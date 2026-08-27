@@ -1,0 +1,48 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/provider_budget_cap/v1",
+  "additionalProperties": false,
+  "properties": {
+    "billing_unit": {
+      "minLength": 1,
+      "title": "Billing Unit",
+      "type": "string"
+    },
+    "maximum_accepted_units": {
+      "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+      "title": "Maximum Accepted Units",
+      "type": "string"
+    },
+    "operation_kind": {
+      "minLength": 1,
+      "title": "Operation Kind",
+      "type": "string"
+    },
+    "provider": {
+      "minLength": 1,
+      "title": "Provider",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "provider_budget_cap",
+      "default": "provider_budget_cap",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "billing_unit",
+    "maximum_accepted_units",
+    "operation_kind",
+    "provider",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "provider_budget_cap",
+  "type": "object"
+}

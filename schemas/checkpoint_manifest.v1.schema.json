@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "CapsuleManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "minLength": 1,
+          "title": "Record Id",
+          "type": "string"
+        },
+        "record_kind": {
+          "minLength": 1,
+          "title": "Record Kind",
+          "type": "string"
+        },
+        "relative_path": {
+          "minLength": 1,
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "capsule_manifest_entry",
+          "default": "capsule_manifest_entry",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "record_kind",
+        "relative_path",
+        "schema_name",
+        "schema_version",
+        "sha256"
+      ],
+      "title": "CapsuleManifestEntry",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/checkpoint_manifest/v1",
+  "additionalProperties": false,
+  "properties": {
+    "checkpoint_manifest_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Checkpoint Manifest Hash",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "lease_epoch": {
+      "exclusiveMinimum": 0,
+      "title": "Lease Epoch",
+      "type": "integer"
+    },
+    "lease_record_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Lease Record Hash",
+      "type": "string"
+    },
+    "predecessor_checkpoint_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Predecessor Checkpoint Hash"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "checkpoint_manifest",
+      "default": "checkpoint_manifest",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sequence": {
+      "exclusiveMinimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "source_entries": {
+      "items": {
+        "$ref": "#/$defs/CapsuleManifestEntry"
+      },
+      "title": "Source Entries",
+      "type": "array"
+    }
+  },
+  "required": [
+    "checkpoint_manifest_hash",
+    "created_at",
+    "lease_epoch",
+    "lease_record_hash",
+    "predecessor_checkpoint_hash",
+    "run_id",
+    "schema_name",
+    "schema_version",
+    "sequence",
+    "source_entries"
+  ],
+  "title": "checkpoint_manifest",
+  "type": "object"
+}

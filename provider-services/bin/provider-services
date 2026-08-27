@@ -333,18 +333,25 @@ verify_services() {
     mem0_port=$(env_value OAMB_MEM0_PORT)
     inspector_port=$(env_value OAMB_MEM0_INSPECTOR_PORT)
     openviking_port=$(env_value OAMB_OPENVIKING_PORT)
+    proof_dir=$(mktemp -d "$RUNTIME_DIR/service-verification-attempt.XXXXXX") || \
+        die "cannot create service verification attempt directory"
+    chmod 700 "$proof_dir"
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
-        "http://127.0.0.1:$hindsight_port/health" | \
-        jq -e '.status == "healthy" and .database == "connected"' >/dev/null
+        "http://127.0.0.1:$hindsight_port/health" > "$proof_dir/hindsight-health.json"
+    jq -e '.status == "healthy" and .database == "connected"' \
+        "$proof_dir/hindsight-health.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
-        "http://127.0.0.1:$hindsight_port/version" | \
-        jq -e '.api_version == "0.9.2" and (.features | type == "object")' >/dev/null
+        "http://127.0.0.1:$hindsight_port/version" > "$proof_dir/hindsight-version.json"
+    jq -e '.api_version == "0.9.2" and (.features | type == "object")' \
+        "$proof_dir/hindsight-version.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
-        "http://127.0.0.1:$mem0_port/openapi.json" | \
-        jq -e '.paths["/memories"] and .paths["/search"]' >/dev/null
+        "http://127.0.0.1:$mem0_port/openapi.json" > "$proof_dir/mem0-openapi.json"
+    jq -e '.paths["/memories"] and .paths["/search"]' \
+        "$proof_dir/mem0-openapi.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
-        "http://127.0.0.1:$openviking_port/health" | \
-        jq -e '.status == "ok" and .healthy == true and .version == "v0.4.16" and .auth_mode == "api_key"' >/dev/null
+        "http://127.0.0.1:$openviking_port/health" > "$proof_dir/openviking-health.json"
+    jq -e '.status == "ok" and .healthy == true and .version == "v0.4.16" and .auth_mode == "api_key"' \
+        "$proof_dir/openviking-health.json" >/dev/null
     "$ROOT/mem0/bootstrap.sh" "$ROOT" "$ENV_FILE"
     mkdir -p "$RUNTIME_DIR"
     umask 077
@@ -353,18 +360,34 @@ verify_services() {
     chmod 600 "$inspector_header"
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 15 \
         -H "@$inspector_header" \
-        "http://127.0.0.1:$inspector_port/v1/projection?run_id=0000000000000000000000000000000000000000000000000000000000000000" | \
-        jq -e '.count == 0 and .points == [] and .next_cursor == null' >/dev/null
-    "$ROOT/openviking/bootstrap.sh" "$ROOT" "$ENV_FILE"
+        "http://127.0.0.1:$inspector_port/v1/projection?run_id=0000000000000000000000000000000000000000000000000000000000000000" \
+        > "$proof_dir/mem0-empty-projection.json"
+    jq -e '.count == 0 and .points == [] and .next_cursor == null' \
+        "$proof_dir/mem0-empty-projection.json" >/dev/null
+    cp "$RUNTIME_DIR/mem0-config-redacted.json" "$proof_dir/mem0-config-redacted.json"
+    "$ROOT/openviking/bootstrap.sh" "$ROOT" "$ENV_FILE" \
+        "$proof_dir/openviking-auth-identity.json"
     trap 'restore_openviking_on_exit $?' 0
     OPENVIKING_QUIESCED=true
     compose stop openviking
-    compose --profile verification run --rm --no-deps openviking-storage-probe || \
+    compose --profile verification run --rm --no-deps openviking-storage-probe \
+        > "$proof_dir/openviking-storage.json" || \
         die "OpenViking read-only storage probe failed"
+    cat "$proof_dir/openviking-storage.json"
     compose start openviking
     wait_for_health openviking
     OPENVIKING_QUIESCED=false
+    attestation_hash=$(shasum -a 256 "$PROJECT_ATTESTATION" | awk '{print $1}')
+    receipt_path=$(python3 "$ROOT/lib/service_receipt.py" \
+        --output-dir "$RUNTIME_DIR/service-verification-receipts" \
+        --proof-dir "$proof_dir" \
+        --trusted-root "$RUNTIME_DIR" \
+        --project "$(env_value OAMB_PROVIDER_PROJECT)" \
+        --attestation-sha256 "$attestation_hash" \
+        --verified-at-utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)") || \
+        die "cannot seal service verification receipt"
     printf 'verify: PASS (identity, API health, persistent configuration, read-only storage, and non-ROOT auth; no benchmark memory written)\n'
+    printf 'verify receipt: %s\n' "$receipt_path"
 }
 
 probe_openai_chat() {

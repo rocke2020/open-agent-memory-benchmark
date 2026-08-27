@@ -39,11 +39,22 @@ def test_core_import_and_cli_help_do_not_load_optional_provider_dependencies() -
 
 
 def test_contract_ports_do_not_import_implementation_packages() -> None:
-    ports = require("oamb.contracts.ports")
-    forbidden = ("oamb.runtime", "oamb.memory_systems", "oamb.model_clients")
+    command = (
+        "import oamb.contracts.ports, sys; "
+        "forbidden=('oamb.runtime','oamb.memory_systems','oamb.model_clients'); "
+        "loaded=sorted(name for name in sys.modules "
+        "if any(name == item or name.startswith(item + '.') for item in forbidden)); "
+        "assert not loaded, loaded"
+    )
 
-    assert not any(name in sys.modules for name in forbidden)
-    assert ports.__name__ == "oamb.contracts.ports"
+    completed = subprocess.run(
+        [sys.executable, "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_checked_in_schemas_are_available_as_package_data() -> None:

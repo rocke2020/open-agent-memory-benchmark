@@ -33,6 +33,16 @@ class TokenStage(StrEnum):
     QUALITY_REVIEW = "quality_review"
 
 
+class TokenStageV2(StrEnum):
+    MEMORY_INGEST = "memory_ingest"
+    MEMORY_QUERY = "memory_query"
+    CONTEXT_VIEW = "context_view"
+    ANSWER = "answer"
+    JUDGE = "judge"
+    QUALITY_REVIEW = "quality_review"
+    MODEL_READINESS = "model_readiness"
+
+
 class TokenDomain(StrEnum):
     LOCAL_CONTEXT_VIEW = "local_context_view"
     EXTERNAL_LLM = "external_llm"
@@ -157,6 +167,68 @@ class TokenUsageRecord(StrictContract):
                 raise ValueError("external LLM usage cannot contain context_view_tokens")
             if not unavailable and not any(value is not None for value in external_values):
                 raise ValueError("measured external LLM usage requires supplier token values")
+        return self
+
+
+class TokenUsageRecordV2(StrictContract):
+    schema_name: Literal["token_usage_record"] = "token_usage_record"
+    schema_version: Literal[2] = 2
+    usage_record_id: Sha256
+    attempt_id: Sha256
+    parent_kind: Literal["ingestion_plan", "case", "phase_review", "model_readiness"]
+    parent_id: NonEmptyStr
+    stage: TokenStageV2
+    operation_kind: NonEmptyStr
+    token_domain: TokenDomain
+    measurement_source: TokenMeasurementSource
+    input_tokens: NonNegativeInt | None
+    visible_output_tokens: NonNegativeInt | None
+    supplier_reported_total_tokens: NonNegativeInt | None
+    context_view_tokens: NonNegativeInt | None
+    proof_status: ProofStatus
+    reason: str | None
+    raw_response_ref: Sha256 | None
+
+    @model_validator(mode="after")
+    def proof_shape(self) -> Self:
+        values = (
+            self.input_tokens,
+            self.visible_output_tokens,
+            self.supplier_reported_total_tokens,
+            self.context_view_tokens,
+        )
+        if self.proof_status in {ProofStatus.UNAVAILABLE, ProofStatus.NOT_APPLICABLE}:
+            if any(value is not None for value in values):
+                raise ValueError(f"{self.proof_status.value} usage cannot contain token values")
+            if not self.reason:
+                raise ValueError(f"{self.proof_status.value} usage requires a reason")
+        elif not any(value is not None for value in values):
+            raise ValueError("measured usage requires at least one token value")
+        unavailable = self.proof_status in {ProofStatus.UNAVAILABLE, ProofStatus.NOT_APPLICABLE}
+        external_values = (
+            self.input_tokens,
+            self.visible_output_tokens,
+            self.supplier_reported_total_tokens,
+        )
+        if self.token_domain == TokenDomain.LOCAL_CONTEXT_VIEW:
+            if self.measurement_source != TokenMeasurementSource.LOCAL_TOKENIZER:
+                raise ValueError("local context usage requires the local tokenizer")
+            if any(value is not None for value in external_values):
+                raise ValueError("local context usage cannot contain external LLM token values")
+            if not unavailable and self.context_view_tokens is None:
+                raise ValueError("measured local context usage requires context_view_tokens")
+        else:
+            if self.measurement_source != TokenMeasurementSource.SUPPLIER_RESPONSE:
+                raise ValueError("external LLM usage requires a supplier response")
+            if self.context_view_tokens is not None:
+                raise ValueError("external LLM usage cannot contain context_view_tokens")
+            if not unavailable and not any(value is not None for value in external_values):
+                raise ValueError("measured external LLM usage requires supplier token values")
+        if self.parent_kind == "model_readiness":
+            if self.stage != TokenStageV2.MODEL_READINESS:
+                raise ValueError("model-readiness usage requires its matching token stage")
+        elif self.stage == TokenStageV2.MODEL_READINESS:
+            raise ValueError("model-readiness token stage requires its matching parent")
         return self
 
 

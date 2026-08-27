@@ -1,0 +1,91 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/run_lease_record/v1",
+  "additionalProperties": false,
+  "properties": {
+    "acquired_at": {
+      "format": "date-time",
+      "title": "Acquired At",
+      "type": "string"
+    },
+    "host_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Host Fingerprint",
+      "type": "string"
+    },
+    "lease_epoch": {
+      "exclusiveMinimum": 0,
+      "title": "Lease Epoch",
+      "type": "integer"
+    },
+    "lease_record_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Lease Record Hash",
+      "type": "string"
+    },
+    "owner_id": {
+      "minLength": 1,
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "predecessor_lease_record_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Predecessor Lease Record Hash"
+    },
+    "process_id": {
+      "exclusiveMinimum": 0,
+      "title": "Process Id",
+      "type": "integer"
+    },
+    "provider_profile_id": {
+      "minLength": 1,
+      "title": "Provider Profile Id",
+      "type": "string"
+    },
+    "provider_project_id": {
+      "minLength": 1,
+      "title": "Provider Project Id",
+      "type": "string"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "run_lease_record",
+      "default": "run_lease_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "acquired_at",
+    "host_fingerprint",
+    "lease_epoch",
+    "lease_record_hash",
+    "owner_id",
+    "predecessor_lease_record_hash",
+    "process_id",
+    "provider_profile_id",
+    "provider_project_id",
+    "run_id",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "run_lease_record",
+  "type": "object"
+}

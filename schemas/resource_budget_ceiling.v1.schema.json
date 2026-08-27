@@ -1,0 +1,42 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/resource_budget_ceiling/v1",
+  "additionalProperties": false,
+  "properties": {
+    "dimension_id": {
+      "minLength": 1,
+      "title": "Dimension Id",
+      "type": "string"
+    },
+    "maximum": {
+      "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+      "title": "Maximum",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "resource_budget_ceiling",
+      "default": "resource_budget_ceiling",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "unit": {
+      "minLength": 1,
+      "title": "Unit",
+      "type": "string"
+    }
+  },
+  "required": [
+    "dimension_id",
+    "maximum",
+    "schema_name",
+    "schema_version",
+    "unit"
+  ],
+  "title": "resource_budget_ceiling",
+  "type": "object"
+}

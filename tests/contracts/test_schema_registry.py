@@ -9,18 +9,26 @@ import pytest
 from pydantic import ValidationError
 
 EXPECTED_PUBLIC_SCHEMAS = {
+    "attempt_intent_record",
+    "attempt_receipt_record",
     "attempt_record",
+    "budget_reservation_record",
     "budget_spec",
     "capsule_manifest",
     "capsule_manifest_entry",
     "case_manifest",
     "case_manifest_entry",
     "case_record",
+    "checkpoint_manifest",
+    "close_error_record",
     "cost_measurement_spec",
     "cost_record",
     "dataset_file",
     "dataset_manifest",
+    "derivation_manifest",
+    "derivation_spec",
     "execution_environment_binding",
+    "external_call_approval_record",
     "ingestion_plan_manifest",
     "ingestion_plan_record",
     "interaction_spec",
@@ -29,23 +37,42 @@ EXPECTED_PUBLIC_SCHEMAS = {
     "measurement_dimension_spec",
     "memory_system_runtime_binding",
     "memory_system_spec",
+    "model_readiness_occurrence_record",
     "model_role_binding",
+    "occurrence_claim_record",
     "origin_record",
     "price_snapshot",
     "protocol_spec",
+    "provider_budget_cap",
+    "provider_runtime_profile_attestation",
+    "provider_service_evidence_manifest",
     "raw_reference",
+    "recovery_decision_record",
     "report_artifact_manifest",
     "resource_usage_record",
+    "resource_budget_ceiling",
+    "role_budget_ceiling",
+    "run_lease_heartbeat_record",
+    "run_lease_record",
     "run_record",
     "run_report_model",
     "run_spec",
     "run_summary",
+    "source_evidence_binding",
     "token_usage_record",
     "validation_issue",
     "validation_profile",
     "validation_result",
     "validation_rule_requirement",
     "workload_spec",
+}
+
+EXPECTED_V2_SCHEMAS = {
+    "attempt_record",
+    "budget_spec",
+    "memory_system_runtime_binding",
+    "model_role_binding",
+    "token_usage_record",
 }
 
 
@@ -63,7 +90,10 @@ def test_public_contract_inventory_is_explicit_and_unique() -> None:
 
     assert actual == EXPECTED_PUBLIC_SCHEMAS
     assert len(schema.CONTRACT_REGISTRY) == len(schema.PUBLIC_CONTRACTS)
-    assert set(schema.CONTRACT_REGISTRY) == {(name, 1) for name in EXPECTED_PUBLIC_SCHEMAS}
+    assert set(schema.CONTRACT_REGISTRY) == {
+        *((name, 1) for name in EXPECTED_PUBLIC_SCHEMAS),
+        *((name, 2) for name in EXPECTED_V2_SCHEMAS),
+    }
 
 
 def test_schema_generation_is_byte_reproducible(tmp_path: Path) -> None:

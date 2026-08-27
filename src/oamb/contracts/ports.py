@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from .evidence import CaseRecord, IngestionPlanRecord, LogicalContextRecord
 from .specifications import CaseManifest, DatasetManifest
@@ -220,9 +220,32 @@ class AttemptSealRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RawPayloadSealRequest:
+    sha256: str
+    media_type: str
+    compression: Literal["none", "gzip"]
+    payload_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactWriteRequest:
+    record_id: str
+    relative_path: str
+    canonical_sha256: str
+    canonical_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReadRequest:
+    relative_path: str
+    expected_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactSealReceipt:
     record_id: str
     canonical_sha256: str
+    created: bool = True
 
 
 class WorkerOutcome(StrEnum):
@@ -313,6 +336,19 @@ class AttemptStorePort(Protocol):
     def seal_intent(self, request: AttemptSealRequest) -> ArtifactSealReceipt: ...
 
     def seal_receipt(self, request: AttemptSealRequest) -> ArtifactSealReceipt: ...
+
+
+@runtime_checkable
+class ArtifactStorePort(Protocol):
+    def seal_raw(self, request: RawPayloadSealRequest) -> RawReferenceHandle: ...
+
+    def seal_source_record(self, request: ArtifactWriteRequest) -> ArtifactSealReceipt: ...
+
+    def seal_checkpoint(self, request: ArtifactWriteRequest) -> ArtifactSealReceipt: ...
+
+    def seal_source_manifest(self, request: ArtifactWriteRequest) -> ArtifactSealReceipt: ...
+
+    def read_verified(self, request: ArtifactReadRequest) -> bytes: ...
 
 
 @runtime_checkable

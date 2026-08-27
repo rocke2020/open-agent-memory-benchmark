@@ -1,1 +1,1 @@
-"""Stage-aware structural validation for T3 contracts."""
+"""Stage-aware structural and provider-service evidence validation."""

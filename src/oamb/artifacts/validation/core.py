@@ -1,26 +1,58 @@
-"""Early fail-closed schema, identity, reference, count, hash, and state checks."""
+"""Fail-closed structural and provider-service evidence validation."""
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import json
 import math
+import os
+import stat
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
-from typing import Annotated, Any
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
+from oamb.contracts.accounting import (
+    CostMeasurementSpec,
+    CostRecord,
+    ResourceUsageRecord,
+    TokenUsageRecordV2,
+)
 from oamb.contracts.base import NonEmptyStr, Sha256
 from oamb.contracts.evidence import (
+    AttemptIntentRecord,
+    AttemptReceiptRecord,
+    AttemptRecordV2,
+    BudgetReservationRecord,
+    ModelReadinessOccurrenceRecord,
+    ModelReadinessOccurrenceState,
+    OccurrenceClaimRecord,
+    ProviderServiceEvidenceManifest,
     ValidationIssue,
     ValidationResult,
     ValidationSeverity,
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256, sha256_identity
 from oamb.contracts.schema import parse_contract
-from oamb.contracts.specifications import ValidationProfile, ValidationStage
+from oamb.contracts.specifications import (
+    BudgetScopeKindV2,
+    BudgetSpecV2,
+    ExternalCallApprovalRecord,
+    ModelRoleBindingV2,
+    ProviderGateStatus,
+    ProviderRuntimeProfileAttestation,
+    RoleBindingStatus,
+    TransportProfile,
+    ValidationProfile,
+    ValidationStage,
+)
 from oamb.contracts.states import (
+    AttemptOutcome,
     CaseState,
     EntityKind,
     IngestionPlanState,
@@ -729,6 +761,972 @@ def validate_structural_input(
         validation_profile_id=profile.profile_id,
         target_hash=target_hash,
         disposition=disposition,
+        required_rule_ids=required_ids,
+        executed_rule_ids=tuple(executed),
+        passed_rule_ids=tuple(passed),
+        failed_rule_ids=tuple(failed),
+        not_applicable_rule_ids=(),
+        missing_rule_ids=tuple(missing),
+        implementation_versions=tuple(implementation_versions),
+        issues=tuple(issues),
+    )
+
+
+class ProviderServiceEvidenceValidationInput(StructuralModel):
+    root_directory: Path
+    source_kind: Literal["provider_service"]
+    operation: Literal["model_readiness"]
+    expected_provider: NonEmptyStr
+    expected_provider_project_id: NonEmptyStr
+    expected_provider_profile_id: NonEmptyStr
+    expected_transport_profile: TransportProfile
+    expected_release_version: NonEmptyStr
+    expected_source_revision: NonEmptyStr
+    expected_build_artifact_sha256: Sha256
+    forbidden_control_values: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderServiceSnapshot:
+    value: ProviderServiceEvidenceValidationInput
+    manifest_bytes: bytes | None
+    manifest_document: dict[str, Any] | None
+    manifest: ProviderServiceEvidenceManifest | None
+    actual_files: dict[str, bytes]
+    parsed_documents: dict[str, BaseModel]
+    schema_errors: tuple[tuple[str, str], ...]
+    symlink_paths: tuple[str, ...]
+
+
+ProviderDocumentT = TypeVar("ProviderDocumentT", bound=BaseModel)
+
+
+def _load_provider_service_snapshot(
+    value: ProviderServiceEvidenceValidationInput,
+) -> _ProviderServiceSnapshot:
+    root = value.root_directory
+    actual_files: dict[str, bytes] = {}
+    symlink_paths: list[str] = []
+    errors: list[tuple[str, str]] = []
+    manifest_bytes: bytes | None = None
+    manifest_document: dict[str, Any] | None = None
+    manifest: ProviderServiceEvidenceManifest | None = None
+    root_descriptor: int | None = None
+    try:
+        root_metadata = root.lstat()
+        if stat.S_ISLNK(root_metadata.st_mode):
+            symlink_paths.append(".")
+            raise OSError("provider evidence root is a symbolic link")
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise OSError("provider evidence root is not a directory")
+        root_descriptor = os.open(
+            root,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened_root = os.fstat(root_descriptor)
+        if (
+            not stat.S_ISDIR(opened_root.st_mode)
+            or opened_root.st_dev != root_metadata.st_dev
+            or opened_root.st_ino != root_metadata.st_ino
+        ):
+            raise OSError("provider evidence root changed while opening")
+        for directory, directory_names, file_names, directory_descriptor in os.fwalk(
+            ".",
+            topdown=True,
+            follow_symlinks=False,
+            dir_fd=root_descriptor,
+        ):
+            for directory_name in tuple(directory_names):
+                metadata = os.stat(
+                    directory_name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                if stat.S_ISLNK(metadata.st_mode):
+                    relative = (
+                        PurePosixPath(directory, directory_name).as_posix().removeprefix("./")
+                    )
+                    symlink_paths.append(relative)
+                    directory_names.remove(directory_name)
+            for file_name in sorted(file_names):
+                relative_path = PurePosixPath(directory, file_name).as_posix().removeprefix("./")
+                try:
+                    metadata = os.stat(
+                        file_name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISLNK(metadata.st_mode):
+                        symlink_paths.append(relative_path)
+                        continue
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise OSError("provider evidence leaf is not a regular file")
+                    descriptor = os.open(
+                        file_name,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=directory_descriptor,
+                    )
+                    try:
+                        opened = os.fstat(descriptor)
+                        if (
+                            not stat.S_ISREG(opened.st_mode)
+                            or opened.st_dev != metadata.st_dev
+                            or opened.st_ino != metadata.st_ino
+                        ):
+                            raise OSError("provider evidence leaf changed while opening")
+                        chunks: list[bytes] = []
+                        while chunk := os.read(descriptor, 1024 * 1024):
+                            chunks.append(chunk)
+                        content = b"".join(chunks)
+                    finally:
+                        os.close(descriptor)
+                    if relative_path == MANIFEST_PATH:
+                        manifest_bytes = content
+                    else:
+                        actual_files[relative_path] = content
+                except OSError:
+                    errors.append((relative_path, "source-unreadable"))
+    except OSError:
+        errors.append((MANIFEST_PATH, "root-missing-or-unsafe"))
+    finally:
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+
+    if manifest_bytes is not None:
+        try:
+            loaded = json.loads(manifest_bytes)
+            if not isinstance(loaded, dict):
+                raise ValueError("manifest must be an object")
+            manifest_document = loaded
+            parsed_manifest = parse_contract(loaded)
+            if not isinstance(parsed_manifest, ProviderServiceEvidenceManifest):
+                raise ValueError("wrong manifest contract")
+            manifest = parsed_manifest
+        except (OSError, ValueError, TypeError):
+            errors.append((MANIFEST_PATH, "manifest-schema-invalid"))
+    else:
+        errors.append((MANIFEST_PATH, "manifest-schema-invalid"))
+
+    parsed_documents: dict[str, BaseModel] = {}
+    if manifest is not None:
+        for entry in manifest.source_entries:
+            relative_path = entry.relative_path
+            if entry.record_kind == "raw" or relative_path not in actual_files:
+                continue
+            try:
+                loaded = json.loads(actual_files[relative_path])
+                if not isinstance(loaded, dict):
+                    raise ValueError("contract document must be an object")
+                parsed = parse_contract(loaded)
+                schema_name = type(parsed).model_fields["schema_name"].default
+                if schema_name != entry.record_kind:
+                    raise ValueError("manifest record kind does not match schema name")
+                parsed_documents[relative_path] = parsed
+            except (ValueError, TypeError, UnicodeDecodeError):
+                errors.append((relative_path, "source-schema-invalid"))
+    return _ProviderServiceSnapshot(
+        value=value,
+        manifest_bytes=manifest_bytes,
+        manifest_document=manifest_document,
+        manifest=manifest,
+        actual_files=actual_files,
+        parsed_documents=parsed_documents,
+        schema_errors=tuple(errors),
+        symlink_paths=tuple(symlink_paths),
+    )
+
+
+MANIFEST_PATH = "provider-service-evidence-manifest.json"
+
+_PROVIDER_RECORD_ID_FIELDS = {
+    "provider_runtime_profile_attestation": "attestation_hash",
+    "model_role_binding": "binding_id",
+    "external_call_approval_record": "approval_id",
+    "budget_spec": "budget_id",
+    "cost_measurement_spec": "measurement_spec_id",
+    "model_readiness_occurrence_record": "occurrence_id",
+    "occurrence_claim_record": "claim_id",
+    "budget_reservation_record": "reservation_id",
+    "attempt_intent_record": "attempt_id",
+    "attempt_receipt_record": "attempt_id",
+    "attempt_record": "attempt_id",
+    "token_usage_record": "usage_record_id",
+    "resource_usage_record": "resource_record_id",
+    "cost_record": "cost_record_id",
+    "run_spec": "run_id",
+    "run_record": "run_id",
+    "memory_system_runtime_binding": "runtime_binding_hash",
+    "ingestion_plan_record": "ingestion_occurrence_id",
+    "case_record": "case_occurrence_id",
+    "capsule_manifest": "capsule_id",
+}
+
+
+def _provider_issue(
+    rule_id: str,
+    code: str,
+    evidence_ref: str = MANIFEST_PATH,
+    pointer: str | None = None,
+) -> tuple[ValidationIssue, ...]:
+    return (_issue(rule_id, evidence_ref, code, pointer),)
+
+
+def _provider_documents(
+    snapshot: _ProviderServiceSnapshot,
+    model_type: type[ProviderDocumentT],
+) -> tuple[ProviderDocumentT, ...]:
+    return tuple(
+        document
+        for document in snapshot.parsed_documents.values()
+        if isinstance(document, model_type)
+    )
+
+
+def _provider_paths(
+    snapshot: _ProviderServiceSnapshot,
+    model_type: type[BaseModel],
+) -> tuple[str, ...]:
+    return tuple(
+        path
+        for path, document in snapshot.parsed_documents.items()
+        if isinstance(document, model_type)
+    )
+
+
+def _provider_schema_rule(snapshot: _ProviderServiceSnapshot) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-schema"
+    if snapshot.schema_errors or snapshot.manifest is None:
+        evidence_ref = snapshot.schema_errors[0][0] if snapshot.schema_errors else MANIFEST_PATH
+        return _provider_issue(rule_id, "provider-schema-invalid", evidence_ref, "/")
+    if (
+        snapshot.value.source_kind != "provider_service"
+        or snapshot.value.operation != "model_readiness"
+        or snapshot.manifest.operation != "model_readiness"
+    ):
+        return _provider_issue(rule_id, "provider-schema-applicability-mismatch", pointer="/")
+    return ()
+
+
+def _provider_manifest_closure_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-manifest-closure"
+    if snapshot.manifest is None or snapshot.manifest_document is None:
+        return _provider_issue(rule_id, "provider-manifest-missing")
+    entries = snapshot.manifest.source_entries
+    paths = tuple(entry.relative_path for entry in entries)
+    if len(set(paths)) != len(paths):
+        return _provider_issue(
+            rule_id, "provider-manifest-duplicate-path", pointer="/source_entries"
+        )
+    if set(paths) != set(snapshot.actual_files):
+        return _provider_issue(
+            rule_id, "provider-manifest-file-set-mismatch", pointer="/source_entries"
+        )
+    for entry in entries:
+        content = snapshot.actual_files[entry.relative_path]
+        if hashlib.sha256(content).hexdigest() != entry.sha256:
+            return _provider_issue(
+                rule_id,
+                "provider-manifest-hash-mismatch",
+                entry.relative_path,
+                "/sha256",
+            )
+        if entry.record_kind == "raw":
+            try:
+                payload = (
+                    gzip.decompress(content) if entry.relative_path.endswith(".gz") else content
+                )
+            except (OSError, EOFError):
+                return _provider_issue(
+                    rule_id,
+                    "provider-manifest-raw-compression-invalid",
+                    entry.relative_path,
+                )
+            expected_record_id = hashlib.sha256(payload).hexdigest()
+            allowed_names = {
+                expected_record_id,
+                f"{expected_record_id}.json",
+                f"{expected_record_id}.json.gz",
+            }
+            if (
+                entry.record_id != expected_record_id
+                or PurePosixPath(entry.relative_path).name not in allowed_names
+            ):
+                return _provider_issue(
+                    rule_id,
+                    "provider-manifest-raw-identity-mismatch",
+                    entry.relative_path,
+                    "/record_id",
+                )
+            continue
+        document = snapshot.parsed_documents.get(entry.relative_path)
+        identity_field = _PROVIDER_RECORD_ID_FIELDS.get(entry.record_kind)
+        if (
+            document is None
+            or identity_field is None
+            or str(getattr(document, identity_field, "")) != entry.record_id
+        ):
+            return _provider_issue(
+                rule_id,
+                "provider-manifest-record-identity-mismatch",
+                entry.relative_path,
+                "/record_id",
+            )
+    without_hash = {
+        key: value for key, value in snapshot.manifest_document.items() if key != "manifest_hash"
+    }
+    if canonical_sha256(without_hash) != snapshot.manifest.manifest_hash:
+        return _provider_issue(
+            rule_id, "provider-manifest-identity-mismatch", pointer="/manifest_hash"
+        )
+    return ()
+
+
+def _provider_path_safety_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-path-safety"
+    if snapshot.manifest is None:
+        return _provider_issue(rule_id, "provider-path-manifest-missing")
+    operational_components = {".runtime", "checkpoints", "derivation-attempts", "tmp"}
+    for entry in snapshot.manifest.source_entries:
+        path = entry.relative_path
+        parts = PurePosixPath(path).parts
+        unsafe = (
+            not parts
+            or parts[0] != "source"
+            or path.startswith("/")
+            or ".." in parts
+            or bool(set(parts) & operational_components)
+            or path.endswith((".tmp", ".partial", "~"))
+        )
+        if unsafe:
+            return _provider_issue(rule_id, "provider-path-unsafe", path, "/relative_path")
+    if snapshot.symlink_paths:
+        return _provider_issue(rule_id, "provider-path-symlink", snapshot.symlink_paths[0])
+    return ()
+
+
+def _provider_occurrence_terminal_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-occurrence-terminal"
+    occurrences = _provider_documents(snapshot, ModelReadinessOccurrenceRecord)
+    if len(occurrences) != 1 or snapshot.manifest is None:
+        return _provider_issue(rule_id, "provider-occurrence-cardinality")
+    occurrence = occurrences[0]
+    terminal = {
+        ModelReadinessOccurrenceState.SEALED,
+        ModelReadinessOccurrenceState.ERROR,
+        ModelReadinessOccurrenceState.CANCELLED,
+        ModelReadinessOccurrenceState.BUDGET_EXCEEDED,
+        ModelReadinessOccurrenceState.INTERRUPTED_UNKNOWN_OUTCOME,
+    }
+    if occurrence.state not in terminal:
+        return _provider_issue(rule_id, "provider-occurrence-nonterminal", pointer="/state")
+    entries_by_kind: dict[str, list[str]] = {}
+    for entry in snapshot.manifest.source_entries:
+        entries_by_kind.setdefault(entry.record_kind, []).append(entry.record_id)
+    expected = {
+        "attempt_record": tuple(occurrence.attempt_ids),
+        "token_usage_record": tuple(occurrence.usage_record_ids),
+        "resource_usage_record": tuple(occurrence.resource_record_ids),
+        "cost_record": tuple(occurrence.cost_record_ids),
+    }
+    for record_kind, record_ids in expected.items():
+        if tuple(entries_by_kind.get(record_kind, ())) != record_ids:
+            return _provider_issue(
+                rule_id,
+                "provider-occurrence-inventory-mismatch",
+                pointer=f"/{record_kind}",
+            )
+    return ()
+
+
+def _provider_parent_isolation_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-parent-isolation"
+    occurrences = _provider_documents(snapshot, ModelReadinessOccurrenceRecord)
+    if len(occurrences) != 1:
+        return _provider_issue(rule_id, "provider-parent-occurrence-missing")
+    occurrence_id = occurrences[0].occurrence_id
+    parent_records = (
+        *_provider_documents(snapshot, AttemptRecordV2),
+        *_provider_documents(snapshot, AttemptIntentRecord),
+        *_provider_documents(snapshot, TokenUsageRecordV2),
+        *_provider_documents(snapshot, ResourceUsageRecord),
+        *_provider_documents(snapshot, CostRecord),
+    )
+    for record in parent_records:
+        if (
+            getattr(record, "parent_kind", None) != "model_readiness"
+            or getattr(record, "parent_id", None) != occurrence_id
+        ):
+            return _provider_issue(rule_id, "provider-parent-cross-reference", pointer="/parent_id")
+    for reservation in _provider_documents(snapshot, BudgetReservationRecord):
+        if reservation.scope_kind != BudgetScopeKindV2.MODEL_READINESS:
+            return _provider_issue(rule_id, "provider-budget-parent-kind", pointer="/scope_kind")
+        if reservation.scope_id != occurrence_id:
+            return _provider_issue(rule_id, "provider-budget-parent-id", pointer="/scope_id")
+    return ()
+
+
+def _ceiling_map(ceilings: tuple[Any, ...]) -> dict[str, Decimal]:
+    return {ceiling.dimension_id: ceiling.maximum for ceiling in ceilings}
+
+
+def _provider_budget_closure_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-budget-closure"
+    budgets = _provider_documents(snapshot, BudgetSpecV2)
+    approvals = _provider_documents(snapshot, ExternalCallApprovalRecord)
+    occurrences = _provider_documents(snapshot, ModelReadinessOccurrenceRecord)
+    roles = _provider_documents(snapshot, ModelRoleBindingV2)
+    reservations = _provider_documents(snapshot, BudgetReservationRecord)
+    if not (len(budgets) == len(approvals) == len(occurrences) == 1):
+        return _provider_issue(rule_id, "provider-budget-cardinality")
+    budget = budgets[0]
+    approval = approvals[0]
+    occurrence = occurrences[0]
+    selected_role_ids = tuple(
+        role.binding_id for role in roles if role.role_status == RoleBindingStatus.SELECTED
+    )
+    role_ceilings = {ceiling.role_binding_id: ceiling for ceiling in budget.role_ceilings}
+    roles_by_id = {role.binding_id: role for role in roles}
+    budget_paths = _provider_paths(snapshot, BudgetSpecV2)
+    budget_bytes_hash = (
+        hashlib.sha256(snapshot.actual_files[budget_paths[0]]).hexdigest()
+        if len(budget_paths) == 1
+        else None
+    )
+    closed = (
+        budget.scope_kind == BudgetScopeKindV2.MODEL_READINESS
+        and budget.scope_id == occurrence.occurrence_id
+        and budget.approval_id == occurrence.approval_id == approval.approval_id
+        and approval.scope_kind == BudgetScopeKindV2.MODEL_READINESS
+        and approval.scope_id == occurrence.occurrence_id
+        and approval.budget_hash == budget_bytes_hash
+        and tuple(role_ceilings) == selected_role_ids == tuple(occurrence.role_binding_ids)
+    )
+    if not closed:
+        return _provider_issue(rule_id, "provider-budget-binding-mismatch")
+    if any(
+        role_id not in roles_by_id
+        or ceiling.provider_budget_cap.provider != roles_by_id[role_id].provider
+        for role_id, ceiling in role_ceilings.items()
+    ):
+        return _provider_issue(rule_id, "provider-budget-provider-cap-mismatch")
+
+    parent_resources = _ceiling_map(budget.resource_ceilings)
+    parent_attempts = parent_input = parent_output = 0
+    parent_wall = Decimal("0")
+    parent_cost = Decimal("0")
+    parent_resources_used = {dimension_id: Decimal("0") for dimension_id in parent_resources}
+    role_totals: dict[str, dict[str, Any]] = {}
+    for role_id, ceiling in role_ceilings.items():
+        role_totals[role_id] = {
+            "attempts": 0,
+            "input": 0,
+            "output": 0,
+            "wall": Decimal("0"),
+            "provider": Decimal("0"),
+            "cost": Decimal("0"),
+            "resources": {
+                dimension_id: Decimal("0")
+                for dimension_id in _ceiling_map(ceiling.resource_ceilings)
+            },
+        }
+    for reservation in reservations:
+        role_ceiling = role_ceilings.get(reservation.role_binding_id)
+        if role_ceiling is None or reservation.budget_id != budget.budget_id:
+            return _provider_issue(rule_id, "provider-reservation-role-mismatch")
+        if reservation.scope_id != budget.scope_id:
+            return _provider_issue(rule_id, "provider-reservation-scope-mismatch")
+        if role_ceiling.currency != budget.currency or reservation.currency != budget.currency:
+            return _provider_issue(rule_id, "provider-reservation-currency-mismatch")
+        role_resource_limits = _ceiling_map(role_ceiling.resource_ceilings)
+        reserved_resources = _ceiling_map(reservation.reserved_resource_ceilings)
+        if set(reserved_resources) != set(role_resource_limits):
+            return _provider_issue(rule_id, "provider-reservation-resource-mismatch")
+        if any(
+            value > role_resource_limits[dimension_id] or dimension_id not in parent_resources
+            for dimension_id, value in reserved_resources.items()
+        ):
+            return _provider_issue(rule_id, "provider-reservation-resource-over-cap")
+        if (
+            reservation.reserved_attempts > role_ceiling.max_attempts
+            or reservation.reserved_input_tokens > role_ceiling.max_input_tokens
+            or reservation.reserved_output_tokens > role_ceiling.max_output_tokens
+            or reservation.reserved_dispatch_wall_seconds > role_ceiling.max_dispatch_wall_seconds
+            or reservation.reserved_provider_units
+            > role_ceiling.provider_budget_cap.maximum_accepted_units
+            or (
+                role_ceiling.max_cost is not None
+                and (reservation.reserved_cost or Decimal("0")) > role_ceiling.max_cost
+            )
+        ):
+            return _provider_issue(rule_id, "provider-reservation-over-cap")
+        totals = role_totals[reservation.role_binding_id]
+        totals["attempts"] += reservation.reserved_attempts
+        totals["input"] += reservation.reserved_input_tokens
+        totals["output"] += reservation.reserved_output_tokens
+        totals["wall"] += reservation.reserved_dispatch_wall_seconds
+        totals["provider"] += reservation.reserved_provider_units
+        totals["cost"] += reservation.reserved_cost or Decimal("0")
+        parent_attempts += reservation.reserved_attempts
+        parent_input += reservation.reserved_input_tokens
+        parent_output += reservation.reserved_output_tokens
+        parent_wall += reservation.reserved_dispatch_wall_seconds
+        parent_cost += reservation.reserved_cost or Decimal("0")
+        for dimension_id, amount in reserved_resources.items():
+            totals["resources"][dimension_id] += amount
+            parent_resources_used[dimension_id] += amount
+    if (
+        parent_attempts > budget.max_attempts
+        or parent_input > budget.max_input_tokens
+        or parent_output > budget.max_output_tokens
+        or parent_wall > budget.max_dispatch_wall_seconds
+        or (budget.max_cost is not None and parent_cost > budget.max_cost)
+        or any(parent_resources_used[key] > parent_resources[key] for key in parent_resources)
+    ):
+        return _provider_issue(rule_id, "provider-parent-budget-over-cap")
+    for role_id, totals in role_totals.items():
+        ceiling = role_ceilings[role_id]
+        resource_limits = _ceiling_map(ceiling.resource_ceilings)
+        if (
+            totals["attempts"] > ceiling.max_attempts
+            or totals["input"] > ceiling.max_input_tokens
+            or totals["output"] > ceiling.max_output_tokens
+            or totals["wall"] > ceiling.max_dispatch_wall_seconds
+            or totals["provider"] > ceiling.provider_budget_cap.maximum_accepted_units
+            or (ceiling.max_cost is not None and totals["cost"] > ceiling.max_cost)
+            or any(totals["resources"][key] > resource_limits[key] for key in resource_limits)
+        ):
+            return _provider_issue(rule_id, "provider-role-budget-over-cap")
+    return ()
+
+
+def _unique_by(values: tuple[Any, ...], field: str) -> dict[str, Any] | None:
+    keyed = {str(getattr(value, field)): value for value in values}
+    return keyed if len(keyed) == len(values) else None
+
+
+def _provider_attempt_ordering_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-attempt-ordering"
+    attempts = _provider_documents(snapshot, AttemptRecordV2)
+    claims = _provider_documents(snapshot, OccurrenceClaimRecord)
+    reservations = _provider_documents(snapshot, BudgetReservationRecord)
+    intents = _provider_documents(snapshot, AttemptIntentRecord)
+    receipts = _provider_documents(snapshot, AttemptReceiptRecord)
+    attempts_by_id = _unique_by(attempts, "attempt_id")
+    claims_by_id = _unique_by(claims, "claim_id")
+    reservations_by_attempt = _unique_by(reservations, "attempt_id")
+    intents_by_attempt = _unique_by(intents, "attempt_id")
+    receipts_by_attempt = _unique_by(receipts, "attempt_id")
+    if any(
+        index is None
+        for index in (
+            attempts_by_id,
+            claims_by_id,
+            reservations_by_attempt,
+            intents_by_attempt,
+            receipts_by_attempt,
+        )
+    ):
+        return _provider_issue(rule_id, "provider-attempt-duplicate")
+    assert attempts_by_id is not None
+    assert claims_by_id is not None
+    assert reservations_by_attempt is not None
+    assert intents_by_attempt is not None
+    assert receipts_by_attempt is not None
+    if not (
+        set(attempts_by_id) == set(reservations_by_attempt) == set(intents_by_attempt)
+    ) or not set(receipts_by_attempt) <= set(attempts_by_id):
+        return _provider_issue(rule_id, "provider-attempt-ledger-incomplete")
+    if len(claims_by_id) != len(attempts_by_id) or {
+        intent.claim_id for intent in intents_by_attempt.values()
+    } != set(claims_by_id):
+        return _provider_issue(rule_id, "provider-attempt-claim-ledger-incomplete")
+    raw_ids = (
+        {
+            entry.record_id
+            for entry in snapshot.manifest.source_entries
+            if entry.record_kind == "raw"
+        }
+        if snapshot.manifest is not None
+        else set()
+    )
+    selected_role_ids = {
+        role.binding_id
+        for role in _provider_documents(snapshot, ModelRoleBindingV2)
+        if role.role_status == RoleBindingStatus.SELECTED
+    }
+    ordinals: set[int] = set()
+    for attempt_id, attempt in attempts_by_id.items():
+        reservation = reservations_by_attempt[attempt_id]
+        intent = intents_by_attempt[attempt_id]
+        claim = claims_by_id[intent.claim_id]
+        if (
+            intent.reservation_id != reservation.reservation_id
+            or intent.request_fingerprint != attempt.request_fingerprint
+            or intent.parent_id != attempt.parent_id
+            or intent.parent_kind != attempt.parent_kind
+            or intent.stage != attempt.stage
+            or intent.stage != "model_readiness"
+            or intent.role_binding_id != reservation.role_binding_id
+            or intent.role_binding_id not in selected_role_ids
+            or intent.reconciliation_capability != attempt.reconciliation_capability
+            or intent.idempotency_key_hash != attempt.idempotency_key_hash
+            or claim.occurrence_id != intent.parent_id
+            or claim.stage != intent.stage
+            or claim.request_fingerprint != intent.request_fingerprint
+            or claim.reconciliation_capability != intent.reconciliation_capability
+            or attempt.ordinal in ordinals
+        ):
+            return _provider_issue(rule_id, "provider-attempt-order-mismatch")
+        ordinals.add(attempt.ordinal)
+        receipt = receipts_by_attempt.get(attempt_id)
+        if attempt.outcome == AttemptOutcome.UNKNOWN_OUTCOME:
+            if (
+                receipt is not None
+                or attempt.raw_response_ref is not None
+                or attempt.raw_error_ref is not None
+            ):
+                return _provider_issue(rule_id, "provider-unknown-attempt-has-receipt")
+            if not (
+                reservation.reserved_at >= claim.claimed_at
+                and reservation.reserved_at
+                <= intent.sealed_at
+                <= attempt.started_at
+                <= attempt.ended_at
+            ):
+                return _provider_issue(rule_id, "provider-attempt-durability-order-invalid")
+        else:
+            if receipt is None:
+                return _provider_issue(rule_id, "provider-attempt-receipt-missing")
+            if not (
+                reservation.reserved_at >= claim.claimed_at
+                and reservation.reserved_at
+                <= intent.sealed_at
+                <= receipt.dispatch_started_at
+                <= receipt.receipt_observed_at
+                <= attempt.ended_at
+                and attempt.started_at == receipt.dispatch_started_at
+            ):
+                return _provider_issue(rule_id, "provider-attempt-durability-order-invalid")
+            receipt_raw = receipt.raw_response_ref or receipt.raw_error_ref
+            attempt_raw = attempt.raw_response_ref or attempt.raw_error_ref
+            if receipt_raw != attempt_raw or (
+                receipt_raw is not None and receipt_raw not in raw_ids
+            ):
+                return _provider_issue(rule_id, "provider-attempt-receipt-mismatch")
+        if attempt.retry_of_attempt_id is not None:
+            predecessor = attempts_by_id.get(attempt.retry_of_attempt_id)
+            if predecessor is None or predecessor.ordinal >= attempt.ordinal:
+                return _provider_issue(rule_id, "provider-attempt-retry-order-invalid")
+    if ordinals != set(range(1, len(attempts) + 1)):
+        return _provider_issue(rule_id, "provider-attempt-ordinal-gap")
+    return ()
+
+
+def _provider_unknown_outcome_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-unknown-outcome"
+    attempts = _provider_documents(snapshot, AttemptRecordV2)
+    occurrences = _provider_documents(snapshot, ModelReadinessOccurrenceRecord)
+    reservations = _provider_documents(snapshot, BudgetReservationRecord)
+    unknown_ids = {
+        attempt.attempt_id for attempt in attempts if attempt.outcome.value == "unknown_outcome"
+    }
+    if not unknown_ids:
+        return ()
+    if len(occurrences) != 1 or occurrences[0].state != (
+        ModelReadinessOccurrenceState.INTERRUPTED_UNKNOWN_OUTCOME
+    ):
+        return _provider_issue(rule_id, "provider-unknown-parent-disposition")
+    if any(attempt.retry_of_attempt_id in unknown_ids for attempt in attempts):
+        return _provider_issue(rule_id, "provider-unknown-attempt-replayed")
+    reserved_attempt_ids = {reservation.attempt_id for reservation in reservations}
+    if not unknown_ids <= reserved_attempt_ids:
+        return _provider_issue(rule_id, "provider-unknown-reservation-missing")
+    return ()
+
+
+def _provider_runtime_binding_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-runtime-binding"
+    attestations = _provider_documents(snapshot, ProviderRuntimeProfileAttestation)
+    approvals = _provider_documents(snapshot, ExternalCallApprovalRecord)
+    occurrences = _provider_documents(snapshot, ModelReadinessOccurrenceRecord)
+    roles = _provider_documents(snapshot, ModelRoleBindingV2)
+    measurements = _provider_documents(snapshot, CostMeasurementSpec)
+    if not (len(attestations) == len(approvals) == len(occurrences) == len(measurements) == 1):
+        return _provider_issue(rule_id, "provider-runtime-edge-missing")
+    attestation = attestations[0]
+    approval = approvals[0]
+    occurrence = occurrences[0]
+    role_ids = tuple(role.binding_id for role in roles)
+    if (
+        snapshot.manifest is None
+        or snapshot.manifest.provider_project_id != occurrence.provider_project_id
+        or snapshot.manifest.provider_profile_id != occurrence.provider_profile_id
+        or snapshot.manifest.occurrence_id != occurrence.occurrence_id
+        or attestation.provider != occurrence.provider
+        or attestation.provider_project_id != occurrence.provider_project_id
+        or attestation.provider_profile_id != occurrence.provider_profile_id
+        or attestation.attestation_hash != occurrence.provider_runtime_profile_attestation_hash
+        or approval.provider_runtime_profile_attestation_hash != attestation.attestation_hash
+        or role_ids != tuple(attestation.model_role_binding_ids)
+        or role_ids != tuple(approval.role_binding_ids)
+        or role_ids != tuple(occurrence.role_binding_ids)
+    ):
+        return _provider_issue(rule_id, "provider-runtime-binding-mismatch")
+    expected_identity = snapshot.value
+    if (
+        attestation.provider != expected_identity.expected_provider
+        or attestation.provider_project_id != expected_identity.expected_provider_project_id
+        or attestation.provider_profile_id != expected_identity.expected_provider_profile_id
+        or attestation.transport_profile != expected_identity.expected_transport_profile
+        or attestation.release_version != expected_identity.expected_release_version
+        or attestation.source_revision != expected_identity.expected_source_revision
+        or attestation.build_artifact_sha256 != expected_identity.expected_build_artifact_sha256
+    ):
+        return _provider_issue(rule_id, "provider-runtime-exact-identity-mismatch")
+    if any(
+        role.role_status != RoleBindingStatus.SELECTED
+        or role.configured_model is None
+        or role.resolved_model is None
+        for role in roles
+    ):
+        return _provider_issue(rule_id, "provider-runtime-role-unattested")
+    if (
+        attestation.liveness_status != ProviderGateStatus.PASS
+        or attestation.storage_configuration_status != ProviderGateStatus.PASS
+        or attestation.runtime_identity_status != ProviderGateStatus.PASS
+    ):
+        return _provider_issue(rule_id, "provider-runtime-service-gate-not-passed")
+    return ()
+
+
+def _provider_gate_separation_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-gate-separation"
+    forbidden_kinds = {
+        "run_spec",
+        "run_record",
+        "memory_system_runtime_binding",
+        "ingestion_plan_record",
+        "case_record",
+        "capsule_manifest",
+    }
+    if snapshot.manifest is None:
+        return _provider_issue(rule_id, "provider-gate-manifest-missing")
+    if any(entry.record_kind in forbidden_kinds for entry in snapshot.manifest.source_entries):
+        return _provider_issue(rule_id, "provider-gate-promotion")
+    attestations = _provider_documents(snapshot, ProviderRuntimeProfileAttestation)
+    if len(attestations) != 1:
+        return _provider_issue(rule_id, "provider-gate-attestation-missing")
+    attestation = attestations[0]
+    if (
+        attestation.model_readiness_status != ProviderGateStatus.NOT_RUN
+        or attestation.memory_conformance_status != ProviderGateStatus.NOT_RUN
+    ):
+        return _provider_issue(rule_id, "provider-gate-state-promoted")
+    return ()
+
+
+def _all_control_strings(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, dict):
+        return tuple(item for nested in value.values() for item in _all_control_strings(nested))
+    if isinstance(value, (list, tuple)):
+        return tuple(item for nested in value for item in _all_control_strings(nested))
+    return ()
+
+
+def _provider_control_redaction_rule(
+    snapshot: _ProviderServiceSnapshot,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "t4-provider-control-redaction"
+    forbidden_values = tuple(value for value in snapshot.value.forbidden_control_values if value)
+    private_prefixes = ("/Users/", "/home/", "/private/var/", "C:\\Users\\")
+    for path, document in snapshot.parsed_documents.items():
+        strings = _all_control_strings(document.model_dump(mode="json"))
+        for candidate in strings:
+            if any(forbidden in candidate for forbidden in forbidden_values):
+                return _provider_issue(rule_id, "provider-control-secret-exposed", path)
+            if candidate.startswith(private_prefixes):
+                return _provider_issue(rule_id, "provider-control-private-path", path)
+            if "://" in candidate or candidate.startswith(("localhost:", "127.0.0.1:")):
+                return _provider_issue(rule_id, "provider-control-authority-exposed", path)
+    if snapshot.manifest is not None:
+        for entry in snapshot.manifest.source_entries:
+            if entry.record_kind != "raw":
+                continue
+            content = snapshot.actual_files.get(entry.relative_path)
+            if content is None:
+                continue
+            try:
+                payload = (
+                    gzip.decompress(content) if entry.relative_path.endswith(".gz") else content
+                )
+            except (OSError, EOFError):
+                continue
+            for forbidden in forbidden_values:
+                if forbidden.encode("utf-8") in payload:
+                    return _provider_issue(
+                        rule_id,
+                        "provider-control-secret-exposed",
+                        entry.relative_path,
+                    )
+            if any(prefix.encode("utf-8") in payload for prefix in private_prefixes):
+                return _provider_issue(
+                    rule_id,
+                    "provider-control-private-path",
+                    entry.relative_path,
+                )
+            if b"://" in payload or b"localhost:" in payload or b"127.0.0.1:" in payload:
+                return _provider_issue(
+                    rule_id,
+                    "provider-control-authority-exposed",
+                    entry.relative_path,
+                )
+    return ()
+
+
+PROVIDER_SERVICE_RULES: tuple[ValidationRule, ...] = (
+    ValidationRule("t4-provider-schema", 1, _provider_schema_rule),
+    ValidationRule("t4-provider-manifest-closure", 1, _provider_manifest_closure_rule),
+    ValidationRule("t4-provider-path-safety", 1, _provider_path_safety_rule),
+    ValidationRule("t4-provider-occurrence-terminal", 1, _provider_occurrence_terminal_rule),
+    ValidationRule("t4-provider-parent-isolation", 1, _provider_parent_isolation_rule),
+    ValidationRule("t4-provider-budget-closure", 1, _provider_budget_closure_rule),
+    ValidationRule("t4-provider-attempt-ordering", 1, _provider_attempt_ordering_rule),
+    ValidationRule("t4-provider-unknown-outcome", 1, _provider_unknown_outcome_rule),
+    ValidationRule("t4-provider-runtime-binding", 1, _provider_runtime_binding_rule),
+    ValidationRule("t4-provider-gate-separation", 1, _provider_gate_separation_rule),
+    ValidationRule("t4-provider-control-redaction", 1, _provider_control_redaction_rule),
+)
+
+PROVIDER_SERVICE_RULE_IDS: tuple[str, ...] = tuple(rule.rule_id for rule in PROVIDER_SERVICE_RULES)
+
+
+def _provider_validation_target_hash(snapshot: _ProviderServiceSnapshot) -> str:
+    return canonical_sha256(
+        [
+            "oamb-t4-provider-service-validation-input-v1",
+            snapshot.value.source_kind,
+            snapshot.value.operation,
+            snapshot.value.expected_provider,
+            snapshot.value.expected_provider_project_id,
+            snapshot.value.expected_provider_profile_id,
+            snapshot.value.expected_transport_profile.value,
+            snapshot.value.expected_release_version,
+            snapshot.value.expected_source_revision,
+            snapshot.value.expected_build_artifact_sha256,
+            hashlib.sha256(snapshot.manifest_bytes or b"").hexdigest(),
+            tuple(
+                (path, hashlib.sha256(content).hexdigest())
+                for path, content in sorted(snapshot.actual_files.items())
+            ),
+            tuple(
+                hashlib.sha256(value.encode("utf-8")).hexdigest()
+                for value in snapshot.value.forbidden_control_values
+            ),
+        ]
+    )
+
+
+def validate_provider_service_evidence(
+    value: ProviderServiceEvidenceValidationInput,
+    profile: ValidationProfile,
+    registry: RuleRegistry,
+) -> ValidationResult:
+    snapshot = _load_provider_service_snapshot(value)
+    required_ids = tuple(requirement.rule_id for requirement in profile.required_rules)
+    target_hash = _provider_validation_target_hash(snapshot)
+    if profile.stage != ValidationStage.EVIDENCE:
+        return _preflight_failure(
+            profile=profile,
+            target_hash=target_hash,
+            required_ids=required_ids,
+            rule_id="validation.stage.v1",
+            code="wrong-validation-stage",
+            pointer="/stage",
+        )
+    expected_inventory_hash = canonical_sha256(
+        [
+            "oamb-required-rule-inventory-v1",
+            tuple(
+                (requirement.rule_id, requirement.minimum_version)
+                for requirement in profile.required_rules
+            ),
+        ]
+    )
+    if profile.required_rule_inventory_hash != expected_inventory_hash:
+        return _preflight_failure(
+            profile=profile,
+            target_hash=target_hash,
+            required_ids=required_ids,
+            rule_id="validation.profile-inventory.v1",
+            code="profile-inventory-mismatch",
+            pointer="/required_rule_inventory_hash",
+        )
+    if required_ids != PROVIDER_SERVICE_RULE_IDS or profile.applicability != (
+        "source_kind=provider_service",
+        "operation=model_readiness",
+    ):
+        return _preflight_failure(
+            profile=profile,
+            target_hash=target_hash,
+            required_ids=required_ids,
+            rule_id="validation.profile-coverage.v1",
+            code="profile-rule-coverage-mismatch",
+            pointer="/required_rules",
+        )
+
+    executed: list[str] = []
+    passed: list[str] = []
+    failed: list[str] = []
+    missing: list[str] = []
+    issues: list[ValidationIssue] = []
+    implementation_versions: list[str] = []
+    schema_verified = False
+    for requirement in profile.required_rules:
+        if requirement.rule_id != "t4-provider-schema" and not schema_verified:
+            missing.append(requirement.rule_id)
+            continue
+        rule = registry.compatible(requirement.rule_id, requirement.minimum_version)
+        if rule is None:
+            missing.append(requirement.rule_id)
+            continue
+        executed.append(rule.rule_id)
+        implementation_versions.append(f"{rule.rule_id}@{rule.version}")
+        rule_issues = rule.evaluate(snapshot)
+        if rule_issues:
+            failed.append(rule.rule_id)
+            issues.extend(rule_issues)
+        else:
+            passed.append(rule.rule_id)
+            if rule.rule_id == "t4-provider-schema":
+                schema_verified = True
+    return ValidationResult(
+        validation_profile_id=profile.profile_id,
+        target_hash=target_hash,
+        disposition=(
+            ValidationDisposition.VALIDATED
+            if not failed and not missing
+            else ValidationDisposition.INVALID
+        ),
         required_rule_ids=required_ids,
         executed_rule_ids=tuple(executed),
         passed_rule_ids=tuple(passed),

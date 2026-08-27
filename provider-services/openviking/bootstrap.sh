@@ -3,6 +3,7 @@ set -eu
 
 ROOT=${1:?provider-services root required}
 ENV_FILE=${2:?provider-services env file required}
+PROOF_FILE=${3:-}
 . "$ROOT/lib/env.sh"
 
 env_value() {
@@ -59,18 +60,30 @@ fi
 printf 'X-API-Key: %s\n' "$user_key" > "$USER_HEADER_FILE"
 chmod 600 "$USER_HEADER_FILE"
 
-curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 15 \
-  -H "@$USER_HEADER_FILE" "$BASE_URL/api/v1/system/status" | \
-  jq -e --arg user "$OAMB_OPENVIKING_ADMIN_USER_ID" \
-    '.status == "ok" and .result.initialized == true and .result.user == $user' >/dev/null
+user_status=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 15 \
+  -H "@$USER_HEADER_FILE" "$BASE_URL/api/v1/system/status")
+printf '%s' "$user_status" | jq -e --arg user "$OAMB_OPENVIKING_ADMIN_USER_ID" \
+  '.status == "ok" and .result.initialized == true and .result.user == $user' >/dev/null
 
-curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 15 \
-  -H "@$USER_HEADER_FILE" "$BASE_URL/health" | \
-  jq -e --arg account "$OAMB_OPENVIKING_ACCOUNT_ID" \
+user_health=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 15 \
+  -H "@$USER_HEADER_FILE" "$BASE_URL/health")
+printf '%s' "$user_health" | jq -e --arg account "$OAMB_OPENVIKING_ACCOUNT_ID" \
     --arg user "$OAMB_OPENVIKING_ADMIN_USER_ID" \
     '.status == "ok" and .account_id == $account and .user_id == $user and
      .role == "admin"' >/dev/null
 
 root_health=$(root_get /health)
 printf '%s' "$root_health" | jq -e '.status == "ok" and .role == "root"' >/dev/null
+if [ -n "$PROOF_FILE" ]; then
+  [ ! -e "$PROOF_FILE" ] || { printf 'openviking bootstrap: proof file already exists\n' >&2; exit 1; }
+  jq -n \
+    --arg account "$OAMB_OPENVIKING_ACCOUNT_ID" \
+    --arg user "$OAMB_OPENVIKING_ADMIN_USER_ID" \
+    --arg user_role "$(printf '%s' "$user_health" | jq -er '.role')" \
+    --arg root_role "$(printf '%s' "$root_health" | jq -er '.role')" \
+    --arg initialized "$(printf '%s' "$user_status" | jq -er '.result.initialized')" \
+    '{account_id: $account, user_id: $user, user_role: $user_role,
+      provisioning_role: $root_role, initialized: ($initialized == "true")}' > "$PROOF_FILE"
+  chmod 600 "$PROOF_FILE"
+fi
 printf 'openviking bootstrap: PASS (dedicated account ADMIN identity verified as non-ROOT)\n'

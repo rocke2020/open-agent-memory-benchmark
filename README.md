@@ -56,6 +56,12 @@ Mem0 Python SDK profile is separate and cannot substitute for REST evidence.
 See [`provider-services/README.md`](provider-services/README.md) for the
 non-destructive service-only workflow.
 
+Start them explicitly with:
+
+```bash
+cd provider-services && ./bin/provider-services up
+```
+
 Provider state is preserved. Normal tests never delete databases, run memory
 conformance, or execute a paid evaluation.
 

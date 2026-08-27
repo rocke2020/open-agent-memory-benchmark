@@ -43,6 +43,18 @@ printf 'acquired\\n'
             self.assertIn("active OAMB run lease", result.stderr)
             self.assertFalse((runtime / "provider-lifecycle.lock").exists())
 
+    def test_dispatched_provider_attempt_fails_and_releases_lifecycle_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "active-provider-attempt").write_text(
+                '{"schema_name":"attempt_intent_record","schema_version":1}\n',
+                encoding="utf-8",
+            )
+            result = self.run_acquire(runtime)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active provider attempt", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
     def test_existing_lifecycle_lock_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)

@@ -4,15 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from oamb.contracts.evidence import ValidationIssue
 
-    from .core import StructuralValidationInput
-
-
-RuleFunction = Callable[["StructuralValidationInput"], tuple["ValidationIssue", ...]]
+RuleFunction = Callable[[Any], tuple["ValidationIssue", ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +52,17 @@ def structural_registry(*, exclude: set[str] | None = None) -> RuleRegistry:
     omitted = exclude or set()
     registry = RuleRegistry()
     for rule in STRUCTURAL_RULES:
+        if rule.rule_id not in omitted:
+            registry.register(rule)
+    return registry
+
+
+def provider_service_registry(*, exclude: set[str] | None = None) -> RuleRegistry:
+    from .core import PROVIDER_SERVICE_RULES
+
+    omitted = exclude or set()
+    registry = RuleRegistry()
+    for rule in PROVIDER_SERVICE_RULES:
         if rule.rule_id not in omitted:
             registry.register(rule)
     return registry

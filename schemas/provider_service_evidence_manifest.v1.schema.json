@@ -1,0 +1,117 @@
+{
+  "$defs": {
+    "CapsuleManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "minLength": 1,
+          "title": "Record Id",
+          "type": "string"
+        },
+        "record_kind": {
+          "minLength": 1,
+          "title": "Record Kind",
+          "type": "string"
+        },
+        "relative_path": {
+          "minLength": 1,
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "capsule_manifest_entry",
+          "default": "capsule_manifest_entry",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "record_kind",
+        "relative_path",
+        "schema_name",
+        "schema_version",
+        "sha256"
+      ],
+      "title": "CapsuleManifestEntry",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/provider_service_evidence_manifest/v1",
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "manifest_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Hash",
+      "type": "string"
+    },
+    "occurrence_id": {
+      "minLength": 1,
+      "title": "Occurrence Id",
+      "type": "string"
+    },
+    "operation": {
+      "const": "model_readiness",
+      "title": "Operation",
+      "type": "string"
+    },
+    "provider_profile_id": {
+      "minLength": 1,
+      "title": "Provider Profile Id",
+      "type": "string"
+    },
+    "provider_project_id": {
+      "minLength": 1,
+      "title": "Provider Project Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "provider_service_evidence_manifest",
+      "default": "provider_service_evidence_manifest",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_entries": {
+      "items": {
+        "$ref": "#/$defs/CapsuleManifestEntry"
+      },
+      "title": "Source Entries",
+      "type": "array"
+    }
+  },
+  "required": [
+    "created_at",
+    "manifest_hash",
+    "occurrence_id",
+    "operation",
+    "provider_profile_id",
+    "provider_project_id",
+    "schema_name",
+    "schema_version",
+    "source_entries"
+  ],
+  "title": "provider_service_evidence_manifest",
+  "type": "object"
+}

@@ -1,0 +1,322 @@
+{
+  "$defs": {
+    "BudgetScopeKindV2": {
+      "enum": [
+        "run",
+        "phase_review",
+        "model_readiness"
+      ],
+      "title": "BudgetScopeKindV2",
+      "type": "string"
+    },
+    "ProviderBudgetCap": {
+      "additionalProperties": false,
+      "properties": {
+        "billing_unit": {
+          "minLength": 1,
+          "title": "Billing Unit",
+          "type": "string"
+        },
+        "maximum_accepted_units": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+          "title": "Maximum Accepted Units",
+          "type": "string"
+        },
+        "operation_kind": {
+          "minLength": 1,
+          "title": "Operation Kind",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "provider_budget_cap",
+          "default": "provider_budget_cap",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "billing_unit",
+        "maximum_accepted_units",
+        "operation_kind",
+        "provider",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "ProviderBudgetCap",
+      "type": "object"
+    },
+    "ResourceBudgetCeiling": {
+      "additionalProperties": false,
+      "properties": {
+        "dimension_id": {
+          "minLength": 1,
+          "title": "Dimension Id",
+          "type": "string"
+        },
+        "maximum": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+          "title": "Maximum",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "resource_budget_ceiling",
+          "default": "resource_budget_ceiling",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "unit": {
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dimension_id",
+        "maximum",
+        "schema_name",
+        "schema_version",
+        "unit"
+      ],
+      "title": "ResourceBudgetCeiling",
+      "type": "object"
+    },
+    "RoleBudgetCeiling": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "max_attempts": {
+          "exclusiveMinimum": 0,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "max_cost": {
+          "anyOf": [
+            {
+              "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Max Cost"
+        },
+        "max_dispatch_wall_seconds": {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+          "title": "Max Dispatch Wall Seconds",
+          "type": "string"
+        },
+        "max_input_tokens": {
+          "minimum": 0,
+          "title": "Max Input Tokens",
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "minimum": 0,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "price_snapshot_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Price Snapshot Id"
+        },
+        "provider_budget_cap": {
+          "$ref": "#/$defs/ProviderBudgetCap"
+        },
+        "resource_ceilings": {
+          "items": {
+            "$ref": "#/$defs/ResourceBudgetCeiling"
+          },
+          "title": "Resource Ceilings",
+          "type": "array"
+        },
+        "role_binding_id": {
+          "minLength": 1,
+          "title": "Role Binding Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "role_budget_ceiling",
+          "default": "role_budget_ceiling",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "currency",
+        "max_attempts",
+        "max_cost",
+        "max_dispatch_wall_seconds",
+        "max_input_tokens",
+        "max_output_tokens",
+        "price_snapshot_id",
+        "provider_budget_cap",
+        "resource_ceilings",
+        "role_binding_id",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "RoleBudgetCeiling",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/budget_spec/v2",
+  "additionalProperties": false,
+  "properties": {
+    "approval_id": {
+      "minLength": 1,
+      "title": "Approval Id",
+      "type": "string"
+    },
+    "budget_id": {
+      "minLength": 1,
+      "title": "Budget Id",
+      "type": "string"
+    },
+    "currency": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Currency"
+    },
+    "max_attempts": {
+      "exclusiveMinimum": 0,
+      "title": "Max Attempts",
+      "type": "integer"
+    },
+    "max_cost": {
+      "anyOf": [
+        {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Max Cost"
+    },
+    "max_dispatch_wall_seconds": {
+      "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+      "title": "Max Dispatch Wall Seconds",
+      "type": "string"
+    },
+    "max_input_tokens": {
+      "minimum": 0,
+      "title": "Max Input Tokens",
+      "type": "integer"
+    },
+    "max_output_tokens": {
+      "minimum": 0,
+      "title": "Max Output Tokens",
+      "type": "integer"
+    },
+    "resource_ceilings": {
+      "items": {
+        "$ref": "#/$defs/ResourceBudgetCeiling"
+      },
+      "title": "Resource Ceilings",
+      "type": "array"
+    },
+    "role_ceilings": {
+      "items": {
+        "$ref": "#/$defs/RoleBudgetCeiling"
+      },
+      "title": "Role Ceilings",
+      "type": "array"
+    },
+    "schema_name": {
+      "const": "budget_spec",
+      "default": "budget_spec",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "scope_id": {
+      "minLength": 1,
+      "title": "Scope Id",
+      "type": "string"
+    },
+    "scope_kind": {
+      "$ref": "#/$defs/BudgetScopeKindV2"
+    },
+    "stop_condition_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Stop Condition Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "approval_id",
+    "budget_id",
+    "currency",
+    "max_attempts",
+    "max_cost",
+    "max_dispatch_wall_seconds",
+    "max_input_tokens",
+    "max_output_tokens",
+    "resource_ceilings",
+    "role_ceilings",
+    "schema_name",
+    "schema_version",
+    "scope_id",
+    "scope_kind",
+    "stop_condition_ids"
+  ],
+  "title": "budget_spec",
+  "type": "object"
+}

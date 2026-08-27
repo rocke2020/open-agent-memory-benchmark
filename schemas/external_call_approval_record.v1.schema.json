@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "BudgetScopeKindV2": {
+      "enum": [
+        "run",
+        "phase_review",
+        "model_readiness"
+      ],
+      "title": "BudgetScopeKindV2",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/external_call_approval_record/v1",
+  "additionalProperties": false,
+  "properties": {
+    "approval_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Approval Hash",
+      "type": "string"
+    },
+    "approval_id": {
+      "minLength": 1,
+      "title": "Approval Id",
+      "type": "string"
+    },
+    "approved_at": {
+      "format": "date-time",
+      "title": "Approved At",
+      "type": "string"
+    },
+    "budget_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Budget Hash",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "operation_kind": {
+      "minLength": 1,
+      "title": "Operation Kind",
+      "type": "string"
+    },
+    "provider_runtime_profile_attestation_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Provider Runtime Profile Attestation Hash"
+    },
+    "role_binding_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Role Binding Ids",
+      "type": "array"
+    },
+    "runtime_binding_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Runtime Binding Hash"
+    },
+    "schema_name": {
+      "const": "external_call_approval_record",
+      "default": "external_call_approval_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "scope_id": {
+      "minLength": 1,
+      "title": "Scope Id",
+      "type": "string"
+    },
+    "scope_kind": {
+      "$ref": "#/$defs/BudgetScopeKindV2"
+    },
+    "stop_condition_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Stop Condition Ids",
+      "type": "array"
+    },
+    "unmetered_cost_acknowledged": {
+      "title": "Unmetered Cost Acknowledged",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "approval_hash",
+    "approval_id",
+    "approved_at",
+    "budget_hash",
+    "expires_at",
+    "operation_kind",
+    "provider_runtime_profile_attestation_hash",
+    "role_binding_ids",
+    "runtime_binding_hash",
+    "schema_name",
+    "schema_version",
+    "scope_id",
+    "scope_kind",
+    "stop_condition_ids",
+    "unmetered_cost_acknowledged"
+  ],
+  "title": "external_call_approval_record",
+  "type": "object"
+}

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import model_validator
 
@@ -14,6 +15,7 @@ from .base import (
     PositiveInt,
     Sha256,
     StrictContract,
+    UtcDateTime,
 )
 from .ids import (
     canonical_sha256,
@@ -34,6 +36,12 @@ class BudgetScopeKind(StrEnum):
     PHASE_REVIEW = "phase_review"
 
 
+class BudgetScopeKindV2(StrEnum):
+    RUN = "run"
+    PHASE_REVIEW = "phase_review"
+    MODEL_READINESS = "model_readiness"
+
+
 class TransportProfile(StrEnum):
     REST = "rest"
     SDK = "sdk"
@@ -50,6 +58,73 @@ class ComparabilityStatus(StrEnum):
     COMPARABLE = "comparable"
     NOT_COMPARABLE = "not_comparable"
     UNKNOWN = "unknown"
+
+
+class ModelRole(StrEnum):
+    MEMORY_EXTRACTION = "memory_extraction"
+    EMBEDDING = "embedding"
+    ANSWER = "answer"
+    JUDGE = "judge"
+    QUALITY_REVIEW = "quality_review"
+
+
+class RoleBindingStatus(StrEnum):
+    SELECTED = "selected"
+    DISABLED = "disabled"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class ExecutionOwner(StrEnum):
+    MEMORY_SYSTEM = "memory_system"
+    HARNESS = "harness"
+    DETERMINISTIC_METRIC = "deterministic_metric"
+
+
+class BindingKind(StrEnum):
+    NATIVE = "native"
+    MODEL_CLIENT = "model_client"
+    DISABLED = "disabled"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class RuntimeAttestationStatus(StrEnum):
+    RUNTIME_VERIFIED = "runtime_verified"
+    BUILD_PROVENANCE_VERIFIED = "build_provenance_verified"
+    UNATTESTED = "unattested"
+    UNSUPPORTED = "unsupported"
+
+
+class ProviderGateStatus(StrEnum):
+    NOT_RUN = "not_run"
+    PASS = "pass"
+    FAIL = "fail"
+    UNSUPPORTED = "unsupported"
+
+
+class SourceEvidenceKind(StrEnum):
+    RUN = "run"
+    EXTERNAL = "external"
+    DERIVATION = "derivation"
+    PROVIDER_SERVICE = "provider_service"
+
+
+class SourceEvidenceBinding(StrictContract):
+    schema_name: Literal["source_evidence_binding"] = "source_evidence_binding"
+    schema_version: Literal[1] = 1
+    binding_id: Sha256
+    source_kind: SourceEvidenceKind
+    source_identity: NonEmptyStr
+    source_root_hash: Sha256
+    validation_result_hash: Sha256
+    source_schema_versions: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def schema_versions_are_unique(self) -> Self:
+        if not self.source_schema_versions:
+            raise ValueError("source evidence binding requires schema versions")
+        if len(set(self.source_schema_versions)) != len(self.source_schema_versions):
+            raise ValueError("source evidence binding contains duplicate schema versions")
+        return self
 
 
 class ProtocolSpec(StrictContract):
@@ -247,6 +322,69 @@ class MemorySystemRuntimeBinding(StrictContract):
     attestation_status: AttestationStatus
 
 
+class MemorySystemRuntimeBindingV2(StrictContract):
+    schema_name: Literal["memory_system_runtime_binding"] = "memory_system_runtime_binding"
+    schema_version: Literal[2] = 2
+    memory_system_id: NonEmptyStr
+    runtime_binding_hash: Sha256
+    provider_project_id: NonEmptyStr
+    provider_profile_id: NonEmptyStr
+    edition: NonEmptyStr
+    distribution_channel: NonEmptyStr
+    api_version: NonEmptyStr
+    release_version: NonEmptyStr
+    source_revision: NonEmptyStr
+    artifact_kind: NonEmptyStr
+    artifact_sha256: Sha256
+    endpoint_fingerprint: Sha256
+    deployment_configuration_sha256: Sha256
+    storage_engine: NonEmptyStr
+    storage_engine_version: NonEmptyStr
+    schema_revision: NonEmptyStr
+    vector_index_type: NonEmptyStr
+    distance_metric: NonEmptyStr
+    vector_dimension: PositiveInt
+    index_configuration_sha256: Sha256
+    model_role_binding_ids: tuple[NonEmptyStr, ...]
+    native_feature_flags_fingerprint: Sha256
+    native_reranking_status: Literal["disabled"]
+    attestation_method: NonEmptyStr
+    attestation_status: RuntimeAttestationStatus
+    raw_proof_refs: tuple[Sha256, ...]
+    model_readiness_required: bool
+    model_readiness_evidence: SourceEvidenceBinding | None
+
+    @model_validator(mode="after")
+    def model_readiness_binding_is_closed(self) -> Self:
+        if not self.model_role_binding_ids:
+            raise ValueError("runtime binding requires model role bindings")
+        if len(set(self.model_role_binding_ids)) != len(self.model_role_binding_ids):
+            raise ValueError("runtime binding contains duplicate model role bindings")
+        if not self.raw_proof_refs:
+            raise ValueError("runtime binding requires raw proof references")
+        if self.model_readiness_required:
+            if self.model_readiness_evidence is None:
+                raise ValueError("required model readiness evidence is missing")
+            if self.model_readiness_evidence.source_kind != SourceEvidenceKind.PROVIDER_SERVICE:
+                raise ValueError("model readiness evidence must bind provider-service evidence")
+        elif self.model_readiness_evidence is not None:
+            raise ValueError("optional model readiness cannot carry an evidence binding")
+        expected_hash = memory_system_runtime_binding_hash(
+            self.model_dump(mode="python", exclude={"runtime_binding_hash"})
+        )
+        if self.runtime_binding_hash != expected_hash:
+            raise ValueError("runtime binding hash does not match its canonical fields")
+        return self
+
+
+def memory_system_runtime_binding_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "memory_system_runtime_binding")
+    payload.setdefault("schema_version", 2)
+    payload.pop("runtime_binding_hash", None)
+    return canonical_sha256(payload)
+
+
 class ExecutionEnvironmentBinding(StrictContract):
     schema_name: Literal["execution_environment_binding"] = "execution_environment_binding"
     schema_version: Literal[1] = 1
@@ -272,6 +410,103 @@ class ModelRoleBinding(StrictContract):
     budget_role: NonEmptyStr
 
 
+class ModelRoleBindingV2(StrictContract):
+    schema_name: Literal["model_role_binding"] = "model_role_binding"
+    schema_version: Literal[2] = 2
+    binding_id: NonEmptyStr
+    role: ModelRole
+    role_status: RoleBindingStatus
+    execution_owner: ExecutionOwner
+    binding_kind: BindingKind
+    provider: NonEmptyStr | None
+    endpoint_reference: NonEmptyStr | None
+    credential_variable_name: NonEmptyStr | None
+    configured_model: NonEmptyStr | None
+    resolved_model: NonEmptyStr | None
+    parameters_fingerprint: Sha256 | None
+    retry_policy_id: NonEmptyStr | None
+    configuration_fingerprint: Sha256
+    redacted_endpoint_fingerprint: Sha256 | None
+
+    @model_validator(mode="after")
+    def binding_status_matches_shape(self) -> Self:
+        selected_fields = (
+            self.provider,
+            self.endpoint_reference,
+            self.configured_model,
+            self.resolved_model,
+            self.parameters_fingerprint,
+            self.retry_policy_id,
+            self.redacted_endpoint_fingerprint,
+        )
+        if self.role_status == RoleBindingStatus.SELECTED:
+            if self.binding_kind not in {BindingKind.NATIVE, BindingKind.MODEL_CLIENT}:
+                raise ValueError("selected binding requires native or model_client kind")
+            if any(value is None for value in selected_fields):
+                raise ValueError("selected binding requires resolved provider and model fields")
+        else:
+            expected_kind = (
+                BindingKind.DISABLED
+                if self.role_status == RoleBindingStatus.DISABLED
+                else BindingKind.NOT_APPLICABLE
+            )
+            if self.binding_kind != expected_kind:
+                raise ValueError("unselected binding status and kind must match")
+            if any(value is not None for value in selected_fields):
+                raise ValueError("unselected binding cannot carry provider or model fields")
+            if self.credential_variable_name is not None:
+                raise ValueError("unselected binding cannot name a credential variable")
+        if self.execution_owner == ExecutionOwner.DETERMINISTIC_METRIC:
+            if self.role != ModelRole.JUDGE or self.role_status != RoleBindingStatus.NOT_APPLICABLE:
+                raise ValueError("deterministic metric is only valid for a not-applicable judge")
+        return self
+
+
+class ResourceBudgetCeiling(StrictContract):
+    schema_name: Literal["resource_budget_ceiling"] = "resource_budget_ceiling"
+    schema_version: Literal[1] = 1
+    dimension_id: NonEmptyStr
+    maximum: NonNegativeDecimal
+    unit: NonEmptyStr
+
+
+class ProviderBudgetCap(StrictContract):
+    schema_name: Literal["provider_budget_cap"] = "provider_budget_cap"
+    schema_version: Literal[1] = 1
+    provider: NonEmptyStr
+    operation_kind: NonEmptyStr
+    billing_unit: NonEmptyStr
+    maximum_accepted_units: NonNegativeDecimal
+
+
+class RoleBudgetCeiling(StrictContract):
+    schema_name: Literal["role_budget_ceiling"] = "role_budget_ceiling"
+    schema_version: Literal[1] = 1
+    role_binding_id: NonEmptyStr
+    max_attempts: PositiveInt
+    max_input_tokens: NonNegativeInt
+    max_output_tokens: NonNegativeInt
+    max_dispatch_wall_seconds: NonNegativeDecimal
+    max_cost: NonNegativeDecimal | None
+    currency: str | None
+    price_snapshot_id: NonEmptyStr | None
+    resource_ceilings: tuple[ResourceBudgetCeiling, ...]
+    provider_budget_cap: ProviderBudgetCap
+
+    @model_validator(mode="after")
+    def currency_and_resources_close(self) -> Self:
+        if (self.max_cost is None) != (self.currency is None):
+            raise ValueError("max_cost and currency must be present together")
+        if self.currency is not None and len(self.currency) != 3:
+            raise ValueError("currency must be an ISO 4217 code")
+        if self.price_snapshot_id is not None and self.max_cost is None:
+            raise ValueError("price snapshot requires a cost ceiling")
+        resource_ids = tuple(item.dimension_id for item in self.resource_ceilings)
+        if len(set(resource_ids)) != len(resource_ids):
+            raise ValueError("role ceiling contains duplicate resource dimensions")
+        return self
+
+
 class BudgetSpec(StrictContract):
     schema_name: Literal["budget_spec"] = "budget_spec"
     schema_version: Literal[1] = 1
@@ -292,6 +527,182 @@ class BudgetSpec(StrictContract):
             raise ValueError("max_cost and currency must be present together")
         if self.currency is not None and len(self.currency) != 3:
             raise ValueError("currency must be an ISO 4217 code")
+        return self
+
+
+class BudgetSpecV2(StrictContract):
+    schema_name: Literal["budget_spec"] = "budget_spec"
+    schema_version: Literal[2] = 2
+    budget_id: NonEmptyStr
+    scope_kind: BudgetScopeKindV2
+    scope_id: NonEmptyStr
+    approval_id: NonEmptyStr
+    max_attempts: PositiveInt
+    max_input_tokens: NonNegativeInt
+    max_output_tokens: NonNegativeInt
+    max_dispatch_wall_seconds: NonNegativeDecimal
+    max_cost: NonNegativeDecimal | None
+    currency: str | None
+    resource_ceilings: tuple[ResourceBudgetCeiling, ...]
+    role_ceilings: tuple[RoleBudgetCeiling, ...]
+    stop_condition_ids: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def parent_and_role_ceilings_close(self) -> Self:
+        if (self.max_cost is None) != (self.currency is None):
+            raise ValueError("max_cost and currency must be present together")
+        if self.currency is not None and len(self.currency) != 3:
+            raise ValueError("currency must be an ISO 4217 code")
+        if not self.role_ceilings:
+            raise ValueError("version 2 budget requires at least one role ceiling")
+        role_ids = tuple(item.role_binding_id for item in self.role_ceilings)
+        if len(set(role_ids)) != len(role_ids):
+            raise ValueError("duplicate role ceiling")
+        resource_ids = tuple(item.dimension_id for item in self.resource_ceilings)
+        if len(set(resource_ids)) != len(resource_ids):
+            raise ValueError("budget contains duplicate resource dimensions")
+        if len(set(self.stop_condition_ids)) != len(self.stop_condition_ids):
+            raise ValueError("budget contains duplicate stop conditions")
+        if any(ceiling.currency != self.currency for ceiling in self.role_ceilings):
+            raise ValueError("role budget currency must match the parent currency")
+        if self.max_cost is not None and any(
+            ceiling.max_cost is None or ceiling.max_cost > self.max_cost
+            for ceiling in self.role_ceilings
+        ):
+            raise ValueError("role cost ceiling must fit the parent cost ceiling")
+        return self
+
+
+class ProviderRuntimeProfileAttestation(StrictContract):
+    schema_name: Literal["provider_runtime_profile_attestation"] = (
+        "provider_runtime_profile_attestation"
+    )
+    schema_version: Literal[1] = 1
+    provider: NonEmptyStr
+    provider_project_id: NonEmptyStr
+    provider_profile_id: NonEmptyStr
+    attestation_hash: Sha256
+    transport_profile: TransportProfile
+    release_version: NonEmptyStr
+    source_revision: NonEmptyStr
+    build_artifact_sha256: Sha256
+    redacted_configuration_sha256: Sha256
+    redacted_endpoint_fingerprint: Sha256
+    auth_configuration_sha256: Sha256
+    storage_configuration_sha256: Sha256
+    model_role_binding_ids: tuple[NonEmptyStr, ...]
+    native_reranking_status: Literal["disabled"]
+    liveness_status: ProviderGateStatus
+    storage_configuration_status: ProviderGateStatus
+    runtime_identity_status: ProviderGateStatus
+    model_readiness_status: ProviderGateStatus
+    memory_conformance_status: ProviderGateStatus
+    raw_proof_refs: tuple[Sha256, ...]
+
+    @model_validator(mode="after")
+    def remains_pre_readiness(self) -> Self:
+        expected_hash = provider_runtime_profile_attestation_hash(
+            self.model_dump(mode="python", exclude={"attestation_hash"})
+        )
+        if self.attestation_hash != expected_hash:
+            raise ValueError("attestation hash does not match its canonical fields")
+        if self.model_readiness_status != ProviderGateStatus.NOT_RUN:
+            raise ValueError("pre-readiness attestation requires model readiness NOT_RUN")
+        if self.memory_conformance_status != ProviderGateStatus.NOT_RUN:
+            raise ValueError("pre-readiness attestation requires memory conformance NOT_RUN")
+        if not self.model_role_binding_ids:
+            raise ValueError("pre-readiness attestation requires selected model roles")
+        if len(set(self.model_role_binding_ids)) != len(self.model_role_binding_ids):
+            raise ValueError("pre-readiness attestation contains duplicate model roles")
+        if not self.raw_proof_refs:
+            raise ValueError("pre-readiness attestation requires raw proof references")
+        return self
+
+
+class ExternalCallApprovalRecord(StrictContract):
+    schema_name: Literal["external_call_approval_record"] = "external_call_approval_record"
+    schema_version: Literal[1] = 1
+    approval_id: NonEmptyStr
+    approval_hash: Sha256
+    operation_kind: NonEmptyStr
+    scope_kind: BudgetScopeKindV2
+    scope_id: NonEmptyStr
+    runtime_binding_hash: Sha256 | None
+    provider_runtime_profile_attestation_hash: Sha256 | None
+    role_binding_ids: tuple[NonEmptyStr, ...]
+    budget_hash: Sha256
+    approved_at: UtcDateTime
+    expires_at: UtcDateTime
+    unmetered_cost_acknowledged: bool
+    stop_condition_ids: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def scope_runtime_and_expiry_close(self) -> Self:
+        expected_hash = external_call_approval_hash(
+            self.model_dump(mode="python", exclude={"approval_hash"})
+        )
+        if self.approval_hash != expected_hash:
+            raise ValueError("approval hash does not match its canonical fields")
+        if self.expires_at <= self.approved_at:
+            raise ValueError("approval expiry must follow approval time")
+        if not self.role_binding_ids:
+            raise ValueError("approval requires at least one role binding")
+        if len(set(self.role_binding_ids)) != len(self.role_binding_ids):
+            raise ValueError("approval contains duplicate role bindings")
+        if len(set(self.stop_condition_ids)) != len(self.stop_condition_ids):
+            raise ValueError("approval contains duplicate stop conditions")
+        if self.scope_kind == BudgetScopeKindV2.RUN:
+            if self.runtime_binding_hash is None:
+                raise ValueError("run approval requires a runtime binding")
+            if self.provider_runtime_profile_attestation_hash is not None:
+                raise ValueError("run approval cannot use a pre-readiness attestation")
+        elif self.scope_kind == BudgetScopeKindV2.MODEL_READINESS:
+            if self.provider_runtime_profile_attestation_hash is None:
+                raise ValueError("model-readiness approval requires an attestation")
+            if self.runtime_binding_hash is not None:
+                raise ValueError("model-readiness approval cannot use a runtime binding")
+        elif (
+            self.runtime_binding_hash is not None
+            or self.provider_runtime_profile_attestation_hash is not None
+        ):
+            raise ValueError("phase-review approval has no memory-system runtime binding")
+        return self
+
+
+def provider_runtime_profile_attestation_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "provider_runtime_profile_attestation")
+    payload.setdefault("schema_version", 1)
+    payload.pop("attestation_hash", None)
+    return canonical_sha256(payload)
+
+
+def external_call_approval_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "external_call_approval_record")
+    payload.setdefault("schema_version", 1)
+    payload.pop("approval_hash", None)
+    return canonical_sha256(payload)
+
+
+class DerivationSpec(StrictContract):
+    schema_name: Literal["derivation_spec"] = "derivation_spec"
+    schema_version: Literal[1] = 1
+    derivation_kind: NonEmptyStr
+    ordered_source_bindings: tuple[SourceEvidenceBinding, ...]
+    ordered_source_root_hash: Sha256
+    transform_spec_hash: Sha256
+    report_spec_hash: Sha256 | None
+    reducer_and_renderer_input_hashes: tuple[Sha256, ...]
+    derivation_input_hash: Sha256
+
+    @model_validator(mode="after")
+    def source_bindings_are_non_empty_and_unique(self) -> Self:
+        if not self.ordered_source_bindings:
+            raise ValueError("derivation requires at least one source binding")
+        binding_ids = tuple(item.binding_id for item in self.ordered_source_bindings)
+        if len(set(binding_ids)) != len(binding_ids):
+            raise ValueError("derivation contains duplicate source bindings")
         return self
 
 
