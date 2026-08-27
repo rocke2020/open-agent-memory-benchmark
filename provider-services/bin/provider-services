@@ -1,0 +1,566 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+COMPOSE_FILE="$ROOT/compose.yaml"
+ENV_FILE="$ROOT/.env"
+VERSIONS_FILE="$ROOT/versions.env"
+RUNTIME_DIR="$ROOT/.runtime"
+BUILD_DIR="$ROOT/.build"
+MEM0_IMAGE="oamb/mem0-api:2.0.19-dc82354"
+PROJECT_ATTESTATION="$RUNTIME_DIR/provider-project.attestation"
+LIFECYCLE_LOCK="$RUNTIME_DIR/provider-lifecycle.lock"
+LIFECYCLE_LOCK_HELD=false
+OPENVIKING_QUIESCED=false
+MODEL_READINESS_RESERVED_CALLS=5
+MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS=240
+
+# Public, tracked values only.
+. "$VERSIONS_FILE"
+. "$ROOT/lib/env.sh"
+. "$ROOT/lib/lifecycle.sh"
+
+die() {
+    printf 'provider-services: %s\n' "$*" >&2
+    exit 1
+}
+
+need_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+env_value() {
+    read_env_value "$ENV_FILE" "$1"
+}
+
+require_env_value() {
+    value=$(env_value "$1") || die "missing $1 in $ENV_FILE"
+    [ -n "$value" ] || die "$1 is empty in $ENV_FILE"
+    case "$value" in
+        change-me*) die "$1 still has a change-me placeholder" ;;
+    esac
+}
+
+compose() {
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+check_env_file() {
+    [ -f "$ENV_FILE" ] || die "copy .env.example to .env and configure it"
+    mode=$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE" 2>/dev/null || true)
+    [ "$mode" = "600" ] || die "$ENV_FILE must have mode 0600 (found ${mode:-unknown})"
+    validate_env_file "$ENV_FILE" || die "$ENV_FILE uses duplicate keys or unsupported dotenv syntax"
+}
+
+check_tools() {
+    for command_name in docker git jq curl python3 shasum awk; do
+        need_command "$command_name"
+    done
+    docker info >/dev/null 2>&1 || die "Docker engine is unavailable"
+    docker compose version >/dev/null 2>&1 || die "Docker Compose is unavailable"
+}
+
+check_source_checkout() {
+    checkout=$(env_value OAMB_MEM0_SOURCE_CHECKOUT) || die "missing OAMB_MEM0_SOURCE_CHECKOUT"
+    [ -d "$checkout/.git" ] || die "Mem0 checkout is not a Git worktree: $checkout"
+    actual_commit=$(git -C "$checkout" rev-parse "v${MEM0_VERSION}^{commit}" 2>/dev/null) || \
+        die "Mem0 checkout lacks formal tag v${MEM0_VERSION}"
+    [ "$actual_commit" = "$MEM0_COMMIT" ] || die "Mem0 tag v${MEM0_VERSION} resolves to $actual_commit"
+    git -C "$checkout" cat-file -e "${MEM0_COMMIT}^{commit}" || die "Mem0 commit is unavailable"
+}
+
+check_ports() {
+    project=$(env_value OAMB_PROVIDER_PROJECT)
+    for variable in OAMB_HINDSIGHT_PORT OAMB_MEM0_PORT OAMB_MEM0_INSPECTOR_PORT OAMB_OPENVIKING_PORT; do
+        port=$(env_value "$variable") || die "missing $variable"
+        if ! python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket() as sock:
+    sock.settimeout(0.2)
+    raise SystemExit(1 if sock.connect_ex(("127.0.0.1", port)) == 0 else 0)
+PY
+        then
+            owner=$(docker ps \
+                --filter "label=com.docker.compose.project=$project" \
+                --filter "publish=$port" -q)
+            [ -n "$owner" ] || die "host port $port is owned outside project $project"
+        fi
+    done
+}
+
+check_project_name() {
+    project=$(env_value OAMB_PROVIDER_PROJECT) || die "missing OAMB_PROVIDER_PROJECT"
+    printf '%s' "$project" | grep -Eq '^oamb-providers-[a-z0-9-]{8,48}$' || \
+        die "OAMB_PROVIDER_PROJECT must be a unique oamb-providers-* identifier"
+}
+
+project_resources() {
+    project=$1
+    {
+        docker ps -a --filter "label=com.docker.compose.project=$project" -q
+        docker volume ls --filter "label=com.docker.compose.project=$project" -q
+        docker network ls --filter "label=com.docker.compose.project=$project" -q
+    } | sed '/^$/d'
+}
+
+attestation_value() {
+    awk -F= -v wanted="$1" '$1 == wanted {sub(/^[^=]*=/, ""); print; found=1; exit} END {if (!found) exit 1}' "$PROJECT_ATTESTATION"
+}
+
+verify_project_attestation() {
+    [ -f "$PROJECT_ATTESTATION" ] || die "provider project attestation is absent"
+    project=$(env_value OAMB_PROVIDER_PROJECT)
+    compose_hash=$(shasum -a 256 "$COMPOSE_FILE" | awk '{print $1}')
+    versions_hash=$(shasum -a 256 "$VERSIONS_FILE" | awk '{print $1}')
+    [ "$(attestation_value project)" = "$project" ] || die "provider project attestation names a different project"
+    [ "$(attestation_value compose_sha256)" = "$compose_hash" ] || die "Compose fingerprint changed since project creation"
+    [ "$(attestation_value versions_sha256)" = "$versions_hash" ] || die "version fingerprint changed since project creation"
+}
+
+check_project_ownership() {
+    project=$(env_value OAMB_PROVIDER_PROJECT)
+    if [ -f "$PROJECT_ATTESTATION" ]; then
+        verify_project_attestation
+        return
+    fi
+    [ -z "$(project_resources "$project")" ] || \
+        die "project $project already has Docker resources but no matching local attestation"
+}
+
+attest_project() {
+    check_project_ownership
+    [ -f "$PROJECT_ATTESTATION" ] && return
+    mkdir -p "$RUNTIME_DIR"
+    umask 077
+    project=$(env_value OAMB_PROVIDER_PROJECT)
+    compose_hash=$(shasum -a 256 "$COMPOSE_FILE" | awk '{print $1}')
+    versions_hash=$(shasum -a 256 "$VERSIONS_FILE" | awk '{print $1}')
+    temporary="$PROJECT_ATTESTATION.partial.$$"
+    [ ! -e "$temporary" ] || die "temporary project attestation already exists"
+    {
+        printf 'project=%s\n' "$project"
+        printf 'compose_sha256=%s\n' "$compose_hash"
+        printf 'versions_sha256=%s\n' "$versions_hash"
+    } > "$temporary"
+    mv "$temporary" "$PROJECT_ATTESTATION"
+}
+
+doctor_build() {
+    check_tools
+    check_env_file
+    check_source_checkout
+}
+
+doctor_full() {
+    doctor_build
+    for name in \
+        OAMB_PROVIDER_PROJECT \
+        OAMB_OLLAMA_BASE_URL OAMB_EMBEDDING_MODEL \
+        OAMB_HINDSIGHT_LLM_PROVIDER OAMB_HINDSIGHT_LLM_MODEL \
+        OAMB_HINDSIGHT_LLM_BASE_URL OAMB_HINDSIGHT_LLM_API_KEY \
+        OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_BASE_URL OAMB_MEM0_LLM_API_KEY \
+        OAMB_MEM0_ADMIN_API_KEY OAMB_MEM0_JWT_SECRET \
+        OAMB_MEM0_POSTGRES_PASSWORD OAMB_MEM0_QDRANT_API_KEY \
+        OAMB_MEM0_INSPECTOR_API_KEY OAMB_OPENVIKING_VLM_PROVIDER \
+        OAMB_OPENVIKING_VLM_MODEL OAMB_OPENVIKING_VLM_BASE_URL \
+        OAMB_OPENVIKING_VLM_API_KEY OAMB_OPENVIKING_ROOT_API_KEY \
+        OAMB_OPENVIKING_ACCOUNT_ID OAMB_OPENVIKING_ADMIN_USER_ID
+    do
+        require_env_value "$name"
+    done
+    check_project_name
+    check_project_ownership
+    [ "$(env_value OAMB_HINDSIGHT_LLM_PROVIDER)" = "openai" ] || \
+        die "this fixed profile requires OAMB_HINDSIGHT_LLM_PROVIDER=openai"
+    [ "$(env_value OAMB_OPENVIKING_VLM_PROVIDER)" = "openai" ] || \
+        die "this fixed profile requires OAMB_OPENVIKING_VLM_PROVIDER=openai"
+    check_ports
+    compose config --quiet
+    printf 'doctor: PASS (configuration resolved; secrets not printed)\n'
+}
+
+prepare_mem0_source() {
+    mkdir -p "$BUILD_DIR"
+    archive="$BUILD_DIR/mem0-source.tar"
+    if [ -f "$archive" ]; then
+        actual=$(shasum -a 256 "$archive" | awk '{print $1}')
+        [ "$actual" = "$MEM0_SOURCE_ARCHIVE_SHA256" ] || \
+            die "existing Mem0 source archive has unexpected digest: $actual"
+        return
+    fi
+    checkout=$(env_value OAMB_MEM0_SOURCE_CHECKOUT)
+    temporary="$BUILD_DIR/mem0-source.tar.partial.$$"
+    [ ! -e "$temporary" ] || die "temporary archive path already exists"
+    git -C "$checkout" archive --format=tar --prefix=mem0-source/ "$MEM0_COMMIT" > "$temporary"
+    actual=$(shasum -a 256 "$temporary" | awk '{print $1}')
+    [ "$actual" = "$MEM0_SOURCE_ARCHIVE_SHA256" ] || \
+        die "prepared Mem0 source digest $actual does not match $MEM0_SOURCE_ARCHIVE_SHA256"
+    mv "$temporary" "$archive"
+}
+
+ensure_image() {
+    image=$1
+    if docker image inspect "$image" >/dev/null 2>&1; then
+        printf 'image: local immutable digest present: %s\n' "$image"
+        return
+    fi
+    docker pull "$image"
+}
+
+mem0_build_input_sha256() {
+    {
+        for relative_path in \
+            .dockerignore \
+            mem0/Dockerfile \
+            mem0/requirements.lock \
+            mem0/server_state.py \
+            mem0/inspector.py
+        do
+            digest=$(shasum -a 256 "$ROOT/$relative_path" | awk '{print $1}')
+            printf '%s  %s\n' "$digest" "$relative_path"
+        done
+        archive_digest=$(shasum -a 256 "$BUILD_DIR/mem0-source.tar" | awk '{print $1}')
+        printf '%s  %s\n' "$archive_digest" '.build/mem0-source.tar'
+    } | shasum -a 256 | awk '{print $1}'
+}
+
+mem0_image_matches_pin() {
+    expected_build_input=$1
+    docker image inspect "$MEM0_IMAGE" 2>/dev/null | jq -e --arg build_input "$expected_build_input" \
+        '.[0].Config.Labels["org.opencontainers.image.version"] == "2.0.19" and
+         .[0].Config.Labels["org.opencontainers.image.revision"] == "dc82354e143c2581d505d581a00286d6ef8c3605" and
+         .[0].Config.Labels["io.oamb.mem0.build-input-sha256"] == $build_input and
+         .[0].Config.Labels["io.oamb.mem0.server-overlay-sha256"] == "fc6d575c66f8c27816cc8f293849a0ce1612f0f5048e3232a867593755ede2d8"' \
+        >/dev/null 2>&1
+}
+
+build_images() {
+    doctor_build
+    prepare_mem0_source
+    mem0_build_input=$(mem0_build_input_sha256)
+    if mem0_image_matches_pin "$mem0_build_input"; then
+        printf 'image: local fixed-source Mem0 image matches release fingerprints\n'
+    else
+        docker build --pull=false \
+            --build-arg MEM0_BUILD_INPUT_SHA256="$mem0_build_input" \
+            --tag "$MEM0_IMAGE" --file "$ROOT/mem0/Dockerfile" "$ROOT"
+    fi
+    docker image inspect "$MEM0_IMAGE" | jq -e --arg build_input "$mem0_build_input" \
+        '.[0].Config.Labels["org.opencontainers.image.version"] == "2.0.19" and
+         .[0].Config.Labels["org.opencontainers.image.revision"] == "dc82354e143c2581d505d581a00286d6ef8c3605" and
+         .[0].Config.Labels["io.oamb.mem0.build-input-sha256"] == $build_input and
+         .[0].Config.Labels["io.oamb.mem0.server-overlay-sha256"] == "fc6d575c66f8c27816cc8f293849a0ce1612f0f5048e3232a867593755ede2d8"' \
+        >/dev/null
+    docker run --rm --entrypoint python "$MEM0_IMAGE" -c \
+        "import importlib.metadata as m; expected={'mem0ai':'2.0.19','fastapi':'0.115.8','pydantic':'2.10.4','uvicorn':'0.34.0','python-dotenv':'1.2.2','bcrypt':'4.0.1'}; assert {k:m.version(k) for k in expected} == expected"
+    docker run --rm --entrypoint python "$MEM0_IMAGE" -c \
+        "import sys; sys.path.insert(0,'/app'); from server_state import _merge_config; base={'vector_store':{'provider':'pgvector','config':{'dbname':'postgres'}}}; update={'vector_store':{'provider':'qdrant','config':{'url':'http://qdrant'}}}; assert _merge_config(base,update)==update"
+    hindsight_image="ghcr.io/vectorize-io/hindsight-api:0.9.2-slim@${HINDSIGHT_IMAGE_DIGEST}"
+    openviking_image="ghcr.io/volcengine/openviking:v0.4.16@${OPENVIKING_IMAGE_DIGEST}"
+    ensure_image "$hindsight_image"
+    ensure_image "pgvector/pgvector:0.8.6-pg17@${MEM0_POSTGRES_IMAGE_DIGEST}"
+    ensure_image "qdrant/qdrant:v1.18.2@${MEM0_QDRANT_IMAGE_DIGEST}"
+    ensure_image "$openviking_image"
+    docker image inspect "$hindsight_image" | jq -e \
+        '.[0].Config.Labels["org.opencontainers.image.version"] == "0.9.2-slim" and
+         .[0].Config.Labels["org.opencontainers.image.revision"] == "ebad478240d3171bb88201ececda5e8d9883d22d"' \
+        >/dev/null
+    docker image inspect "$openviking_image" | jq -e \
+        '.[0].Config.Labels["org.opencontainers.image.version"] == "v0.4.16" and
+         .[0].Config.Labels["org.opencontainers.image.revision"] == "499995f3ed2e7f551a715179c4053772c51ff819"' \
+        >/dev/null
+    printf 'build: PASS (Mem0 fixed-source image and official digest-pinned images validated)\n'
+}
+
+wait_for_health_result() {
+    service=$1
+    attempts=0
+    while :; do
+        container=$(compose ps -q "$service")
+        [ -n "$container" ] || return 1
+        status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container") || return 1
+        [ "$status" = "healthy" ] && return
+        [ "$status" = "unhealthy" ] && return 1
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 90 ] || return 1
+        sleep 2
+    done
+}
+
+wait_for_health() {
+    service=$1
+    wait_for_health_result "$service" || die "$service failed its health deadline"
+}
+
+restore_openviking_on_exit() {
+    original_status=$1
+    trap - 0
+    if [ "$OPENVIKING_QUIESCED" = true ]; then
+        if ! compose start openviking >/dev/null 2>&1 || ! wait_for_health_result openviking; then
+            printf 'provider-services: failed to restore OpenViking after storage probe\n' >&2
+            [ "$original_status" -ne 0 ] || original_status=1
+        fi
+        OPENVIKING_QUIESCED=false
+    fi
+    release_lifecycle_lock
+    exit "$original_status"
+}
+
+start_services() {
+    doctor_full
+    build_images
+    acquire_lifecycle_lock
+    attest_project
+    compose up -d --no-build
+    for service in hindsight mem0-postgres mem0 mem0-inspector openviking; do
+        wait_for_health "$service"
+    done
+    printf 'up: PASS (service liveness only; model readiness and memory conformance not claimed)\n'
+}
+
+verify_services() {
+    doctor_full
+    acquire_lifecycle_lock
+    verify_project_attestation
+    for service in hindsight mem0-postgres mem0 mem0-inspector openviking; do
+        wait_for_health "$service"
+    done
+    hindsight_port=$(env_value OAMB_HINDSIGHT_PORT)
+    mem0_port=$(env_value OAMB_MEM0_PORT)
+    inspector_port=$(env_value OAMB_MEM0_INSPECTOR_PORT)
+    openviking_port=$(env_value OAMB_OPENVIKING_PORT)
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+        "http://127.0.0.1:$hindsight_port/health" | \
+        jq -e '.status == "healthy" and .database == "connected"' >/dev/null
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+        "http://127.0.0.1:$hindsight_port/version" | \
+        jq -e '.api_version == "0.9.2" and (.features | type == "object")' >/dev/null
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+        "http://127.0.0.1:$mem0_port/openapi.json" | \
+        jq -e '.paths["/memories"] and .paths["/search"]' >/dev/null
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+        "http://127.0.0.1:$openviking_port/health" | \
+        jq -e '.status == "ok" and .healthy == true and .version == "v0.4.16" and .auth_mode == "api_key"' >/dev/null
+    "$ROOT/mem0/bootstrap.sh" "$ROOT" "$ENV_FILE"
+    mkdir -p "$RUNTIME_DIR"
+    umask 077
+    inspector_header="$RUNTIME_DIR/mem0-inspector-header"
+    printf 'Authorization: Bearer %s\n' "$(env_value OAMB_MEM0_INSPECTOR_API_KEY)" > "$inspector_header"
+    chmod 600 "$inspector_header"
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 15 \
+        -H "@$inspector_header" \
+        "http://127.0.0.1:$inspector_port/v1/projection?run_id=0000000000000000000000000000000000000000000000000000000000000000" | \
+        jq -e '.count == 0 and .points == [] and .next_cursor == null' >/dev/null
+    "$ROOT/openviking/bootstrap.sh" "$ROOT" "$ENV_FILE"
+    trap 'restore_openviking_on_exit $?' 0
+    OPENVIKING_QUIESCED=true
+    compose stop openviking
+    compose --profile verification run --rm --no-deps openviking-storage-probe || \
+        die "OpenViking read-only storage probe failed"
+    compose start openviking
+    wait_for_health openviking
+    OPENVIKING_QUIESCED=false
+    printf 'verify: PASS (identity, API health, persistent configuration, read-only storage, and non-ROOT auth; no benchmark memory written)\n'
+}
+
+probe_openai_chat() {
+    label=$1
+    base_url=$2
+    api_key=$3
+    model=$4
+    safe_label=$(printf '%s' "$label" | tr -c 'a-z0-9-' '-')
+    header_file="$RUNTIME_DIR/$safe_label-header"
+    request_file="$RUNTIME_DIR/$safe_label-request.json"
+    response_file="$RUNTIME_DIR/$safe_label-response.json"
+    printf 'Authorization: Bearer %s\n' "$api_key" > "$header_file"
+    chmod 600 "$header_file"
+    jq -n --arg model "$model" \
+        '{model: $model, messages: [{role: "user", content: "Reply with OK."}], temperature: 0, max_tokens: 1}' \
+        > "$request_file"
+    record_model_dispatch "$label"
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 60 \
+        -H "@$header_file" -H 'Content-Type: application/json' \
+        --data-binary "@$request_file" "${base_url%/}/chat/completions" > "$response_file"
+    jq -e '.choices | type == "array" and length >= 1' "$response_file" >/dev/null || \
+        die "$label model probe returned an invalid response"
+    record_model_terminal "$label"
+}
+
+create_model_readiness_attempt() {
+    project=$1
+    approval_hash=$2
+    budget_hash=$3
+    READINESS_ATTEMPT_FILE="$RUNTIME_DIR/model-readiness-attempt.json"
+    claim="$RUNTIME_DIR/model-readiness-attempt.claim"
+    mkdir "$claim" 2>/dev/null || \
+        die "model-readiness approval was already consumed; use a new provider project"
+    temporary="$READINESS_ATTEMPT_FILE.partial.$$"
+    jq -n --arg project "$project" --arg approval "$approval_hash" \
+        --arg budget "$budget_hash" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson calls "$MODEL_READINESS_RESERVED_CALLS" \
+        --argjson wall "$MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS" \
+        '{schema_version: "oamb-provider-model-readiness-attempt-v1",
+          provider_project: $project, approval_sha256: $approval,
+          budget_sha256: $budget, started_at_utc: $started,
+          calls_reserved: $calls, calls_dispatched: 0,
+          max_dispatch_wall_seconds: $wall, attempts: [],
+          billing_complete: false, cost_usd: null, memory_state_created: false}' \
+        > "$temporary"
+    mv "$temporary" "$READINESS_ATTEMPT_FILE"
+}
+
+record_model_dispatch() {
+    label=$1
+    temporary="$READINESS_ATTEMPT_FILE.partial.$$"
+    jq --arg label "$label" --arg dispatched "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        if (.calls_dispatched >= .calls_reserved) or
+           any(.attempts[]; .role == $label)
+        then error("model readiness reservation exhausted or role repeated")
+        else .calls_dispatched += 1 |
+             .attempts += [{role: $label, status: "dispatched",
+                            dispatched_at_utc: $dispatched}]
+        end
+    ' "$READINESS_ATTEMPT_FILE" > "$temporary" || \
+        die "cannot record model-readiness dispatch for $label"
+    mv "$temporary" "$READINESS_ATTEMPT_FILE"
+}
+
+record_model_terminal() {
+    label=$1
+    temporary="$READINESS_ATTEMPT_FILE.partial.$$"
+    jq --arg label "$label" --arg completed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        if ([.attempts[] | select(.role == $label and .status == "dispatched")] | length) != 1
+        then error("model readiness terminal state has no unique dispatch")
+        else .attempts |= map(
+            if .role == $label then .status = "succeeded" |
+                .completed_at_utc = $completed else . end)
+        end
+    ' "$READINESS_ATTEMPT_FILE" > "$temporary" || \
+        die "cannot record model-readiness completion for $label"
+    mv "$temporary" "$READINESS_ATTEMPT_FILE"
+}
+
+verify_model_readiness() {
+    [ "${1:-}" = "--approval" ] && [ -n "${2:-}" ] && \
+        [ "${3:-}" = "--budget" ] && [ -n "${4:-}" ] && [ "$#" -eq 4 ] || \
+        die "verify --model-readiness requires --approval FILE --budget FILE"
+    approval_file=$2
+    budget_file=$4
+    [ -f "$approval_file" ] || die "model-readiness approval file is absent"
+    [ -f "$budget_file" ] || die "model-readiness budget file is absent"
+    doctor_full
+    acquire_lifecycle_lock
+    verify_project_attestation
+    project=$(env_value OAMB_PROVIDER_PROJECT)
+    budget_hash=$(shasum -a 256 "$budget_file" | awk '{print $1}')
+    jq -e --arg project "$project" --arg budget_hash "$budget_hash" \
+        '.schema_version == "oamb-provider-model-readiness-approval-v1" and
+         .approved == true and .provider_project == $project and
+         .budget_sha256 == $budget_hash and .allow_unmetered_cost == true and
+         (.expires_at_utc | type == "string")' \
+        "$approval_file" >/dev/null || die "model-readiness approval does not bind this project and budget"
+    python3 - "$approval_file" <<'PY' || die "model-readiness approval is expired or malformed"
+import datetime as dt
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as approval_file:
+    expires = json.load(approval_file)["expires_at_utc"]
+deadline = dt.datetime.fromisoformat(expires.replace("Z", "+00:00"))
+raise SystemExit(0 if deadline > dt.datetime.now(dt.timezone.utc) else 1)
+PY
+    jq -e --argjson calls "$MODEL_READINESS_RESERVED_CALLS" \
+        --argjson wall "$MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS" \
+        '.schema_version == "oamb-provider-model-readiness-budget-v1" and
+         (.max_model_calls | type == "number" and floor == . and . >= $calls) and
+         (.max_model_dispatch_wall_seconds | type == "number" and . >= $wall) and
+         .max_total_cost_usd == null and .cost_metering == "unavailable"' \
+        "$budget_file" >/dev/null || die "model-readiness budget is malformed or too small"
+    for service in hindsight mem0-postgres mem0 mem0-inspector openviking; do
+        wait_for_health "$service"
+    done
+    mkdir -p "$RUNTIME_DIR"
+    umask 077
+    approval_hash=$(shasum -a 256 "$approval_file" | awk '{print $1}')
+    create_model_readiness_attempt "$project" "$approval_hash" "$budget_hash"
+    embedding_request="$RUNTIME_DIR/embedding-ready-request.json"
+    embedding_response="$RUNTIME_DIR/embedding-ready-response.json"
+    jq -n --arg model "$(env_value OAMB_EMBEDDING_MODEL)" \
+        '{model: $model, input: ["OAMB readiness probe"]}' > "$embedding_request"
+    embedding_base=$(env_value OAMB_OLLAMA_BASE_URL)
+    case "$embedding_base" in
+        http://host.docker.internal:*) embedding_base="http://127.0.0.1:${embedding_base#http://host.docker.internal:}" ;;
+    esac
+    record_model_dispatch controlled-embedding
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 30 \
+        -H 'Authorization: Bearer ollama-local' -H 'Content-Type: application/json' \
+        --data-binary "@$embedding_request" "${embedding_base%/}/embeddings" > "$embedding_response"
+    jq -e '.data[0].embedding | type == "array" and length == 1024' "$embedding_response" >/dev/null
+    record_model_terminal controlled-embedding
+    probe_openai_chat hindsight-llm \
+        "$(env_value OAMB_HINDSIGHT_LLM_BASE_URL)" \
+        "$(env_value OAMB_HINDSIGHT_LLM_API_KEY)" \
+        "$(env_value OAMB_HINDSIGHT_LLM_MODEL)"
+    probe_openai_chat mem0-llm \
+        "$(env_value OAMB_MEM0_LLM_BASE_URL)" \
+        "$(env_value OAMB_MEM0_LLM_API_KEY)" \
+        "$(env_value OAMB_MEM0_LLM_MODEL)"
+    probe_openai_chat openviking-vlm \
+        "$(env_value OAMB_OPENVIKING_VLM_BASE_URL)" \
+        "$(env_value OAMB_OPENVIKING_VLM_API_KEY)" \
+        "$(env_value OAMB_OPENVIKING_VLM_MODEL)"
+    openviking_port=$(env_value OAMB_OPENVIKING_PORT)
+    record_model_dispatch openviking-ready
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 30 \
+        "http://127.0.0.1:$openviking_port/ready" | jq -e '.status == "ready"' >/dev/null
+    record_model_terminal openviking-ready
+    receipt="$RUNTIME_DIR/model-readiness-receipt.json"
+    [ ! -e "$receipt" ] || die "model-readiness receipt already exists; use a new provider project"
+    attempt_hash=$(shasum -a 256 "$READINESS_ATTEMPT_FILE" | awk '{print $1}')
+    jq -n --arg project "$project" --arg approval "$approval_hash" --arg budget "$budget_hash" \
+        --arg attempt "$attempt_hash" \
+        --arg completed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{schema_version: "oamb-provider-model-readiness-receipt-v1",
+          provider_project: $project, approval_sha256: $approval,
+          budget_sha256: $budget, attempt_sha256: $attempt,
+          completed_at_utc: $completed, model_calls_dispatched: 5,
+          billing_complete: false, cost_usd: null,
+          memory_state_created: false}' > "$receipt"
+    printf 'verify --model-readiness: PASS (five attempt-bounded probes responded; billing unavailable; receipt preserved)\n'
+}
+
+stop_services() {
+    check_tools
+    check_env_file
+    check_project_name
+    acquire_lifecycle_lock
+    verify_project_attestation
+    compose stop
+    printf 'stop: PASS (containers and all persistent state preserved)\n'
+}
+
+usage() {
+    printf 'usage: %s {doctor|build|up|verify --services|verify --model-readiness --approval FILE --budget FILE|status|stop}\n' "$0" >&2
+    exit 2
+}
+
+case "${1:-}" in
+    doctor) doctor_full ;;
+    build) build_images ;;
+    up) start_services ;;
+    verify)
+        shift
+        case "${1:-}" in
+            --services) [ "$#" -eq 1 ] || usage; verify_services ;;
+            --model-readiness) shift; verify_model_readiness "$@" ;;
+            *) usage ;;
+        esac
+        ;;
+    status) check_env_file; compose ps ;;
+    stop) stop_services ;;
+    *) usage ;;
+esac

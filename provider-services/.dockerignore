@@ -1,0 +1,6 @@
+**
+!.build/mem0-source.tar
+!mem0/Dockerfile
+!mem0/inspector.py
+!mem0/requirements.lock
+!mem0/server_state.py

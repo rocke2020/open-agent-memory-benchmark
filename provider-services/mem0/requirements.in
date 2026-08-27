@@ -1,0 +1,29 @@
+# Mem0 v2.0.19 core runtime dependencies. The package itself is installed from
+# the verified local source archive after these locked artifacts.
+qdrant-client>=1.12.0
+pydantic[email]==2.10.4
+openai>=1.90.0
+httpx>=0.28.0
+posthog>=7.14.0,<8.0
+pytz>=2024.1
+sqlalchemy>=2.0.31,<3.0
+protobuf>=5.29.6,<7.0.0
+
+# Official v2.0.19 REST server dependencies, with a binary psycopg wheel so the
+# slim runtime does not depend on an unpinned system libpq package.
+fastapi==0.115.8
+uvicorn==0.34.0
+python-dotenv==1.2.2
+psycopg[binary]>=3.2.8
+psycopg-pool>=3.2.6,<4.0.0
+anthropic>=0.39,<1.0
+google-generativeai>=0.8,<1.0
+alembic>=1.13,<2.0
+passlib[bcrypt]>=1.7,<2.0
+bcrypt==4.0.1
+python-jose[cryptography]>=3.3,<4.0
+cryptography>46.0.4
+slowapi>=0.1.9,<1.0
+
+# Required for an offline, no-build-isolation install of the fixed source tree.
+hatchling>=1.27,<2.0
