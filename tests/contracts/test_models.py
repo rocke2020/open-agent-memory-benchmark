@@ -314,7 +314,7 @@ def test_runtime_checkable_ports_accept_structural_fakes() -> None:
         "render_answer",
         "evaluate",
         "validate_records",
-    } <= set(ports.WorkloadPort.__protocol_attrs__)
+    } <= set(vars(ports.WorkloadPort))
     assert {
         "resolve",
         "capabilities",
@@ -325,7 +325,7 @@ def test_runtime_checkable_ports_accept_structural_fakes() -> None:
         "state_digest",
         "retrieve",
         "close",
-    } <= set(ports.MemorySystemPort.__protocol_attrs__)
+    } <= set(vars(ports.MemorySystemPort))
 
     class FakeWorkload:
         def resolve_sources(self) -> Any:
