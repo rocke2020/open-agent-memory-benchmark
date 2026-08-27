@@ -1,0 +1,4 @@
+{
+  "base_fixture": "valid.json",
+  "mutation": {"kind": "control", "control_values": ["https://example.invalid?key=secret-token"]}
+}

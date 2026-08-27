@@ -1,0 +1,84 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/report_artifact_manifest/v1",
+  "additionalProperties": false,
+  "properties": {
+    "asset_hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Asset Hashes",
+      "type": "array"
+    },
+    "audience": {
+      "enum": [
+        "local",
+        "public"
+      ],
+      "title": "Audience",
+      "type": "string"
+    },
+    "evidence_validation_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evidence Validation Hash",
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "ordered_source_root_hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Ordered Source Root Hashes",
+      "type": "array"
+    },
+    "renderer_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Renderer Hash",
+      "type": "string"
+    },
+    "report_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Id",
+      "type": "string"
+    },
+    "report_model_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Model Hash",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "report_artifact_manifest",
+      "default": "report_artifact_manifest",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "asset_hashes",
+    "audience",
+    "evidence_validation_hash",
+    "limitations",
+    "ordered_source_root_hashes",
+    "renderer_hash",
+    "report_id",
+    "report_model_hash",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "report_artifact_manifest",
+  "type": "object"
+}

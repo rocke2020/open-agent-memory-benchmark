@@ -1,0 +1,63 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/case_manifest_entry/v1",
+  "additionalProperties": false,
+  "properties": {
+    "answer_value_sha256": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Answer Value Sha256",
+      "type": "array"
+    },
+    "case_manifest_entry_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Case Manifest Entry Id",
+      "type": "string"
+    },
+    "context_manifest_entry_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Context Manifest Entry Id",
+      "type": "string"
+    },
+    "question_bytes_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Question Bytes Sha256",
+      "type": "string"
+    },
+    "raw_question_id": {
+      "minLength": 1,
+      "title": "Raw Question Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "case_manifest_entry",
+      "default": "case_manifest_entry",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_question_number_1_indexed": {
+      "exclusiveMinimum": 0,
+      "title": "Source Question Number 1 Indexed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "answer_value_sha256",
+    "case_manifest_entry_id",
+    "context_manifest_entry_id",
+    "question_bytes_sha256",
+    "raw_question_id",
+    "schema_name",
+    "schema_version",
+    "source_question_number_1_indexed"
+  ],
+  "title": "case_manifest_entry",
+  "type": "object"
+}

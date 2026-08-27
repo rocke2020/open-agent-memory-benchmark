@@ -1,0 +1,54 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/logical_context_manifest_entry/v1",
+  "additionalProperties": false,
+  "properties": {
+    "context_bytes_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Context Bytes Sha256",
+      "type": "string"
+    },
+    "context_content_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Context Content Id",
+      "type": "string"
+    },
+    "context_manifest_entry_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Context Manifest Entry Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "logical_context_manifest_entry",
+      "default": "logical_context_manifest_entry",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_file_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source File Sha256",
+      "type": "string"
+    },
+    "source_row_number_1_indexed": {
+      "exclusiveMinimum": 0,
+      "title": "Source Row Number 1 Indexed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "context_bytes_sha256",
+    "context_content_id",
+    "context_manifest_entry_id",
+    "schema_name",
+    "schema_version",
+    "source_file_sha256",
+    "source_row_number_1_indexed"
+  ],
+  "title": "logical_context_manifest_entry",
+  "type": "object"
+}

@@ -1,0 +1,164 @@
+{
+  "$defs": {
+    "ProofStatus": {
+      "enum": [
+        "measured_complete",
+        "measured_partial",
+        "unavailable",
+        "not_applicable"
+      ],
+      "title": "ProofStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/resource_usage_record/v1",
+  "additionalProperties": false,
+  "properties": {
+    "dimension_id": {
+      "minLength": 1,
+      "title": "Dimension Id",
+      "type": "string"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ended At"
+    },
+    "environment_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Environment Hash",
+      "type": "string"
+    },
+    "measurement_source": {
+      "minLength": 1,
+      "title": "Measurement Source",
+      "type": "string"
+    },
+    "measurement_spec_id": {
+      "minLength": 1,
+      "title": "Measurement Spec Id",
+      "type": "string"
+    },
+    "meter_boundary": {
+      "minLength": 1,
+      "title": "Meter Boundary",
+      "type": "string"
+    },
+    "parent_id": {
+      "minLength": 1,
+      "title": "Parent Id",
+      "type": "string"
+    },
+    "parent_kind": {
+      "minLength": 1,
+      "title": "Parent Kind",
+      "type": "string"
+    },
+    "proof_status": {
+      "$ref": "#/$defs/ProofStatus"
+    },
+    "raw_telemetry_ref": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Raw Telemetry Ref"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reason"
+    },
+    "resource_record_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Resource Record Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "resource_usage_record",
+      "default": "resource_usage_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "stage": {
+      "minLength": 1,
+      "title": "Stage",
+      "type": "string"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Started At"
+    },
+    "unit": {
+      "minLength": 1,
+      "title": "Unit",
+      "type": "string"
+    },
+    "value": {
+      "anyOf": [
+        {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Value"
+    }
+  },
+  "required": [
+    "dimension_id",
+    "ended_at",
+    "environment_hash",
+    "measurement_source",
+    "measurement_spec_id",
+    "meter_boundary",
+    "parent_id",
+    "parent_kind",
+    "proof_status",
+    "raw_telemetry_ref",
+    "reason",
+    "resource_record_id",
+    "schema_name",
+    "schema_version",
+    "stage",
+    "started_at",
+    "unit",
+    "value"
+  ],
+  "title": "resource_usage_record",
+  "type": "object"
+}

@@ -1,0 +1,4 @@
+{
+  "base_fixture": "valid.json",
+  "mutation": {"kind": "schema", "record_id": "protocol-1", "unknown_field": true}
+}

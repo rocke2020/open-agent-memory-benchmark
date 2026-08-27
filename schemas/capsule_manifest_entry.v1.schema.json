@@ -1,0 +1,48 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/capsule_manifest_entry/v1",
+  "additionalProperties": false,
+  "properties": {
+    "record_id": {
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    },
+    "record_kind": {
+      "minLength": 1,
+      "title": "Record Kind",
+      "type": "string"
+    },
+    "relative_path": {
+      "minLength": 1,
+      "title": "Relative Path",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "capsule_manifest_entry",
+      "default": "capsule_manifest_entry",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "record_id",
+    "record_kind",
+    "relative_path",
+    "schema_name",
+    "schema_version",
+    "sha256"
+  ],
+  "title": "capsule_manifest_entry",
+  "type": "object"
+}

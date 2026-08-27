@@ -1,0 +1,257 @@
+{
+  "$defs": {
+    "CaseManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "answer_value_sha256": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Answer Value Sha256",
+          "type": "array"
+        },
+        "case_manifest_entry_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Case Manifest Entry Id",
+          "type": "string"
+        },
+        "context_manifest_entry_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Context Manifest Entry Id",
+          "type": "string"
+        },
+        "question_bytes_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Question Bytes Sha256",
+          "type": "string"
+        },
+        "raw_question_id": {
+          "minLength": 1,
+          "title": "Raw Question Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "case_manifest_entry",
+          "default": "case_manifest_entry",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_question_number_1_indexed": {
+          "exclusiveMinimum": 0,
+          "title": "Source Question Number 1 Indexed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "answer_value_sha256",
+        "case_manifest_entry_id",
+        "context_manifest_entry_id",
+        "question_bytes_sha256",
+        "raw_question_id",
+        "schema_name",
+        "schema_version",
+        "source_question_number_1_indexed"
+      ],
+      "title": "CaseManifestEntry",
+      "type": "object"
+    },
+    "IngestionPlanManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "ingestion_payload_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Ingestion Payload Hash",
+          "type": "string"
+        },
+        "ingestion_plan_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Ingestion Plan Id",
+          "type": "string"
+        },
+        "ordered_case_manifest_entry_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Ordered Case Manifest Entry Ids",
+          "type": "array"
+        },
+        "ordered_member_context_manifest_entry_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Ordered Member Context Manifest Entry Ids",
+          "type": "array"
+        },
+        "ordered_source_unit_bytes_sha256": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Ordered Source Unit Bytes Sha256",
+          "type": "array"
+        },
+        "plan_manifest_entry_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Plan Manifest Entry Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "ingestion_plan_manifest",
+          "default": "ingestion_plan_manifest",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "workload_id": {
+          "minLength": 1,
+          "title": "Workload Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ingestion_payload_hash",
+        "ingestion_plan_id",
+        "ordered_case_manifest_entry_ids",
+        "ordered_member_context_manifest_entry_ids",
+        "ordered_source_unit_bytes_sha256",
+        "plan_manifest_entry_id",
+        "schema_name",
+        "schema_version",
+        "workload_id"
+      ],
+      "title": "IngestionPlanManifest",
+      "type": "object"
+    },
+    "LogicalContextManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "context_bytes_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Context Bytes Sha256",
+          "type": "string"
+        },
+        "context_content_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Context Content Id",
+          "type": "string"
+        },
+        "context_manifest_entry_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Context Manifest Entry Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "logical_context_manifest_entry",
+          "default": "logical_context_manifest_entry",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_file_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source File Sha256",
+          "type": "string"
+        },
+        "source_row_number_1_indexed": {
+          "exclusiveMinimum": 0,
+          "title": "Source Row Number 1 Indexed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "context_bytes_sha256",
+        "context_content_id",
+        "context_manifest_entry_id",
+        "schema_name",
+        "schema_version",
+        "source_file_sha256",
+        "source_row_number_1_indexed"
+      ],
+      "title": "LogicalContextManifestEntry",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/case_manifest/v1",
+  "additionalProperties": false,
+  "properties": {
+    "cases": {
+      "items": {
+        "$ref": "#/$defs/CaseManifestEntry"
+      },
+      "title": "Cases",
+      "type": "array"
+    },
+    "ingestion_plans": {
+      "items": {
+        "$ref": "#/$defs/IngestionPlanManifest"
+      },
+      "title": "Ingestion Plans",
+      "type": "array"
+    },
+    "logical_contexts": {
+      "items": {
+        "$ref": "#/$defs/LogicalContextManifestEntry"
+      },
+      "title": "Logical Contexts",
+      "type": "array"
+    },
+    "manifest_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Hash",
+      "type": "string"
+    },
+    "manifest_id": {
+      "minLength": 1,
+      "title": "Manifest Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "case_manifest",
+      "default": "case_manifest",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "workload_id": {
+      "minLength": 1,
+      "title": "Workload Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cases",
+    "ingestion_plans",
+    "logical_contexts",
+    "manifest_hash",
+    "manifest_id",
+    "schema_name",
+    "schema_version",
+    "workload_id"
+  ],
+  "title": "case_manifest",
+  "type": "object"
+}

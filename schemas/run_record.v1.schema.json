@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "ResumeDisposition": {
+      "enum": [
+        "not_applicable",
+        "resume_safe",
+        "replacement_run_required"
+      ],
+      "title": "ResumeDisposition",
+      "type": "string"
+    },
+    "RunState": {
+      "enum": [
+        "planned",
+        "preflighting",
+        "ready",
+        "running",
+        "finalizing",
+        "finalized",
+        "rejected",
+        "interrupted",
+        "aborted"
+      ],
+      "title": "RunState",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/run_record/v1",
+  "additionalProperties": false,
+  "properties": {
+    "case_occurrence_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Case Occurrence Ids",
+      "type": "array"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ended At"
+    },
+    "ingestion_occurrence_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Ingestion Occurrence Ids",
+      "type": "array"
+    },
+    "resume_disposition": {
+      "$ref": "#/$defs/ResumeDisposition"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "run_spec_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Run Spec Hash",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "run_record",
+      "default": "run_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Started At"
+    },
+    "state": {
+      "$ref": "#/$defs/RunState"
+    }
+  },
+  "required": [
+    "case_occurrence_ids",
+    "ended_at",
+    "ingestion_occurrence_ids",
+    "resume_disposition",
+    "run_id",
+    "run_spec_hash",
+    "schema_name",
+    "schema_version",
+    "started_at",
+    "state"
+  ],
+  "title": "run_record",
+  "type": "object"
+}

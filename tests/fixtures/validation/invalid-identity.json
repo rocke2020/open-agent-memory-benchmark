@@ -1,0 +1,4 @@
+{
+  "base_fixture": "valid.json",
+  "mutation": {"kind": "identity", "actual_id": "0000000000000000000000000000000000000000000000000000000000000000"}
+}

@@ -1,0 +1,74 @@
+{
+  "$defs": {
+    "ValidationSeverity": {
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "title": "ValidationSeverity",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/validation_issue/v1",
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "minLength": 1,
+      "title": "Code",
+      "type": "string"
+    },
+    "evidence_ref": {
+      "minLength": 1,
+      "title": "Evidence Ref",
+      "type": "string"
+    },
+    "json_pointer": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Json Pointer"
+    },
+    "remediation_code": {
+      "minLength": 1,
+      "title": "Remediation Code",
+      "type": "string"
+    },
+    "rule_id": {
+      "minLength": 1,
+      "title": "Rule Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "validation_issue",
+      "default": "validation_issue",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "severity": {
+      "$ref": "#/$defs/ValidationSeverity"
+    }
+  },
+  "required": [
+    "code",
+    "evidence_ref",
+    "json_pointer",
+    "remediation_code",
+    "rule_id",
+    "schema_name",
+    "schema_version",
+    "severity"
+  ],
+  "title": "validation_issue",
+  "type": "object"
+}

@@ -1,0 +1,150 @@
+{
+  "$defs": {
+    "CostBasis": {
+      "enum": [
+        "actual_supplier_charge",
+        "estimate_from_measured_usage"
+      ],
+      "title": "CostBasis",
+      "type": "string"
+    },
+    "IndexingView": {
+      "enum": [
+        "attempted",
+        "final_contribution",
+        "not_applicable"
+      ],
+      "title": "IndexingView",
+      "type": "string"
+    },
+    "ProofStatus": {
+      "enum": [
+        "measured_complete",
+        "measured_partial",
+        "unavailable",
+        "not_applicable"
+      ],
+      "title": "ProofStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/cost_record/v1",
+  "additionalProperties": false,
+  "properties": {
+    "amount": {
+      "anyOf": [
+        {
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Amount"
+    },
+    "basis": {
+      "$ref": "#/$defs/CostBasis"
+    },
+    "cost_record_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Cost Record Id",
+      "type": "string"
+    },
+    "currency": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Currency"
+    },
+    "indexing_view": {
+      "$ref": "#/$defs/IndexingView"
+    },
+    "parent_id": {
+      "minLength": 1,
+      "title": "Parent Id",
+      "type": "string"
+    },
+    "parent_kind": {
+      "minLength": 1,
+      "title": "Parent Kind",
+      "type": "string"
+    },
+    "price_snapshot_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Price Snapshot Id"
+    },
+    "proof_status": {
+      "$ref": "#/$defs/ProofStatus"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reason"
+    },
+    "schema_name": {
+      "const": "cost_record",
+      "default": "cost_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_resource_record_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Source Resource Record Ids",
+      "type": "array"
+    },
+    "source_usage_record_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Source Usage Record Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "amount",
+    "basis",
+    "cost_record_id",
+    "currency",
+    "indexing_view",
+    "parent_id",
+    "parent_kind",
+    "price_snapshot_id",
+    "proof_status",
+    "reason",
+    "schema_name",
+    "schema_version",
+    "source_resource_record_ids",
+    "source_usage_record_ids"
+  ],
+  "title": "cost_record",
+  "type": "object"
+}

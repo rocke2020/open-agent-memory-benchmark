@@ -1,0 +1,4 @@
+{
+  "base_fixture": "valid.json",
+  "mutation": {"kind": "count", "declared_count": 2}
+}

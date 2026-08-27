@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-agent-memory-benchmark"
+version = "0.1.0"
+description = "Evidence-first reproducible benchmark for self-hosted agent-memory systems"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "OAMB contributors" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = [
+  # T3: strict immutable contracts and deterministic JSON Schema generation.
+  "pydantic>=2.12,<3",
+  # T3: the offline CLI composition root and schema build/check commands.
+  "typer>=0.20,<1",
+]
+
+[project.optional-dependencies]
+# Reserved for the later, comparison-ineligible Mem0 SDK profile.
+mem0-sdk = []
+
+[project.scripts]
+oamb = "oamb.cli:main"
+
+[dependency-groups]
+dev = [
+  "hypothesis>=6.140,<7",
+  "mypy>=1.18,<2",
+  "pytest>=8.4,<10",
+  "ruff>=0.13,<1",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/AGENTS.md",
+  "/CLAUDE.md",
+  "/DATASETS.md",
+  "/LICENSE",
+  "/README.md",
+  "/SECURITY.md",
+  "/THIRD_PARTY.md",
+  "/pyproject.toml",
+  "/schemas",
+  "/src",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oamb"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "oamb/schemas"
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["provider-services"]
+
+[tool.ruff.lint]
+select = ["B", "E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_any_generics = false

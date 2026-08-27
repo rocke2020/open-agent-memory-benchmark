@@ -1,0 +1,84 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/interaction_spec/v1",
+  "additionalProperties": false,
+  "properties": {
+    "chunking_id": {
+      "minLength": 1,
+      "title": "Chunking Id",
+      "type": "string"
+    },
+    "ingestion_mapping_id": {
+      "minLength": 1,
+      "title": "Ingestion Mapping Id",
+      "type": "string"
+    },
+    "interaction_id": {
+      "minLength": 1,
+      "title": "Interaction Id",
+      "type": "string"
+    },
+    "interaction_version": {
+      "minLength": 1,
+      "title": "Interaction Version",
+      "type": "string"
+    },
+    "normalizer_id": {
+      "minLength": 1,
+      "title": "Normalizer Id",
+      "type": "string"
+    },
+    "output_contract_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Output Contract Ids",
+      "type": "array"
+    },
+    "prompt_pack_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Prompt Pack Ids",
+      "type": "array"
+    },
+    "query_effect_policy": {
+      "minLength": 1,
+      "title": "Query Effect Policy",
+      "type": "string"
+    },
+    "retrieval_top_k": {
+      "exclusiveMinimum": 0,
+      "title": "Retrieval Top K",
+      "type": "integer"
+    },
+    "schema_name": {
+      "const": "interaction_spec",
+      "default": "interaction_spec",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "chunking_id",
+    "ingestion_mapping_id",
+    "interaction_id",
+    "interaction_version",
+    "normalizer_id",
+    "output_contract_ids",
+    "prompt_pack_ids",
+    "query_effect_policy",
+    "retrieval_top_k",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "interaction_spec",
+  "type": "object"
+}

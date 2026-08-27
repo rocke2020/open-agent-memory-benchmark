@@ -1,0 +1,102 @@
+{
+  "documents": [
+    {
+      "record_id": "protocol-1",
+      "record_kind": "protocol_spec",
+      "document": {
+        "schema_name": "protocol_spec",
+        "schema_version": 1,
+        "protocol_id": "oamb-v0.1",
+        "protocol_version": "0.1.0",
+        "stages": ["memory_ingest", "memory_query", "answer", "evaluate"],
+        "lifecycle_version": "oamb-lifecycle-v1",
+        "context_policy": "provider_order_no_rerank",
+        "output_contract_ids": ["strict-answer-v1"],
+        "metric_ids": ["exact-match-v1"],
+        "comparison_rule_ids": ["same-controls-v1"]
+      }
+    }
+  ],
+  "identity_claims": [
+    {
+      "evidence_ref": "protocol-1",
+      "identity_prefix": "oamb-demo-identity-v1",
+      "identity_parts": ["record-1"],
+      "actual_id": "01d83b8b4d56f1e049f7edcebf599541d05b6af58da881f6161ac1f668a53baf"
+    }
+  ],
+  "reference_claims": [
+    {
+      "evidence_ref": "protocol-1",
+      "target_record_id": "protocol-1",
+      "expected_record_kind": "protocol_spec"
+    }
+  ],
+  "count_claims": [
+    {
+      "evidence_ref": "manifest.protocols",
+      "declared_count": 1,
+      "member_record_ids": ["protocol-1"]
+    }
+  ],
+  "hash_claims": [
+    {
+      "evidence_ref": "payload-1",
+      "value": {"x": 1},
+      "actual_sha256": "5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22"
+    }
+  ],
+  "transition_claims": [
+    {
+      "evidence_ref": "run-1",
+      "entity_kind": "run",
+      "current_state": "planned",
+      "event": "start_preflight",
+      "claimed_next_state": "preflighting"
+    }
+  ],
+  "control_field_claims": [
+    {
+      "evidence_ref": "config.endpoint",
+      "control_values": ["https://example.invalid/v1"],
+      "forbidden_values": ["secret-token"]
+    }
+  ],
+  "rule_coverage_claims": [
+    {
+      "rule_id": "structural.schema.v1",
+      "target_evidence_refs": ["protocol-1"],
+      "not_applicable_reason": null
+    },
+    {
+      "rule_id": "structural.identity.v1",
+      "target_evidence_refs": ["protocol-1"],
+      "not_applicable_reason": null
+    },
+    {
+      "rule_id": "structural.reference.v1",
+      "target_evidence_refs": ["protocol-1"],
+      "not_applicable_reason": null
+    },
+    {
+      "rule_id": "structural.count.v1",
+      "target_evidence_refs": ["manifest.protocols"],
+      "not_applicable_reason": null
+    },
+    {
+      "rule_id": "structural.hash.v1",
+      "target_evidence_refs": ["payload-1"],
+      "not_applicable_reason": null
+    },
+    {
+      "rule_id": "structural.transition.v1",
+      "target_evidence_refs": ["run-1"],
+      "not_applicable_reason": null
+    },
+    {
+      "rule_id": "structural.control-value.v1",
+      "target_evidence_refs": ["config.endpoint"],
+      "not_applicable_reason": null
+    }
+  ]
+}

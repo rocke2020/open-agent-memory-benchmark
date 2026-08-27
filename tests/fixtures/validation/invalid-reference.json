@@ -1,0 +1,4 @@
+{
+  "base_fixture": "valid.json",
+  "mutation": {"kind": "reference", "target_record_id": "missing-record"}
+}
