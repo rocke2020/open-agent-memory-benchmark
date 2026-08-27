@@ -40,6 +40,10 @@ dev = [
   "pytest>=8.4,<10",
   "ruff>=0.13,<1",
 ]
+download = [
+  "httpx[socks]>=0.28,<1",
+  "huggingface-hub>=1.29,<2",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -52,7 +56,9 @@ include = [
   "/THIRD_PARTY.md",
   "/pyproject.toml",
   "/schemas",
+  "/scripts/download",
   "/src",
+  "/uv.lock",
 ]
 
 [tool.hatch.build.targets.wheel]

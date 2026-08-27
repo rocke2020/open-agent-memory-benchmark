@@ -12,6 +12,8 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 | Hypothesis | Canonical identity and state property tests | MPL-2.0 | Development dependency |
 | Ruff | Formatting and static linting | MIT | Development dependency |
 | mypy | Static type checking | MIT | Development dependency |
+| huggingface_hub | Pinned benchmark dataset downloads | Apache-2.0 | Download dependency |
+| HTTPX with SOCKS support | Hub transport through configured proxies | BSD-3-Clause | Download dependency |
 
 Provider images, source archives, datasets, PromptPacks, and imported evidence
 retain their own upstream licenses and notices. Their inclusion in a local

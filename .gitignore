@@ -223,3 +223,6 @@ __marimo__/
 provider-services/.env
 provider-services/.runtime/
 provider-services/.build/
+
+# Downloaded benchmark datasets
+/datasets
