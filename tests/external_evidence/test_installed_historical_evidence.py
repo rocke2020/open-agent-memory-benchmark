@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+
+ANSI_CONTROL_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def test_installed_wheel_rebuilds_external_report_byte_identically(
@@ -26,14 +30,26 @@ def test_installed_wheel_rebuilds_external_report_byte_identically(
         environment,
     )
     installed_cli = environment / "bin" / "oamb"
-    help_result = subprocess.run(
+    colored_environment = {**os.environ, "FORCE_COLOR": "1"}
+    parent_help = subprocess.run(
         [str(installed_cli), "external", "--help"],
         check=False,
         capture_output=True,
         text=True,
+        env=colored_environment,
     )
-    assert help_result.returncode == 0, help_result.stderr
-    assert {"import", "validate", "report"} <= set(help_result.stdout.split())
+    assert parent_help.returncode == 0, parent_help.stderr
+    visible_parent_help = ANSI_CONTROL_SEQUENCE.sub("", parent_help.stdout)
+    assert {"import", "validate", "report"} <= set(visible_parent_help.split())
+    for command in ("import", "validate", "report"):
+        help_result = subprocess.run(
+            [str(installed_cli), "external", command, "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=colored_environment,
+        )
+        assert help_result.returncode == 0, help_result.stderr
 
     validation_path = tmp_path / "external-validation.json"
     validation = subprocess.run(
