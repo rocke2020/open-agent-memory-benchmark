@@ -9,7 +9,9 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
     ArtifactStorePort,
     CapabilitySet,
-    IngestionReceipt,
+    IngestionDispatch,
+    IngestionDispatchReceipt,
+    IngestionDispatchRequest,
     IngestionRequest,
     InventoryReceipt,
     NativeEvidenceBatch,
@@ -88,10 +90,41 @@ class ScriptedFakeMemorySystem:
             ),
         )
 
-    async def ingest(self, request: IngestionRequest) -> IngestionReceipt:
+    def plan_ingestion(self, request: IngestionRequest) -> tuple[IngestionDispatch, ...]:
+        self._require_open()
+        self._plan_by_scope[request.scope.scope_id]
+        return (
+            IngestionDispatch(
+                dispatch_ordinal_1_indexed=1,
+                operation_kind="fake_memory_ingest",
+                request_fingerprint=canonical_sha256(
+                    [
+                        "oamb-fake-ingest-dispatch-v1",
+                        request.scope.scope_id,
+                        tuple(
+                            (
+                                item.source_unit_id,
+                                item.ordinal_1_indexed,
+                                item.payload_sha256,
+                            )
+                            for item in request.ordered_source_units
+                        ),
+                    ]
+                ),
+                ordered_source_units=request.ordered_source_units,
+            ),
+        )
+
+    async def ingest(
+        self,
+        request: IngestionDispatchRequest,
+    ) -> IngestionDispatchReceipt:
         self._require_open()
         plan_id = self._plan_by_scope[request.scope.scope_id]
-        source_ids = tuple(item.source_unit_id for item in request.ordered_source_units)
+        if request.dispatch.dispatch_ordinal_1_indexed != 1:
+            raise ValueError("fake memory system accepts exactly one planned dispatch")
+        source_units = request.dispatch.ordered_source_units
+        source_ids = tuple(item.source_unit_id for item in source_units)
         if plan_id in self._partial and source_ids:
             accepted = source_ids[:1]
             rejected = source_ids[1:]
@@ -99,29 +132,33 @@ class ScriptedFakeMemorySystem:
             accepted = source_ids
             rejected = ()
         self._accepted_by_scope[request.scope.scope_id] = accepted
-        return IngestionReceipt(
-            ingestion_occurrence_id=request.scope.ingestion_occurrence_id,
+        document = {
+            "operation": "ingest",
+            "attempt_id": request.attempt_id,
+            "ingestion_occurrence_id": request.scope.ingestion_occurrence_id,
+            "scope_id": request.scope.scope_id,
+            "dispatch_ordinal_1_indexed": request.dispatch.dispatch_ordinal_1_indexed,
+            "source_units": tuple(
+                {
+                    "source_unit_id": item.source_unit_id,
+                    "payload_sha256": item.payload_sha256,
+                    "payload": item.payload_bytes.decode("utf-8"),
+                }
+                for item in source_units
+            ),
+            "accepted_source_unit_ids": accepted,
+            "rejected_source_unit_ids": rejected,
+        }
+        raw_bytes = canonical_json_bytes(document)
+        raw_reference = self._seal_raw(raw_bytes)
+        return IngestionDispatchReceipt(
+            attempt_id=request.attempt_id,
+            dispatch=request.dispatch,
             accepted_source_unit_ids=accepted,
             rejected_source_unit_ids=rejected,
-            raw_references=(
-                self._raw_reference(
-                    {
-                        "operation": "ingest",
-                        "ingestion_occurrence_id": request.scope.ingestion_occurrence_id,
-                        "scope_id": request.scope.scope_id,
-                        "source_units": tuple(
-                            {
-                                "source_unit_id": item.source_unit_id,
-                                "payload_sha256": item.payload_sha256,
-                                "payload": item.payload_bytes.decode("utf-8"),
-                            }
-                            for item in request.ordered_source_units
-                        ),
-                        "accepted_source_unit_ids": accepted,
-                        "rejected_source_unit_ids": rejected,
-                    }
-                ),
-            ),
+            raw_reference=raw_reference,
+            raw_response_bytes=raw_bytes,
+            usage_records=(),
         )
 
     async def wait_ready(self, request: ReadinessRequest) -> ReadinessReceipt:
@@ -130,6 +167,12 @@ class ScriptedFakeMemorySystem:
         self._readiness_checks[request.scope.scope_id] += 1
         source_inventory_matches = request.expected_source_unit_ids == self._accepted_by_scope.get(
             request.scope.scope_id, ()
+        )
+        source_inventory_matches = source_inventory_matches and (
+            request.ingestion_receipt.ingestion_occurrence_id
+            == request.scope.ingestion_occurrence_id
+            and request.ingestion_receipt.accepted_source_unit_ids
+            == request.expected_source_unit_ids
         )
         ready = source_inventory_matches and plan_id not in self._partial
         if plan_id in self._delayed and self._readiness_checks[request.scope.scope_id] == 1:
@@ -243,6 +286,9 @@ class ScriptedFakeMemorySystem:
 
     def _raw_reference(self, document: object) -> RawReferenceHandle:
         payload = canonical_json_bytes(document)
+        return self._seal_raw(payload)
+
+    def _seal_raw(self, payload: bytes) -> RawReferenceHandle:
         sha256 = hashlib.sha256(payload).hexdigest()
         return self._store.seal_raw(
             RawPayloadSealRequest(

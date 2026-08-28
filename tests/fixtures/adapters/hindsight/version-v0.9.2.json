@@ -1,0 +1,1 @@
+{"api_version":"0.9.2","features":{"observations":true,"mcp":true,"worker":true,"bank_config_api":true,"bank_llm_health":false,"file_upload_api":true,"document_export_api":true,"document_import_api":true,"audit_log":false,"llm_trace":true,"store_document_text":true}}

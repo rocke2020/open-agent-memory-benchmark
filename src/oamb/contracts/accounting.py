@@ -242,6 +242,137 @@ class TokenUsageRecordV2(StrictContract):
         return self
 
 
+_EXTERNAL_TOKEN_DIMENSIONS = frozenset(
+    {
+        "input_tokens",
+        "visible_output_tokens",
+        "supplier_reported_total_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+    }
+)
+_LOCAL_TOKEN_DIMENSIONS = frozenset({"context_view_tokens"})
+
+
+class TokenUsageRecordV3(StrictContract):
+    schema_name: Literal["token_usage_record"] = "token_usage_record"
+    schema_version: Literal[3] = 3
+    usage_record_id: Sha256
+    attempt_id: Sha256
+    parent_kind: Literal["ingestion_plan", "case", "phase_review", "model_readiness"]
+    parent_id: NonEmptyStr
+    stage: TokenStageV2
+    operation_kind: NonEmptyStr
+    token_domain: TokenDomain
+    measurement_source: TokenMeasurementSource
+    input_tokens: NonNegativeInt | None
+    visible_output_tokens: NonNegativeInt | None
+    supplier_reported_total_tokens: NonNegativeInt | None
+    context_view_tokens: NonNegativeInt | None
+    cached_input_tokens: NonNegativeInt | None
+    reasoning_tokens: NonNegativeInt | None
+    configured_model: NonEmptyStr | None
+    runtime_model: NonEmptyStr | None
+    meter_schema_id: NonEmptyStr
+    raw_field_paths: tuple[tuple[NonEmptyStr, NonEmptyStr], ...]
+    covered_dimensions: tuple[NonEmptyStr, ...]
+    unavailable_dimensions: tuple[NonEmptyStr, ...]
+    not_applicable_dimensions: tuple[NonEmptyStr, ...]
+    inclusion_relationships: tuple[tuple[NonEmptyStr, NonEmptyStr], ...]
+    token_measurement_complete: bool
+    billing_complete: bool
+    proof_status: ProofStatus
+    reason: str | None
+    raw_response_ref: Sha256 | None
+
+    @model_validator(mode="after")
+    def meter_coverage_is_closed(self) -> Self:
+        groups = (
+            self.covered_dimensions,
+            self.unavailable_dimensions,
+            self.not_applicable_dimensions,
+        )
+        if any(len(set(group)) != len(group) for group in groups):
+            raise ValueError("token meter coverage contains duplicate dimensions")
+        covered, unavailable, not_applicable = (set(group) for group in groups)
+        if covered & unavailable or covered & not_applicable or unavailable & not_applicable:
+            raise ValueError("token meter coverage groups must be disjoint")
+
+        values = {
+            "input_tokens": self.input_tokens,
+            "visible_output_tokens": self.visible_output_tokens,
+            "supplier_reported_total_tokens": self.supplier_reported_total_tokens,
+            "context_view_tokens": self.context_view_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+        }
+        if self.token_domain == TokenDomain.EXTERNAL_LLM:
+            expected_dimensions = _EXTERNAL_TOKEN_DIMENSIONS
+            if self.measurement_source != TokenMeasurementSource.SUPPLIER_RESPONSE:
+                raise ValueError("external LLM usage requires a supplier response")
+            if self.context_view_tokens is not None:
+                raise ValueError("external LLM usage cannot contain context-view tokens")
+            if self.configured_model is None or self.runtime_model is None:
+                raise ValueError(
+                    "external LLM usage requires configured and runtime model identity"
+                )
+            if self.raw_response_ref is None:
+                raise ValueError("external LLM usage requires a raw response reference")
+            raw_path_dimensions = tuple(item[0] for item in self.raw_field_paths)
+            if len(set(raw_path_dimensions)) != len(raw_path_dimensions):
+                raise ValueError("token usage raw field paths contain duplicate dimensions")
+            if set(raw_path_dimensions) != covered:
+                raise ValueError("measured supplier dimensions require exact raw field paths")
+        else:
+            expected_dimensions = _LOCAL_TOKEN_DIMENSIONS
+            if self.measurement_source != TokenMeasurementSource.LOCAL_TOKENIZER:
+                raise ValueError("local context usage requires the local tokenizer")
+            if any(values[dimension] is not None for dimension in _EXTERNAL_TOKEN_DIMENSIONS):
+                raise ValueError("local context usage cannot contain supplier token values")
+            if self.configured_model is not None or self.runtime_model is not None:
+                raise ValueError("local context usage cannot carry supplier model identity")
+            if self.raw_field_paths:
+                raise ValueError("local context usage cannot carry supplier raw field paths")
+
+        if covered | unavailable | not_applicable != expected_dimensions:
+            raise ValueError("token meter coverage must classify every profile dimension")
+        for dimension in expected_dimensions:
+            if (values[dimension] is not None) != (dimension in covered):
+                raise ValueError("token values must exactly match measured coverage")
+        relationship_dimensions = tuple(item[0] for item in self.inclusion_relationships)
+        if len(set(relationship_dimensions)) != len(relationship_dimensions):
+            raise ValueError("token inclusion relationships contain duplicate dimensions")
+        if not set(relationship_dimensions) <= expected_dimensions:
+            raise ValueError("token inclusion relationship names an unknown dimension")
+
+        if self.token_measurement_complete != (not unavailable):
+            raise ValueError("token measurement completeness disagrees with unavailable dimensions")
+        if self.billing_complete and (unavailable or not self.token_measurement_complete):
+            raise ValueError("billing completeness requires complete token measurement")
+        if self.proof_status == ProofStatus.MEASURED_COMPLETE:
+            if not self.token_measurement_complete or not covered:
+                raise ValueError("measured-complete usage requires complete measured coverage")
+            if self.reason is not None:
+                raise ValueError("measured-complete usage cannot carry a limitation reason")
+        elif self.proof_status == ProofStatus.MEASURED_PARTIAL:
+            if not covered or not unavailable or not self.reason:
+                raise ValueError(
+                    "measured-partial usage requires measured and unavailable coverage"
+                )
+        elif self.proof_status == ProofStatus.UNAVAILABLE:
+            if covered or unavailable != expected_dimensions or not self.reason:
+                raise ValueError("unavailable usage requires every dimension unavailable")
+        elif covered or not_applicable != expected_dimensions or not self.reason:
+            raise ValueError("not-applicable usage requires every dimension not applicable")
+
+        if self.parent_kind == "model_readiness":
+            if self.stage != TokenStageV2.MODEL_READINESS:
+                raise ValueError("model-readiness usage requires its matching token stage")
+        elif self.stage == TokenStageV2.MODEL_READINESS:
+            raise ValueError("model-readiness token stage requires its matching parent")
+        return self
+
+
 class ResourceUsageRecord(StrictContract):
     schema_name: Literal["resource_usage_record"] = "resource_usage_record"
     schema_version: Literal[1] = 1

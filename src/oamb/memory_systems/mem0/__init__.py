@@ -1,0 +1,70 @@
+"""Fail-closed Mem0 exact-profile adapter framework."""
+
+from .adapter import Mem0RestAdapter
+from .profiles import (
+    MEM0_REST_PROFILE,
+    MEM0_SDK_PROFILE,
+    Mem0ExactProfile,
+    Mem0ReferenceProfileVerdict,
+    Mem0TransportKind,
+    parse_reference_profile_verdict,
+    reference_profile_unsupported,
+)
+from .projection import (
+    MEM0_PROJECTION_MAX_PAGES,
+    MEM0_PROJECTION_MAX_POINTS,
+    Mem0Projection,
+    Mem0ProjectionPoint,
+    parse_projection_pages,
+)
+from .sdk import Mem0SdkAdapter, Mem0SdkWorkerBoundary
+from .wire import (
+    MEM0_REST_ROUTE_ALLOWLIST,
+    MEM0_SEARCH_THRESHOLD,
+    MEM0_SEARCH_TOP_K,
+    Mem0AddDisposition,
+    Mem0AddEvent,
+    Mem0AddResult,
+    Mem0RestRequest,
+    Mem0SearchItem,
+    Mem0SourceMetadata,
+    build_add_http_request,
+    build_search_http_request,
+    encode_add_request,
+    encode_search_request,
+    parse_add_response,
+    parse_search_response,
+)
+
+__all__ = [
+    "MEM0_PROJECTION_MAX_PAGES",
+    "MEM0_PROJECTION_MAX_POINTS",
+    "MEM0_REST_PROFILE",
+    "MEM0_REST_ROUTE_ALLOWLIST",
+    "MEM0_SEARCH_THRESHOLD",
+    "MEM0_SEARCH_TOP_K",
+    "MEM0_SDK_PROFILE",
+    "Mem0RestAdapter",
+    "Mem0AddDisposition",
+    "Mem0AddEvent",
+    "Mem0AddResult",
+    "Mem0ExactProfile",
+    "Mem0ReferenceProfileVerdict",
+    "Mem0RestRequest",
+    "Mem0Projection",
+    "Mem0ProjectionPoint",
+    "Mem0SearchItem",
+    "Mem0SdkAdapter",
+    "Mem0SdkWorkerBoundary",
+    "Mem0SourceMetadata",
+    "Mem0TransportKind",
+    "build_add_http_request",
+    "build_search_http_request",
+    "encode_add_request",
+    "encode_search_request",
+    "parse_add_response",
+    "parse_projection_pages",
+    "parse_reference_profile_verdict",
+    "parse_search_response",
+    "reference_profile_unsupported",
+]

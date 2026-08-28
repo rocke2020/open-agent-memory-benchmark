@@ -1,0 +1,1 @@
+{"status":"ok","result":{"root_uri":"ROOT","created":["CHUNK1","CHUNK2"],"updated":[],"unchanged":[],"queue_status":{"Semantic":{"processed":2,"requeue_count":0,"error_count":0,"errors":[]},"Embedding":{"processed":2,"requeue_count":0,"error_count":0,"errors":[]}}}}

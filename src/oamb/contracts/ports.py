@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
+from .accounting import TokenUsageRecordV3
 from .evidence import CaseRecord, IngestionPlanRecord, LogicalContextRecord
 from .ids import canonical_sha256
 from .specifications import CaseManifest, DatasetManifest
@@ -76,6 +77,7 @@ class NativeEvidenceCandidate:
 class NativeEvidenceBatch:
     raw_reference: RawReferenceHandle
     candidates: tuple[NativeEvidenceCandidate, ...]
+    supporting_raw_references: tuple[RawReferenceHandle, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +186,7 @@ class ScopeReceipt:
     ingestion_occurrence_id: str
     scope_id: str
     raw_reference: RawReferenceHandle
+    supporting_raw_references: tuple[RawReferenceHandle, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,17 +196,45 @@ class IngestionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class IngestionDispatch:
+    dispatch_ordinal_1_indexed: int
+    operation_kind: str
+    request_fingerprint: str
+    ordered_source_units: tuple[SourceUnit, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionDispatchRequest:
+    scope: ScopeReceipt
+    attempt_id: str
+    dispatch: IngestionDispatch
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionDispatchReceipt:
+    attempt_id: str
+    dispatch: IngestionDispatch
+    accepted_source_unit_ids: tuple[str, ...]
+    rejected_source_unit_ids: tuple[str, ...]
+    raw_reference: RawReferenceHandle
+    raw_response_bytes: bytes
+    usage_records: tuple[TokenUsageRecordV3, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class IngestionReceipt:
     ingestion_occurrence_id: str
     accepted_source_unit_ids: tuple[str, ...]
     rejected_source_unit_ids: tuple[str, ...]
     raw_references: tuple[RawReferenceHandle, ...]
+    dispatch_receipts: tuple[IngestionDispatchReceipt, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ReadinessRequest:
     scope: ScopeReceipt
     expected_source_unit_ids: tuple[str, ...]
+    ingestion_receipt: IngestionReceipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +262,7 @@ class StateDigestReceipt:
 class ProjectionReceipt:
     inventory: InventoryReceipt
     state_digest: StateDigestReceipt
+    supporting_raw_references: tuple[RawReferenceHandle, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +387,94 @@ class ModelCallCancelledUnknownOutcome(asyncio.CancelledError, ModelCallUnknownO
         ModelCallUnknownOutcome.__init__(self, message, failure_kind="cancelled")
 
 
+class MemorySystemCallFailure(RuntimeError):
+    """A memory-system call with a known non-success outcome."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str,
+        raw_reference: RawReferenceHandle | None = None,
+        raw_response_bytes: bytes | None = None,
+        supporting_raw_references: tuple[RawReferenceHandle, ...] = (),
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.raw_reference = raw_reference
+        self.raw_response_bytes = raw_response_bytes
+        self.supporting_raw_references = supporting_raw_references
+        self.status_code = status_code
+
+
+class MemorySystemCallUnknownOutcome(RuntimeError):
+    """A dispatched memory write without a trustworthy provider receipt."""
+
+    def __init__(self, message: str, *, failure_kind: str = "unknown_outcome") -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
+
+class MemorySystemCallCancelledUnknownOutcome(
+    asyncio.CancelledError,
+    MemorySystemCallUnknownOutcome,
+):
+    """A cancelled memory write that retains asyncio cancellation semantics."""
+
+    def __init__(self, message: str) -> None:
+        MemorySystemCallUnknownOutcome.__init__(self, message, failure_kind="cancelled")
+
+
+class MemorySystemCallCancelledBeforeDispatch(asyncio.CancelledError):
+    """A cancelled call proven not to have entered the provider dispatch boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        supporting_raw_references: tuple[RawReferenceHandle, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = "cancelled_before_dispatch"
+        self.raw_reference: RawReferenceHandle | None = None
+        self.raw_response_bytes: bytes | None = None
+        self.supporting_raw_references = supporting_raw_references
+        self.status_code: int | None = None
+
+
+class MemorySystemReadCancelled(asyncio.CancelledError):
+    """A cancelled read with any raw responses sealed earlier in the composite call."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        supporting_raw_references: tuple[RawReferenceHandle, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = "cancelled"
+        self.raw_reference: RawReferenceHandle | None = None
+        self.raw_response_bytes: bytes | None = None
+        self.supporting_raw_references = supporting_raw_references
+        self.status_code: int | None = None
+
+
+class MemorySystemProfileUnsupported(RuntimeError):
+    """An exact adapter profile that cannot satisfy its declared contract."""
+
+    def __init__(self, profile_id: str, *, reason_codes: tuple[str, ...]) -> None:
+        if not profile_id:
+            raise ValueError("unsupported profile requires an identity")
+        if not reason_codes or any(not reason for reason in reason_codes):
+            raise ValueError("unsupported profile requires reason codes")
+        if len(set(reason_codes)) != len(reason_codes):
+            raise ValueError("unsupported profile reason codes must be unique")
+        super().__init__(f"memory-system profile is unsupported: {profile_id}")
+        self.profile_id = profile_id
+        self.reason_codes = reason_codes
+
+
 @dataclass(frozen=True, slots=True)
 class AttemptSealRequest:
     attempt_id: str
@@ -454,7 +574,9 @@ class MemorySystemPort(Protocol):
 
     async def allocate_ingestion_scope(self, request: ScopeAllocationRequest) -> ScopeReceipt: ...
 
-    async def ingest(self, request: IngestionRequest) -> IngestionReceipt: ...
+    def plan_ingestion(self, request: IngestionRequest) -> tuple[IngestionDispatch, ...]: ...
+
+    async def ingest(self, request: IngestionDispatchRequest) -> IngestionDispatchReceipt: ...
 
     async def wait_ready(self, request: ReadinessRequest) -> ReadinessReceipt: ...
 

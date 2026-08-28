@@ -1,0 +1,328 @@
+{
+  "$defs": {
+    "ProofStatus": {
+      "enum": [
+        "measured_complete",
+        "measured_partial",
+        "unavailable",
+        "not_applicable"
+      ],
+      "title": "ProofStatus",
+      "type": "string"
+    },
+    "TokenDomain": {
+      "enum": [
+        "local_context_view",
+        "external_llm"
+      ],
+      "title": "TokenDomain",
+      "type": "string"
+    },
+    "TokenMeasurementSource": {
+      "enum": [
+        "local_tokenizer",
+        "supplier_response"
+      ],
+      "title": "TokenMeasurementSource",
+      "type": "string"
+    },
+    "TokenStageV2": {
+      "enum": [
+        "memory_ingest",
+        "memory_query",
+        "context_view",
+        "answer",
+        "judge",
+        "quality_review",
+        "model_readiness"
+      ],
+      "title": "TokenStageV2",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/token_usage_record/v3",
+  "additionalProperties": false,
+  "properties": {
+    "attempt_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "billing_complete": {
+      "title": "Billing Complete",
+      "type": "boolean"
+    },
+    "cached_input_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Cached Input Tokens"
+    },
+    "configured_model": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Configured Model"
+    },
+    "context_view_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Context View Tokens"
+    },
+    "covered_dimensions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Covered Dimensions",
+      "type": "array"
+    },
+    "inclusion_relationships": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "minLength": 1,
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Inclusion Relationships",
+      "type": "array"
+    },
+    "input_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Input Tokens"
+    },
+    "measurement_source": {
+      "$ref": "#/$defs/TokenMeasurementSource"
+    },
+    "meter_schema_id": {
+      "minLength": 1,
+      "title": "Meter Schema Id",
+      "type": "string"
+    },
+    "not_applicable_dimensions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Not Applicable Dimensions",
+      "type": "array"
+    },
+    "operation_kind": {
+      "minLength": 1,
+      "title": "Operation Kind",
+      "type": "string"
+    },
+    "parent_id": {
+      "minLength": 1,
+      "title": "Parent Id",
+      "type": "string"
+    },
+    "parent_kind": {
+      "enum": [
+        "ingestion_plan",
+        "case",
+        "phase_review",
+        "model_readiness"
+      ],
+      "title": "Parent Kind",
+      "type": "string"
+    },
+    "proof_status": {
+      "$ref": "#/$defs/ProofStatus"
+    },
+    "raw_field_paths": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "minLength": 1,
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Raw Field Paths",
+      "type": "array"
+    },
+    "raw_response_ref": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Raw Response Ref"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reason"
+    },
+    "reasoning_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reasoning Tokens"
+    },
+    "runtime_model": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Runtime Model"
+    },
+    "schema_name": {
+      "const": "token_usage_record",
+      "default": "token_usage_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 3,
+      "default": 3,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "stage": {
+      "$ref": "#/$defs/TokenStageV2"
+    },
+    "supplier_reported_total_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Supplier Reported Total Tokens"
+    },
+    "token_domain": {
+      "$ref": "#/$defs/TokenDomain"
+    },
+    "token_measurement_complete": {
+      "title": "Token Measurement Complete",
+      "type": "boolean"
+    },
+    "unavailable_dimensions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Unavailable Dimensions",
+      "type": "array"
+    },
+    "usage_record_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Usage Record Id",
+      "type": "string"
+    },
+    "visible_output_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Visible Output Tokens"
+    }
+  },
+  "required": [
+    "attempt_id",
+    "billing_complete",
+    "cached_input_tokens",
+    "configured_model",
+    "context_view_tokens",
+    "covered_dimensions",
+    "inclusion_relationships",
+    "input_tokens",
+    "measurement_source",
+    "meter_schema_id",
+    "not_applicable_dimensions",
+    "operation_kind",
+    "parent_id",
+    "parent_kind",
+    "proof_status",
+    "raw_field_paths",
+    "raw_response_ref",
+    "reason",
+    "reasoning_tokens",
+    "runtime_model",
+    "schema_name",
+    "schema_version",
+    "stage",
+    "supplier_reported_total_tokens",
+    "token_domain",
+    "token_measurement_complete",
+    "unavailable_dimensions",
+    "usage_record_id",
+    "visible_output_tokens"
+  ],
+  "title": "token_usage_record",
+  "type": "object"
+}

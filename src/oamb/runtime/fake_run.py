@@ -46,7 +46,9 @@ from oamb.contracts.ports import (
     AnswerValue,
     ArtifactStorePort,
     CasePlan,
+    IngestionDispatchRequest,
     IngestionPlan,
+    IngestionReceipt,
     IngestionRequest,
     JudgeRequest,
     MemorySystemPort,
@@ -373,49 +375,104 @@ async def _run_fake_vertical_slice_impl(
             )
         )
         scopes[plan.ingestion_plan_id] = scope
-        request_fingerprint = canonical_sha256(
-            ["oamb-fake-ingest-request-v1", plan.ingestion_plan_id]
+        ingestion_request = IngestionRequest(
+            scope=scope,
+            ordered_source_units=plan.ordered_source_units,
         )
-        ingest_attempt_id = attempt_id(occurrence_id, "memory_ingest", 1, request_fingerprint)
-        started = state.timestamp()
-        receipt = await memory.ingest(
-            IngestionRequest(scope=scope, ordered_source_units=plan.ordered_source_units)
+        dispatches = memory.plan_ingestion(ingestion_request)
+        if tuple(item.dispatch_ordinal_1_indexed for item in dispatches) != tuple(
+            range(1, len(dispatches) + 1)
+        ):
+            raise ValueError("memory ingestion dispatch ordinals are not contiguous")
+        planned_source_ids = tuple(
+            source.source_unit_id
+            for dispatch in dispatches
+            for source in dispatch.ordered_source_units
         )
-        ended = state.timestamp()
-        index_contribution = (
-            IndexContribution.FINAL
-            if not receipt.rejected_source_unit_ids
-            else IndexContribution.NONE
-        )
-        attempt = AttemptRecord(
-            attempt_id=ingest_attempt_id,
-            parent_kind="ingestion_plan",
-            parent_id=occurrence_id,
-            stage="memory_ingest",
-            ordinal=1,
-            request_fingerprint=request_fingerprint,
-            started_at=started,
-            ended_at=ended,
-            outcome=AttemptOutcome.SUCCEEDED,
-            retry_of_attempt_id=None,
-            idempotency_key_hash=None,
-            reconciliation_capability="none",
-            raw_response_ref=receipt.raw_references[0].sha256,
-            raw_error_ref=None,
-            index_contribution=index_contribution,
-            superseded_by_attempt_id=None,
-        )
-        _seal(state, "attempts", ingest_attempt_id, attempt)
-        usage_id = _seal_fake_usage(
-            state,
-            attempt_id_value=ingest_attempt_id,
-            parent_kind="ingestion_plan",
-            parent_id=occurrence_id,
-            stage=TokenStage.MEMORY_INGEST,
-            operation_kind="fake_memory_ingest",
-            input_tokens=sum(len(item.payload_bytes.split()) for item in plan.ordered_source_units),
-            output_tokens=0,
-            raw_response_ref=receipt.raw_references[0].sha256,
+        expected_source_ids = tuple(source.source_unit_id for source in plan.ordered_source_units)
+        if planned_source_ids != expected_source_ids:
+            raise ValueError("memory ingestion plan does not preserve exact source order")
+
+        dispatch_receipts = []
+        ingest_attempt_ids: list[str] = []
+        usage_ids: list[str] = []
+        for dispatch in dispatches:
+            ingest_attempt_id = attempt_id(
+                occurrence_id,
+                "memory_ingest",
+                dispatch.dispatch_ordinal_1_indexed,
+                dispatch.request_fingerprint,
+            )
+            started = state.timestamp()
+            dispatch_receipt = await memory.ingest(
+                IngestionDispatchRequest(
+                    scope=scope,
+                    attempt_id=ingest_attempt_id,
+                    dispatch=dispatch,
+                )
+            )
+            ended = state.timestamp()
+            if (
+                dispatch_receipt.attempt_id != ingest_attempt_id
+                or dispatch_receipt.dispatch != dispatch
+            ):
+                raise ValueError("memory ingestion receipt does not match its dispatch")
+            index_contribution = (
+                IndexContribution.FINAL
+                if not dispatch_receipt.rejected_source_unit_ids
+                else IndexContribution.NONE
+            )
+            attempt = AttemptRecord(
+                attempt_id=ingest_attempt_id,
+                parent_kind="ingestion_plan",
+                parent_id=occurrence_id,
+                stage="memory_ingest",
+                ordinal=dispatch.dispatch_ordinal_1_indexed,
+                request_fingerprint=dispatch.request_fingerprint,
+                started_at=started,
+                ended_at=ended,
+                outcome=AttemptOutcome.SUCCEEDED,
+                retry_of_attempt_id=None,
+                idempotency_key_hash=None,
+                reconciliation_capability="none",
+                raw_response_ref=dispatch_receipt.raw_reference.sha256,
+                raw_error_ref=None,
+                index_contribution=index_contribution,
+                superseded_by_attempt_id=None,
+            )
+            _seal(state, "attempts", ingest_attempt_id, attempt)
+            usage_ids.append(
+                _seal_fake_usage(
+                    state,
+                    attempt_id_value=ingest_attempt_id,
+                    parent_kind="ingestion_plan",
+                    parent_id=occurrence_id,
+                    stage=TokenStage.MEMORY_INGEST,
+                    operation_kind=dispatch.operation_kind,
+                    input_tokens=sum(
+                        len(item.payload_bytes.split()) for item in dispatch.ordered_source_units
+                    ),
+                    output_tokens=0,
+                    raw_response_ref=dispatch_receipt.raw_reference.sha256,
+                )
+            )
+            ingest_attempt_ids.append(ingest_attempt_id)
+            dispatch_receipts.append(dispatch_receipt)
+
+        receipt = IngestionReceipt(
+            ingestion_occurrence_id=occurrence_id,
+            accepted_source_unit_ids=tuple(
+                source_id
+                for item in dispatch_receipts
+                for source_id in item.accepted_source_unit_ids
+            ),
+            rejected_source_unit_ids=tuple(
+                source_id
+                for item in dispatch_receipts
+                for source_id in item.rejected_source_unit_ids
+            ),
+            raw_references=tuple(item.raw_reference for item in dispatch_receipts),
+            dispatch_receipts=tuple(dispatch_receipts),
         )
         readiness_refs: list[str] = []
         ready = False
@@ -424,6 +481,7 @@ async def _run_fake_vertical_slice_impl(
                 ReadinessRequest(
                     scope=scope,
                     expected_source_unit_ids=receipt.accepted_source_unit_ids,
+                    ingestion_receipt=receipt,
                 )
             )
             readiness_refs.extend(item.sha256 for item in readiness.evidence_references)
@@ -446,8 +504,8 @@ async def _run_fake_vertical_slice_impl(
             accepted_source_count=len(receipt.accepted_source_unit_ids),
             failed_source_count=len(receipt.rejected_source_unit_ids),
             readiness_evidence_refs=tuple(readiness_refs),
-            attempt_ids=(ingest_attempt_id,),
-            usage_record_ids=(usage_id,),
+            attempt_ids=tuple(ingest_attempt_ids),
+            usage_record_ids=tuple(usage_ids),
             resource_record_ids=(),
             cost_record_ids=(),
         )

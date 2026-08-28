@@ -17,6 +17,7 @@ from .accounting import (
     ResourceUsageRecord,
     TokenUsageRecord,
     TokenUsageRecordV2,
+    TokenUsageRecordV3,
 )
 from .evidence import (
     AttemptIntentRecord,
@@ -146,6 +147,7 @@ PUBLIC_CONTRACTS: tuple[type[BaseModel], ...] = (
     PriceSnapshot,
     TokenUsageRecord,
     TokenUsageRecordV2,
+    TokenUsageRecordV3,
     ResourceUsageRecord,
     CostRecord,
     RunSummary,

@@ -81,6 +81,8 @@ EXPECTED_V2_SCHEMAS = {
     "token_usage_record",
 }
 
+EXPECTED_V3_SCHEMAS = {"token_usage_record"}
+
 
 def require_schema() -> ModuleType:
     try:
@@ -99,6 +101,7 @@ def test_public_contract_inventory_is_explicit_and_unique() -> None:
     assert set(schema.CONTRACT_REGISTRY) == {
         *((name, 1) for name in EXPECTED_PUBLIC_SCHEMAS),
         *((name, 2) for name in EXPECTED_V2_SCHEMAS),
+        *((name, 3) for name in EXPECTED_V3_SCHEMAS),
     }
 
 

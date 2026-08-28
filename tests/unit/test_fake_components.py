@@ -13,6 +13,8 @@ import pytest
 
 from oamb.artifacts.store import ArtifactStore
 from oamb.contracts.ports import (
+    IngestionDispatchRequest,
+    IngestionReceipt,
     IngestionRequest,
     MemorySystemPort,
     ModelCallFailure,
@@ -22,6 +24,8 @@ from oamb.contracts.ports import (
     ReadinessRequest,
     RetrievalRequest,
     ScopeAllocationRequest,
+    ScopeReceipt,
+    SourceUnit,
     WorkloadPort,
 )
 from oamb.runtime.preflight import PreflightRejected
@@ -32,6 +36,42 @@ def require(module_name: str) -> ModuleType:
         return importlib.import_module(module_name)
     except ModuleNotFoundError:
         pytest.fail(f"{module_name} is not implemented", pytrace=False)
+
+
+async def _ingest(
+    memory: MemorySystemPort,
+    scope: ScopeReceipt,
+    source_units: tuple[SourceUnit, ...],
+) -> IngestionReceipt:
+    dispatches = memory.plan_ingestion(
+        IngestionRequest(scope=scope, ordered_source_units=source_units)
+    )
+    dispatch_receipts = []
+    for dispatch in dispatches:
+        dispatch_receipts.append(
+            await memory.ingest(
+                IngestionDispatchRequest(
+                    scope=scope,
+                    attempt_id=f"{dispatch.dispatch_ordinal_1_indexed:064x}",
+                    dispatch=dispatch,
+                )
+            )
+        )
+    return IngestionReceipt(
+        ingestion_occurrence_id=scope.ingestion_occurrence_id,
+        accepted_source_unit_ids=tuple(
+            source_id
+            for receipt in dispatch_receipts
+            for source_id in receipt.accepted_source_unit_ids
+        ),
+        rejected_source_unit_ids=tuple(
+            source_id
+            for receipt in dispatch_receipts
+            for source_id in receipt.rejected_source_unit_ids
+        ),
+        raw_references=tuple(receipt.raw_reference for receipt in dispatch_receipts),
+        dispatch_receipts=tuple(dispatch_receipts),
+    )
 
 
 def test_generated_fake_workload_has_one_reused_plan_and_one_partial_plan() -> None:
@@ -102,19 +142,19 @@ def test_fake_memory_delays_readiness_preserves_order_and_reports_partial_ingest
                 ingestion_plan_id=ready_plan.ingestion_plan_id,
             )
         )
-        receipt = await memory.ingest(
-            IngestionRequest(scope=scope, ordered_source_units=ready_plan.ordered_source_units)
-        )
+        receipt = await _ingest(memory, scope, ready_plan.ordered_source_units)
         first = await memory.wait_ready(
             ReadinessRequest(
                 scope=scope,
                 expected_source_unit_ids=receipt.accepted_source_unit_ids,
+                ingestion_receipt=receipt,
             )
         )
         second = await memory.wait_ready(
             ReadinessRequest(
                 scope=scope,
                 expected_source_unit_ids=receipt.accepted_source_unit_ids,
+                ingestion_receipt=receipt,
             )
         )
         native = await memory.retrieve(
@@ -140,12 +180,7 @@ def test_fake_memory_delays_readiness_preserves_order_and_reports_partial_ingest
                 ingestion_plan_id=partial_plan.ingestion_plan_id,
             )
         )
-        partial = await memory.ingest(
-            IngestionRequest(
-                scope=partial_scope,
-                ordered_source_units=partial_plan.ordered_source_units,
-            )
-        )
+        partial = await _ingest(memory, partial_scope, partial_plan.ordered_source_units)
         assert partial.accepted_source_unit_ids == (
             partial_plan.ordered_source_units[0].source_unit_id,
         )
@@ -174,13 +209,12 @@ def test_fake_memory_seals_every_returned_raw_reference(tmp_path: Path) -> None:
                 ingestion_plan_id=plan.ingestion_plan_id,
             )
         )
-        receipt = await memory.ingest(
-            IngestionRequest(scope=scope, ordered_source_units=plan.ordered_source_units)
-        )
+        receipt = await _ingest(memory, scope, plan.ordered_source_units)
         readiness = await memory.wait_ready(
             ReadinessRequest(
                 scope=scope,
                 expected_source_unit_ids=receipt.accepted_source_unit_ids,
+                ingestion_receipt=receipt,
             )
         )
         projection = await memory.project(scope)
@@ -227,9 +261,7 @@ def test_fake_retrieval_raw_payload_reconstructs_returned_candidates(tmp_path: P
                 ingestion_plan_id=plan.ingestion_plan_id,
             )
         )
-        await memory.ingest(
-            IngestionRequest(scope=scope, ordered_source_units=plan.ordered_source_units)
-        )
+        await _ingest(memory, scope, plan.ordered_source_units)
         batch = cast(
             NativeEvidenceBatch,
             await memory.retrieve(

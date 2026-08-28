@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-
-class UnknownExternalOutcome(RuntimeError):
-    """Signals a dispatched operation whose terminal receipt cannot be proven."""
+from oamb.contracts.ports import MemorySystemCallUnknownOutcome
 
 
 class IngestionPlanUnavailable(RuntimeError):
@@ -15,6 +13,7 @@ class IngestionPlanUnavailable(RuntimeError):
 
 
 Operation = Callable[[], Awaitable[None]]
+UnknownExternalOutcome = MemorySystemCallUnknownOutcome
 
 
 @dataclass(frozen=True, slots=True)
