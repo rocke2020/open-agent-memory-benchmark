@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import pytest
+
+from oamb.contracts.ports import FinishDisposition, ModelCandidate, ModelCompletion
+from oamb.workloads.metrics import (
+    mab_exact,
+    mab_substring_em,
+    max_over_gold_answers,
+    parse_lme_answer_completion,
+    parse_lme_answer_text,
+    parse_lme_judge_completion,
+    parse_lme_judge_yes_no,
+    parse_mab_first_line,
+    parse_mab_raw_or_first_line_max,
+)
+
+
+def test_lme_output_parsers_are_strict_and_preserve_visible_answer_text() -> None:
+    assert parse_lme_answer_text("  answer\n") == "  answer\n"
+    assert parse_lme_judge_yes_no("\tYES\r\n") is True
+    assert parse_lme_judge_yes_no(" no ") is False
+
+    for invalid in ("", " \t\r\n", "yes.", "yesterday", "yes because"):
+        with pytest.raises(ValueError):
+            parse_lme_judge_yes_no(invalid)
+    with pytest.raises(ValueError):
+        parse_lme_answer_text(" \t\r\n")
+
+
+def test_lme_completion_boundary_rejects_truncation_extra_candidates_and_tools() -> None:
+    valid = ModelCompletion(
+        finish_disposition=FinishDisposition.NORMAL_STOP,
+        candidates=(ModelCandidate(content=" yes ", tool_call_present=False, complete=True),),
+    )
+
+    assert parse_lme_answer_completion(valid) == " yes "
+    assert parse_lme_judge_completion(valid) is True
+    invalid = (
+        ModelCompletion(
+            finish_disposition=FinishDisposition.LENGTH_LIMIT,
+            candidates=valid.candidates,
+        ),
+        ModelCompletion(
+            finish_disposition=FinishDisposition.NORMAL_STOP,
+            candidates=valid.candidates * 2,
+        ),
+        ModelCompletion(
+            finish_disposition=FinishDisposition.NORMAL_STOP,
+            candidates=(ModelCandidate(content="yes", tool_call_present=True, complete=True),),
+        ),
+    )
+    for completion in invalid:
+        with pytest.raises(ValueError):
+            parse_lme_answer_completion(completion)
+
+
+def test_mab_first_line_exact_and_substring_metrics_match_frozen_edges() -> None:
+    assert parse_mab_first_line("43\nexplanation") == "43"
+    assert mab_exact("43", "43") is True
+    assert mab_exact("label: 43", "43") is False
+    assert mab_substring_em("The Answer!", "answer") is True
+    assert mab_substring_em("concatenate", "cat") is True
+    assert mab_substring_em("cat", "dog") is False
+    assert parse_mab_raw_or_first_line_max("alpha\nnoise", ("wrong", "alpha")) == (
+        "alpha\nnoise",
+        "alpha",
+    )
+    assert parse_mab_raw_or_first_line_max("full raw answer", ("raw answer",)) == (
+        "full raw answer",
+        "full raw answer",
+    )
+    assert parse_mab_first_line("An\N{LATIN SMALL LETTER LONG S}wer: 43") == (
+        "An\N{LATIN SMALL LETTER LONG S}wer: 43"
+    )
+
+
+@pytest.mark.parametrize("substring", (False, True))
+def test_mab_metrics_reject_every_normalized_empty_gold_answer(substring: bool) -> None:
+    scorer = mab_substring_em if substring else mab_exact
+
+    with pytest.raises(ValueError, match="normalization"):
+        scorer("anything", "!!!")
+    with pytest.raises(ValueError, match="normalization"):
+        max_over_gold_answers(
+            "first answer",
+            ("first answer", "!!!"),
+            substring=substring,
+        )

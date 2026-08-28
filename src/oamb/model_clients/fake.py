@@ -87,6 +87,8 @@ class ScriptedFakeModelClient:
         outcome: str,
         output_text: str,
     ) -> tuple[RawReferenceHandle, tuple[str, ...]]:
+        if request.parent_kind == "model_readiness":
+            raise ValueError("the T5 fake model client has no model-readiness role")
         input_tokens = count_message_whitespace_tokens(request.messages)
         output_tokens = count_whitespace_tokens(output_text)
         payload = canonical_json_bytes(

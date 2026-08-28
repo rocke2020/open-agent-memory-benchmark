@@ -36,6 +36,7 @@ from oamb.contracts.specifications import (
     DatasetManifest,
     IngestionPlanManifest,
     LogicalContextManifestEntry,
+    case_manifest_hash,
 )
 
 FAKE_DATASET_ID = "oamb-generated-fake-v1"
@@ -344,7 +345,7 @@ def _build_case_manifest(
         "ingestion_plans": tuple(ingestion_plans),
         "cases": tuple(cases),
     }
-    manifest_hash = canonical_sha256(["oamb-case-manifest-v1", manifest_fields])
+    manifest_hash = case_manifest_hash(manifest_fields)
     return (
         CaseManifest(
             manifest_id="generated-fake-manifest-v1",

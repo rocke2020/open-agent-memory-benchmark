@@ -1,0 +1,39 @@
+{
+  "dataset_manifest_hash": "78011e09488f2ca88c13dd5518016b56668b1d49174fdec85a1db0eaccf00a2c",
+  "selected_case_digest": "e8526e11afbb2af5ffe5ccf35ccad20cd2c41f14fdc3e18aab62fb79417b97d0",
+  "selected_plan_digest": "85efa5ac9698bf512708cf93bcd011218578183e5f2fc86bbe8ed3f2eda00ef4",
+  "plans": [
+    ["77742acb5c419f835a4c629a9a31b6a27faf1df718f9f6bd2c40438bc35de74f", ["eventqa_65536@8"], [[6, 18, 20]]],
+    ["79bc24e8fae11b3306ec76f3ebeed6252e7288fbdccdf0c5af24b975501650af", ["eventqa_65536@9"], [[6, 69, 92]]],
+    ["872a7860bcc2db0ce69beb544b5756c8ed2d8812d9a51cde8e469ef9311f4d2f", ["eventqa_65536@10"], [[25, 35, 48]]],
+    ["9cac0305bdafffe892e7ba11042929fd13d3cc2bb76fe895551e8183174ef802", ["eventqa_65536@11"], [[27, 39, 68]]],
+    ["c28619f90edb053b5afe9db1f89a143602eebc2f7df677209a6cb99cf59f6d2c", ["eventqa_65536@12"], [[10, 24, 62]]],
+    ["8cb2e20f7bf5540ec5299cdad51e3823984a752826fce30d716bf7e77d8dedc4", ["recsys_redial_full@1"], [[19, 33, 50, 54, 69, 115, 120, 164, 172, 194]]],
+    ["ed02d6d422b33f3bfe433f4559682205122d496e8daef1ea2a0695e9b530baa6", ["icl_banking77_5900shot_balance@2"], [[56, 96]]],
+    ["156b551ed63ea243b4d8832cb50024df935fbee8530aee7c7e428eced0a69c65", ["icl_clinic150_7050shot_balance@3"], [[73, 89]]],
+    ["93fc58124bcaedab350ba016be2fcadeade539362dc90a1a615d743bcff10b86", ["icl_nlu_8296shot_balance@4"], [[23, 85]]],
+    ["3dfd8bdf6040007482c282442c5ab3b0b9a4c017b7ae8e6d8fef2a6c16dbdd57", ["icl_trec_coarse_6600shot_balance@5"], [[22, 33]]],
+    ["2c9b346e0b89d60ae3f93deffc3b74eee39019dfccc650e9903f3b804e53c57b", ["icl_trec_fine_6400shot_balance@6"], [[28, 63]]],
+    ["5c35d20cbf3529f71b06c4dc4062617b317ca1ccefda033dce5b11a43fdb8e40", ["detective_qa@101"], [[5, 6]]],
+    ["7075971d04246785e78e24cb71ea28e235a83a39ad8cb66c871c739898f7f14f", ["detective_qa@102"], [[2, 4]]],
+    ["0f9c6f1a3568ab625d5209a95af6c55945e4f2a66a320cb33a564f84ddd07124", ["detective_qa@103"], [[2]]],
+    ["34879921c64940be7a568a6e8e02bb01bc17aea10e57b22289fe23753275200a", ["detective_qa@104"], [[1, 4]]],
+    ["e8281d5ca4588bda0bc94bbc281ddbad529fffae959bddee4f64bb6e8bedf91c", ["detective_qa@105"], [[8]]],
+    ["e584114dba51b4e1816cc6c2116b5f45c9b75f660687f544f49eb646a261e355", ["detective_qa@106"], [[4]]],
+    ["237a320b3fff31b5bf43af8d7763ec669d19aecec6a5d021a05370ff0f953c66", ["detective_qa@107"], [[1]]],
+    ["d3b3d664917c204577c7df7ccd2f93680a5636f6b2d3e709ec1ba8bac4bc665b", ["detective_qa@108"], [[1]]],
+    ["397df97ee12dcee22e5a15219101e19f87b27a2bcc72e2f020e4b38edb918418", ["detective_qa@109"], [[6, 8]]],
+    ["79ddc8dd4374fb688396180a160834062108213e73c58b9342b4b75a232060c0", ["detective_qa@110"], [[2, 5]]],
+    ["3a7e0daff8030f5f8153cf443ca7d668491df11b1cfb9653eab686656b552d2c", ["factconsolidation_sh_6k@5", "factconsolidation_mh_6k@1"], [[65, 78], [20, 28]]],
+    ["0ebed1d647aa227f5026e71ca93a88fb5be2d0ef0e73140ce0caa8914c03e46f", ["factconsolidation_sh_32k@6", "factconsolidation_mh_32k@2"], [[66, 85], [83]]],
+    ["df464acdc255560b6a4502a77bd8578dd9534dbe44416af3372c53dc82bb3ec4", ["factconsolidation_sh_64k@7", "factconsolidation_mh_64k@3"], [[31, 93], [55, 62]]],
+    ["31e2161abe21a8f936d389e706270dd7ebfe1ed9302d4aa10cf3a0783340d9c1", ["factconsolidation_sh_262k@8", "factconsolidation_mh_262k@4"], [[53, 96], [21, 85]]]
+  ],
+  "smoke": [
+    ["77742acb5c419f835a4c629a9a31b6a27faf1df718f9f6bd2c40438bc35de74f", "eventqa_65536@q6"],
+    ["8cb2e20f7bf5540ec5299cdad51e3823984a752826fce30d716bf7e77d8dedc4", "recsys_redial_full@q33"],
+    ["ed02d6d422b33f3bfe433f4559682205122d496e8daef1ea2a0695e9b530baa6", "icl_banking77_5900shot_balance@q56"],
+    ["e8281d5ca4588bda0bc94bbc281ddbad529fffae959bddee4f64bb6e8bedf91c", "detective_qa@q8"],
+    ["31e2161abe21a8f936d389e706270dd7ebfe1ed9302d4aa10cf3a0783340d9c1", "factconsolidation_mh_262k@q21"]
+  ]
+}

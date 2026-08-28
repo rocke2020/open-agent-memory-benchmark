@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Literal, Self
@@ -160,6 +161,152 @@ class DatasetManifest(StrictContract):
     payload_policy: NonEmptyStr
 
 
+class PromptTemplateManifest(StrictContract):
+    schema_name: Literal["prompt_template_manifest"] = "prompt_template_manifest"
+    schema_version: Literal[1] = 1
+    template_name: NonEmptyStr
+    relative_path: NonEmptyStr
+    content_sha256: Sha256
+    byte_count: PositiveInt
+    source_extracted_sha256: Sha256 | None = None
+    adaptation_id: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def source_extraction_and_adaptation_are_paired(self) -> Self:
+        if (self.source_extracted_sha256 is None) != (self.adaptation_id is None):
+            raise ValueError("source-extracted prompt hash and adaptation ID must be paired")
+        return self
+
+
+def prompt_pack_manifest_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "prompt_pack_manifest")
+    payload.setdefault("schema_version", 1)
+    payload.pop("manifest_sha256", None)
+    return canonical_sha256(payload)
+
+
+class PromptPackManifest(StrictContract):
+    schema_name: Literal["prompt_pack_manifest"] = "prompt_pack_manifest"
+    schema_version: Literal[1] = 1
+    prompt_pack_id: NonEmptyStr
+    prompt_pack_version: NonEmptyStr
+    workload_id: NonEmptyStr
+    origin: Literal["oamb_authored", "attributed_source", "user_supplied", "generated"]
+    source_repository: NonEmptyStr | None
+    source_revision: NonEmptyStr | None
+    source_file_sha256: Sha256 | None
+    license_expression: NonEmptyStr
+    rights_attestation: NonEmptyStr
+    redistribution_allowed: bool
+    templates: tuple[PromptTemplateManifest, ...]
+    variables: tuple[NonEmptyStr, ...]
+    output_contract_id: NonEmptyStr
+    manifest_sha256: Sha256
+
+    @model_validator(mode="after")
+    def identity_and_members_are_closed(self) -> Self:
+        if not self.templates:
+            raise ValueError("prompt pack requires at least one template")
+        names = tuple(template.template_name for template in self.templates)
+        paths = tuple(template.relative_path for template in self.templates)
+        if len(set(names)) != len(names) or len(set(paths)) != len(paths):
+            raise ValueError("prompt pack contains duplicate template names or paths")
+        if len(set(self.variables)) != len(self.variables):
+            raise ValueError("prompt pack contains a duplicate variable")
+        if not self.variables:
+            raise ValueError("prompt pack requires declared variables")
+        for variable in self.variables:
+            if re.fullmatch(r"[a-z][a-z0-9_]*", variable) is None:
+                raise ValueError("prompt variable names require lower snake case")
+            if any(
+                sensitive in variable
+                for sensitive in ("api_key", "secret", "password", "credential", "access_token")
+            ):
+                raise ValueError("secret values are not valid prompt variables")
+        source_values = (
+            self.source_repository,
+            self.source_revision,
+            self.source_file_sha256,
+        )
+        if self.origin == "attributed_source" and any(value is None for value in source_values):
+            raise ValueError("attributed PromptPack requires complete source provenance")
+        if self.origin == "attributed_source" and any(
+            template.source_extracted_sha256 is None for template in self.templates
+        ):
+            raise ValueError(
+                "attributed PromptPack templates require source-extracted hashes and adaptations"
+            )
+        if any(value is not None for value in source_values) and any(
+            value is None for value in source_values
+        ):
+            raise ValueError("prompt source repository, revision, and hash must be complete")
+        expected = prompt_pack_manifest_hash(
+            self.model_dump(mode="python", exclude={"manifest_sha256"})
+        )
+        if self.manifest_sha256 != expected:
+            raise ValueError("prompt pack manifest hash does not match its content")
+        return self
+
+
+class OutputContract(StrictContract):
+    schema_name: Literal["output_contract"] = "output_contract"
+    schema_version: Literal[1] = 1
+    output_contract_id: NonEmptyStr
+    representation: Literal["text", "boolean", "ranked_text_list"]
+    parser_id: NonEmptyStr
+    max_output_tokens: PositiveInt
+    required_candidate_count: PositiveInt
+    accepted_finish_dispositions: tuple[
+        Literal[
+            "normal_stop",
+            "length_limit",
+            "content_filtered",
+            "tool_call",
+            "missing_finish_reason",
+            "cancelled",
+            "incomplete_stream",
+            "transport_error",
+        ],
+        ...,
+    ]
+    parse_failure_policy: Literal["terminal_error", "unjudged"]
+
+    @model_validator(mode="after")
+    def finish_dispositions_are_closed(self) -> Self:
+        if not self.accepted_finish_dispositions:
+            raise ValueError("output contract requires a finish disposition")
+        if len(set(self.accepted_finish_dispositions)) != len(self.accepted_finish_dispositions):
+            raise ValueError("output contract contains duplicate finish dispositions")
+        return self
+
+
+class MetricSpec(StrictContract):
+    schema_name: Literal["metric_spec"] = "metric_spec"
+    schema_version: Literal[1] = 1
+    metric_id: NonEmptyStr
+    output_contract_id: NonEmptyStr
+    compatible_output_contract_ids: tuple[NonEmptyStr, ...] = ()
+    normalizer_id: NonEmptyStr
+    scorer_id: NonEmptyStr
+    answer_set_policy: NonEmptyStr
+    input_fields: tuple[NonEmptyStr, ...]
+    judge_prompt_pack_id: NonEmptyStr | None
+    failure_semantics: Literal["unavailable", "terminal_error"]
+    unjudged_semantics: Literal["unavailable", "not_applicable", "unjudged"]
+
+    @model_validator(mode="after")
+    def evaluation_ownership_is_explicit(self) -> Self:
+        if not self.input_fields or len(set(self.input_fields)) != len(self.input_fields):
+            raise ValueError("metric input fields must be non-empty and unique")
+        if self.judge_prompt_pack_id is not None and "judge" not in self.scorer_id:
+            raise ValueError("judge prompt requires a judge scorer")
+        output_ids = (self.output_contract_id, *self.compatible_output_contract_ids)
+        if len(set(output_ids)) != len(output_ids):
+            raise ValueError("metric contains duplicate output contract IDs")
+        return self
+
+
 class LogicalContextManifestEntry(StrictContract):
     schema_name: Literal["logical_context_manifest_entry"] = "logical_context_manifest_entry"
     schema_version: Literal[1] = 1
@@ -224,6 +371,20 @@ class IngestionPlanManifest(StrictContract):
         return self
 
 
+def case_manifest_hash(fields: Mapping[str, Any]) -> str:
+    payload = {
+        field: fields[field]
+        for field in (
+            "manifest_id",
+            "workload_id",
+            "logical_contexts",
+            "ingestion_plans",
+            "cases",
+        )
+    }
+    return canonical_sha256(["oamb-case-manifest-v1", payload])
+
+
 class CaseManifest(StrictContract):
     schema_name: Literal["case_manifest"] = "case_manifest"
     schema_version: Literal[1] = 1
@@ -270,6 +431,9 @@ class CaseManifest(StrictContract):
             raise ValueError("every logical context must belong to exactly once ingestion plan")
         if len(flattened_case_ids) != len(case_ids) or set(flattened_case_ids) != case_set:
             raise ValueError("every case must belong to exactly once ingestion plan")
+        expected_hash = case_manifest_hash(self.model_dump(mode="python"))
+        if self.manifest_hash != expected_hash:
+            raise ValueError("case manifest hash does not match its exact members")
         return self
 
 

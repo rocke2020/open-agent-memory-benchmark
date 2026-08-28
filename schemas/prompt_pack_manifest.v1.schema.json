@@ -1,0 +1,213 @@
+{
+  "$defs": {
+    "PromptTemplateManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "adaptation_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Adaptation Id"
+        },
+        "byte_count": {
+          "exclusiveMinimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "relative_path": {
+          "minLength": 1,
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "prompt_template_manifest",
+          "default": "prompt_template_manifest",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_extracted_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Extracted Sha256"
+        },
+        "template_name": {
+          "minLength": 1,
+          "title": "Template Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "byte_count",
+        "content_sha256",
+        "relative_path",
+        "schema_name",
+        "schema_version",
+        "template_name"
+      ],
+      "title": "PromptTemplateManifest",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/prompt_pack_manifest/v1",
+  "additionalProperties": false,
+  "properties": {
+    "license_expression": {
+      "minLength": 1,
+      "title": "License Expression",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "origin": {
+      "enum": [
+        "oamb_authored",
+        "attributed_source",
+        "user_supplied",
+        "generated"
+      ],
+      "title": "Origin",
+      "type": "string"
+    },
+    "output_contract_id": {
+      "minLength": 1,
+      "title": "Output Contract Id",
+      "type": "string"
+    },
+    "prompt_pack_id": {
+      "minLength": 1,
+      "title": "Prompt Pack Id",
+      "type": "string"
+    },
+    "prompt_pack_version": {
+      "minLength": 1,
+      "title": "Prompt Pack Version",
+      "type": "string"
+    },
+    "redistribution_allowed": {
+      "title": "Redistribution Allowed",
+      "type": "boolean"
+    },
+    "rights_attestation": {
+      "minLength": 1,
+      "title": "Rights Attestation",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "prompt_pack_manifest",
+      "default": "prompt_pack_manifest",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_file_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Source File Sha256"
+    },
+    "source_repository": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Source Repository"
+    },
+    "source_revision": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Source Revision"
+    },
+    "templates": {
+      "items": {
+        "$ref": "#/$defs/PromptTemplateManifest"
+      },
+      "title": "Templates",
+      "type": "array"
+    },
+    "variables": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Variables",
+      "type": "array"
+    },
+    "workload_id": {
+      "minLength": 1,
+      "title": "Workload Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "license_expression",
+    "manifest_sha256",
+    "origin",
+    "output_contract_id",
+    "prompt_pack_id",
+    "prompt_pack_version",
+    "redistribution_allowed",
+    "rights_attestation",
+    "schema_name",
+    "schema_version",
+    "source_file_sha256",
+    "source_repository",
+    "source_revision",
+    "templates",
+    "variables",
+    "workload_id"
+  ],
+  "title": "prompt_pack_manifest",
+  "type": "object"
+}

@@ -12,6 +12,7 @@ from oamb.config.load import EnvironmentReference
 from oamb.config.resolve import RoleSelection, validate_selected_environment
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.specifications import (
+    BindingKind,
     BudgetScopeKindV2,
     BudgetSpecV2,
     ExecutionEnvironmentBinding,
@@ -344,6 +345,43 @@ _MODEL_ROLE_BY_SLOT = {
     RoleSlotName.QUALITY_REVIEW: ModelRole.QUALITY_REVIEW,
 }
 
+_SELECTED_ROLE_OWNERSHIP = {
+    ModelRole.MEMORY_EXTRACTION: {
+        (ExecutionOwner.MEMORY_SYSTEM, BindingKind.NATIVE),
+        (ExecutionOwner.HARNESS, BindingKind.MODEL_CLIENT),
+    },
+    ModelRole.EMBEDDING: {(ExecutionOwner.MEMORY_SYSTEM, BindingKind.NATIVE)},
+    ModelRole.ANSWER: {(ExecutionOwner.HARNESS, BindingKind.MODEL_CLIENT)},
+    ModelRole.JUDGE: {(ExecutionOwner.HARNESS, BindingKind.MODEL_CLIENT)},
+    ModelRole.QUALITY_REVIEW: {(ExecutionOwner.HARNESS, BindingKind.MODEL_CLIENT)},
+}
+
+
+def _validate_selected_role_ownership(binding: ModelRoleBindingV2) -> None:
+    actual = (binding.execution_owner, binding.binding_kind)
+    if actual not in _SELECTED_ROLE_OWNERSHIP[binding.role]:
+        expected = " or ".join(
+            f"{owner.value}/{kind.value}"
+            for owner, kind in sorted(
+                _SELECTED_ROLE_OWNERSHIP[binding.role],
+                key=lambda item: (item[0].value, item[1].value),
+            )
+        )
+        raise PreflightRejected(
+            f"{binding.role.value} role requires {expected}; received "
+            f"{binding.execution_owner.value}/{binding.binding_kind.value}"
+        )
+    if (
+        binding.binding_kind == BindingKind.MODEL_CLIENT
+        and binding.retry_policy_id != "no-retry-v1"
+    ):
+        raise PreflightRejected("harness model clients require no-retry-v1")
+    if (
+        binding.binding_kind == BindingKind.MODEL_CLIENT
+        and binding.credential_variable_name is None
+    ):
+        raise PreflightRejected("harness model clients require a credential reference")
+
 
 def _validate_external_roles(
     slots: tuple[RoleSlot, ...], environment: Mapping[str, str] | None
@@ -360,6 +398,7 @@ def _validate_external_roles(
                 raise PreflightRejected("resolved role slot requires a selected role binding")
             if slot.binding.role != _MODEL_ROLE_BY_SLOT[slot.role]:
                 raise PreflightRejected("role binding does not match its canonical role slot")
+            _validate_selected_role_ownership(slot.binding)
             expected_reference = slot.binding.credential_variable_name
             actual_reference = (
                 slot.credential_reference.name if slot.credential_reference is not None else None

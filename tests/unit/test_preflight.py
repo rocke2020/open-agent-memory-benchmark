@@ -309,7 +309,9 @@ def _selected_role(
         role=role,
         role_status=RoleBindingStatus.SELECTED,
         execution_owner=owner,
-        binding_kind=BindingKind.NATIVE,
+        binding_kind=(
+            BindingKind.MODEL_CLIENT if owner == ExecutionOwner.HARNESS else BindingKind.NATIVE
+        ),
         provider="fixture-provider",
         endpoint_reference="fixture-endpoint",
         credential_variable_name=credential_variable_name,
@@ -320,6 +322,83 @@ def _selected_role(
         configuration_fingerprint=HASH_B,
         redacted_endpoint_fingerprint=HASH_C,
     )
+
+
+def test_external_role_owner_and_transport_kind_matrix_fails_closed() -> None:
+    from oamb.contracts.specifications import (
+        BindingKind,
+        ExecutionOwner,
+        ModelRole,
+        ModelRoleBindingV2,
+    )
+    from oamb.runtime.preflight import PreflightRejected, _validate_external_roles
+
+    slots = list(_external_role_slots())
+    answer = slots[2].binding
+    assert isinstance(answer, ModelRoleBindingV2)
+    slots[2] = slots[2].__class__(
+        role=slots[2].role,
+        status=slots[2].status,
+        binding=answer.model_copy(update={"binding_kind": BindingKind.NATIVE}),
+        credential_reference=slots[2].credential_reference,
+        evidence_reference=slots[2].evidence_reference,
+    )
+    with pytest.raises(PreflightRejected, match="answer.*harness.*model_client"):
+        _validate_external_roles(tuple(slots), {"OAMB_ANSWER_API_KEY": "secret"})
+
+    embedding = _selected_role(
+        ModelRole.EMBEDDING,
+        "bad-embedding",
+        owner=ExecutionOwner.HARNESS,
+    ).model_copy(update={"binding_kind": BindingKind.MODEL_CLIENT})
+    slots = list(_external_role_slots())
+    slots[1] = slots[1].__class__(
+        role=slots[1].role,
+        status=slots[1].status,
+        binding=embedding,
+        credential_reference=slots[1].credential_reference,
+        evidence_reference=slots[1].evidence_reference,
+    )
+    with pytest.raises(PreflightRejected, match="embedding.*memory_system.*native"):
+        _validate_external_roles(tuple(slots), {"OAMB_ANSWER_API_KEY": "secret"})
+
+
+def test_selected_harness_model_client_requires_zero_opaque_retry_profile() -> None:
+    from oamb.contracts.specifications import ModelRoleBindingV2
+    from oamb.runtime.preflight import PreflightRejected, _validate_external_roles
+
+    slots = list(_external_role_slots())
+    answer = slots[2].binding
+    assert isinstance(answer, ModelRoleBindingV2)
+    slots[2] = slots[2].__class__(
+        role=slots[2].role,
+        status=slots[2].status,
+        binding=answer.model_copy(update={"retry_policy_id": "sdk-default-retries"}),
+        credential_reference=slots[2].credential_reference,
+        evidence_reference=slots[2].evidence_reference,
+    )
+
+    with pytest.raises(PreflightRejected, match="no-retry-v1"):
+        _validate_external_roles(tuple(slots), {"OAMB_ANSWER_API_KEY": "secret"})
+
+
+def test_selected_harness_model_client_requires_a_credential_reference() -> None:
+    from oamb.contracts.specifications import ModelRoleBindingV2
+    from oamb.runtime.preflight import PreflightRejected, _validate_external_roles
+
+    slots = list(_external_role_slots())
+    answer = slots[2].binding
+    assert isinstance(answer, ModelRoleBindingV2)
+    slots[2] = slots[2].__class__(
+        role=slots[2].role,
+        status=slots[2].status,
+        binding=answer.model_copy(update={"credential_variable_name": None}),
+        credential_reference=None,
+        evidence_reference=slots[2].evidence_reference,
+    )
+
+    with pytest.raises(PreflightRejected, match="credential"):
+        _validate_external_roles(tuple(slots), {})
 
 
 def _external_role_slots() -> tuple[RoleSlot, ...]:

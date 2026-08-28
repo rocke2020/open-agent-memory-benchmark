@@ -24,6 +24,12 @@ dependencies = [
   "pydantic>=2.12,<3",
   # T3: the offline CLI composition root and schema build/check commands.
   "typer>=0.20,<1",
+  # T6: original REST transports, including OpenAI-compatible model calls.
+  "httpx>=0.28,<1",
+  # T6: protocol-frozen o200k_base encode_ordinary context accounting.
+  "tiktoken==0.14.0",
+  # T6: direct, schema-preserving reads of pinned MemoryAgentBench Parquet files.
+  "pyarrow>=19,<24",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +44,7 @@ dev = [
   "hypothesis>=6.140,<7",
   "mypy>=1.18,<2",
   "pytest>=8.4,<10",
+  "pytest-asyncio>=1.2,<2",
   "ruff>=0.13,<1",
 ]
 download = [
@@ -51,6 +58,7 @@ include = [
   "/CLAUDE.md",
   "/DATASETS.md",
   "/LICENSE",
+  "/prompt-packs",
   "/README.md",
   "/SECURITY.md",
   "/THIRD_PARTY.md",
@@ -66,6 +74,7 @@ packages = ["src/oamb"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "schemas" = "oamb/schemas"
+"prompt-packs" = "oamb/prompt-packs"
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
