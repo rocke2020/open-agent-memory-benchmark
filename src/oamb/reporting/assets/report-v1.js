@@ -158,6 +158,14 @@
     stableIndex += 1;
   }
   let activeRecordId = null;
+  const recordElements = new Map();
+  const recordSearchText = new Map(
+    records.map((record) => [
+      record.id,
+      `${record.label}\n${record.value}`.toLocaleLowerCase(),
+    ]),
+  );
+  let renderedSortValue = null;
 
   for (const [facetName, select] of facetFilters) {
     if (facetName === "raw") {
@@ -399,47 +407,63 @@
     }
   }
 
+  function recordElement(record) {
+    const existing = recordElements.get(record.id);
+    if (existing) {
+      return existing;
+    }
+    const article = document.createElement("article");
+    const heading = document.createElement("h3");
+    const anchor = document.createElement("a");
+    const axis = document.createElement("span");
+    const value = document.createElement("pre");
+    article.className = "record";
+    article.id = record.id;
+    article.dataset.axis = record.axis;
+    article.tabIndex = -1;
+    anchor.href =
+      record.axis === "report"
+        ? "#"
+        : `#${record.axis}=${encodeURIComponent(record.detail.record_id)}`;
+    anchor.textContent = record.label;
+    axis.className = "axis-badge";
+    axis.textContent = record.axis;
+    value.textContent = record.value;
+    heading.append(anchor, axis);
+    article.append(heading, value);
+    article.addEventListener("focus", () => {
+      activeRecordId = article.id;
+      writeHashState(false);
+    });
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+      activeRecordId = article.id;
+      writeHashState(true);
+      article.focus();
+    });
+    recordElements.set(record.id, article);
+    return article;
+  }
+
   function render() {
     const query = filter.value.trim().toLocaleLowerCase();
     const selectedAxis = axisFilter.value;
-    const ordered = [...records].sort(compareRecords);
-    list.replaceChildren();
-    for (const record of ordered) {
-      const article = document.createElement("article");
-      const heading = document.createElement("h3");
-      const anchor = document.createElement("a");
-      const axis = document.createElement("span");
-      const value = document.createElement("pre");
-      article.className = "record";
-      article.id = record.id;
-      article.dataset.axis = record.axis;
-      article.tabIndex = -1;
+    for (const record of records) {
+      const article = recordElement(record);
       article.hidden = !(
         (selectedAxis === "all" || selectedAxis === record.axis) &&
         selectedFacetMatches(record) &&
-        `${record.label}\n${record.value}`.toLocaleLowerCase().includes(query)
+        recordSearchText.get(record.id).includes(query)
       );
-      anchor.href =
-        record.axis === "report"
-          ? "#"
-          : `#${record.axis}=${encodeURIComponent(record.detail.record_id)}`;
-      anchor.textContent = record.label;
-      axis.className = "axis-badge";
-      axis.textContent = record.axis;
-      value.textContent = record.value;
-      heading.append(anchor, axis);
-      article.append(heading, value);
-      article.addEventListener("focus", () => {
-        activeRecordId = article.id;
-        writeHashState(false);
-      });
-      anchor.addEventListener("click", (event) => {
-        event.preventDefault();
-        activeRecordId = article.id;
-        writeHashState(true);
-        article.focus();
-      });
-      list.append(article);
+    }
+    if (renderedSortValue !== sort.value) {
+      const ordered = [...records].sort(compareRecords);
+      const orderedElements = document.createDocumentFragment();
+      for (const record of ordered) {
+        orderedElements.append(recordElement(record));
+      }
+      list.replaceChildren(orderedElements);
+      renderedSortValue = sort.value;
     }
     const requested = activeRecordId && document.getElementById(activeRecordId);
     if (requested && !requested.hidden) {

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import subprocess
-import sys
+from collections.abc import Callable
 from pathlib import Path
 
 
-def test_installed_wheel_rebuilds_external_report_byte_identically(tmp_path: Path) -> None:
+def test_installed_wheel_rebuilds_external_report_byte_identically(
+    tmp_path: Path,
+    install_wheel_in_isolated_environment: Callable[[Path, Path], Path],
+) -> None:
     repository_root = Path(__file__).resolve().parents[2]
     distribution_root = tmp_path / "dist"
     build = subprocess.run(
@@ -18,29 +21,10 @@ def test_installed_wheel_rebuilds_external_report_byte_identically(tmp_path: Pat
     assert build.returncode == 0, build.stderr
     wheel = next(distribution_root.glob("*.whl"))
     environment = tmp_path / "installed"
-    create_environment = subprocess.run(
-        ["uv", "venv", "--python", sys.executable, str(environment)],
-        check=False,
-        capture_output=True,
-        text=True,
+    install_wheel_in_isolated_environment(
+        wheel,
+        environment,
     )
-    assert create_environment.returncode == 0, create_environment.stderr
-    installed_python = environment / "bin" / "python"
-    install = subprocess.run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--offline",
-            "--python",
-            str(installed_python),
-            str(wheel),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert install.returncode == 0, install.stderr
     installed_cli = environment / "bin" / "oamb"
     help_result = subprocess.run(
         [str(installed_cli), "external", "--help"],

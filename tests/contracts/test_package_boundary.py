@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -92,6 +93,7 @@ def test_generated_schema_snapshots_are_absent_from_source_and_package_configura
 
 def test_built_and_installed_distributions_expose_no_generated_schema_surface(
     tmp_path: Path,
+    install_wheel_in_isolated_environment: Callable[[Path, Path], Path],
 ) -> None:
     repository_root = Path(__file__).resolve().parents[2]
     distribution_root = tmp_path / "dist"
@@ -123,29 +125,10 @@ def test_built_and_installed_distributions_expose_no_generated_schema_surface(
         assert scan_public_paths(distribution_root, distribution_paths) == ()
 
     environment = tmp_path / "installed"
-    create_environment = subprocess.run(
-        ["uv", "venv", "--python", sys.executable, str(environment)],
-        check=False,
-        capture_output=True,
-        text=True,
+    installed_python = install_wheel_in_isolated_environment(
+        wheel,
+        environment,
     )
-    assert create_environment.returncode == 0, create_environment.stderr
-    installed_python = environment / "bin" / "python"
-    install = subprocess.run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--offline",
-            "--python",
-            str(installed_python),
-            str(wheel),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert install.returncode == 0, install.stderr
     resource_probe = subprocess.run(
         [
             str(installed_python),

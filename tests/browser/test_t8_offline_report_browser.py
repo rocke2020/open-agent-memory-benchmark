@@ -732,6 +732,8 @@ def test_5000_case_browser_interaction_stays_within_frozen_latency_budgets(
         external_requests, console_errors, page_errors = _open_file_report(page, path)
         interactive_milliseconds = (time.perf_counter() - interactive_started) * 1_000
         assert page.locator('[data-axis="case"]').count() == 5_000
+        initial_record = page.locator(".record").first.element_handle()
+        assert initial_record is not None
 
         filter_sort_milliseconds = page.evaluate(
             """() => {
@@ -762,6 +764,7 @@ def test_5000_case_browser_interaction_stays_within_frozen_latency_budgets(
             filter_sort_milliseconds=filter_sort_milliseconds,
             detail_navigation_milliseconds=detail_navigation_milliseconds,
         )
+        assert initial_record.evaluate("(record) => record.isConnected")
         enforce_report_browser_performance(measurement)
         monkeypatch.setattr(
             report_performance,
