@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import json
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -154,6 +155,54 @@ class ArtifactStore:
             canonical_json_bytes(manifest),
             trusted_root=self.root,
         )
+
+    def finalize_capsule(self, *, run_id: str, run_spec_hash: str) -> CapsuleManifest:
+        entries: list[CapsuleManifestEntry] = []
+        source_root = self.root / "source"
+        for path in sorted(source_root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative_path = path.relative_to(self.root).as_posix()
+            if relative_path.startswith("source/raw/"):
+                record_kind = "raw_payload"
+                record_id = path.name.removesuffix(".json.gz")
+            else:
+                document = json.loads(read_regular_file(path))
+                if not isinstance(document, dict) or not isinstance(
+                    document.get("schema_name"), str
+                ):
+                    raise ArtifactCollisionError(
+                        f"source record has no schema identity: {relative_path}"
+                    )
+                record_kind = document["schema_name"]
+                record_id = path.stem
+            entries.append(
+                CapsuleManifestEntry(
+                    record_kind=record_kind,
+                    record_id=record_id,
+                    relative_path=relative_path,
+                    sha256=sha256_file(path),
+                )
+            )
+        source_entries = tuple(entries)
+        source_manifest_hash = canonical_sha256(
+            [
+                "oamb-source-manifest-v1",
+                tuple(entry.model_dump(mode="python") for entry in source_entries),
+            ]
+        )
+        capsule_id = canonical_sha256(
+            ["oamb-capsule-v1", run_id, run_spec_hash, source_manifest_hash]
+        )
+        manifest = CapsuleManifest(
+            capsule_id=capsule_id,
+            run_id=run_id,
+            run_spec_hash=run_spec_hash,
+            source_entries=source_entries,
+            source_manifest_hash=source_manifest_hash,
+        )
+        self.seal_capsule(manifest)
+        return manifest
 
     def append_checkpoint(self, manifest: CheckpointManifest) -> AtomicWriteResult:
         expected_hash = canonical_sha256(

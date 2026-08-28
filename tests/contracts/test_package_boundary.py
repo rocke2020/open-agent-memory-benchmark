@@ -57,6 +57,25 @@ def test_contract_ports_do_not_import_implementation_packages() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+def test_artifact_validation_does_not_import_reporting_implementation() -> None:
+    command = (
+        "import oamb.artifacts.validation.fake, sys; "
+        "forbidden='oamb.reporting'; "
+        "loaded=sorted(name for name in sys.modules "
+        "if name == forbidden or name.startswith(forbidden + '.')); "
+        "assert not loaded, loaded"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_checked_in_schemas_are_available_as_package_data() -> None:
     schema = require("oamb.contracts.schema")
 

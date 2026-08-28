@@ -17,6 +17,16 @@ from .base import (
 )
 
 
+def count_whitespace_tokens(text: str) -> int:
+    """Return the deterministic fake meter's whitespace-delimited token count."""
+
+    return len(text.split())
+
+
+def count_message_whitespace_tokens(messages: tuple[tuple[str, str], ...]) -> int:
+    return sum(count_whitespace_tokens(content) for _role, content in messages)
+
+
 class ProofStatus(StrEnum):
     MEASURED_COMPLETE = "measured_complete"
     MEASURED_PARTIAL = "measured_partial"

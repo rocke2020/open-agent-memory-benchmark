@@ -1,0 +1,124 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/run_summary/v2",
+  "additionalProperties": false,
+  "properties": {
+    "billing_complete": {
+      "title": "Billing Complete",
+      "type": "boolean"
+    },
+    "budget_exceeded_cases": {
+      "minimum": 0,
+      "title": "Budget Exceeded Cases",
+      "type": "integer"
+    },
+    "cancelled_cases": {
+      "minimum": 0,
+      "title": "Cancelled Cases",
+      "type": "integer"
+    },
+    "completed_cases": {
+      "minimum": 0,
+      "title": "Completed Cases",
+      "type": "integer"
+    },
+    "cost_complete": {
+      "title": "Cost Complete",
+      "type": "boolean"
+    },
+    "errored_cases": {
+      "minimum": 0,
+      "title": "Errored Cases",
+      "type": "integer"
+    },
+    "evaluated_cases": {
+      "minimum": 0,
+      "title": "Evaluated Cases",
+      "type": "integer"
+    },
+    "intended_cases": {
+      "minimum": 0,
+      "title": "Intended Cases",
+      "type": "integer"
+    },
+    "intended_ingestion_plans": {
+      "minimum": 0,
+      "title": "Intended Ingestion Plans",
+      "type": "integer"
+    },
+    "intended_logical_contexts": {
+      "minimum": 0,
+      "title": "Intended Logical Contexts",
+      "type": "integer"
+    },
+    "judged_cases": {
+      "minimum": 0,
+      "title": "Judged Cases",
+      "type": "integer"
+    },
+    "parsed_cases": {
+      "minimum": 0,
+      "title": "Parsed Cases",
+      "type": "integer"
+    },
+    "ready_ingestion_plans": {
+      "minimum": 0,
+      "title": "Ready Ingestion Plans",
+      "type": "integer"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "run_summary",
+      "default": "run_summary",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "terminal_cases": {
+      "minimum": 0,
+      "title": "Terminal Cases",
+      "type": "integer"
+    },
+    "unjudged_cases": {
+      "minimum": 0,
+      "title": "Unjudged Cases",
+      "type": "integer"
+    },
+    "unsupported_cases": {
+      "minimum": 0,
+      "title": "Unsupported Cases",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "billing_complete",
+    "budget_exceeded_cases",
+    "cancelled_cases",
+    "completed_cases",
+    "cost_complete",
+    "errored_cases",
+    "evaluated_cases",
+    "intended_cases",
+    "intended_ingestion_plans",
+    "intended_logical_contexts",
+    "judged_cases",
+    "parsed_cases",
+    "ready_ingestion_plans",
+    "run_id",
+    "schema_name",
+    "schema_version",
+    "terminal_cases",
+    "unjudged_cases",
+    "unsupported_cases"
+  ],
+  "title": "run_summary",
+  "type": "object"
+}

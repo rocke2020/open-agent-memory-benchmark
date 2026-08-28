@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -309,6 +311,7 @@ def test_runtime_checkable_ports_accept_structural_fakes() -> None:
         "resolve_sources",
         "build_case_manifest",
         "iter_ingestion_plans",
+        "iter_case_plans",
         "render_retrieval_query",
         "build_visible_evidence",
         "render_answer",
@@ -337,6 +340,9 @@ def test_runtime_checkable_ports_accept_structural_fakes() -> None:
         def iter_ingestion_plans(self, case_manifest: Any) -> Any:
             return ()
 
+        def iter_case_plans(self, case_manifest: Any) -> Any:
+            return ()
+
         def render_retrieval_query(self, case_plan: Any) -> bytes:
             return b"query"
 
@@ -353,6 +359,35 @@ def test_runtime_checkable_ports_accept_structural_fakes() -> None:
             return ()
 
     assert isinstance(FakeWorkload(), ports.WorkloadPort)
+
+
+def test_t5_implementation_imports_preserve_the_frozen_dependency_direction() -> None:
+    source_root = Path(__file__).resolve().parents[2] / "src" / "oamb"
+    forbidden = {
+        "memory_systems": ("oamb.runtime", "oamb.workloads", "oamb.model_clients"),
+        "model_clients": ("oamb.runtime", "oamb.workloads", "oamb.memory_systems"),
+        "workloads": ("oamb.runtime", "oamb.memory_systems", "oamb.model_clients"),
+        "runtime": ("oamb.memory_systems", "oamb.model_clients", "oamb.artifacts.store"),
+    }
+    violations: list[str] = []
+    for package, forbidden_prefixes in forbidden.items():
+        for path in sorted((source_root / package).glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported = tuple(
+                node.module
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module is not None
+            ) + tuple(
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            )
+            for module in imported:
+                if module.startswith(forbidden_prefixes):
+                    violations.append(f"{path.relative_to(source_root)} imports {module}")
+
+    assert violations == []
 
 
 def test_workload_port_payloads_carry_inputs_needed_by_t5() -> None:
@@ -377,3 +412,58 @@ def test_workload_port_payloads_carry_inputs_needed_by_t5() -> None:
         "ingestion_plan_records",
         "case_records",
     } <= set(ports.WorkloadRecordSet.__dataclass_fields__)
+
+
+def test_t5_case_and_summary_v2_distinguish_unjudged_from_incorrect() -> None:
+    evidence = require("oamb.contracts.evidence")
+    reporting = require("oamb.contracts.reporting")
+
+    assert {
+        "evaluation_disposition",
+        "parsed_answer_sha256",
+    } <= set(evidence.CaseRecordV2.model_fields)
+    assert {
+        "parsed_cases",
+        "evaluated_cases",
+        "judged_cases",
+        "unjudged_cases",
+    } <= set(reporting.RunSummaryV2.model_fields)
+    assert reporting.RunReportModelV2.model_fields["summary"].annotation is reporting.RunSummaryV2
+
+
+def test_t5_case_v2_closes_evaluation_disposition_against_terminal_state() -> None:
+    evidence = require("oamb.contracts.evidence")
+    states = require("oamb.contracts.states")
+    evaluated = {
+        "case_occurrence_id": "1" * 64,
+        "run_id": "run-1",
+        "ingestion_occurrence_id": "2" * 64,
+        "case_manifest_entry_id": "3" * 64,
+        "state": states.CaseState.COMPLETED,
+        "retrieval_raw_ref": "4" * 64,
+        "prompt_sha256": "5" * 64,
+        "answer_raw_ref": "6" * 64,
+        "parsed_answer_sha256": "7" * 64,
+        "evaluation_raw_ref": "8" * 64,
+        "evaluation_disposition": evidence.CaseEvaluationDisposition.DETERMINISTIC_EVALUATED,
+        "attempt_ids": (),
+        "error_stage": None,
+    }
+    assert evidence.CaseRecordV2(**evaluated).state == states.CaseState.COMPLETED
+
+    with pytest.raises(ValidationError, match="completed case"):
+        evidence.CaseRecordV2(**(evaluated | {"state": states.CaseState.ERROR}))
+    with pytest.raises(ValidationError, match="completed case"):
+        evidence.CaseRecordV2(
+            **(
+                evaluated
+                | {
+                    "retrieval_raw_ref": None,
+                    "prompt_sha256": None,
+                    "answer_raw_ref": None,
+                    "parsed_answer_sha256": None,
+                    "evaluation_raw_ref": None,
+                    "evaluation_disposition": evidence.CaseEvaluationDisposition.NOT_RUN,
+                }
+            )
+        )

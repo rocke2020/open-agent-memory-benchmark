@@ -27,6 +27,7 @@ from .evidence import (
     CapsuleManifest,
     CapsuleManifestEntry,
     CaseRecord,
+    CaseRecordV2,
     CheckpointManifest,
     CloseErrorRecord,
     DerivationManifest,
@@ -44,7 +45,13 @@ from .evidence import (
     ValidationIssue,
     ValidationResult,
 )
-from .reporting import ReportArtifactManifest, RunReportModel, RunSummary
+from .reporting import (
+    ReportArtifactManifest,
+    RunReportModel,
+    RunReportModelV2,
+    RunSummary,
+    RunSummaryV2,
+)
 from .specifications import (
     BudgetSpec,
     BudgetSpecV2,
@@ -118,6 +125,7 @@ PUBLIC_CONTRACTS: tuple[type[BaseModel], ...] = (
     LogicalContextRecord,
     IngestionPlanRecord,
     CaseRecord,
+    CaseRecordV2,
     CapsuleManifestEntry,
     CapsuleManifest,
     CheckpointManifest,
@@ -135,7 +143,9 @@ PUBLIC_CONTRACTS: tuple[type[BaseModel], ...] = (
     ResourceUsageRecord,
     CostRecord,
     RunSummary,
+    RunSummaryV2,
     RunReportModel,
+    RunReportModelV2,
     ReportArtifactManifest,
 )
 

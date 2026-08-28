@@ -62,6 +62,13 @@ class RecoveryDisposition(StrEnum):
     TERMINAL_UNKNOWN_OUTCOME = "terminal_unknown_outcome"
 
 
+class CaseEvaluationDisposition(StrEnum):
+    NOT_RUN = "not_run"
+    DETERMINISTIC_EVALUATED = "deterministic_evaluated"
+    JUDGED = "judged"
+    UNJUDGED = "unjudged"
+
+
 class RawReference(StrictContract):
     schema_name: Literal["raw_reference"] = "raw_reference"
     schema_version: Literal[1] = 1
@@ -402,6 +409,56 @@ class CaseRecord(StrictContract):
     evaluation_raw_ref: Sha256 | None
     attempt_ids: tuple[Sha256, ...]
     error_stage: str | None
+
+
+class CaseRecordV2(StrictContract):
+    schema_name: Literal["case_record"] = "case_record"
+    schema_version: Literal[2] = 2
+    case_occurrence_id: Sha256
+    run_id: NonEmptyStr
+    ingestion_occurrence_id: Sha256
+    case_manifest_entry_id: Sha256
+    state: CaseState
+    retrieval_raw_ref: Sha256 | None
+    prompt_sha256: Sha256 | None
+    answer_raw_ref: Sha256 | None
+    parsed_answer_sha256: Sha256 | None
+    evaluation_raw_ref: Sha256 | None
+    evaluation_disposition: CaseEvaluationDisposition
+    attempt_ids: tuple[Sha256, ...]
+    error_stage: str | None
+
+    @model_validator(mode="after")
+    def evaluation_shape_is_explicit(self) -> Self:
+        answered = (
+            self.retrieval_raw_ref is not None
+            and self.prompt_sha256 is not None
+            and self.answer_raw_ref is not None
+            and self.parsed_answer_sha256 is not None
+        )
+        if self.evaluation_disposition == CaseEvaluationDisposition.NOT_RUN:
+            if self.parsed_answer_sha256 is not None or self.evaluation_raw_ref is not None:
+                raise ValueError("not-run evaluation cannot contain parsed/evaluation output")
+            if self.state == CaseState.COMPLETED:
+                raise ValueError("completed case cannot have a not-run evaluation")
+        elif not answered:
+            raise ValueError("evaluated or unjudged case requires a parsed answer")
+        if self.evaluation_disposition in {
+            CaseEvaluationDisposition.DETERMINISTIC_EVALUATED,
+            CaseEvaluationDisposition.JUDGED,
+        }:
+            if self.evaluation_raw_ref is None or self.error_stage is not None:
+                raise ValueError("successful evaluation requires evidence and no error stage")
+            if self.state != CaseState.COMPLETED:
+                raise ValueError("successful evaluation requires a completed case")
+        elif self.evaluation_disposition == CaseEvaluationDisposition.UNJUDGED:
+            if (
+                self.state != CaseState.ERROR
+                or self.evaluation_raw_ref is not None
+                or self.error_stage != "judge"
+            ):
+                raise ValueError("unjudged case requires a terminal judge error")
+        return self
 
 
 class CapsuleManifestEntry(StrictContract):

@@ -10,6 +10,10 @@ class UnknownExternalOutcome(RuntimeError):
     """Signals a dispatched operation whose terminal receipt cannot be proven."""
 
 
+class IngestionPlanUnavailable(RuntimeError):
+    """Signals a terminal plan failure that must not block healthy sibling plans."""
+
+
 Operation = Callable[[], Awaitable[None]]
 
 
@@ -29,6 +33,7 @@ class CaseTask:
 @dataclass(frozen=True, slots=True)
 class SerialRunResult:
     completed_plan_ids: tuple[str, ...]
+    unavailable_plan_ids: tuple[str, ...]
     completed_case_ids: tuple[str, ...]
     cancelled: bool
     unknown_outcome_task_id: str | None
@@ -51,16 +56,27 @@ class SerialRunner:
     ) -> SerialRunResult:
         self._validate_schedule(ingestion_tasks, case_tasks)
         completed_plans: list[str] = []
+        unavailable_plans: list[str] = []
         completed_cases: list[str] = []
 
         for ingestion_task in ingestion_tasks:
             if self._cancel_requested:
-                return SerialRunResult(tuple(completed_plans), tuple(completed_cases), True, None)
+                return SerialRunResult(
+                    tuple(completed_plans),
+                    tuple(unavailable_plans),
+                    tuple(completed_cases),
+                    True,
+                    None,
+                )
             try:
                 await ingestion_task.execute()
+            except IngestionPlanUnavailable:
+                unavailable_plans.append(ingestion_task.ingestion_plan_id)
+                continue
             except UnknownExternalOutcome:
                 return SerialRunResult(
                     tuple(completed_plans),
+                    tuple(unavailable_plans),
                     tuple(completed_cases),
                     False,
                     ingestion_task.ingestion_plan_id,
@@ -70,19 +86,30 @@ class SerialRunner:
         completed_plan_set = set(completed_plans)
         for case_task in case_tasks:
             if self._cancel_requested:
-                return SerialRunResult(tuple(completed_plans), tuple(completed_cases), True, None)
+                return SerialRunResult(
+                    tuple(completed_plans),
+                    tuple(unavailable_plans),
+                    tuple(completed_cases),
+                    True,
+                    None,
+                )
             if case_task.ingestion_plan_id not in completed_plan_set:
                 continue
             try:
                 await case_task.execute()
             except UnknownExternalOutcome:
                 return SerialRunResult(
-                    tuple(completed_plans), tuple(completed_cases), False, case_task.case_id
+                    tuple(completed_plans),
+                    tuple(unavailable_plans),
+                    tuple(completed_cases),
+                    False,
+                    case_task.case_id,
                 )
             completed_cases.append(case_task.case_id)
 
         return SerialRunResult(
             tuple(completed_plans),
+            tuple(unavailable_plans),
             tuple(completed_cases),
             self._cancel_requested,
             None,

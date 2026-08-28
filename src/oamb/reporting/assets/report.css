@@ -1,0 +1,73 @@
+:root {
+  color-scheme: light dark;
+  --background: #f7f8fa;
+  --surface: #ffffff;
+  --text: #17202a;
+  --muted: #52616b;
+  --border: #c8d0d9;
+  --badge-background: #e8eef5;
+  --badge-text: #243447;
+  --diagnostic-background: #fff2cc;
+  --diagnostic-text: #5f4300;
+  --pre-background: #eef2f6;
+  --diff-add: #d7f5df;
+  --diff-remove: #ffe0e0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #11161c;
+    --surface: #18212a;
+    --text: #edf2f7;
+    --muted: #b4c0cc;
+    --border: #465565;
+    --badge-background: #293746;
+    --badge-text: #e7eef6;
+    --diagnostic-background: #4b3a08;
+    --diagnostic-text: #ffe7a0;
+    --pre-background: #0d1217;
+    --diff-add: #173c25;
+    --diff-remove: #4a2020;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.5;
+  margin: 0;
+}
+
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+
+section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) 2fr;
+  gap: 0.4rem 1rem;
+}
+
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
+.badge { background: var(--badge-background); color: var(--badge-text); padding: 0.2rem 0.45rem; }
+.diagnostic { background: var(--diagnostic-background); color: var(--diagnostic-text); font-weight: 700; }
+.diff-add { background: var(--diff-add); }
+.diff-remove { background: var(--diff-remove); }
+
+@media print {
+  body { background: white; color: black; }
+  section { break-inside: avoid; border-color: #777; }
+}

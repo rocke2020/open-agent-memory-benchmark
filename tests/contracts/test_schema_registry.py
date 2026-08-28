@@ -70,8 +70,11 @@ EXPECTED_PUBLIC_SCHEMAS = {
 EXPECTED_V2_SCHEMAS = {
     "attempt_record",
     "budget_spec",
+    "case_record",
     "memory_system_runtime_binding",
     "model_role_binding",
+    "run_report_model",
+    "run_summary",
     "token_usage_record",
 }
 

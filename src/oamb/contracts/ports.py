@@ -200,6 +200,10 @@ class RetrievalRequest:
 
 @dataclass(frozen=True, slots=True)
 class ModelRequest:
+    attempt_id: str
+    parent_kind: Literal["ingestion_plan", "case", "phase_review"]
+    parent_id: str
+    stage: str
     role_binding_id: str
     messages_sha256: str
     messages: tuple[tuple[str, str], ...]
@@ -210,6 +214,23 @@ class ModelReceipt:
     raw_reference: RawReferenceHandle
     output_text: str
     usage_reference_ids: tuple[str, ...]
+
+
+class ModelCallFailure(RuntimeError):
+    """A model call with sealed error/usage evidence and explicit retryability."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_reference: RawReferenceHandle,
+        usage_reference_ids: tuple[str, ...],
+        retryable: bool,
+    ) -> None:
+        super().__init__(message)
+        self.raw_reference = raw_reference
+        self.usage_reference_ids = usage_reference_ids
+        self.retryable = retryable
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +298,8 @@ class WorkloadPort(Protocol):
     def build_case_manifest(self, dataset_manifest: DatasetManifest) -> CaseManifest: ...
 
     def iter_ingestion_plans(self, case_manifest: CaseManifest) -> tuple[IngestionPlan, ...]: ...
+
+    def iter_case_plans(self, case_manifest: CaseManifest) -> tuple[CasePlan, ...]: ...
 
     def render_retrieval_query(self, case_plan: CasePlan) -> bytes: ...
 

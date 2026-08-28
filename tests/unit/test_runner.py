@@ -6,6 +6,7 @@ import pytest
 
 from oamb.runtime.runner import (
     CaseTask,
+    IngestionPlanUnavailable,
     IngestionTask,
     SerialRunner,
     UnknownExternalOutcome,
@@ -121,3 +122,32 @@ def test_cancellation_stops_new_scheduling_after_active_task_returns() -> None:
 
     assert calls == ["first"]
     assert result.cancelled is True
+
+
+def test_unavailable_plan_skips_only_its_cases_and_continues_ready_sibling() -> None:
+    calls: list[str] = []
+
+    async def unavailable() -> None:
+        calls.append("plan-unavailable")
+        raise IngestionPlanUnavailable("readiness did not close")
+
+    async def complete(name: str) -> None:
+        calls.append(name)
+
+    result = asyncio.run(
+        SerialRunner().run(
+            ingestion_tasks=(
+                IngestionTask("plan-unavailable", unavailable),
+                IngestionTask("plan-ready", lambda: complete("plan-ready")),
+            ),
+            case_tasks=(
+                CaseTask("case-unavailable", "plan-unavailable", lambda: complete("bad")),
+                CaseTask("case-ready", "plan-ready", lambda: complete("case-ready")),
+            ),
+        )
+    )
+
+    assert calls == ["plan-unavailable", "plan-ready", "case-ready"]
+    assert result.completed_plan_ids == ("plan-ready",)
+    assert result.unavailable_plan_ids == ("plan-unavailable",)
+    assert result.completed_case_ids == ("case-ready",)
