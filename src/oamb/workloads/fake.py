@@ -193,14 +193,49 @@ class GeneratedFakeWorkload:
                 ),
                 output_contract_id="fake-judge-json-v1",
             )
-        result = canonical_sha256(
-            [
-                "oamb-fake-exact-v1",
-                answer.parsed_value == case_plan.reference_payload,
-                answer.parsed_value_sha256,
-            ]
+        trace = canonical_json_bytes(
+            {
+                "metric_id": case_plan.metric_id,
+                "numerator": int(answer.parsed_value == case_plan.reference_payload),
+                "denominator": 1,
+                "parsed_answer_sha256": answer.parsed_value_sha256,
+            }
         )
-        return DeterministicEvaluation(metric_id=case_plan.metric_id, result_sha256=result)
+        return DeterministicEvaluation(
+            metric_id=case_plan.metric_id,
+            result_sha256=hashlib.sha256(trace).hexdigest(),
+            numerator=int(answer.parsed_value == case_plan.reference_payload),
+            denominator=1,
+            trace_bytes=trace,
+        )
+
+    def finalize_judge(
+        self,
+        case_plan: CasePlan,
+        answer: AnswerValue,
+        judge_answer: AnswerValue,
+    ) -> DeterministicEvaluation:
+        decision = judge_answer.parsed_value.decode("utf-8", errors="strict").strip().lower()
+        if decision not in {"yes", "no"}:
+            raise ValueError("fake judge output must be yes or no")
+        trace = canonical_json_bytes(
+            {
+                "metric_id": case_plan.metric_id,
+                "numerator": int(decision == "yes"),
+                "denominator": 1,
+                "parsed_answer_sha256": answer.parsed_value_sha256,
+                "judge_answer_sha256": judge_answer.parsed_value_sha256,
+                "judge_raw_reference": judge_answer.raw_reference.sha256,
+                "judge_decision": decision,
+            }
+        )
+        return DeterministicEvaluation(
+            metric_id=case_plan.metric_id,
+            result_sha256=hashlib.sha256(trace).hexdigest(),
+            numerator=int(decision == "yes"),
+            denominator=1,
+            trace_bytes=trace,
+        )
 
     def validate_records(self, records: WorkloadRecordSet) -> tuple[WorkloadRuleResult, ...]:
         return (

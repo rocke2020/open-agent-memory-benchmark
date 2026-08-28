@@ -563,6 +563,13 @@ class WorkloadPort(Protocol):
         answer: AnswerValue,
     ) -> DeterministicEvaluation | JudgeRequest: ...
 
+    def finalize_judge(
+        self,
+        case_plan: CasePlan,
+        answer: AnswerValue,
+        judge_answer: AnswerValue,
+    ) -> DeterministicEvaluation: ...
+
     def validate_records(self, records: WorkloadRecordSet) -> tuple[WorkloadRuleResult, ...]: ...
 
 

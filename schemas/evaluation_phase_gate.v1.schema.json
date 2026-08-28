@@ -1,0 +1,522 @@
+{
+  "$defs": {
+    "AIQualityReviewRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "accounting_closed": {
+          "title": "Accounting Closed",
+          "type": "boolean"
+        },
+        "aggregate_version": {
+          "minLength": 1,
+          "title": "Aggregate Version",
+          "type": "string"
+        },
+        "ai_review_record_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Ai Review Record Id",
+          "type": "string"
+        },
+        "attempt_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Attempt Ids",
+          "type": "array"
+        },
+        "batch_result_hashes": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Batch Result Hashes",
+          "type": "array"
+        },
+        "case_coverage_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Case Coverage Hash",
+          "type": "string"
+        },
+        "cost_record_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Cost Record Ids",
+          "type": "array"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "finding_codes": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Finding Codes",
+          "type": "array"
+        },
+        "finding_registry_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Finding Registry Hash",
+          "type": "string"
+        },
+        "history_root_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "History Root Hash",
+          "type": "string"
+        },
+        "integrity_result_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Integrity Result Hash",
+          "type": "string"
+        },
+        "occurrence_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Occurrence Id",
+          "type": "string"
+        },
+        "ordinal": {
+          "exclusiveMinimum": 0,
+          "title": "Ordinal",
+          "type": "integer"
+        },
+        "output_contract_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Output Contract Hash",
+          "type": "string"
+        },
+        "parser_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parser Hash",
+          "type": "string"
+        },
+        "previous_ai_review_record_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Previous Ai Review Record Hash"
+        },
+        "previous_history_root_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Previous History Root Hash"
+        },
+        "projection_spec_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Projection Spec Hash",
+          "type": "string"
+        },
+        "prompt_pack_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Prompt Pack Hash",
+          "type": "string"
+        },
+        "resource_record_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Resource Record Ids",
+          "type": "array"
+        },
+        "review_bundle_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Review Bundle Hash",
+          "type": "string"
+        },
+        "review_outcome_kind": {
+          "enum": [
+            "complete",
+            "semantic_failure",
+            "operational_inconclusive",
+            "evidence_inconclusive"
+          ],
+          "title": "Review Outcome Kind",
+          "type": "string"
+        },
+        "review_plan_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Review Plan Hash",
+          "type": "string"
+        },
+        "reviewer_configuration_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reviewer Configuration Hash",
+          "type": "string"
+        },
+        "reviewer_model_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reviewer Model Hash",
+          "type": "string"
+        },
+        "reviewer_role_binding_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reviewer Role Binding Hash",
+          "type": "string"
+        },
+        "reviewer_runtime_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reviewer Runtime Hash",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "ai_quality_review_record",
+          "default": "ai_quality_review_record",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/QualityReviewStatus"
+        },
+        "usage_record_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Usage Record Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "accounting_closed",
+        "aggregate_version",
+        "ai_review_record_id",
+        "attempt_ids",
+        "batch_result_hashes",
+        "case_coverage_hash",
+        "cost_record_ids",
+        "created_at",
+        "finding_codes",
+        "finding_registry_hash",
+        "history_root_hash",
+        "integrity_result_hash",
+        "occurrence_id",
+        "ordinal",
+        "output_contract_hash",
+        "parser_hash",
+        "previous_ai_review_record_hash",
+        "previous_history_root_hash",
+        "projection_spec_hash",
+        "prompt_pack_hash",
+        "resource_record_ids",
+        "review_bundle_hash",
+        "review_outcome_kind",
+        "review_plan_hash",
+        "reviewer_configuration_hash",
+        "reviewer_model_hash",
+        "reviewer_role_binding_hash",
+        "reviewer_runtime_hash",
+        "schema_name",
+        "schema_version",
+        "status",
+        "usage_record_ids"
+      ],
+      "title": "AIQualityReviewRecord",
+      "type": "object"
+    },
+    "HumanQualityReviewRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "ai_review_record_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Ai Review Record Hash",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "decision_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Decision Hash",
+          "type": "string"
+        },
+        "decision_nonce": {
+          "minLength": 1,
+          "title": "Decision Nonce",
+          "type": "string"
+        },
+        "evidence_references": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence References",
+          "type": "array"
+        },
+        "finding_codes": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Finding Codes",
+          "type": "array"
+        },
+        "human_review_record_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Human Review Record Id",
+          "type": "string"
+        },
+        "review_bundle_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Review Bundle Hash",
+          "type": "string"
+        },
+        "reviewer_label": {
+          "minLength": 1,
+          "title": "Reviewer Label",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "human_quality_review_record",
+          "default": "human_quality_review_record",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "signature_verification": {
+          "$ref": "#/$defs/SignatureVerificationRecord"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "trusted_key_fingerprint": {
+          "minLength": 1,
+          "title": "Trusted Key Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ai_review_record_hash",
+        "created_at",
+        "decision_hash",
+        "decision_nonce",
+        "evidence_references",
+        "finding_codes",
+        "human_review_record_id",
+        "review_bundle_hash",
+        "reviewer_label",
+        "schema_name",
+        "schema_version",
+        "signature_verification",
+        "status",
+        "trusted_key_fingerprint"
+      ],
+      "title": "HumanQualityReviewRecord",
+      "type": "object"
+    },
+    "QualityReviewStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive"
+      ],
+      "title": "QualityReviewStatus",
+      "type": "string"
+    },
+    "SignatureVerificationRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "ed25519",
+          "default": "ed25519",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "key_binding_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Key Binding Id",
+          "type": "string"
+        },
+        "public_key_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Public Key Sha256",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "signature_verification_record",
+          "default": "signature_verification_record",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "signature_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Signature Sha256",
+          "type": "string"
+        },
+        "signed_payload_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Signed Payload Sha256",
+          "type": "string"
+        },
+        "trusted_key_fingerprint": {
+          "minLength": 1,
+          "title": "Trusted Key Fingerprint",
+          "type": "string"
+        },
+        "verification_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Verification Id",
+          "type": "string"
+        },
+        "verified_at": {
+          "format": "date-time",
+          "title": "Verified At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_binding_id",
+        "public_key_sha256",
+        "schema_name",
+        "schema_version",
+        "signature_sha256",
+        "signed_payload_sha256",
+        "trusted_key_fingerprint",
+        "verification_id",
+        "verified_at"
+      ],
+      "title": "SignatureVerificationRecord",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/evaluation_phase_gate/v1",
+  "additionalProperties": false,
+  "properties": {
+    "ai_record": {
+      "$ref": "#/$defs/AIQualityReviewRecord"
+    },
+    "canonical_ai_review_record_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Canonical Ai Review Record Hash",
+      "type": "string"
+    },
+    "gate_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Gate Id",
+      "type": "string"
+    },
+    "human_record": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HumanQualityReviewRecord"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "human_review_record_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Human Review Record Hash"
+    },
+    "ordered_ai_review_record_hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Ordered Ai Review Record Hashes",
+      "type": "array"
+    },
+    "passed_by_ai": {
+      "title": "Passed By Ai",
+      "type": "boolean"
+    },
+    "passed_by_human": {
+      "title": "Passed By Human",
+      "type": "boolean"
+    },
+    "phase_id": {
+      "minLength": 1,
+      "title": "Phase Id",
+      "type": "string"
+    },
+    "review_bundle_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Review Bundle Hash",
+      "type": "string"
+    },
+    "review_history_root_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Review History Root Hash",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "evaluation_phase_gate",
+      "default": "evaluation_phase_gate",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "ai_record",
+    "canonical_ai_review_record_hash",
+    "gate_id",
+    "human_record",
+    "human_review_record_hash",
+    "ordered_ai_review_record_hashes",
+    "passed_by_ai",
+    "passed_by_human",
+    "phase_id",
+    "review_bundle_hash",
+    "review_history_root_hash",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "evaluation_phase_gate",
+  "type": "object"
+}

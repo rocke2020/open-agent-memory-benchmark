@@ -1,0 +1,110 @@
+{
+  "$defs": {
+    "AIReviewFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "evidence_references": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence References",
+          "type": "array"
+        },
+        "explanation": {
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "ai_review_finding",
+          "default": "ai_review_finding",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "severity": {
+          "$ref": "#/$defs/ReviewFindingSeverity"
+        }
+      },
+      "required": [
+        "code",
+        "evidence_references",
+        "explanation",
+        "schema_name",
+        "schema_version",
+        "severity"
+      ],
+      "title": "AIReviewFinding",
+      "type": "object"
+    },
+    "QualityReviewStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive"
+      ],
+      "title": "QualityReviewStatus",
+      "type": "string"
+    },
+    "ReviewFindingSeverity": {
+      "enum": [
+        "fail",
+        "inconclusive",
+        "advisory"
+      ],
+      "title": "ReviewFindingSeverity",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/ai_review_case_result/v1",
+  "additionalProperties": false,
+  "properties": {
+    "case_occurrence_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Case Occurrence Id",
+      "type": "string"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/AIReviewFinding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "schema_name": {
+      "const": "ai_review_case_result",
+      "default": "ai_review_case_result",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/QualityReviewStatus"
+    }
+  },
+  "required": [
+    "case_occurrence_id",
+    "findings",
+    "schema_name",
+    "schema_version",
+    "status"
+  ],
+  "title": "ai_review_case_result",
+  "type": "object"
+}

@@ -1,0 +1,194 @@
+{
+  "$defs": {
+    "DisplayPreview": {
+      "additionalProperties": false,
+      "properties": {
+        "limitation": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Limitation"
+        },
+        "media_type": {
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "display_preview",
+          "default": "display_preview",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "shown_bytes": {
+          "minimum": 0,
+          "title": "Shown Bytes",
+          "type": "integer"
+        },
+        "source_reference": {
+          "minLength": 1,
+          "title": "Source Reference",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "total_bytes": {
+          "minimum": 0,
+          "title": "Total Bytes",
+          "type": "integer"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "limitation",
+        "media_type",
+        "schema_name",
+        "schema_version",
+        "sha256",
+        "shown_bytes",
+        "source_reference",
+        "text",
+        "total_bytes",
+        "truncated"
+      ],
+      "title": "DisplayPreview",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/ai_review_case_projection/v1",
+  "additionalProperties": false,
+  "properties": {
+    "accepted_answers": {
+      "items": {
+        "$ref": "#/$defs/DisplayPreview"
+      },
+      "title": "Accepted Answers",
+      "type": "array"
+    },
+    "case_manifest_entry_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Case Manifest Entry Id",
+      "type": "string"
+    },
+    "case_occurrence_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Case Occurrence Id",
+      "type": "string"
+    },
+    "completion_state": {
+      "minLength": 1,
+      "title": "Completion State",
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "manifest_ordinal": {
+      "exclusiveMinimum": 0,
+      "title": "Manifest Ordinal",
+      "type": "integer"
+    },
+    "memory_system_id": {
+      "minLength": 1,
+      "title": "Memory System Id",
+      "type": "string"
+    },
+    "metric_or_judge_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Metric Or Judge Hash",
+      "type": "string"
+    },
+    "projection_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Projection Id",
+      "type": "string"
+    },
+    "question": {
+      "$ref": "#/$defs/DisplayPreview"
+    },
+    "retrieved_evidence": {
+      "items": {
+        "$ref": "#/$defs/DisplayPreview"
+      },
+      "title": "Retrieved Evidence",
+      "type": "array"
+    },
+    "schema_name": {
+      "const": "ai_review_case_projection",
+      "default": "ai_review_case_projection",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "stratum": {
+      "minLength": 1,
+      "title": "Stratum",
+      "type": "string"
+    },
+    "usage_proof_statuses": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Usage Proof Statuses",
+      "type": "array"
+    },
+    "workload_id": {
+      "minLength": 1,
+      "title": "Workload Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "accepted_answers",
+    "case_manifest_entry_id",
+    "case_occurrence_id",
+    "completion_state",
+    "limitations",
+    "manifest_ordinal",
+    "memory_system_id",
+    "metric_or_judge_hash",
+    "projection_id",
+    "question",
+    "retrieved_evidence",
+    "schema_name",
+    "schema_version",
+    "stratum",
+    "usage_proof_statuses",
+    "workload_id"
+  ],
+  "title": "ai_review_case_projection",
+  "type": "object"
+}

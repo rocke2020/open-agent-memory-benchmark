@@ -1,0 +1,77 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/display_preview/v1",
+  "additionalProperties": false,
+  "properties": {
+    "limitation": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Limitation"
+    },
+    "media_type": {
+      "minLength": 1,
+      "title": "Media Type",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "display_preview",
+      "default": "display_preview",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Sha256",
+      "type": "string"
+    },
+    "shown_bytes": {
+      "minimum": 0,
+      "title": "Shown Bytes",
+      "type": "integer"
+    },
+    "source_reference": {
+      "minLength": 1,
+      "title": "Source Reference",
+      "type": "string"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "total_bytes": {
+      "minimum": 0,
+      "title": "Total Bytes",
+      "type": "integer"
+    },
+    "truncated": {
+      "title": "Truncated",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "limitation",
+    "media_type",
+    "schema_name",
+    "schema_version",
+    "sha256",
+    "shown_bytes",
+    "source_reference",
+    "text",
+    "total_bytes",
+    "truncated"
+  ],
+  "title": "display_preview",
+  "type": "object"
+}

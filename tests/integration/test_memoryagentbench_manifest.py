@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
 import pytest
+
+from oamb.artifacts.validation.catalog import validate_catalog_profile
+from oamb.contracts.states import ValidationDisposition
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DATASET_ROOT = REPOSITORY_ROOT / "datasets" / "MemoryAgentBench"
@@ -127,7 +132,7 @@ def test_mab65_selection_is_independent_of_loaded_row_iteration_order() -> None:
 
     rows = tuple(
         row
-        for relative_path, sha256, split in mab._PINNED_FILES
+        for relative_path, sha256, split, _byte_count in mab.MAB_PINNED_SOURCE_FILES
         for row in mab.read_aligned_parquet_rows(
             DATASET_ROOT / relative_path,
             split=split,
@@ -171,3 +176,177 @@ def test_complete_real_mab65_manifest_can_emit_the_secondary_index() -> None:
 
     assert result.available is True
     assert result.index_value == 100
+
+
+@pytest.mark.skipif(not DATASET_ROOT.is_dir(), reason="pinned MemoryAgentBench data not downloaded")
+def test_real_mab_bundles_pass_closed_production_profiles_and_manifest_drift_fails() -> None:
+    from oamb.workloads.memoryagentbench import build_mab5_manifest, build_mab65_manifest
+
+    full = build_mab65_manifest(DATASET_ROOT)
+    smoke = build_mab5_manifest(full)
+    for profile_id, bundle in (
+        ("oamb-t8-workload-mab65-v1", full),
+        ("oamb-t8-workload-mab5-v1", smoke),
+    ):
+        result = validate_catalog_profile(profile_id, bundle)
+        assert result.disposition == ValidationDisposition.VALIDATED, result.issues
+        assert result.executed_rule_ids == result.required_rule_ids
+
+    drifted = replace(
+        full,
+        case_manifest=full.case_manifest.model_copy(update={"manifest_hash": "f" * 64}),
+    )
+    drifted_result = validate_catalog_profile("oamb-t8-workload-mab65-v1", drifted)
+    assert drifted_result.disposition == ValidationDisposition.INVALID
+    assert "workload.mab65.selector-grouping.v1" in drifted_result.failed_rule_ids
+
+
+@pytest.mark.skipif(not DATASET_ROOT.is_dir(), reason="pinned MemoryAgentBench data not downloaded")
+def test_mab_profile_binds_complete_dataset_source_identity() -> None:
+    from oamb.workloads.memoryagentbench import build_mab65_manifest
+
+    full = build_mab65_manifest(DATASET_ROOT)
+    original_dataset = full.dataset_manifest
+    original_file = original_dataset.source_files[0]
+    baseline = validate_catalog_profile("oamb-t8-workload-mab65-v1", full)
+    drifted_datasets = (
+        original_dataset.model_copy(update={"split": "changed"}),
+        original_dataset.model_copy(update={"payload_policy": "changed"}),
+        original_dataset.model_copy(update={"source_files": ()}),
+        original_dataset.model_copy(
+            update={
+                "source_files": (
+                    original_file.model_copy(update={"relative_path": "changed.parquet"}),
+                    *original_dataset.source_files[1:],
+                )
+            }
+        ),
+        original_dataset.model_copy(
+            update={
+                "source_files": (
+                    original_file.model_copy(update={"byte_count": 1}),
+                    *original_dataset.source_files[1:],
+                )
+            }
+        ),
+        original_dataset.model_copy(
+            update={
+                "source_files": (
+                    original_file.model_copy(update={"license_id": "MIT"}),
+                    *original_dataset.source_files[1:],
+                )
+            }
+        ),
+    )
+
+    for dataset in drifted_datasets:
+        result = validate_catalog_profile(
+            "oamb-t8-workload-mab65-v1",
+            replace(full, dataset_manifest=dataset),
+        )
+        assert result.disposition == ValidationDisposition.INVALID
+        assert "workload.mab.source-manifest.v1" in result.failed_rule_ids
+        assert result.target_hash != baseline.target_hash
+
+
+@pytest.mark.skipif(not DATASET_ROOT.is_dir(), reason="pinned MemoryAgentBench data not downloaded")
+def test_mab_profile_rejects_case_source_provenance_tamper() -> None:
+    from oamb.workloads.memoryagentbench import build_mab65_manifest
+
+    full = build_mab65_manifest(DATASET_ROOT)
+    baseline = validate_catalog_profile("oamb-t8-workload-mab65-v1", full)
+    tampered_cases = (
+        replace(
+            full.cases[0],
+            source_relative_path="data/Test_Time_Learning-00000-of-00001.parquet",
+        ),
+        replace(full.cases[0], source_row_number_1_indexed=2),
+    )
+
+    for tampered_case in tampered_cases:
+        tampered = replace(full, cases=(tampered_case, *full.cases[1:]))
+        result = validate_catalog_profile("oamb-t8-workload-mab65-v1", tampered)
+
+        assert result.target_hash != baseline.target_hash
+        assert result.disposition == ValidationDisposition.INVALID
+        assert "workload.mab.source-manifest.v1" in result.failed_rule_ids
+
+
+@pytest.mark.skipif(not DATASET_ROOT.is_dir(), reason="pinned MemoryAgentBench data not downloaded")
+def test_mab_profile_rejects_reference_payload_tamper_with_synchronized_hash() -> None:
+    from oamb.workloads.memoryagentbench import build_mab65_manifest
+
+    full = build_mab65_manifest(DATASET_ROOT)
+    baseline = validate_catalog_profile("oamb-t8-workload-mab65-v1", full)
+    attacker_payload = b'["attacker-gold"]'
+    original_case = full.cases[0]
+    tampered_case_plan = replace(
+        original_case.case_plan,
+        reference_payload=attacker_payload,
+        reference_payload_sha256=hashlib.sha256(attacker_payload).hexdigest(),
+    )
+    tampered = replace(
+        full,
+        cases=(replace(original_case, case_plan=tampered_case_plan), *full.cases[1:]),
+    )
+
+    result = validate_catalog_profile("oamb-t8-workload-mab65-v1", tampered)
+
+    assert result.target_hash != baseline.target_hash
+    assert result.disposition == ValidationDisposition.INVALID
+    assert "workload.mab.prompt-answer-parser.v1" in result.failed_rule_ids
+
+
+@pytest.mark.skipif(not DATASET_ROOT.is_dir(), reason="pinned MemoryAgentBench data not downloaded")
+def test_mab_profile_rejects_runtime_source_payload_tamper() -> None:
+    from oamb.workloads.memoryagentbench import build_mab65_manifest
+
+    full = build_mab65_manifest(DATASET_ROOT)
+    baseline = validate_catalog_profile("oamb-t8-workload-mab65-v1", full)
+    original_plan = full.plans[0]
+    original_unit = original_plan.runtime_plan.ordered_source_units[0]
+    tampered_runtime_plan = replace(
+        original_plan.runtime_plan,
+        ordered_source_units=(
+            replace(original_unit, payload_bytes=b"attacker source payload"),
+            *original_plan.runtime_plan.ordered_source_units[1:],
+        ),
+    )
+    tampered = replace(
+        full,
+        plans=(replace(original_plan, runtime_plan=tampered_runtime_plan), *full.plans[1:]),
+    )
+
+    result = validate_catalog_profile("oamb-t8-workload-mab65-v1", tampered)
+
+    assert result.target_hash != baseline.target_hash
+    assert result.disposition == ValidationDisposition.INVALID
+    assert "workload.mab.source-manifest.v1" in result.failed_rule_ids
+
+
+@pytest.mark.skipif(not DATASET_ROOT.is_dir(), reason="pinned MemoryAgentBench data not downloaded")
+def test_mab_profile_rejects_catalog_and_unicode_identity_tamper() -> None:
+    from oamb.workloads.memoryagentbench import build_mab65_manifest
+
+    full = build_mab65_manifest(DATASET_ROOT)
+    baseline = validate_catalog_profile("oamb-t8-workload-mab65-v1", full)
+    first_movie = full.movie_catalog.movies[0]
+    drifted_catalog = replace(
+        full.movie_catalog,
+        movies=(
+            replace(first_movie, normalized_title="attacker-normalization"),
+            *full.movie_catalog.movies[1:],
+        ),
+    )
+    tampered_bundles = (
+        replace(full, entity_catalog_sha256="f" * 64),
+        replace(full, unicode_fingerprint="f" * 64),
+        replace(full, movie_catalog=drifted_catalog),
+    )
+
+    for tampered in tampered_bundles:
+        result = validate_catalog_profile("oamb-t8-workload-mab65-v1", tampered)
+
+        assert result.target_hash != baseline.target_hash
+        assert result.disposition == ValidationDisposition.INVALID
+        assert "workload.mab.source-manifest.v1" in result.failed_rule_ids

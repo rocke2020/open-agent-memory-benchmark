@@ -84,6 +84,9 @@ MAB65_RANK_PREFIX = "oamb-mab65-v1"
 MAB5_MANIFEST_ID = "mab5-live-smoke-v1"
 MAB_DATASET_ID = "ai-hyz/MemoryAgentBench"
 MAB_DATASET_REVISION = "7ea066982b140a19337e17e60d45d4076e042faf"
+MAB_DATASET_SPLIT = "mab65-frozen-four-split-v1"
+MAB_SOURCE_LICENSE_ID = "NOASSERTION"
+MAB_PAYLOAD_POLICY = "local_only_no_redistribution"
 MAB_DATASET_MANIFEST_HASH = "78011e09488f2ca88c13dd5518016b56668b1d49174fdec85a1db0eaccf00a2c"
 MAB65_SELECTED_CASE_DIGEST = "e8526e11afbb2af5ffe5ccf35ccad20cd2c41f14fdc3e18aab62fb79417b97d0"
 MAB65_SELECTED_PLAN_DIGEST = "85efa5ac9698bf512708cf93bcd011218578183e5f2fc86bbe8ed3f2eda00ef4"
@@ -101,34 +104,40 @@ MAB_ANSWER_WRAPPER = (
 )
 MAB_ANSWER_WRAPPER_SHA256 = hashlib.sha256(MAB_ANSWER_WRAPPER.encode()).hexdigest()
 
-_PINNED_FILES = (
+MAB_PINNED_SOURCE_FILES = (
     (
         "data/Accurate_Retrieval-00000-of-00001.parquet",
         "56c3cd80fb6731a3e53cd1a6be3148f54df60ff2d290ee50e28f8acebf9655c1",
         "Accurate_Retrieval",
+        20_024_386,
     ),
     (
         "data/Test_Time_Learning-00000-of-00001.parquet",
         "5338753be48f925d03318eed66117286e3489025fabe050a547bd086cd7d79c0",
         "Test_Time_Learning",
+        3_947_476,
     ),
     (
         "data/Long_Range_Understanding-00000-of-00001.parquet",
         "5ab175461954db67770d4a4cb69e569b513ebb96aceb9ee79b57f67488bcd539",
         "Long_Range_Understanding",
+        49_342_452,
     ),
     (
         "data/Conflict_Resolution-00000-of-00001.parquet",
         "24d5c3f09ce0ce15625cb9f8a98f44f0d864ca6c94d7b4ad04eb697ca3a5ff45",
         "Conflict_Resolution",
+        1_491_588,
     ),
 )
-_ENTITY_FILE = (
+MAB_ENTITY_SOURCE_FILE = (
     "entity2id.json",
     "63353aca481bc9558b502f91cb98f6fa26438796fdd7e0bc06b5a1532126e8b5",
+    1_758_081,
 )
 _PINNED_FILE_ORDER = {
-    relative_path: ordinal for ordinal, (relative_path, _sha256, _split) in enumerate(_PINNED_FILES)
+    relative_path: ordinal
+    for ordinal, (relative_path, _sha256, _split, _byte_count) in enumerate(MAB_PINNED_SOURCE_FILES)
 }
 _ICL_SOURCES = (
     "icl_banking77_5900shot_balance",
@@ -603,37 +612,50 @@ def _dataset_manifest(root: Path) -> DatasetManifest:
     revision_path = root / "REVISION"
     if revision_path.read_text(encoding="utf-8").strip() != MAB_DATASET_REVISION:
         raise ValueError("MemoryAgentBench revision mismatch")
-    content_files = tuple((path, sha256) for path, sha256, _split in _PINNED_FILES) + (
-        _ENTITY_FILE,
-    )
+    content_files = tuple(
+        (path, sha256) for path, sha256, _split, _byte_count in MAB_PINNED_SOURCE_FILES
+    ) + (MAB_ENTITY_SOURCE_FILE[:2],)
     computed_manifest_hash = mab_dataset_content_manifest_hash(content_files)
     if computed_manifest_hash != MAB_DATASET_MANIFEST_HASH:
         raise ValueError("MemoryAgentBench content manifest hash drift")
     files: list[DatasetFile] = []
-    for relative_path, sha256, _split in (*_PINNED_FILES, (*_ENTITY_FILE, "catalog")):
+    source_specs = (
+        *MAB_PINNED_SOURCE_FILES,
+        (
+            MAB_ENTITY_SOURCE_FILE[0],
+            MAB_ENTITY_SOURCE_FILE[1],
+            "catalog",
+            MAB_ENTITY_SOURCE_FILE[2],
+        ),
+    )
+    for relative_path, sha256, _split, byte_count in source_specs:
         path = root / relative_path
         _require_hash(path, sha256)
+        if path.stat().st_size != byte_count:
+            raise ValueError(f"MemoryAgentBench byte count mismatch: {relative_path}")
         files.append(
             DatasetFile(
                 relative_path=relative_path,
                 sha256=sha256,
-                byte_count=path.stat().st_size,
-                license_id="NOASSERTION",
+                byte_count=byte_count,
+                license_id=MAB_SOURCE_LICENSE_ID,
             )
         )
     return DatasetManifest(
         dataset_id=MAB_DATASET_ID,
         revision=MAB_DATASET_REVISION,
-        split="mab65-frozen-four-split-v1",
+        split=MAB_DATASET_SPLIT,
         manifest_hash=computed_manifest_hash,
         source_files=tuple(files),
-        payload_policy="local_only_no_redistribution",
+        payload_policy=MAB_PAYLOAD_POLICY,
     )
 
 
 def build_mab65_manifest(root: Path) -> MabManifestBundle:
     dataset = _dataset_manifest(root)
-    entity_document: Any = json.loads((root / _ENTITY_FILE[0]).read_text(encoding="utf-8"))
+    entity_document: Any = json.loads(
+        (root / MAB_ENTITY_SOURCE_FILE[0]).read_text(encoding="utf-8")
+    )
     if not isinstance(entity_document, dict) or any(
         not isinstance(uri, str) or not isinstance(entity_id, int)
         for uri, entity_id in entity_document.items()
@@ -645,7 +667,7 @@ def build_mab65_manifest(root: Path) -> MabManifestBundle:
     )
     rows = tuple(
         row
-        for relative_path, sha256, split in _PINNED_FILES
+        for relative_path, sha256, split, _byte_count in MAB_PINNED_SOURCE_FILES
         for row in read_aligned_parquet_rows(
             root / relative_path,
             split=split,
@@ -774,7 +796,7 @@ def build_mab65_manifest(root: Path) -> MabManifestBundle:
         cases=tuple(cases),
         plans=tuple(plans),
         movie_catalog=movie_catalog,
-        entity_catalog_sha256=_ENTITY_FILE[1],
+        entity_catalog_sha256=MAB_ENTITY_SOURCE_FILE[1],
         unicode_fingerprint=unicode_fingerprint,
         selected_case_digest=case_digest,
         selected_plan_digest=plan_digest,
@@ -1218,6 +1240,15 @@ class MemoryAgentBenchWorkload:
             denominator=denominator,
             trace_bytes=trace_bytes,
         )
+
+    def finalize_judge(
+        self,
+        case_plan: CasePlan,
+        answer: AnswerValue,
+        judge_answer: AnswerValue,
+    ) -> DeterministicEvaluation:
+        del case_plan, answer, judge_answer
+        raise ValueError("MemoryAgentBench does not use a judge model")
 
     def validate_records(self, records: WorkloadRecordSet) -> tuple[WorkloadRuleResult, ...]:
         passed = (

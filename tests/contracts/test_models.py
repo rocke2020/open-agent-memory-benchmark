@@ -316,6 +316,7 @@ def test_runtime_checkable_ports_accept_structural_fakes() -> None:
         "build_visible_evidence",
         "render_answer",
         "evaluate",
+        "finalize_judge",
         "validate_records",
     } <= set(vars(ports.WorkloadPort))
     assert {
@@ -353,6 +354,9 @@ def test_runtime_checkable_ports_accept_structural_fakes() -> None:
             return object()
 
         def evaluate(self, case_plan: Any, answer: Any) -> Any:
+            return object()
+
+        def finalize_judge(self, case_plan: Any, answer: Any, judge_answer: Any) -> Any:
             return object()
 
         def validate_records(self, records: Any) -> Any:

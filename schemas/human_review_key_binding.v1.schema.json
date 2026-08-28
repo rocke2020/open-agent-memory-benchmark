@@ -1,0 +1,69 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/human_review_key_binding/v1",
+  "additionalProperties": false,
+  "properties": {
+    "algorithm": {
+      "const": "ed25519",
+      "default": "ed25519",
+      "title": "Algorithm",
+      "type": "string"
+    },
+    "fingerprint": {
+      "minLength": 1,
+      "title": "Fingerprint",
+      "type": "string"
+    },
+    "key_binding_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Key Binding Id",
+      "type": "string"
+    },
+    "public_key_base64": {
+      "minLength": 1,
+      "title": "Public Key Base64",
+      "type": "string"
+    },
+    "public_key_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Public Key Sha256",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "human_review_key_binding",
+      "default": "human_review_key_binding",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_kind": {
+      "enum": [
+        "raw",
+        "file"
+      ],
+      "title": "Source Kind",
+      "type": "string"
+    },
+    "source_reference": {
+      "minLength": 1,
+      "title": "Source Reference",
+      "type": "string"
+    }
+  },
+  "required": [
+    "fingerprint",
+    "key_binding_id",
+    "public_key_base64",
+    "public_key_sha256",
+    "schema_name",
+    "schema_version",
+    "source_kind",
+    "source_reference"
+  ],
+  "title": "human_review_key_binding",
+  "type": "object"
+}

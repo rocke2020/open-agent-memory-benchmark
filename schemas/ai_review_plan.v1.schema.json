@@ -1,0 +1,255 @@
+{
+  "$defs": {
+    "AIReviewBatch": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Batch Id",
+          "type": "string"
+        },
+        "input_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Input Bytes",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "maximal_output_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Maximal Output Bytes",
+          "type": "integer"
+        },
+        "maximal_output_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Maximal Output Tokens",
+          "type": "integer"
+        },
+        "ordered_case_occurrence_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Ordered Case Occurrence Ids",
+          "type": "array"
+        },
+        "payload_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Payload Hash",
+          "type": "string"
+        },
+        "request_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "ai_review_batch",
+          "default": "ai_review_batch",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "batch_id",
+        "input_bytes",
+        "input_tokens",
+        "maximal_output_bytes",
+        "maximal_output_tokens",
+        "ordered_case_occurrence_ids",
+        "payload_hash",
+        "request_fingerprint",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "AIReviewBatch",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/ai_review_plan/v1",
+  "additionalProperties": false,
+  "properties": {
+    "aggregate_version": {
+      "minLength": 1,
+      "title": "Aggregate Version",
+      "type": "string"
+    },
+    "case_batches": {
+      "items": {
+        "$ref": "#/$defs/AIReviewBatch"
+      },
+      "title": "Case Batches",
+      "type": "array"
+    },
+    "case_coverage_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Case Coverage Hash",
+      "type": "string"
+    },
+    "expected_attempt_count": {
+      "exclusiveMinimum": 0,
+      "title": "Expected Attempt Count",
+      "type": "integer"
+    },
+    "finding_registry_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Finding Registry Hash",
+      "type": "string"
+    },
+    "model_context_window_tokens": {
+      "exclusiveMinimum": 0,
+      "title": "Model Context Window Tokens",
+      "type": "integer"
+    },
+    "ordered_case_occurrence_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Ordered Case Occurrence Ids",
+      "type": "array"
+    },
+    "output_contract_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Output Contract Hash",
+      "type": "string"
+    },
+    "parser_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Parser Hash",
+      "type": "string"
+    },
+    "phase_integrity_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Phase Integrity Id",
+      "type": "string"
+    },
+    "phase_integrity_input_bytes": {
+      "exclusiveMinimum": 0,
+      "title": "Phase Integrity Input Bytes",
+      "type": "integer"
+    },
+    "phase_integrity_input_tokens": {
+      "exclusiveMinimum": 0,
+      "title": "Phase Integrity Input Tokens",
+      "type": "integer"
+    },
+    "phase_integrity_maximal_output_bytes": {
+      "exclusiveMinimum": 0,
+      "title": "Phase Integrity Maximal Output Bytes",
+      "type": "integer"
+    },
+    "phase_integrity_maximal_output_tokens": {
+      "exclusiveMinimum": 0,
+      "title": "Phase Integrity Maximal Output Tokens",
+      "type": "integer"
+    },
+    "phase_integrity_payload_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Phase Integrity Payload Hash",
+      "type": "string"
+    },
+    "phase_integrity_request_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Phase Integrity Request Fingerprint",
+      "type": "string"
+    },
+    "plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Plan Hash",
+      "type": "string"
+    },
+    "projection_spec_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Projection Spec Hash",
+      "type": "string"
+    },
+    "prompt_pack_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Prompt Pack Hash",
+      "type": "string"
+    },
+    "review_bundle_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Review Bundle Hash",
+      "type": "string"
+    },
+    "reviewer_configuration_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Reviewer Configuration Hash",
+      "type": "string"
+    },
+    "reviewer_counter_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Reviewer Counter Fingerprint",
+      "type": "string"
+    },
+    "reviewer_model_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Reviewer Model Hash",
+      "type": "string"
+    },
+    "reviewer_role_binding_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Reviewer Role Binding Hash",
+      "type": "string"
+    },
+    "reviewer_runtime_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Reviewer Runtime Hash",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "ai_review_plan",
+      "default": "ai_review_plan",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "aggregate_version",
+    "case_batches",
+    "case_coverage_hash",
+    "expected_attempt_count",
+    "finding_registry_hash",
+    "model_context_window_tokens",
+    "ordered_case_occurrence_ids",
+    "output_contract_hash",
+    "parser_hash",
+    "phase_integrity_id",
+    "phase_integrity_input_bytes",
+    "phase_integrity_input_tokens",
+    "phase_integrity_maximal_output_bytes",
+    "phase_integrity_maximal_output_tokens",
+    "phase_integrity_payload_hash",
+    "phase_integrity_request_fingerprint",
+    "plan_hash",
+    "projection_spec_hash",
+    "prompt_pack_hash",
+    "review_bundle_hash",
+    "reviewer_configuration_hash",
+    "reviewer_counter_fingerprint",
+    "reviewer_model_hash",
+    "reviewer_role_binding_hash",
+    "reviewer_runtime_hash",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "ai_review_plan",
+  "type": "object"
+}

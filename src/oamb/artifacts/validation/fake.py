@@ -1449,13 +1449,15 @@ def _evaluation_raw_matches(
 ) -> bool:
     if document is None or manifest_case is None or case.parsed_answer_sha256 is None:
         return False
-    expected_result = canonical_sha256(
-        [
-            "oamb-fake-exact-v1",
-            case.parsed_answer_sha256 in manifest_case.answer_value_sha256,
-            case.parsed_answer_sha256,
-        ]
+    expected_trace = canonical_json_bytes(
+        {
+            "metric_id": "fake-exact-v1",
+            "numerator": int(case.parsed_answer_sha256 in manifest_case.answer_value_sha256),
+            "denominator": 1,
+            "parsed_answer_sha256": case.parsed_answer_sha256,
+        }
     )
+    expected_result = hashlib.sha256(expected_trace).hexdigest()
     return (
         set(document) == {"metric_id", "result_sha256"}
         and document.get("metric_id") == "fake-exact-v1"

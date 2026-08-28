@@ -16,6 +16,7 @@ from .base import (
     StrictContract,
     UtcDateTime,
 )
+from .ids import canonical_sha256
 from .specifications import BudgetScopeKindV2, ResourceBudgetCeiling
 from .states import (
     AttemptOutcome,
@@ -459,6 +460,272 @@ class CaseRecordV2(StrictContract):
             ):
                 raise ValueError("unjudged case requires a terminal judge error")
         return self
+
+
+class IngestionPlanRecordV2(StrictContract):
+    schema_name: Literal["ingestion_plan_record"] = "ingestion_plan_record"
+    schema_version: Literal[2] = 2
+    ingestion_occurrence_id: Sha256
+    run_id: NonEmptyStr
+    memory_system_id: NonEmptyStr
+    adapter_profile_id: NonEmptyStr
+    runtime_binding_hash: Sha256
+    ingestion_plan_id: Sha256
+    ordered_member_context_manifest_entry_ids: tuple[Sha256, ...]
+    ordered_case_occurrence_ids: tuple[Sha256, ...]
+    state: IngestionPlanState
+    scope_id: NonEmptyStr | None
+    scope_raw_refs: tuple[Sha256, ...]
+    ordered_source_unit_ids: tuple[Sha256, ...]
+    ordered_dispatch_attempt_ids: tuple[Sha256, ...]
+    ordered_dispatch_source_unit_ids: tuple[tuple[Sha256, ...], ...]
+    accepted_source_unit_ids: tuple[Sha256, ...]
+    rejected_source_unit_ids: tuple[Sha256, ...]
+    readiness_evidence_refs: tuple[Sha256, ...]
+    inventory_raw_ref: Sha256 | None
+    projected_source_unit_ids: tuple[Sha256, ...]
+    projection_raw_refs: tuple[Sha256, ...]
+    protected_state_sha256: Sha256 | None
+    attempt_ids: tuple[Sha256, ...]
+    usage_record_ids: tuple[Sha256, ...]
+    resource_record_ids: tuple[Sha256, ...]
+    cost_record_ids: tuple[Sha256, ...]
+
+    @model_validator(mode="after")
+    def native_plan_scope_dispatch_and_projection_close(self) -> Self:
+        for label, values in (
+            ("member", self.ordered_member_context_manifest_entry_ids),
+            ("case", self.ordered_case_occurrence_ids),
+            ("source", self.ordered_source_unit_ids),
+            ("dispatch", self.ordered_dispatch_attempt_ids),
+            ("accepted", self.accepted_source_unit_ids),
+            ("rejected", self.rejected_source_unit_ids),
+            ("attempt", self.attempt_ids),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"native ingestion plan contains duplicate {label} identities")
+        intended = set(self.ordered_source_unit_ids)
+        accepted = set(self.accepted_source_unit_ids)
+        rejected = set(self.rejected_source_unit_ids)
+        if accepted & rejected or not (accepted | rejected) <= intended:
+            raise ValueError("native ingestion accepted/rejected source partition is invalid")
+        if not set(self.ordered_dispatch_attempt_ids) <= set(self.attempt_ids):
+            raise ValueError(
+                "native ingestion dispatch attempts are absent from the attempt ledger"
+            )
+        dispatch_sources = tuple(
+            source_id
+            for source_ids in self.ordered_dispatch_source_unit_ids
+            for source_id in source_ids
+        )
+        if (
+            len(self.ordered_dispatch_source_unit_ids) != len(self.ordered_dispatch_attempt_ids)
+            or any(not source_ids for source_ids in self.ordered_dispatch_source_unit_ids)
+            or dispatch_sources != self.ordered_source_unit_ids
+        ):
+            raise ValueError(
+                "native ingestion dispatch source ledger does not close the source order"
+            )
+        if self.state in {IngestionPlanState.READY, IngestionPlanState.SEALED}:
+            if accepted | rejected != intended:
+                raise ValueError("ready native ingestion requires a closed source partition")
+            if (
+                self.scope_id is None
+                or not self.scope_raw_refs
+                or not self.readiness_evidence_refs
+                or self.inventory_raw_ref is None
+                or not self.projection_raw_refs
+                or self.protected_state_sha256 is None
+            ):
+                raise ValueError(
+                    "ready native ingestion requires complete scope/readiness/projection"
+                )
+            if self.projected_source_unit_ids != self.accepted_source_unit_ids:
+                raise ValueError("native ingestion projection does not match accepted source order")
+        return self
+
+
+class CaseRecordV3(StrictContract):
+    schema_name: Literal["case_record"] = "case_record"
+    schema_version: Literal[3] = 3
+    case_occurrence_id: Sha256
+    run_id: NonEmptyStr
+    ingestion_occurrence_id: Sha256
+    case_manifest_entry_id: Sha256
+    adapter_profile_id: NonEmptyStr
+    state: CaseState
+    retrieval_raw_ref: Sha256 | None
+    retrieval_supporting_raw_refs: tuple[Sha256, ...]
+    ordered_native_candidate_ids: tuple[NonEmptyStr, ...]
+    ordered_native_content_sha256: tuple[Sha256, ...]
+    native_candidate_source_unit_ids: tuple[Sha256 | None, ...]
+    visible_evidence_raw_ref: Sha256 | None
+    visible_evidence_sha256: Sha256 | None
+    visible_evidence_byte_count: NonNegativeInt | None
+    visible_evidence_token_count: NonNegativeInt | None
+    visible_evidence_tokenizer_fingerprint: Sha256 | None
+    native_candidate_count: NonNegativeInt
+    visible_kept_count: NonNegativeInt
+    visible_dropped_count: NonNegativeInt
+    visible_truncated_count: NonNegativeInt
+    visible_decision_ledger_raw_ref: Sha256 | None
+    pre_query_projection_raw_refs: tuple[Sha256, ...]
+    pre_query_state_sha256: Sha256 | None
+    post_query_projection_raw_refs: tuple[Sha256, ...]
+    post_query_state_sha256: Sha256 | None
+    query_mutation_status: Literal["unchanged", "changed", "unavailable"]
+    prompt_raw_ref: Sha256 | None
+    prompt_sha256: Sha256 | None
+    judge_prompt_raw_ref: Sha256 | None
+    answer_raw_ref: Sha256 | None
+    parsed_answer_sha256: Sha256 | None
+    metric_id: NonEmptyStr | None
+    metric_numerator: NonNegativeInt | None
+    metric_denominator: PositiveInt | None
+    evaluation_raw_ref: Sha256 | None
+    evaluation_disposition: CaseEvaluationDisposition
+    attempt_ids: tuple[Sha256, ...]
+    usage_record_ids: tuple[Sha256, ...]
+    resource_record_ids: tuple[Sha256, ...]
+    cost_record_ids: tuple[Sha256, ...]
+    error_stage: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def native_case_evidence_and_metric_close(self) -> Self:
+        candidate_lengths = {
+            len(self.ordered_native_candidate_ids),
+            len(self.ordered_native_content_sha256),
+            len(self.native_candidate_source_unit_ids),
+        }
+        if len(candidate_lengths) != 1:
+            raise ValueError(
+                "native candidate identities, content, and attribution must be aligned"
+            )
+        if len(set(self.ordered_native_candidate_ids)) != len(self.ordered_native_candidate_ids):
+            raise ValueError("native candidate identities must be unique within one response")
+        if self.native_candidate_count != len(self.ordered_native_candidate_ids):
+            raise ValueError("native candidate count does not match the ordered retrieval")
+        if self.visible_kept_count + self.visible_dropped_count != self.native_candidate_count:
+            raise ValueError("visible evidence kept/dropped counts do not close")
+        if self.visible_truncated_count > self.visible_kept_count:
+            raise ValueError("visible evidence truncated count exceeds kept evidence")
+        if (self.metric_numerator is None) != (self.metric_denominator is None):
+            raise ValueError("metric fraction requires both numerator and denominator")
+        if (
+            self.metric_numerator is not None
+            and self.metric_denominator is not None
+            and self.metric_numerator > self.metric_denominator
+        ):
+            raise ValueError("metric fraction numerator exceeds its denominator")
+        if self.state == CaseState.COMPLETED:
+            if self.prompt_raw_ref is None:
+                raise ValueError("completed native case requires prompt evidence")
+            required = (
+                self.retrieval_raw_ref,
+                self.visible_evidence_raw_ref,
+                self.visible_evidence_sha256,
+                self.visible_evidence_byte_count,
+                self.visible_evidence_token_count,
+                self.visible_evidence_tokenizer_fingerprint,
+                self.visible_decision_ledger_raw_ref,
+                self.pre_query_state_sha256,
+                self.post_query_state_sha256,
+                self.prompt_sha256,
+                self.answer_raw_ref,
+                self.parsed_answer_sha256,
+                self.metric_id,
+                self.metric_numerator,
+                self.metric_denominator,
+                self.evaluation_raw_ref,
+            )
+            if any(value is None for value in required):
+                raise ValueError(
+                    "completed native case requires closed retrieval/context/metric evidence"
+                )
+            if not self.pre_query_projection_raw_refs or not self.post_query_projection_raw_refs:
+                raise ValueError("completed native case requires both protected projections")
+            if (
+                self.query_mutation_status != "unchanged"
+                or self.pre_query_state_sha256 != self.post_query_state_sha256
+            ):
+                raise ValueError("completed read-only case requires unchanged protected state")
+            if self.error_stage is not None:
+                raise ValueError("completed native case cannot carry an error stage")
+            if self.evaluation_disposition not in {
+                CaseEvaluationDisposition.DETERMINISTIC_EVALUATED,
+                CaseEvaluationDisposition.JUDGED,
+            }:
+                raise ValueError("completed native case requires a successful evaluation")
+            if (
+                self.evaluation_disposition == CaseEvaluationDisposition.JUDGED
+                and self.judge_prompt_raw_ref is None
+            ):
+                raise ValueError("judged native case requires judge prompt evidence")
+            if (
+                self.evaluation_disposition == CaseEvaluationDisposition.DETERMINISTIC_EVALUATED
+                and self.judge_prompt_raw_ref is not None
+            ):
+                raise ValueError("deterministic native case cannot carry judge prompt evidence")
+        return self
+
+
+class PhaseReviewOccurrenceRecord(StrictContract):
+    schema_name: Literal["phase_review_occurrence_record"] = "phase_review_occurrence_record"
+    schema_version: Literal[1] = 1
+    phase_review_occurrence_id: Sha256
+    phase_id: NonEmptyStr
+    review_bundle_hash: Sha256
+    reviewer_role_binding_hash: Sha256
+    ordinal: PositiveInt
+    approval_record_id: Sha256
+    budget_id: NonEmptyStr
+    state: Literal[
+        "planned",
+        "budget_reserved",
+        "running",
+        "sealed",
+        "error",
+        "cancelled",
+        "budget_exceeded",
+        "interrupted_unknown_outcome",
+    ]
+    started_at: UtcDateTime | None
+    ended_at: UtcDateTime | None
+
+    @model_validator(mode="after")
+    def occurrence_identity_and_times_are_canonical(self) -> Self:
+        expected = phase_review_occurrence_id(
+            phase_id=self.phase_id,
+            review_bundle_hash=self.review_bundle_hash,
+            reviewer_role_binding_hash=self.reviewer_role_binding_hash,
+            ordinal=self.ordinal,
+        )
+        if self.phase_review_occurrence_id != expected:
+            raise ValueError("phase-review occurrence identity does not match its payload")
+        if (self.started_at is None) != (self.ended_at is None):
+            raise ValueError("phase-review occurrence timing requires both endpoints")
+        if self.started_at is not None and self.ended_at is not None:
+            if self.ended_at < self.started_at:
+                raise ValueError("phase-review occurrence ends before it starts")
+        return self
+
+
+def phase_review_occurrence_id(
+    *,
+    phase_id: str,
+    review_bundle_hash: str,
+    reviewer_role_binding_hash: str,
+    ordinal: int,
+) -> str:
+    return canonical_sha256(
+        [
+            "oamb-phase-review-occurrence-v1",
+            phase_id,
+            review_bundle_hash,
+            reviewer_role_binding_hash,
+            ordinal,
+        ]
+    )
 
 
 class CapsuleManifestEntry(StrictContract):

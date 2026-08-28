@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 
 from .accounting import (
     CostMeasurementSpec,
@@ -29,14 +29,17 @@ from .evidence import (
     CapsuleManifestEntry,
     CaseRecord,
     CaseRecordV2,
+    CaseRecordV3,
     CheckpointManifest,
     CloseErrorRecord,
     DerivationManifest,
     IngestionPlanRecord,
+    IngestionPlanRecordV2,
     LogicalContextRecord,
     ModelReadinessOccurrenceRecord,
     OccurrenceClaimRecord,
     OriginRecord,
+    PhaseReviewOccurrenceRecord,
     ProviderServiceEvidenceManifest,
     RawReference,
     RecoveryDecisionRecord,
@@ -47,22 +50,69 @@ from .evidence import (
     ValidationResult,
 )
 from .reporting import (
+    AggregateMetricDelta,
+    AIQualityReviewRecord,
+    AIReviewBatchResult,
+    AIReviewCaseProjection,
+    AIReviewCaseResult,
+    AIReviewFinding,
+    AIReviewIntegrityProjection,
+    AIReviewIntegrityResult,
+    ComparisonControlBinding,
+    ComparisonControlSnapshot,
+    ComparisonCostDelta,
+    ComparisonPredicateResult,
+    ComparisonReportModel,
+    ComparisonReportPayload,
+    CompletionSummaryV3,
+    DiagnosticRunReportModel,
+    DisplayPreview,
+    EvaluationPhaseGate,
+    EvaluationReviewBundle,
+    ExactRational,
+    HumanQualityReviewRecord,
+    HumanReviewDecision,
+    Mab65ReportReduction,
+    MabCapabilityMetricSummary,
+    MabComponentMetricSummary,
+    MabPlanEvidenceBinding,
+    MabPlanMetricSummary,
+    MeasurementSummaryLine,
+    MetricSummary,
+    PairedMetricDelta,
+    PhaseAcceptanceReport,
+    ReducerBinding,
+    ReleaseReportModel,
     ReportArtifactManifest,
+    ReportArtifactManifestV2,
+    ReportRecordProjection,
     RunReportModel,
     RunReportModelV2,
+    RunReportModelV3,
     RunSummary,
     RunSummaryV2,
+    SignatureVerificationRecord,
+    ValidationClaimBoundary,
 )
 from .specifications import (
+    AcceptanceReportSpec,
+    AIReviewBatch,
+    AIReviewPlan,
     BudgetSpec,
     BudgetSpecV2,
     CaseManifest,
     CaseManifestEntry,
+    ComparisonCostControl,
+    ComparisonPairBinding,
+    ComparisonSpec,
+    ComparisonWinnerReducer,
     DatasetFile,
     DatasetManifest,
     DerivationSpec,
+    DerivationSpecV2,
     ExecutionEnvironmentBinding,
     ExternalCallApprovalRecord,
+    HumanReviewKeyBinding,
     IngestionPlanManifest,
     InteractionSpec,
     LogicalContextManifestEntry,
@@ -77,6 +127,8 @@ from .specifications import (
     ProtocolSpec,
     ProviderBudgetCap,
     ProviderRuntimeProfileAttestation,
+    ReportIdentitySpecBinding,
+    ReportSpec,
     ResourceBudgetCeiling,
     RoleBudgetCeiling,
     RunSpec,
@@ -85,6 +137,14 @@ from .specifications import (
     ValidationRuleRequirement,
     WorkloadSpec,
 )
+
+
+class ComparisonReportContract(RootModel[ComparisonReportPayload]):
+    """Registry-only root preserving both comparison-report wire variants."""
+
+    public_schema_name: ClassVar[str] = "comparison_report"
+    public_schema_version: ClassVar[int] = 1
+
 
 PUBLIC_CONTRACTS: tuple[type[BaseModel], ...] = (
     ProtocolSpec,
@@ -112,8 +172,19 @@ PUBLIC_CONTRACTS: tuple[type[BaseModel], ...] = (
     RoleBudgetCeiling,
     ProviderRuntimeProfileAttestation,
     ExternalCallApprovalRecord,
+    HumanReviewKeyBinding,
     SourceEvidenceBinding,
     DerivationSpec,
+    DerivationSpecV2,
+    ReportSpec,
+    AcceptanceReportSpec,
+    ReportIdentitySpecBinding,
+    ComparisonPairBinding,
+    ComparisonCostControl,
+    ComparisonWinnerReducer,
+    ComparisonSpec,
+    AIReviewBatch,
+    AIReviewPlan,
     RunSpec,
     ValidationRuleRequirement,
     ValidationProfile,
@@ -131,8 +202,11 @@ PUBLIC_CONTRACTS: tuple[type[BaseModel], ...] = (
     AttemptReceiptRecord,
     LogicalContextRecord,
     IngestionPlanRecord,
+    IngestionPlanRecordV2,
     CaseRecord,
     CaseRecordV2,
+    CaseRecordV3,
+    PhaseReviewOccurrenceRecord,
     CapsuleManifestEntry,
     CapsuleManifest,
     CheckpointManifest,
@@ -152,15 +226,61 @@ PUBLIC_CONTRACTS: tuple[type[BaseModel], ...] = (
     CostRecord,
     RunSummary,
     RunSummaryV2,
+    ComparisonControlBinding,
+    ComparisonControlSnapshot,
+    DisplayPreview,
+    ExactRational,
+    PairedMetricDelta,
+    ComparisonPredicateResult,
+    ComparisonCostDelta,
+    AggregateMetricDelta,
+    ComparisonReportContract,
+    EvaluationReviewBundle,
+    AIReviewCaseProjection,
+    AIReviewIntegrityProjection,
+    AIReviewFinding,
+    AIReviewCaseResult,
+    AIReviewBatchResult,
+    AIReviewIntegrityResult,
+    AIQualityReviewRecord,
+    HumanReviewDecision,
+    SignatureVerificationRecord,
+    HumanQualityReviewRecord,
+    EvaluationPhaseGate,
+    CompletionSummaryV3,
+    ValidationClaimBoundary,
+    ReportRecordProjection,
+    MetricSummary,
+    ReducerBinding,
+    MabPlanEvidenceBinding,
+    MabPlanMetricSummary,
+    MabComponentMetricSummary,
+    MabCapabilityMetricSummary,
+    Mab65ReportReduction,
+    MeasurementSummaryLine,
     RunReportModel,
     RunReportModelV2,
+    RunReportModelV3,
+    DiagnosticRunReportModel,
+    ComparisonReportModel,
+    ReleaseReportModel,
+    PhaseAcceptanceReport,
     ReportArtifactManifest,
+    ReportArtifactManifestV2,
 )
 
 
 def _registry_key(model: type[BaseModel]) -> tuple[str, int]:
-    name_value = model.model_fields["schema_name"].default
-    version_value = model.model_fields["schema_version"].default
+    name_field = model.model_fields.get("schema_name")
+    version_field = model.model_fields.get("schema_version")
+    name_value = (
+        name_field.default if name_field is not None else getattr(model, "public_schema_name", None)
+    )
+    version_value = (
+        version_field.default
+        if version_field is not None
+        else getattr(model, "public_schema_version", None)
+    )
     if not isinstance(name_value, str) or not isinstance(version_value, int):
         raise TypeError(f"invalid public contract identity: {model.__name__}")
     return name_value, version_value
@@ -186,9 +306,12 @@ def parse_contract(document: dict[str, Any]) -> BaseModel:
         model = CONTRACT_REGISTRY[(name, version)]
     except KeyError as exc:
         raise UnknownContractError(f"unsupported contract: {name!r} v{version!r}") from exc
-    return model.model_validate_json(
+    parsed = model.model_validate_json(
         json.dumps(document, ensure_ascii=False, separators=(",", ":"))
     )
+    if isinstance(parsed, ComparisonReportContract):
+        return parsed.root
+    return parsed
 
 
 def schema_filename(model: type[BaseModel]) -> str:
@@ -200,6 +323,13 @@ def schema_bytes(model: type[BaseModel]) -> bytes:
     name, version = _registry_key(model)
     document = model.model_json_schema(mode="validation")
     _require_discriminators(document)
+    if "properties" not in document:
+        document["type"] = "object"
+        document["properties"] = {
+            "schema_name": {"const": name, "default": name, "type": "string"},
+            "schema_version": {"const": version, "default": version, "type": "integer"},
+        }
+        document["required"] = ["schema_name", "schema_version"]
     document["$id"] = f"https://open-agent-memory-benchmark.dev/schemas/{name}/v{version}"
     document["title"] = name
     return (json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode(

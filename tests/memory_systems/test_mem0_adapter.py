@@ -5,11 +5,17 @@ import importlib
 import sys
 import time
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from oamb.artifacts.validation.adapter import (
+    Mem0AdapterValidationInput,
+    mem0_adapter_validation_input,
+)
+from oamb.artifacts.validation.catalog import validate_catalog_profile
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.ports import (
     IngestionDispatch,
@@ -25,6 +31,7 @@ from oamb.contracts.ports import (
     WorkerReceipt,
     WorkerRequest,
 )
+from oamb.contracts.states import ValidationDisposition
 from oamb.runtime.worker import SupervisedWorker
 
 EXPECTED_V2_0_19_UNSUPPORTED_REASONS = (
@@ -123,6 +130,19 @@ def test_v2_0_19_profiles_return_exact_typed_unsupported_verdict(
     assert verdict.reason_codes == EXPECTED_V2_0_19_UNSUPPORTED_REASONS
     assert profile.is_default_comparison_transport is comparison_eligible
 
+    adapter = (
+        mem0.Mem0RestAdapter() if profile_name == "MEM0_REST_PROFILE" else mem0.Mem0SdkAdapter()
+    )
+    with pytest.raises(MemorySystemProfileUnsupported):
+        asyncio.run(adapter.resolve())
+    profile_id = f"oamb-t8-adapter-{profile.profile_id}"
+    validation = validate_catalog_profile(
+        profile_id,
+        mem0_adapter_validation_input(adapter),
+    )
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+    asyncio.run(adapter.close())
+
 
 @pytest.mark.parametrize(
     ("profile_name", "fixture_name"),
@@ -168,6 +188,36 @@ def test_profile_fixture_rejects_unknown_config_field() -> None:
         )
 
 
+def test_mem0_validation_rejects_a_synthesized_zero_dispatch_claim_without_rejection() -> None:
+    mem0 = importlib.import_module("oamb.memory_systems.mem0")
+    adapter = mem0.Mem0RestAdapter()
+
+    validation = validate_catalog_profile(
+        "oamb-t8-adapter-mem0-rest-v1",
+        mem0_adapter_validation_input(adapter),
+    )
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "adapter.mem0.rest.runtime-profile.v1" in validation.failed_rule_ids
+
+
+def test_mem0_validation_rejects_a_fabricated_adapter_attestation() -> None:
+    mem0 = importlib.import_module("oamb.memory_systems.mem0")
+    adapter = mem0.Mem0RestAdapter()
+    with pytest.raises(MemorySystemProfileUnsupported):
+        asyncio.run(adapter.resolve())
+    fabricated = replace(adapter.validation_audit(), producer_attestation=object())
+
+    validation = validate_catalog_profile(
+        "oamb-t8-adapter-mem0-rest-v1",
+        Mem0AdapterValidationInput(adapter=adapter, audit=fabricated),
+    )
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "adapter.mem0.rest.runtime-profile.v1" in validation.failed_rule_ids
+    asyncio.run(adapter.close())
+
+
 @pytest.mark.asyncio
 async def test_rest_profile_rejects_resolve_scope_add_and_search_without_dispatch() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
@@ -211,6 +261,18 @@ async def test_rest_profile_rejects_resolve_scope_add_and_search_without_dispatc
         )
 
     assert dispatcher.request_count == 0
+    audit = adapter.validation_audit()
+    assert tuple(event.operation_kind for event in audit.ordered_events) == (
+        "resolve",
+        "allocate_ingestion_scope",
+        "plan_ingestion",
+        "ingest",
+        "retrieve",
+    )
+    assert all(
+        event.dispatcher_count_before == event.dispatcher_count_after == 0
+        for event in audit.ordered_events
+    )
     await adapter.close()
     assert dispatcher.closed is True
 

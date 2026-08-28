@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from oamb.contracts.ids import (
+    canonical_json_bytes,
     canonical_sha256,
     case_manifest_entry_id,
     context_content_id,
@@ -24,6 +25,7 @@ from oamb.contracts.ids import (
 from oamb.contracts.ports import (
     AnswerValue,
     CasePlan,
+    DeterministicEvaluation,
     IngestionPlan,
     JudgeRequest,
     NativeEvidenceBatch,
@@ -60,6 +62,10 @@ LME_DATASET_ID = "longmemeval-s-cleaned"
 LME_DATASET_REVISION = "98d7416c24c778c2fee6e6f3006e7a073259d48f"
 LME_SOURCE_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
 LME_SOURCE_NAME = "longmemeval_s_cleaned.json"
+LME_SOURCE_BYTE_COUNT = 277_383_467
+LME_SOURCE_LICENSE_ID = "NOASSERTION"
+LME_DATASET_SPLIT = "s-cleaned"
+LME_PAYLOAD_POLICY = "download-required-not-redistributed"
 LME_DATASET_MANIFEST_HASH = "098fd29291256d5e09dc82db146ee90fadc267e6061c33167bff0b54b98c2a85"
 LME30_CASE_MANIFEST_HASH = "b69702c5a643f054b98808ec463ab8babb23d513bdcdd77de79c687eb4d7326d"
 LME6_CASE_MANIFEST_HASH = "b5093e3f418eef9cc30eb2323f676be92cf6132f8116aee5a8da6e8a98851563"
@@ -482,6 +488,39 @@ class LongMemEvalWorkload:
         )
         return JudgeRequest(prompt=prompt, output_contract_id=LME_JUDGE_OUTPUT_CONTRACT_ID)
 
+    def finalize_judge(
+        self,
+        case_plan: CasePlan,
+        answer: AnswerValue,
+        judge_answer: AnswerValue,
+    ) -> DeterministicEvaluation:
+        if (
+            case_plan.metric_id != LME_JUDGE_METRIC_ID
+            or case_plan.judge_binding_id != LME_JUDGE_PROMPT_PACK_ID
+        ):
+            raise ValueError("LongMemEval judge binding has drifted")
+        decision = judge_answer.parsed_value.decode("utf-8", errors="strict").strip().lower()
+        if decision not in {"yes", "no"}:
+            raise ValueError("LongMemEval judge output must be yes or no")
+        trace = canonical_json_bytes(
+            {
+                "metric_id": LME_JUDGE_METRIC_ID,
+                "numerator": int(decision == "yes"),
+                "denominator": 1,
+                "parsed_answer_sha256": answer.parsed_value_sha256,
+                "judge_answer_sha256": judge_answer.parsed_value_sha256,
+                "judge_raw_reference": judge_answer.raw_reference.sha256,
+                "judge_decision": decision,
+            }
+        )
+        return DeterministicEvaluation(
+            metric_id=LME_JUDGE_METRIC_ID,
+            result_sha256=hashlib.sha256(trace).hexdigest(),
+            numerator=int(decision == "yes"),
+            denominator=1,
+            trace_bytes=trace,
+        )
+
     def validate_records(self, records: WorkloadRecordSet) -> tuple[WorkloadRuleResult, ...]:
         expected_count = len(self._bundle.selected_rows)
         passed = (
@@ -584,18 +623,20 @@ def _parse_messages(raw_session: object) -> tuple[LongMemEvalMessage, ...]:
 
 
 def _dataset_manifest(source_path: Path) -> DatasetManifest:
+    if source_path.stat().st_size != LME_SOURCE_BYTE_COUNT:
+        raise ValueError("LongMemEval source byte count differs from the frozen snapshot")
     source_file = DatasetFile(
         relative_path=LME_SOURCE_NAME,
         sha256=LME_SOURCE_SHA256,
-        byte_count=source_path.stat().st_size,
-        license_id="NOASSERTION",
+        byte_count=LME_SOURCE_BYTE_COUNT,
+        license_id=LME_SOURCE_LICENSE_ID,
     )
     manifest_hash = canonical_sha256(
         [
             "oamb-lme-dataset-manifest-v1",
             LME_DATASET_ID,
             LME_DATASET_REVISION,
-            "s-cleaned",
+            LME_DATASET_SPLIT,
             source_file,
         ]
     )
@@ -604,10 +645,10 @@ def _dataset_manifest(source_path: Path) -> DatasetManifest:
     return DatasetManifest(
         dataset_id=LME_DATASET_ID,
         revision=LME_DATASET_REVISION,
-        split="s-cleaned",
+        split=LME_DATASET_SPLIT,
         manifest_hash=manifest_hash,
         source_files=(source_file,),
-        payload_policy="download-required-not-redistributed",
+        payload_policy=LME_PAYLOAD_POLICY,
     )
 
 
@@ -715,7 +756,16 @@ def _build_bundle(
         )
         source_units = tuple(
             SourceUnit(
-                source_unit_id=(f"{LME30_WORKLOAD_ID}:{row.question_id}:{session.session_id}"),
+                source_unit_id=canonical_sha256(
+                    [
+                        "oamb-lme-source-unit-v1",
+                        LME30_WORKLOAD_ID,
+                        row.question_id,
+                        session.session_id,
+                        ordinal,
+                        payload_sha256,
+                    ]
+                ),
                 context_manifest_entry_id=context_id,
                 ordinal_1_indexed=ordinal,
                 payload_sha256=payload_sha256,

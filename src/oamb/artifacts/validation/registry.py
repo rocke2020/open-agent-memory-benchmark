@@ -17,6 +17,7 @@ class ValidationRule:
     rule_id: str
     version: int
     evaluate: RuleFunction
+    enabled: bool = True
 
 
 class DuplicateRuleError(ValueError):
@@ -26,9 +27,11 @@ class DuplicateRuleError(ValueError):
 class RuleRegistry:
     def __init__(self) -> None:
         self._rules: dict[str, ValidationRule] = {}
+        self._duplicate_rule_ids: set[str] = set()
 
     def register(self, rule: ValidationRule) -> None:
         if rule.rule_id in self._rules:
+            self._duplicate_rule_ids.add(rule.rule_id)
             raise DuplicateRuleError(f"duplicate validation rule: {rule.rule_id}")
         self._rules[rule.rule_id] = rule
 
@@ -37,9 +40,13 @@ class RuleRegistry:
 
     def compatible(self, rule_id: str, minimum_version: int) -> ValidationRule | None:
         rule = self._rules.get(rule_id)
-        if rule is None or rule.version < minimum_version:
+        if rule is None or not rule.enabled or rule.version < minimum_version:
             return None
         return rule
+
+    @property
+    def duplicate_rule_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._duplicate_rule_ids))
 
     @property
     def rule_ids(self) -> tuple[str, ...]:

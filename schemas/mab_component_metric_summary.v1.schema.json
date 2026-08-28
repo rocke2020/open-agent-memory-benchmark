@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "ExactRational": {
+      "additionalProperties": false,
+      "properties": {
+        "denominator": {
+          "exclusiveMinimum": 0,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "numerator": {
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "schema_name": {
+          "const": "exact_rational",
+          "default": "exact_rational",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "denominator",
+        "numerator",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "ExactRational",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/mab_component_metric_summary/v1",
+  "additionalProperties": false,
+  "properties": {
+    "case_count": {
+      "exclusiveMinimum": 0,
+      "title": "Case Count",
+      "type": "integer"
+    },
+    "component": {
+      "enum": [
+        "ar",
+        "icl",
+        "recsys",
+        "lru",
+        "cr_sf"
+      ],
+      "title": "Component",
+      "type": "string"
+    },
+    "plan_count": {
+      "exclusiveMinimum": 0,
+      "title": "Plan Count",
+      "type": "integer"
+    },
+    "schema_name": {
+      "const": "mab_component_metric_summary",
+      "default": "mab_component_metric_summary",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "score": {
+      "$ref": "#/$defs/ExactRational"
+    }
+  },
+  "required": [
+    "case_count",
+    "component",
+    "plan_count",
+    "schema_name",
+    "schema_version",
+    "score"
+  ],
+  "title": "mab_component_metric_summary",
+  "type": "object"
+}

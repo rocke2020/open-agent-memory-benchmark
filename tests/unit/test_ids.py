@@ -137,3 +137,6 @@ def test_decimal_uses_the_same_canonical_path_inside_and_outside_models() -> Non
     assert ids.canonical_json_bytes({"amount": Decimal("1.20")}) == (
         ids.canonical_json_bytes({"amount": record.amount})
     )
+    assert ids.canonical_json_bytes(record) == ids.canonical_json_bytes(
+        record.model_dump(mode="python")
+    )

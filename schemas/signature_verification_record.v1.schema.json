@@ -1,0 +1,72 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/signature_verification_record/v1",
+  "additionalProperties": false,
+  "properties": {
+    "algorithm": {
+      "const": "ed25519",
+      "default": "ed25519",
+      "title": "Algorithm",
+      "type": "string"
+    },
+    "key_binding_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Key Binding Id",
+      "type": "string"
+    },
+    "public_key_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Public Key Sha256",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "signature_verification_record",
+      "default": "signature_verification_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "signature_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Signature Sha256",
+      "type": "string"
+    },
+    "signed_payload_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Signed Payload Sha256",
+      "type": "string"
+    },
+    "trusted_key_fingerprint": {
+      "minLength": 1,
+      "title": "Trusted Key Fingerprint",
+      "type": "string"
+    },
+    "verification_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Verification Id",
+      "type": "string"
+    },
+    "verified_at": {
+      "format": "date-time",
+      "title": "Verified At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "key_binding_id",
+    "public_key_sha256",
+    "schema_name",
+    "schema_version",
+    "signature_sha256",
+    "signed_payload_sha256",
+    "trusted_key_fingerprint",
+    "verification_id",
+    "verified_at"
+  ],
+  "title": "signature_verification_record",
+  "type": "object"
+}

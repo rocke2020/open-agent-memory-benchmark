@@ -1,0 +1,775 @@
+{
+  "$defs": {
+    "AggregateMetricDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "absolute_delta": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "aggregate_contract_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Aggregate Contract Hash",
+          "type": "string"
+        },
+        "denominator": {
+          "exclusiveMinimum": 0,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "left": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "metric_id": {
+          "minLength": 1,
+          "title": "Metric Id",
+          "type": "string"
+        },
+        "reducer_id": {
+          "minLength": 1,
+          "title": "Reducer Id",
+          "type": "string"
+        },
+        "reducer_version": {
+          "exclusiveMinimum": 0,
+          "title": "Reducer Version",
+          "type": "integer"
+        },
+        "right": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "schema_name": {
+          "const": "aggregate_metric_delta",
+          "default": "aggregate_metric_delta",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "signed_delta": {
+          "$ref": "#/$defs/ExactRational"
+        }
+      },
+      "required": [
+        "absolute_delta",
+        "aggregate_contract_hash",
+        "denominator",
+        "left",
+        "metric_id",
+        "reducer_id",
+        "reducer_version",
+        "right",
+        "schema_name",
+        "schema_version",
+        "signed_delta"
+      ],
+      "title": "AggregateMetricDelta",
+      "type": "object"
+    },
+    "ComparableComparisonReport": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate_metric_delta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AggregateMetricDelta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comparable": {
+          "const": true,
+          "default": true,
+          "title": "Comparable",
+          "type": "boolean"
+        },
+        "comparison_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Comparison Id",
+          "type": "string"
+        },
+        "comparison_spec_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Comparison Spec Hash",
+          "type": "string"
+        },
+        "cost_delta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComparisonCostDelta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limitations": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "ordered_source_root_hashes": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          ],
+          "title": "Ordered Source Root Hashes",
+          "type": "array"
+        },
+        "paired_metric_deltas": {
+          "items": {
+            "$ref": "#/$defs/PairedMetricDelta"
+          },
+          "title": "Paired Metric Deltas",
+          "type": "array"
+        },
+        "predicates": {
+          "items": {
+            "$ref": "#/$defs/ComparisonPredicateResult"
+          },
+          "title": "Predicates",
+          "type": "array"
+        },
+        "schema_name": {
+          "const": "comparison_report",
+          "default": "comparison_report",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "winner": {
+          "anyOf": [
+            {
+              "enum": [
+                "left",
+                "right",
+                "tie"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Winner"
+        }
+      },
+      "required": [
+        "aggregate_metric_delta",
+        "comparison_id",
+        "comparison_spec_hash",
+        "cost_delta",
+        "limitations",
+        "ordered_source_root_hashes",
+        "paired_metric_deltas",
+        "predicates",
+        "schema_name",
+        "schema_version",
+        "winner"
+      ],
+      "title": "ComparableComparisonReport",
+      "type": "object"
+    },
+    "ComparisonCostDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "absolute_delta": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "basis": {
+          "enum": [
+            "raw_resource",
+            "actual_supplier_charge",
+            "estimate_from_measured_usage"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "cost_control_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Cost Control Hash",
+          "type": "string"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "dimension_id": {
+          "minLength": 1,
+          "title": "Dimension Id",
+          "type": "string"
+        },
+        "left": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "right": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "schema_name": {
+          "const": "comparison_cost_delta",
+          "default": "comparison_cost_delta",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "signed_delta": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "unit": {
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/ComparisonCostView"
+        }
+      },
+      "required": [
+        "absolute_delta",
+        "basis",
+        "cost_control_hash",
+        "currency",
+        "dimension_id",
+        "left",
+        "right",
+        "schema_name",
+        "schema_version",
+        "signed_delta",
+        "unit",
+        "view"
+      ],
+      "title": "ComparisonCostDelta",
+      "type": "object"
+    },
+    "ComparisonCostView": {
+      "enum": [
+        "none",
+        "raw_resource",
+        "actual_charge",
+        "declared_rate_estimate"
+      ],
+      "title": "ComparisonCostView",
+      "type": "string"
+    },
+    "ComparisonPredicateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Hash",
+          "type": "string"
+        },
+        "left_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Left Hash",
+          "type": "string"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "right_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Right Hash",
+          "type": "string"
+        },
+        "rule_id": {
+          "minLength": 1,
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "comparison_predicate_result",
+          "default": "comparison_predicate_result",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_hash",
+        "left_hash",
+        "passed",
+        "right_hash",
+        "rule_id",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "ComparisonPredicateResult",
+      "type": "object"
+    },
+    "ExactRational": {
+      "additionalProperties": false,
+      "properties": {
+        "denominator": {
+          "exclusiveMinimum": 0,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "numerator": {
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "schema_name": {
+          "const": "exact_rational",
+          "default": "exact_rational",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "denominator",
+        "numerator",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "ExactRational",
+      "type": "object"
+    },
+    "IncomparableComparisonReport": {
+      "additionalProperties": false,
+      "properties": {
+        "comparable": {
+          "const": false,
+          "default": false,
+          "title": "Comparable",
+          "type": "boolean"
+        },
+        "comparison_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Comparison Id",
+          "type": "string"
+        },
+        "comparison_spec_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Comparison Spec Hash",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "ordered_source_root_hashes": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          ],
+          "title": "Ordered Source Root Hashes",
+          "type": "array"
+        },
+        "predicates": {
+          "items": {
+            "$ref": "#/$defs/ComparisonPredicateResult"
+          },
+          "title": "Predicates",
+          "type": "array"
+        },
+        "schema_name": {
+          "const": "comparison_report",
+          "default": "comparison_report",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "comparison_id",
+        "comparison_spec_hash",
+        "limitations",
+        "ordered_source_root_hashes",
+        "predicates",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "IncomparableComparisonReport",
+      "type": "object"
+    },
+    "PairedMetricDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "absolute_delta": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "case_manifest_entry_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Case Manifest Entry Id",
+          "type": "string"
+        },
+        "left": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "left_case_occurrence_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Left Case Occurrence Id",
+          "type": "string"
+        },
+        "metric_id": {
+          "minLength": 1,
+          "title": "Metric Id",
+          "type": "string"
+        },
+        "right": {
+          "$ref": "#/$defs/ExactRational"
+        },
+        "right_case_occurrence_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Right Case Occurrence Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "paired_metric_delta",
+          "default": "paired_metric_delta",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "signed_delta": {
+          "$ref": "#/$defs/ExactRational"
+        }
+      },
+      "required": [
+        "absolute_delta",
+        "case_manifest_entry_id",
+        "left",
+        "left_case_occurrence_id",
+        "metric_id",
+        "right",
+        "right_case_occurrence_id",
+        "schema_name",
+        "schema_version",
+        "signed_delta"
+      ],
+      "title": "PairedMetricDelta",
+      "type": "object"
+    },
+    "SourceEvidenceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Binding Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "source_evidence_binding",
+          "default": "source_evidence_binding",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_identity": {
+          "minLength": 1,
+          "title": "Source Identity",
+          "type": "string"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/SourceEvidenceKind"
+        },
+        "source_root_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Root Hash",
+          "type": "string"
+        },
+        "source_schema_versions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Source Schema Versions",
+          "type": "array"
+        },
+        "validation_result_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Validation Result Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding_id",
+        "schema_name",
+        "schema_version",
+        "source_identity",
+        "source_kind",
+        "source_root_hash",
+        "source_schema_versions",
+        "validation_result_hash"
+      ],
+      "title": "SourceEvidenceBinding",
+      "type": "object"
+    },
+    "SourceEvidenceKind": {
+      "enum": [
+        "run",
+        "external",
+        "derivation",
+        "provider_service"
+      ],
+      "title": "SourceEvidenceKind",
+      "type": "string"
+    },
+    "ValidationClaimBoundary": {
+      "additionalProperties": false,
+      "properties": {
+        "applicable_rule_count": {
+          "minimum": 0,
+          "title": "Applicable Rule Count",
+          "type": "integer"
+        },
+        "billing_complete": {
+          "title": "Billing Complete",
+          "type": "boolean"
+        },
+        "comparison_eligible": {
+          "title": "Comparison Eligible",
+          "type": "boolean"
+        },
+        "cost_complete": {
+          "title": "Cost Complete",
+          "type": "boolean"
+        },
+        "executed_rule_count": {
+          "minimum": 0,
+          "title": "Executed Rule Count",
+          "type": "integer"
+        },
+        "failed_rule_count": {
+          "minimum": 0,
+          "title": "Failed Rule Count",
+          "type": "integer"
+        },
+        "missing_rule_count": {
+          "minimum": 0,
+          "title": "Missing Rule Count",
+          "type": "integer"
+        },
+        "not_applicable_rule_count": {
+          "minimum": 0,
+          "title": "Not Applicable Rule Count",
+          "type": "integer"
+        },
+        "passed_rule_count": {
+          "minimum": 0,
+          "title": "Passed Rule Count",
+          "type": "integer"
+        },
+        "schema_name": {
+          "const": "validation_claim_boundary",
+          "default": "validation_claim_boundary",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "diagnostic"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "applicable_rule_count",
+        "billing_complete",
+        "comparison_eligible",
+        "cost_complete",
+        "executed_rule_count",
+        "failed_rule_count",
+        "missing_rule_count",
+        "not_applicable_rule_count",
+        "passed_rule_count",
+        "schema_name",
+        "schema_version",
+        "status"
+      ],
+      "title": "ValidationClaimBoundary",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/comparison_report_model/v1",
+  "additionalProperties": false,
+  "properties": {
+    "claim_boundary": {
+      "$ref": "#/$defs/ValidationClaimBoundary"
+    },
+    "comparison": {
+      "discriminator": {
+        "mapping": {
+          "False": "#/$defs/IncomparableComparisonReport",
+          "True": "#/$defs/ComparableComparisonReport"
+        },
+        "propertyName": "comparable"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ComparableComparisonReport"
+        },
+        {
+          "$ref": "#/$defs/IncomparableComparisonReport"
+        }
+      ],
+      "title": "Comparison"
+    },
+    "left_run_report_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Left Run Report Hash",
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "ordered_evidence_validation_hashes": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      ],
+      "title": "Ordered Evidence Validation Hashes",
+      "type": "array"
+    },
+    "ordered_source_bindings": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/SourceEvidenceBinding"
+        },
+        {
+          "$ref": "#/$defs/SourceEvidenceBinding"
+        }
+      ],
+      "title": "Ordered Source Bindings",
+      "type": "array"
+    },
+    "report_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Id",
+      "type": "string"
+    },
+    "report_spec_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Spec Hash",
+      "type": "string"
+    },
+    "right_run_report_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Right Run Report Hash",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "comparison_report_model",
+      "default": "comparison_report_model",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "claim_boundary",
+    "comparison",
+    "left_run_report_hash",
+    "limitations",
+    "ordered_evidence_validation_hashes",
+    "ordered_source_bindings",
+    "report_id",
+    "report_spec_hash",
+    "right_run_report_hash",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "comparison_report_model",
+  "type": "object"
+}

@@ -1,0 +1,54 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/comparison_pair_binding/v1",
+  "additionalProperties": false,
+  "properties": {
+    "case_manifest_entry_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Case Manifest Entry Id",
+      "type": "string"
+    },
+    "left_case_occurrence_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Left Case Occurrence Id",
+      "type": "string"
+    },
+    "metric_id": {
+      "minLength": 1,
+      "title": "Metric Id",
+      "type": "string"
+    },
+    "pair_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Pair Id",
+      "type": "string"
+    },
+    "right_case_occurrence_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Right Case Occurrence Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "comparison_pair_binding",
+      "default": "comparison_pair_binding",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "case_manifest_entry_id",
+    "left_case_occurrence_id",
+    "metric_id",
+    "pair_id",
+    "right_case_occurrence_id",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "comparison_pair_binding",
+  "type": "object"
+}

@@ -1,0 +1,53 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/comparison_predicate_result/v1",
+  "additionalProperties": false,
+  "properties": {
+    "expected_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Expected Hash",
+      "type": "string"
+    },
+    "left_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Left Hash",
+      "type": "string"
+    },
+    "passed": {
+      "title": "Passed",
+      "type": "boolean"
+    },
+    "right_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Right Hash",
+      "type": "string"
+    },
+    "rule_id": {
+      "minLength": 1,
+      "title": "Rule Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "comparison_predicate_result",
+      "default": "comparison_predicate_result",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "expected_hash",
+    "left_hash",
+    "passed",
+    "right_hash",
+    "rule_id",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "comparison_predicate_result",
+  "type": "object"
+}

@@ -3,11 +3,13 @@ from __future__ import annotations
 import copy
 import hashlib
 from fractions import Fraction
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from oamb.contracts.evidence import CaseRecordV3, IngestionPlanRecordV2
 from oamb.contracts.ids import (
     canonical_sha256,
     case_manifest_entry_id,
@@ -282,6 +284,132 @@ def test_capability_balanced_reducer_uses_exact_plan_macro_fractions(
     assert result.ttl_score == Fraction(1, 4)
     assert result.index_value == Fraction(775, 12)
     assert all(isinstance(plan.score, Fraction) for plan in result.plans)
+
+
+def _sealed_native_records(
+    bundle: Any,
+    *,
+    missing_metric_case_id: str | None = None,
+) -> tuple[tuple[SimpleNamespace, ...], tuple[SimpleNamespace, ...]]:
+    from oamb.contracts.evidence import CaseEvaluationDisposition
+    from oamb.contracts.states import CaseState, IngestionPlanState
+
+    case_occurrence_ids = {
+        case.entry.case_manifest_entry_id: canonical_sha256(
+            ["native-mab-case", case.entry.case_manifest_entry_id]
+        )
+        for case in bundle.cases
+    }
+    cases = tuple(
+        SimpleNamespace(
+            case_occurrence_id=case_occurrence_ids[case.entry.case_manifest_entry_id],
+            case_manifest_entry_id=case.entry.case_manifest_entry_id,
+            state=CaseState.COMPLETED,
+            evaluation_disposition=CaseEvaluationDisposition.DETERMINISTIC_EVALUATED,
+            metric_id=case.case_plan.metric_id,
+            metric_numerator=(
+                None if case.entry.case_manifest_entry_id == missing_metric_case_id else 1
+            ),
+            metric_denominator=(
+                None if case.entry.case_manifest_entry_id == missing_metric_case_id else 1
+            ),
+            query_mutation_status="unchanged",
+            pre_query_state_sha256=canonical_sha256(
+                ["native-mab-state", case.entry.case_manifest_entry_id]
+            ),
+            post_query_state_sha256=canonical_sha256(
+                ["native-mab-state", case.entry.case_manifest_entry_id]
+            ),
+            evaluation_raw_ref=canonical_sha256(
+                ["native-mab-evaluation", case.entry.case_manifest_entry_id]
+            ),
+        )
+        for case in bundle.cases
+    )
+    plans = tuple(
+        SimpleNamespace(
+            ingestion_occurrence_id=canonical_sha256(
+                ["native-mab-plan", plan.manifest.plan_manifest_entry_id]
+            ),
+            ingestion_plan_id=plan.manifest.ingestion_plan_id,
+            ordered_member_context_manifest_entry_ids=(
+                plan.manifest.ordered_member_context_manifest_entry_ids
+            ),
+            ordered_case_occurrence_ids=tuple(
+                case_occurrence_ids[case_id]
+                for case_id in plan.manifest.ordered_case_manifest_entry_ids
+            ),
+            state=IngestionPlanState.SEALED,
+        )
+        for plan in bundle.plans
+    )
+    return plans, cases
+
+
+def test_native_mab65_reduction_suppresses_index_without_sealed_comparison_controls(
+    mab65_bundle: Any,
+) -> None:
+    from oamb.artifacts.validation.run_evidence import NativeRunEvidenceValidationInput
+    from oamb.reporting.native_reduce import _build_native_mab65_report_reduction
+
+    plans, cases = _sealed_native_records(mab65_bundle)
+    target = NativeRunEvidenceValidationInput(
+        capsule_root=Path("fixture-capsule"),
+        workload_profile_id="oamb-t8-workload-mab65-v1",
+        workload_target=mab65_bundle,
+        adapter_profile_id="oamb-t8-adapter-openviking-rest-v1",
+        accounting_target=object(),
+    )
+
+    report_reduction = _build_native_mab65_report_reduction(
+        validation_target=target,
+        plans=cast(tuple[IngestionPlanRecordV2, ...], plans),
+        cases=cast(tuple[CaseRecordV3, ...], cases),
+    )
+
+    assert report_reduction is not None
+    assert not report_reduction.available
+    assert report_reduction.unavailable_reason == "comparison_controls"
+    assert report_reduction.plans == ()
+    assert report_reduction.components == ()
+    assert report_reduction.ttl_score is None
+    assert report_reduction.capabilities == ()
+    assert report_reduction.index_value is None
+
+
+def test_native_mab65_reduction_keeps_control_gate_first_when_case_metric_is_missing(
+    mab65_bundle: Any,
+) -> None:
+    from oamb.artifacts.validation.run_evidence import NativeRunEvidenceValidationInput
+    from oamb.reporting.native_reduce import _build_native_mab65_report_reduction
+
+    missing_case_id = mab65_bundle.cases[-1].entry.case_manifest_entry_id
+    plans, cases = _sealed_native_records(
+        mab65_bundle,
+        missing_metric_case_id=missing_case_id,
+    )
+    target = NativeRunEvidenceValidationInput(
+        capsule_root=Path("fixture-capsule"),
+        workload_profile_id="oamb-t8-workload-mab65-v1",
+        workload_target=mab65_bundle,
+        adapter_profile_id="oamb-t8-adapter-openviking-rest-v1",
+        accounting_target=object(),
+    )
+
+    report_reduction = _build_native_mab65_report_reduction(
+        validation_target=target,
+        plans=cast(tuple[IngestionPlanRecordV2, ...], plans),
+        cases=cast(tuple[CaseRecordV3, ...], cases),
+    )
+
+    assert report_reduction is not None
+    assert not report_reduction.available
+    assert report_reduction.unavailable_reason == "comparison_controls"
+    assert report_reduction.plans == ()
+    assert report_reduction.components == ()
+    assert report_reduction.ttl_score is None
+    assert report_reduction.capabilities == ()
+    assert report_reduction.index_value is None
 
 
 @pytest.mark.parametrize(

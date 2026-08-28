@@ -299,10 +299,10 @@ def reduce_mab65(
         return _unavailable("catalog_fingerprint")
     if bundle.unicode_fingerprint != expected_unicode_fingerprint:
         return _unavailable("unicode_fingerprint")
-    if observed_interaction_fingerprint != expected_interaction_fingerprint:
-        return _unavailable("interaction_fingerprint")
     if not comparison_controls_closed:
         return _unavailable("comparison_controls")
+    if observed_interaction_fingerprint != expected_interaction_fingerprint:
+        return _unavailable("interaction_fingerprint")
     if not capsule_valid:
         return _unavailable("capsule_invalid")
     if not query_state_unchanged:

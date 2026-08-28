@@ -183,16 +183,22 @@ def test_prepare_seals_claim_reservation_and_intent_before_dispatch(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("claim_update", "reservation_update", "intent_update", "maximum_update", "match"),
     (
-        ({"stage": "different"}, {}, {}, {}, "stage"),
-        ({"reconciliation_capability": "receipt_lookup"}, {}, {}, {}, "reconciliation"),
-        ({}, {"scope_id": "different"}, {}, {}, "scope"),
+        "claim_update",
+        "reservation_update",
+        "intent_update",
+        "maximum_provider_units",
+        "match",
+    ),
+    (
+        ({"stage": "different"}, {}, {}, None, "stage"),
+        ({"reconciliation_capability": "receipt_lookup"}, {}, {}, None, "reconciliation"),
+        ({}, {"scope_id": "different"}, {}, None, "scope"),
         (
             {},
             {},
             {},
-            {"provider_units": (("openai", "chat_completion", "call", 2),)},
+            (("openai", "chat_completion", "call", 2),),
             "provider units",
         ),
     ),
@@ -202,7 +208,7 @@ def test_prepare_rejects_a_chain_that_would_fail_validation_before_writing(
     claim_update: dict[str, object],
     reservation_update: dict[str, object],
     intent_update: dict[str, object],
-    maximum_update: dict[str, object],
+    maximum_provider_units: tuple[tuple[str, str, str, int], ...] | None,
     match: str,
 ) -> None:
     store = RecordingStore(tmp_path / "capsule")
@@ -213,7 +219,11 @@ def test_prepare_rejects_a_chain_that_would_fail_validation_before_writing(
             claim=claim().model_copy(update=claim_update),
             reservation=reservation().model_copy(update=reservation_update),
             intent=intent().model_copy(update=intent_update),
-            maximum=replace(maximum(), **maximum_update),
+            maximum=(
+                replace(maximum(), provider_units=maximum_provider_units)
+                if maximum_provider_units is not None
+                else maximum()
+            ),
         )
 
     assert store.events == []

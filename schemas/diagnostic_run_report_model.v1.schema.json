@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "SourceEvidenceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Binding Id",
+          "type": "string"
+        },
+        "schema_name": {
+          "const": "source_evidence_binding",
+          "default": "source_evidence_binding",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_identity": {
+          "minLength": 1,
+          "title": "Source Identity",
+          "type": "string"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/SourceEvidenceKind"
+        },
+        "source_root_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Root Hash",
+          "type": "string"
+        },
+        "source_schema_versions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Source Schema Versions",
+          "type": "array"
+        },
+        "validation_result_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Validation Result Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding_id",
+        "schema_name",
+        "schema_version",
+        "source_identity",
+        "source_kind",
+        "source_root_hash",
+        "source_schema_versions",
+        "validation_result_hash"
+      ],
+      "title": "SourceEvidenceBinding",
+      "type": "object"
+    },
+    "SourceEvidenceKind": {
+      "enum": [
+        "run",
+        "external",
+        "derivation",
+        "provider_service"
+      ],
+      "title": "SourceEvidenceKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/diagnostic_run_report_model/v1",
+  "additionalProperties": false,
+  "properties": {
+    "evidence_validation_profile_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evidence Validation Profile Hash",
+      "type": "string"
+    },
+    "evidence_validation_result_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evidence Validation Result Hash",
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "ordered_source_bindings": {
+      "maxItems": 1,
+      "minItems": 1,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/SourceEvidenceBinding"
+        }
+      ],
+      "title": "Ordered Source Bindings",
+      "type": "array"
+    },
+    "origin_kind": {
+      "enum": [
+        "native",
+        "external"
+      ],
+      "title": "Origin Kind",
+      "type": "string"
+    },
+    "report_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Id",
+      "type": "string"
+    },
+    "report_spec_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Spec Hash",
+      "type": "string"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "diagnostic_run_report_model",
+      "default": "diagnostic_run_report_model",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "validation_issue_codes": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Validation Issue Codes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "evidence_validation_profile_hash",
+    "evidence_validation_result_hash",
+    "limitations",
+    "ordered_source_bindings",
+    "origin_kind",
+    "report_id",
+    "report_spec_hash",
+    "run_id",
+    "schema_name",
+    "schema_version",
+    "validation_issue_codes"
+  ],
+  "title": "diagnostic_run_report_model",
+  "type": "object"
+}

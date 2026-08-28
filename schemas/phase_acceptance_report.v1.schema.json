@@ -1,0 +1,126 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/phase_acceptance_report/v1",
+  "additionalProperties": false,
+  "properties": {
+    "acceptance_report_spec_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Acceptance Report Spec Hash",
+      "type": "string"
+    },
+    "ai_review_record_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Ai Review Record Hash",
+      "type": "string"
+    },
+    "evaluation_export_validation_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evaluation Export Validation Hash",
+      "type": "string"
+    },
+    "evaluation_report_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evaluation Report Hash",
+      "type": "string"
+    },
+    "evidence_references": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence References",
+      "type": "array"
+    },
+    "finding_codes": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Finding Codes",
+      "type": "array"
+    },
+    "gate_review_bundle_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Gate Review Bundle Hash",
+      "type": "string"
+    },
+    "human_review_record_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Human Review Record Hash",
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "passed_by_ai": {
+      "title": "Passed By Ai",
+      "type": "boolean"
+    },
+    "passed_by_human": {
+      "title": "Passed By Human",
+      "type": "boolean"
+    },
+    "phase_gate_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Phase Gate Hash",
+      "type": "string"
+    },
+    "phase_id": {
+      "minLength": 1,
+      "title": "Phase Id",
+      "type": "string"
+    },
+    "report_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Id",
+      "type": "string"
+    },
+    "review_bundle_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Review Bundle Hash",
+      "type": "string"
+    },
+    "review_current": {
+      "title": "Review Current",
+      "type": "boolean"
+    },
+    "schema_name": {
+      "const": "phase_acceptance_report",
+      "default": "phase_acceptance_report",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "acceptance_report_spec_hash",
+    "ai_review_record_hash",
+    "evaluation_export_validation_hash",
+    "evaluation_report_hash",
+    "evidence_references",
+    "finding_codes",
+    "gate_review_bundle_hash",
+    "human_review_record_hash",
+    "limitations",
+    "passed_by_ai",
+    "passed_by_human",
+    "phase_gate_hash",
+    "phase_id",
+    "report_id",
+    "review_bundle_hash",
+    "review_current",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "phase_acceptance_report",
+  "type": "object"
+}

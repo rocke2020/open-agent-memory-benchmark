@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.ports import MemorySystemProfileUnsupported
 from oamb.memory_systems.rest import parse_exact_json_object
 
@@ -27,6 +28,41 @@ class Mem0ExactProfile:
     source_revision: str
     source_archive_sha256: str
     is_default_comparison_transport: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Mem0OperationAuditEvent:
+    event_id: str
+    sequence: int
+    operation_kind: str
+    unsupported_profile_id: str
+    unsupported_reason_codes: tuple[str, ...]
+    dispatcher_count_before: int
+    dispatcher_count_after: int
+
+
+@dataclass(frozen=True, slots=True)
+class Mem0ZeroDispatchAudit:
+    audit_id: str
+    profile: Mem0ExactProfile
+    unsupported_profile_id: str
+    unsupported_reason_codes: tuple[str, ...]
+    ordered_events: tuple[Mem0OperationAuditEvent, ...]
+    producer_attestation: object = field(repr=False, compare=False)
+
+    @property
+    def rejected_operation_count(self) -> int:
+        return len(self.ordered_events)
+
+    @property
+    def dispatched_operation_count(self) -> int:
+        return sum(
+            event.dispatcher_count_after - event.dispatcher_count_before
+            for event in self.ordered_events
+        )
+
+
+_MEM0_ADAPTER_AUDIT_PRODUCER = object()
 
 
 MEM0_REST_PROFILE = Mem0ExactProfile(
@@ -54,6 +90,17 @@ _V2_0_19_UNSUPPORTED_REASONS = (
     "incomplete_main_entity_history_projection",
     "swallowed_internal_errors",
     "audited_empty_unproven",
+)
+MEM0_ZERO_DISPATCH_OPERATIONS = (
+    "resolve",
+    "allocate_ingestion_scope",
+    "plan_ingestion",
+    "ingest",
+    "wait_ready",
+    "inventory",
+    "state_digest",
+    "project",
+    "retrieve",
 )
 
 _PROFILE_VERDICT_FIELDS = frozenset(
@@ -133,6 +180,154 @@ def reference_profile_unsupported(profile: Mem0ExactProfile) -> MemorySystemProf
     )
 
 
+def build_mem0_operation_audit_event(
+    *,
+    profile: Mem0ExactProfile,
+    sequence: int,
+    operation_kind: str,
+    dispatcher_count_before: int,
+    dispatcher_count_after: int,
+) -> Mem0OperationAuditEvent:
+    if operation_kind not in MEM0_ZERO_DISPATCH_OPERATIONS:
+        raise ValueError("unknown Mem0 zero-dispatch operation")
+    unsupported = reference_profile_unsupported(profile)
+    fields = {
+        "sequence": sequence,
+        "operation_kind": operation_kind,
+        "unsupported_profile_id": unsupported.profile_id,
+        "unsupported_reason_codes": unsupported.reason_codes,
+        "dispatcher_count_before": dispatcher_count_before,
+        "dispatcher_count_after": dispatcher_count_after,
+    }
+    return Mem0OperationAuditEvent(
+        event_id=canonical_sha256(["oamb-mem0-operation-audit-event-v1", fields]),
+        sequence=sequence,
+        operation_kind=operation_kind,
+        unsupported_profile_id=unsupported.profile_id,
+        unsupported_reason_codes=unsupported.reason_codes,
+        dispatcher_count_before=dispatcher_count_before,
+        dispatcher_count_after=dispatcher_count_after,
+    )
+
+
+def _seal_mem0_zero_dispatch_audit(
+    *,
+    profile: Mem0ExactProfile,
+    ordered_events: tuple[Mem0OperationAuditEvent, ...],
+) -> Mem0ZeroDispatchAudit:
+    unsupported = reference_profile_unsupported(profile)
+    audit_id = _mem0_zero_dispatch_audit_id(
+        profile=profile,
+        unsupported_profile_id=unsupported.profile_id,
+        unsupported_reason_codes=unsupported.reason_codes,
+        ordered_events=ordered_events,
+    )
+    return Mem0ZeroDispatchAudit(
+        audit_id=audit_id,
+        profile=profile,
+        unsupported_profile_id=unsupported.profile_id,
+        unsupported_reason_codes=unsupported.reason_codes,
+        ordered_events=ordered_events,
+        producer_attestation=_MEM0_ADAPTER_AUDIT_PRODUCER,
+    )
+
+
+def mem0_zero_dispatch_audit_is_valid(audit: Mem0ZeroDispatchAudit) -> bool:
+    if audit.producer_attestation is not _MEM0_ADAPTER_AUDIT_PRODUCER:
+        return False
+    try:
+        unsupported = reference_profile_unsupported(audit.profile)
+    except ValueError:
+        return False
+    if (
+        audit.unsupported_profile_id != unsupported.profile_id
+        or audit.unsupported_reason_codes != unsupported.reason_codes
+        or not audit.ordered_events
+    ):
+        return False
+    for sequence, event in enumerate(audit.ordered_events, 1):
+        try:
+            expected = build_mem0_operation_audit_event(
+                profile=audit.profile,
+                sequence=sequence,
+                operation_kind=event.operation_kind,
+                dispatcher_count_before=event.dispatcher_count_before,
+                dispatcher_count_after=event.dispatcher_count_after,
+            )
+        except ValueError:
+            return False
+        if (
+            event != expected
+            or event.dispatcher_count_before != 0
+            or event.dispatcher_count_after != 0
+        ):
+            return False
+    return audit.audit_id == _mem0_zero_dispatch_audit_id(
+        profile=audit.profile,
+        unsupported_profile_id=audit.unsupported_profile_id,
+        unsupported_reason_codes=audit.unsupported_reason_codes,
+        ordered_events=audit.ordered_events,
+    )
+
+
+def mem0_zero_dispatch_audit_binding(audit: Mem0ZeroDispatchAudit) -> tuple[object, ...]:
+    return (
+        audit.audit_id,
+        audit.profile.profile_id,
+        audit.profile.transport_kind,
+        audit.profile.release_version,
+        audit.profile.source_revision,
+        audit.profile.source_archive_sha256,
+        audit.unsupported_profile_id,
+        audit.unsupported_reason_codes,
+        tuple(
+            (
+                event.event_id,
+                event.sequence,
+                event.operation_kind,
+                event.unsupported_profile_id,
+                event.unsupported_reason_codes,
+                event.dispatcher_count_before,
+                event.dispatcher_count_after,
+            )
+            for event in audit.ordered_events
+        ),
+    )
+
+
+def _mem0_zero_dispatch_audit_id(
+    *,
+    profile: Mem0ExactProfile,
+    unsupported_profile_id: str,
+    unsupported_reason_codes: tuple[str, ...],
+    ordered_events: tuple[Mem0OperationAuditEvent, ...],
+) -> str:
+    return canonical_sha256(
+        [
+            "oamb-mem0-zero-dispatch-audit-v1",
+            profile.profile_id,
+            profile.transport_kind,
+            profile.release_version,
+            profile.source_revision,
+            profile.source_archive_sha256,
+            unsupported_profile_id,
+            unsupported_reason_codes,
+            tuple(
+                (
+                    event.event_id,
+                    event.sequence,
+                    event.operation_kind,
+                    event.unsupported_profile_id,
+                    event.unsupported_reason_codes,
+                    event.dispatcher_count_before,
+                    event.dispatcher_count_after,
+                )
+                for event in ordered_events
+            ),
+        ]
+    )
+
+
 def parse_reference_profile_verdict(
     raw_bytes: bytes,
     *,
@@ -209,9 +404,15 @@ __all__ = [
     "MEM0_SDK_PROFILE",
     "MEM0_SOURCE_ARCHIVE_SHA256",
     "MEM0_SOURCE_REVISION",
+    "MEM0_ZERO_DISPATCH_OPERATIONS",
     "Mem0ExactProfile",
+    "Mem0OperationAuditEvent",
     "Mem0ReferenceProfileVerdict",
     "Mem0TransportKind",
+    "Mem0ZeroDispatchAudit",
+    "build_mem0_operation_audit_event",
+    "mem0_zero_dispatch_audit_binding",
+    "mem0_zero_dispatch_audit_is_valid",
     "parse_reference_profile_verdict",
     "reference_profile_unsupported",
 ]

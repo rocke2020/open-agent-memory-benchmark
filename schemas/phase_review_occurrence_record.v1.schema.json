@@ -1,0 +1,107 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/phase_review_occurrence_record/v1",
+  "additionalProperties": false,
+  "properties": {
+    "approval_record_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Approval Record Id",
+      "type": "string"
+    },
+    "budget_id": {
+      "minLength": 1,
+      "title": "Budget Id",
+      "type": "string"
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ended At"
+    },
+    "ordinal": {
+      "exclusiveMinimum": 0,
+      "title": "Ordinal",
+      "type": "integer"
+    },
+    "phase_id": {
+      "minLength": 1,
+      "title": "Phase Id",
+      "type": "string"
+    },
+    "phase_review_occurrence_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Phase Review Occurrence Id",
+      "type": "string"
+    },
+    "review_bundle_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Review Bundle Hash",
+      "type": "string"
+    },
+    "reviewer_role_binding_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Reviewer Role Binding Hash",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "phase_review_occurrence_record",
+      "default": "phase_review_occurrence_record",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Started At"
+    },
+    "state": {
+      "enum": [
+        "planned",
+        "budget_reserved",
+        "running",
+        "sealed",
+        "error",
+        "cancelled",
+        "budget_exceeded",
+        "interrupted_unknown_outcome"
+      ],
+      "title": "State",
+      "type": "string"
+    }
+  },
+  "required": [
+    "approval_record_id",
+    "budget_id",
+    "ended_at",
+    "ordinal",
+    "phase_id",
+    "phase_review_occurrence_id",
+    "review_bundle_hash",
+    "reviewer_role_binding_hash",
+    "schema_name",
+    "schema_version",
+    "started_at",
+    "state"
+  ],
+  "title": "phase_review_occurrence_record",
+  "type": "object"
+}

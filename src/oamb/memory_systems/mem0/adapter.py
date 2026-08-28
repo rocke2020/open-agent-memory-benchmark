@@ -23,7 +23,15 @@ from oamb.contracts.ports import (
     StateDigestReceipt,
 )
 
-from .profiles import MEM0_REST_PROFILE, Mem0ExactProfile, reference_profile_unsupported
+from .profiles import (
+    MEM0_REST_PROFILE,
+    Mem0ExactProfile,
+    Mem0OperationAuditEvent,
+    Mem0ZeroDispatchAudit,
+    _seal_mem0_zero_dispatch_audit,
+    build_mem0_operation_audit_event,
+    reference_profile_unsupported,
+)
 
 
 class Mem0RestDispatcher(Protocol):
@@ -35,9 +43,11 @@ class Mem0RestDispatcher(Protocol):
 class _ZeroDispatchMem0Adapter:
     def __init__(self, *, profile: Mem0ExactProfile) -> None:
         self._profile = profile
+        self._dispatched_operation_count = 0
+        self._audit_events: list[Mem0OperationAuditEvent] = []
 
     async def resolve(self) -> RuntimeResolution:
-        self._raise_unsupported()
+        self._raise_unsupported("resolve")
 
     async def capabilities(self) -> CapabilitySet:
         return CapabilitySet(
@@ -48,38 +58,53 @@ class _ZeroDispatchMem0Adapter:
 
     async def allocate_ingestion_scope(self, request: ScopeAllocationRequest) -> ScopeReceipt:
         del request
-        self._raise_unsupported()
+        self._raise_unsupported("allocate_ingestion_scope")
 
     def plan_ingestion(self, request: IngestionRequest) -> tuple[IngestionDispatch, ...]:
         del request
-        self._raise_unsupported()
+        self._raise_unsupported("plan_ingestion")
 
     async def ingest(self, request: IngestionDispatchRequest) -> IngestionDispatchReceipt:
         del request
-        self._raise_unsupported()
+        self._raise_unsupported("ingest")
 
     async def wait_ready(self, request: ReadinessRequest) -> ReadinessReceipt:
         del request
-        self._raise_unsupported()
+        self._raise_unsupported("wait_ready")
 
     async def inventory(self, scope: ScopeReceipt) -> InventoryReceipt:
         del scope
-        self._raise_unsupported()
+        self._raise_unsupported("inventory")
 
     async def state_digest(self, scope: ScopeReceipt) -> StateDigestReceipt:
         del scope
-        self._raise_unsupported()
+        self._raise_unsupported("state_digest")
 
     async def project(self, scope: ScopeReceipt) -> ProjectionReceipt:
         del scope
-        self._raise_unsupported()
+        self._raise_unsupported("project")
 
     async def retrieve(self, request: RetrievalRequest) -> NativeEvidenceBatch:
         del request
-        self._raise_unsupported()
+        self._raise_unsupported("retrieve")
 
-    def _raise_unsupported(self) -> Never:
+    def _raise_unsupported(self, operation_kind: str) -> Never:
+        self._audit_events.append(
+            build_mem0_operation_audit_event(
+                profile=self._profile,
+                sequence=len(self._audit_events) + 1,
+                operation_kind=operation_kind,
+                dispatcher_count_before=self._dispatched_operation_count,
+                dispatcher_count_after=self._dispatched_operation_count,
+            )
+        )
         raise reference_profile_unsupported(self._profile)
+
+    def validation_audit(self) -> Mem0ZeroDispatchAudit:
+        return _seal_mem0_zero_dispatch_audit(
+            profile=self._profile,
+            ordered_events=tuple(self._audit_events),
+        )
 
 
 class Mem0RestAdapter(_ZeroDispatchMem0Adapter):

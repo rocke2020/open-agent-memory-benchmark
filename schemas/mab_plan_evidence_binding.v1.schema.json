@@ -1,0 +1,84 @@
+{
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/mab_plan_evidence_binding/v1",
+  "additionalProperties": false,
+  "properties": {
+    "ingestion_occurrence_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Ingestion Occurrence Id",
+      "type": "string"
+    },
+    "ingestion_plan_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Ingestion Plan Id",
+      "type": "string"
+    },
+    "member_labels": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Member Labels",
+      "type": "array"
+    },
+    "metric_id": {
+      "minLength": 1,
+      "title": "Metric Id",
+      "type": "string"
+    },
+    "ordered_case_occurrence_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Ordered Case Occurrence Ids",
+      "type": "array"
+    },
+    "ordered_logical_context_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Ordered Logical Context Ids",
+      "type": "array"
+    },
+    "plan_manifest_entry_id": {
+      "minLength": 1,
+      "title": "Plan Manifest Entry Id",
+      "type": "string"
+    },
+    "resolution_evidence_references": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Resolution Evidence References",
+      "type": "array"
+    },
+    "schema_name": {
+      "const": "mab_plan_evidence_binding",
+      "default": "mab_plan_evidence_binding",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "ingestion_occurrence_id",
+    "ingestion_plan_id",
+    "member_labels",
+    "metric_id",
+    "ordered_case_occurrence_ids",
+    "ordered_logical_context_ids",
+    "plan_manifest_entry_id",
+    "resolution_evidence_references",
+    "schema_name",
+    "schema_version"
+  ],
+  "title": "mab_plan_evidence_binding",
+  "type": "object"
+}

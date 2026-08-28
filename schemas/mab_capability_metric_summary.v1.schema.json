@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "ExactRational": {
+      "additionalProperties": false,
+      "properties": {
+        "denominator": {
+          "exclusiveMinimum": 0,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "numerator": {
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "schema_name": {
+          "const": "exact_rational",
+          "default": "exact_rational",
+          "title": "Schema Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "denominator",
+        "numerator",
+        "schema_name",
+        "schema_version"
+      ],
+      "title": "ExactRational",
+      "type": "object"
+    }
+  },
+  "$id": "https://open-agent-memory-benchmark.dev/schemas/mab_capability_metric_summary/v1",
+  "additionalProperties": false,
+  "properties": {
+    "capability": {
+      "enum": [
+        "ar",
+        "ttl",
+        "lru",
+        "cr_sf"
+      ],
+      "title": "Capability",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "mab_capability_metric_summary",
+      "default": "mab_capability_metric_summary",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "score": {
+      "$ref": "#/$defs/ExactRational"
+    },
+    "weight": {
+      "$ref": "#/$defs/ExactRational"
+    },
+    "weighted_contribution": {
+      "$ref": "#/$defs/ExactRational"
+    }
+  },
+  "required": [
+    "capability",
+    "schema_name",
+    "schema_version",
+    "score",
+    "weight",
+    "weighted_contribution"
+  ],
+  "title": "mab_capability_metric_summary",
+  "type": "object"
+}

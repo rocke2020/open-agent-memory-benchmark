@@ -161,6 +161,60 @@ def test_judge_renderer_uses_independent_unanswerable_branch() -> None:
     assert b"Explanation: The source does not say." in rendered.canonical_bytes
 
 
+def test_workload_finalizes_strict_yes_no_judge_output_as_an_exact_fraction() -> None:
+    lme = require_longmemeval()
+    from types import SimpleNamespace
+
+    from oamb.contracts.ports import AnswerValue, CasePlan, RawReferenceHandle
+
+    workload = lme.LongMemEvalWorkload(
+        SimpleNamespace(case_manifest=SimpleNamespace(cases=()), selected_rows=())
+    )
+    case_plan = CasePlan(
+        case_manifest_entry_id="a" * 64,
+        context_manifest_entry_id="b" * 64,
+        source_question_number_1_indexed=1,
+        question_bytes=b"question",
+        reference_payload=b'"answer"',
+        reference_payload_sha256="c" * 64,
+        prompt_binding_id="oamb-lme-answer-v1",
+        output_contract_id="lme-answer-text-v1",
+        metric_id="lme-judged-accuracy-v1",
+        judge_binding_id="oamb-lme-judge-v1",
+        answer_max_output_tokens=8_192,
+    )
+    answer = AnswerValue(
+        raw_reference=RawReferenceHandle("d" * 64),
+        raw_answer=b"answer",
+        parsed_value=b"answer",
+        parsed_value_sha256=hashlib.sha256(b"answer").hexdigest(),
+    )
+    judge = AnswerValue(
+        raw_reference=RawReferenceHandle("e" * 64),
+        raw_answer=b"yes\n",
+        parsed_value=b"yes\n",
+        parsed_value_sha256=hashlib.sha256(b"yes\n").hexdigest(),
+    )
+
+    evaluation = workload.finalize_judge(case_plan, answer, judge)
+
+    assert (evaluation.numerator, evaluation.denominator) == (1, 1)
+    trace = json.loads(evaluation.trace_bytes)
+    assert trace["judge_raw_reference"] == "e" * 64
+    assert trace["parsed_answer_sha256"] == answer.parsed_value_sha256
+    with pytest.raises(ValueError, match="yes or no"):
+        workload.finalize_judge(
+            case_plan,
+            answer,
+            AnswerValue(
+                raw_reference=RawReferenceHandle("f" * 64),
+                raw_answer=b"maybe",
+                parsed_value=b"maybe",
+                parsed_value_sha256=hashlib.sha256(b"maybe").hexdigest(),
+            ),
+        )
+
+
 def test_answer_renderer_binds_exact_visible_evidence_bytes() -> None:
     lme = require_longmemeval()
     evidence = b'{"text":"literal <|endoftext|>"}'

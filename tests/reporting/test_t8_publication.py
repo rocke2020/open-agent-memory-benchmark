@@ -1,0 +1,710 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import importlib
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Literal
+
+import pytest
+
+from oamb.artifacts.validation.adapter import (
+    Mem0AdapterValidationInput,
+    mem0_adapter_validation_input,
+)
+from oamb.artifacts.validation.catalog import validate_catalog_profile
+from oamb.artifacts.validation.phase import (
+    PhaseGateValidationInput,
+    validate_t10_phase_gate,
+)
+from oamb.contracts.evidence import ValidationResult
+from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ports import MemorySystemProfileUnsupported
+from oamb.contracts.reporting import CompletionSummaryV3, DisplayPreview, RunReportModelV3
+from oamb.contracts.specifications import (
+    ReportSpec,
+    SourceEvidenceBinding,
+    SourceEvidenceKind,
+)
+from oamb.contracts.states import ValidationDisposition
+from oamb.memory_systems.mem0 import Mem0RestAdapter
+from oamb.reporting.public import (
+    build_diagnostic_run_report_model,
+    build_phase_acceptance_report,
+    build_run_report_model,
+)
+from oamb.reporting.roots import build_acceptance_report_spec, build_report_spec
+from tests.contracts.test_t8_phase_validation import _accepted_gate_with_evidence
+from tests.reporting.test_t8_offline_renderer import (
+    build_claim_boundary,
+    build_record_projections,
+)
+
+SHA_A = "a" * 64
+SHA_B = "b" * 64
+SHA_C = "c" * 64
+SHA_D = "d" * 64
+COMMITTED_AT = datetime(2026, 8, 28, tzinfo=UTC)
+
+
+def _publication() -> ModuleType:
+    try:
+        return importlib.import_module("oamb.reporting.publication")
+    except ModuleNotFoundError:
+        pytest.fail("generic T8 report publication is not implemented", pytrace=False)
+
+
+def _renderer() -> ModuleType:
+    return importlib.import_module("oamb.reporting.offline_renderer")
+
+
+def _validation(
+    *,
+    profile_id: str = "oamb-t8-adapter-mem0-rest-v1",
+) -> ValidationResult:
+    production = validate_catalog_profile(
+        "oamb-t8-adapter-mem0-rest-v1",
+        _validation_target(),
+    )
+    return production.model_copy(update={"validation_profile_id": profile_id})
+
+
+def _validation_target() -> Mem0AdapterValidationInput:
+    adapter = Mem0RestAdapter()
+    with pytest.raises(MemorySystemProfileUnsupported):
+        asyncio.run(adapter.resolve())
+    target = mem0_adapter_validation_input(adapter)
+    asyncio.run(adapter.close())
+    return target
+
+
+def _model_and_spec(
+    audience: Literal["local", "public"] = "public",
+) -> tuple[RunReportModelV3, ReportSpec, SourceEvidenceBinding]:
+    renderer = _renderer()
+    validation = _validation()
+    validation_hash = canonical_sha256(validation)
+    validation_profile_hash = canonical_sha256(
+        [
+            "oamb-validation-profile-binding-v1",
+            validation.validation_profile_id,
+            validation.required_rule_ids,
+            validation.implementation_versions,
+        ]
+    )
+    source = SourceEvidenceBinding(
+        binding_id=SHA_A,
+        source_kind=SourceEvidenceKind.EXTERNAL,
+        source_identity="run-publication-fixture",
+        source_root_hash=validation.target_hash,
+        validation_result_hash=validation_hash,
+        source_schema_versions=("capsule_manifest@1",),
+    )
+    summary = CompletionSummaryV3(
+        run_id="run-publication-fixture",
+        intended_logical_contexts=1,
+        intended_ingestion_plans=1,
+        ready_ingestion_plans=1,
+        intended_cases=1,
+        terminal_cases=1,
+        completed_cases=1,
+        errored_cases=0,
+        unsupported_cases=0,
+        cancelled_cases=0,
+        budget_exceeded_cases=0,
+        parsed_cases=1,
+        evaluated_cases=1,
+        judged_cases=1,
+        unjudged_cases=0,
+        metric_eligible_cases=1,
+    )
+    model = build_run_report_model(
+        report_spec_hash=SHA_A,
+        source_binding=source,
+        evidence_validation_profile_hash=validation_profile_hash,
+        evidence_validation_result_hash=validation_hash,
+        reducer_bindings=(("completion-v1", 1, SHA_D),),
+        audience=audience,
+        origin_kind="external",
+        capsule_id=None,
+        protocol_id="fixture-protocol-v1",
+        workload_id="fixture-workload-v1",
+        memory_system_id="fixture-memory-v1",
+        claim_boundary=build_claim_boundary(rule_count=len(validation.required_rule_ids)),
+        summary=summary,
+        metric_summaries=(),
+        measurement_lines=(),
+        logical_context_ids=(SHA_A,),
+        ingestion_occurrence_ids=(SHA_B,),
+        case_occurrence_ids=(SHA_C,),
+        attempt_ids=(SHA_D,),
+        record_projections=build_record_projections(
+            logical_ids=(SHA_A,),
+            plan_ids=(SHA_B,),
+            case_ids=(SHA_C,),
+            attempt_ids=(SHA_D,),
+        ),
+        limitations=("fixture-only",),
+    )
+    css_hash, script_hash = renderer.offline_asset_hashes()
+    spec = build_report_spec(
+        report_kind="run",
+        audience=audience,
+        preview_max_field_bytes=4096,
+        preview_total_bytes=65536,
+        display_field_ids=("identity", "completion", "quality", "usage", "limitations"),
+        renderer_hash=renderer.offline_renderer_hash(),
+        asset_hashes=(css_hash, script_hash),
+        export_profile_selector_id=f"{audience}-run-v1",
+        export_profile_selector_version=1,
+    )
+    model = _bind_run_model_to_spec(model, spec)
+    return model, spec, source
+
+
+def _bind_run_model_to_spec(model: RunReportModelV3, spec: ReportSpec) -> RunReportModelV3:
+    model = model.model_copy(update={"report_spec_hash": canonical_sha256(spec)})
+    fields = model.model_dump(
+        mode="python",
+        exclude={"schema_name", "schema_version", "report_id"},
+    )
+    return type(model).model_validate(
+        {
+            **model.model_dump(mode="python"),
+            "report_id": importlib.import_module("oamb.contracts.reporting").run_report_model_v3_id(
+                **fields
+            ),
+        }
+    )
+
+
+def _phase_model_spec_and_validation() -> tuple[Any, Any, Any, tuple[Any, Any]]:
+    bundle, gate, evidence = _accepted_gate_with_evidence()
+    target = PhaseGateValidationInput(bundle=bundle, gate=gate, review_evidence=evidence)
+    validation = validate_t10_phase_gate(bundle, gate, review_evidence=evidence)
+    validation_hash = canonical_sha256(validation)
+    source = SourceEvidenceBinding(
+        binding_id=SHA_A,
+        source_kind=SourceEvidenceKind.DERIVATION,
+        source_identity="phase-acceptance-fixture",
+        source_root_hash=validation.target_hash,
+        validation_result_hash=validation_hash,
+        source_schema_versions=("evaluation_phase_gate@1",),
+    )
+    assert gate.human_record is not None
+    spec = build_acceptance_report_spec(
+        audience="public",
+        evaluation_report_hash=bundle.report_model_hash,
+        evaluation_export_validation_hash=bundle.export_validation_hash,
+        review_bundle_hash=bundle.bundle_id,
+        ai_review_record_hash=gate.canonical_ai_review_record_hash,
+        human_review_record_hash=gate.human_record.human_review_record_id,
+        phase_gate_hash=gate.gate_id,
+        renderer_hash=_renderer().offline_renderer_hash(),
+        asset_hashes=_renderer().offline_asset_hashes(),
+        export_profile_selector_id="public-phase-acceptance-v1",
+        export_profile_selector_version=1,
+    )
+    model = build_phase_acceptance_report(
+        acceptance_report_spec_hash=canonical_sha256(spec),
+        phase_id=bundle.phase_id,
+        evaluation_report_hash=spec.evaluation_report_hash,
+        evaluation_export_validation_hash=spec.evaluation_export_validation_hash,
+        review_bundle_hash=bundle.bundle_id,
+        phase_gate_hash=gate.gate_id,
+        ai_review_record_hash=gate.canonical_ai_review_record_hash,
+        human_review_record_hash=gate.human_record.human_review_record_id,
+        gate_review_bundle_hash=gate.review_bundle_hash,
+        gate_passed_by_ai=gate.passed_by_ai,
+        gate_passed_by_human=gate.passed_by_human,
+        finding_codes=gate.human_record.finding_codes,
+        evidence_references=gate.human_record.evidence_references,
+        limitations=("fixture-only",),
+    )
+    return model, spec, source, (validation, target)
+
+
+def test_external_run_publication_fails_closed_until_the_t9_importer(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+    assert not (tmp_path / "derivations").exists()
+
+
+def test_phase_acceptance_publication_closes_the_fresh_gate_and_spec_roots(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, source, (validation, target) = _phase_model_spec_and_validation()
+
+    built = publication.build_report_derivation(
+        model=model,
+        report_spec=spec,
+        ordered_source_bindings=(source,),
+        evidence_validations=(validation,),
+        evidence_validation_targets=(target,),
+        transform_spec_hash=SHA_A,
+        schema_versions=("phase_acceptance_report@1", "report_artifact_manifest@2"),
+        output_root=tmp_path,
+        committed_at=COMMITTED_AT,
+    )
+
+    assert built.export_validation.disposition == ValidationDisposition.VALIDATED
+
+
+def test_phase_acceptance_export_rejects_forged_model_or_unrelated_validation(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, source, (validation, target) = _phase_model_spec_and_validation()
+    forged_model = build_phase_acceptance_report(
+        acceptance_report_spec_hash=canonical_sha256(spec),
+        phase_id="different-phase",
+        evaluation_report_hash=model.evaluation_report_hash,
+        evaluation_export_validation_hash=model.evaluation_export_validation_hash,
+        review_bundle_hash=model.review_bundle_hash,
+        phase_gate_hash=model.phase_gate_hash,
+        ai_review_record_hash=model.ai_review_record_hash,
+        human_review_record_hash=model.human_review_record_hash,
+        gate_review_bundle_hash=model.gate_review_bundle_hash,
+        gate_passed_by_ai=model.passed_by_ai,
+        gate_passed_by_human=model.passed_by_human,
+        finding_codes=model.finding_codes,
+        evidence_references=model.evidence_references,
+        limitations=model.limitations,
+    )
+
+    with pytest.raises(publication.ReportExportError) as forged:
+        publication.build_report_derivation(
+            model=forged_model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(validation,),
+            evidence_validation_targets=(target,),
+            transform_spec_hash=SHA_A,
+            schema_versions=("phase_acceptance_report@1", "report_artifact_manifest@2"),
+            output_root=tmp_path / "forged",
+            committed_at=COMMITTED_AT,
+        )
+
+    unrelated_validation = _validation()
+    unrelated_target = _validation_target()
+    unrelated_source = source.model_copy(
+        update={
+            "source_root_hash": unrelated_validation.target_hash,
+            "validation_result_hash": canonical_sha256(unrelated_validation),
+        }
+    )
+    with pytest.raises(publication.ReportExportError) as unrelated:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(unrelated_source,),
+            evidence_validations=(unrelated_validation,),
+            evidence_validation_targets=(unrelated_target,),
+            transform_spec_hash=SHA_A,
+            schema_versions=("phase_acceptance_report@1", "report_artifact_manifest@2"),
+            output_root=tmp_path / "unrelated",
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in forged.value.result.issues}
+    assert "report-binding-mismatch" in {issue.code for issue in unrelated.value.result.issues}
+
+
+def test_public_export_failure_is_retained_only_as_an_attempt(tmp_path: Path) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+            extra_publication_payloads={
+                "copied/operator-note.txt": b"credential sk-fixture-secret-must-not-publish"
+            },
+        )
+
+    error = captured.value
+    assert error.attempt_directory.is_dir()
+    assert (error.attempt_directory / "export-validation.json").is_file()
+    assert not (error.attempt_directory / "derived-manifest.json").exists()
+    assert not (tmp_path / "derivations").exists()
+    assert "public-sensitive-content" in {issue.code for issue in error.result.issues}
+
+
+def test_export_scan_inventory_cannot_omit_a_publication_payload(tmp_path: Path) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+            omitted_scan_paths=frozenset({"outputs/report-model.json"}),
+        )
+
+    assert "publication-scan-coverage-mismatch" in {
+        issue.code for issue in captured.value.result.issues
+    }
+
+
+def test_export_rejects_unfrozen_selector_and_schema_inventory(tmp_path: Path) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+    bad_spec = build_report_spec(
+        report_kind="run",
+        audience=spec.audience,
+        preview_max_field_bytes=spec.preview_max_field_bytes,
+        preview_total_bytes=spec.preview_total_bytes,
+        display_field_ids=spec.display_field_ids,
+        renderer_hash=spec.renderer_hash,
+        asset_hashes=spec.asset_hashes,
+        browser_contract_hash=spec.browser_contract_hash,
+        performance_contract_hash=spec.performance_contract_hash,
+        export_profile_selector_id="attacker-controlled",
+        export_profile_selector_version=999,
+    )
+    bad_model = _bind_run_model_to_spec(model, bad_spec)
+
+    with pytest.raises(publication.ReportExportError) as selector:
+        publication.build_report_derivation(
+            model=bad_model,
+            report_spec=bad_spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path / "selector",
+            committed_at=COMMITTED_AT,
+        )
+    with pytest.raises(publication.ReportExportError) as schema:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("garbage@999",),
+            output_root=tmp_path / "schema",
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in selector.value.result.issues}
+    assert "report-binding-mismatch" in {issue.code for issue in schema.value.result.issues}
+
+
+def test_report_spec_builder_rejects_planted_renderer_and_acceptance_hashes() -> None:
+    _model, spec, _source = _model_and_spec()
+
+    def build_with_hashes(
+        *,
+        renderer_hash: str = spec.renderer_hash,
+        browser_contract_hash: str = spec.browser_contract_hash,
+        performance_contract_hash: str = spec.performance_contract_hash,
+    ) -> ReportSpec:
+        return build_report_spec(
+            report_kind="run",
+            audience=spec.audience,
+            preview_max_field_bytes=spec.preview_max_field_bytes,
+            preview_total_bytes=spec.preview_total_bytes,
+            display_field_ids=spec.display_field_ids,
+            renderer_hash=renderer_hash,
+            asset_hashes=spec.asset_hashes,
+            browser_contract_hash=browser_contract_hash,
+            performance_contract_hash=performance_contract_hash,
+            export_profile_selector_id="public-run-v1",
+            export_profile_selector_version=1,
+        )
+
+    with pytest.raises(ValueError, match="renderer identity"):
+        build_with_hashes(renderer_hash=SHA_A)
+    with pytest.raises(ValueError, match="browser contract"):
+        build_with_hashes(browser_contract_hash=SHA_A)
+    with pytest.raises(ValueError, match="performance contract"):
+        build_with_hashes(performance_contract_hash=SHA_A)
+
+
+def test_export_rejects_network_active_markup_in_any_copied_payload(tmp_path: Path) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+            extra_publication_payloads={
+                "copied/active.html": (
+                    b'<script src="https://attacker.invalid/payload.js"></script>'
+                )
+            },
+        )
+
+    assert "network-active-publication-payload" in {
+        issue.code for issue in captured.value.result.issues
+    }
+    assert not (tmp_path / "derivations").exists()
+
+
+@pytest.mark.parametrize(
+    "bidi_control",
+    tuple(chr(codepoint) for codepoint in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+    + ("\u200e", "\u200f"),
+)
+def test_public_export_rejects_every_frozen_bidi_control(
+    tmp_path: Path,
+    bidi_control: str,
+) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+            extra_publication_payloads={"copied/note.txt": f"safe{bidi_control}spoof".encode()},
+        )
+
+    assert "public-sensitive-content" in {issue.code for issue in captured.value.result.issues}
+
+
+def test_export_rejects_an_arbitrary_shape_valid_upstream_validation(tmp_path: Path) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+    arbitrary = _validation(profile_id="arbitrary-always-pass-v1")
+    source = source.model_copy(update={"validation_result_hash": canonical_sha256(arbitrary)})
+    model = model.model_copy(update={"ordered_source_bindings": (source,)})
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(arbitrary,),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+
+
+def test_export_replays_upstream_validation_against_the_supplied_source_target(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+    original_target = _validation_target()
+    first_event = original_target.audit.ordered_events[0]
+    invalid_target = replace(
+        original_target,
+        audit=replace(
+            original_target.audit,
+            ordered_events=(
+                replace(first_event, dispatcher_count_after=1),
+                *original_target.audit.ordered_events[1:],
+            ),
+        ),
+    )
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(invalid_target,),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+
+
+def test_export_rejects_display_previews_outside_the_bound_report_spec(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, source = _model_and_spec()
+    oversized_text = "x" * (spec.preview_max_field_bytes + 1)
+    encoded = oversized_text.encode()
+    oversized = DisplayPreview(
+        text=oversized_text,
+        shown_bytes=len(encoded),
+        total_bytes=len(encoded),
+        sha256=hashlib.sha256(encoded).hexdigest(),
+        media_type="application/json",
+        truncated=False,
+        source_reference="source/raw/oversized.json",
+        limitation=None,
+    )
+    projections = tuple(
+        projection.model_copy(update={"display_previews": (oversized,)})
+        if projection.axis == "case"
+        else projection
+        for projection in model.record_projections
+    )
+    oversized_model = _bind_run_model_to_spec(
+        model.model_copy(update={"record_projections": projections}),
+        spec,
+    )
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=oversized_model,
+            report_spec=spec,
+            ordered_source_bindings=(source,),
+            evidence_validations=(_validation(),),
+            evidence_validation_targets=(_validation_target(),),
+            transform_spec_hash=SHA_A,
+            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+
+
+def test_external_diagnostic_publication_fails_closed_until_the_t9_importer(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    target = _validation_target()
+    first_event = target.audit.ordered_events[0]
+    invalid_target = replace(
+        target,
+        audit=replace(
+            target.audit,
+            ordered_events=(
+                replace(first_event, dispatcher_count_after=1),
+                *target.audit.ordered_events[1:],
+            ),
+        ),
+    )
+    validation = validate_catalog_profile("oamb-t8-adapter-mem0-rest-v1", invalid_target)
+    assert validation.disposition == ValidationDisposition.INVALID
+    validation_hash = canonical_sha256(validation)
+    source = SourceEvidenceBinding(
+        binding_id=SHA_A,
+        source_kind=SourceEvidenceKind.EXTERNAL,
+        source_identity="invalid-diagnostic-fixture",
+        source_root_hash=validation.target_hash,
+        validation_result_hash=validation_hash,
+        source_schema_versions=("mem0_zero_dispatch_audit@1",),
+    )
+    css_hash, script_hash = _renderer().offline_asset_hashes()
+    spec = build_report_spec(
+        report_kind="run",
+        audience="public",
+        preview_max_field_bytes=4096,
+        preview_total_bytes=65536,
+        display_field_ids=("identity", "validation", "limitations"),
+        renderer_hash=_renderer().offline_renderer_hash(),
+        asset_hashes=(css_hash, script_hash),
+        export_profile_selector_id="public-run-v1",
+        export_profile_selector_version=1,
+    )
+    profile_hash = canonical_sha256(
+        [
+            "oamb-validation-profile-binding-v1",
+            validation.validation_profile_id,
+            validation.required_rule_ids,
+            validation.implementation_versions,
+        ]
+    )
+    with pytest.raises(ValueError, match="run identity"):
+        build_diagnostic_run_report_model(
+            report_spec_hash=canonical_sha256(spec),
+            source_binding=source,
+            evidence_validation_profile_hash=profile_hash,
+            evidence_validation_result_hash=validation_hash,
+            origin_kind="external",
+            run_id="spoofed-unrelated-run",
+            validation_issue_codes=tuple(dict.fromkeys(issue.code for issue in validation.issues)),
+            limitations=("diagnostic-only",),
+        )
+    model = build_diagnostic_run_report_model(
+        report_spec_hash=canonical_sha256(spec),
+        source_binding=source,
+        evidence_validation_profile_hash=profile_hash,
+        evidence_validation_result_hash=validation_hash,
+        origin_kind="external",
+        run_id="invalid-diagnostic-fixture",
+        validation_issue_codes=tuple(dict.fromkeys(issue.code for issue in validation.issues)),
+        limitations=("diagnostic-only; no benchmark quality or cost claims",),
+    )
+    arguments = {
+        "model": model,
+        "report_spec": spec,
+        "ordered_source_bindings": (source,),
+        "evidence_validations": (validation,),
+        "evidence_validation_targets": (invalid_target,),
+        "transform_spec_hash": SHA_A,
+        "schema_versions": (
+            "diagnostic_run_report_model@1",
+            "report_artifact_manifest@2",
+        ),
+        "output_root": tmp_path,
+        "committed_at": COMMITTED_AT,
+    }
+
+    with pytest.raises(ValueError, match="explicit opt-in"):
+        publication.build_report_derivation(**arguments)
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(**arguments, diagnostic=True)
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+    assert not (tmp_path / "derivations").exists()
