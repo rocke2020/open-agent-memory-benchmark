@@ -751,6 +751,28 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
             },
             reporting.ReportArtifactManifest,
         ),
+        (
+            {
+                "schema_name": "phase_review_occurrence_record",
+                "schema_version": 1,
+                "phase_review_occurrence_id": evidence.phase_review_occurrence_id(
+                    phase_id="legacy-phase",
+                    review_bundle_hash=HASH,
+                    reviewer_role_binding_hash=OTHER_HASH,
+                    ordinal=1,
+                ),
+                "phase_id": "legacy-phase",
+                "review_bundle_hash": HASH,
+                "reviewer_role_binding_hash": OTHER_HASH,
+                "ordinal": 1,
+                "approval_record_id": HASH,
+                "budget_id": "legacy-phase-budget",
+                "state": "planned",
+                "started_at": None,
+                "ended_at": None,
+            },
+            evidence.PhaseReviewOccurrenceRecord,
+        ),
         (run_summary_v1, reporting.RunSummary),
         (
             {

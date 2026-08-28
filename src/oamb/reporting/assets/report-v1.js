@@ -174,7 +174,7 @@
   }
 
   kind.textContent = model.schema_name;
-  origin.textContent = model.origin_kind || model.schema_name;
+  origin.textContent = model.origin_kind || model.origin_class || model.schema_name;
 
   function exactText(value) {
     return `${value.numerator}/${value.denominator}`;
@@ -451,6 +451,14 @@
     return Array.from(list.querySelectorAll(".record:not([hidden])"));
   }
 
+  function focusRequestedRecord() {
+    const requested = activeRecordId && document.getElementById(activeRecordId);
+    if (requested && !requested.hidden) {
+      activeRecordId = requested.id;
+      requested.focus();
+    }
+  }
+
   function moveWithinVisibleSet(offset) {
     const visible = visibleRecords();
     if (visible.length === 0) {
@@ -488,11 +496,7 @@
   window.addEventListener("hashchange", () => {
     restoreHashState();
     render();
-    const requested = activeRecordId && document.getElementById(activeRecordId);
-    if (requested && !requested.hidden) {
-      activeRecordId = requested.id;
-      requested.focus();
-    }
+    focusRequestedRecord();
   });
   document.addEventListener("keydown", (event) => {
     if (event.target instanceof Element && event.target.closest("input, select, textarea, button")) {
@@ -540,4 +544,5 @@
 
   restoreHashState();
   render();
+  focusRequestedRecord();
 })();

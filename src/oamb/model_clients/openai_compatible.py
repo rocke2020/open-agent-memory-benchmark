@@ -197,6 +197,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 f"model supplier returned HTTP {response.status_code}",
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
                 retryable=response.status_code in {408, 429} or response.status_code >= 500,
                 failure_kind="supplier_error",
@@ -215,6 +216,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 f"model response parse failed: {exc}",
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
                 retryable=False,
                 failure_kind="response_parse_error",
@@ -230,6 +232,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 f"model usage profile failed: {exc}",
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=exc.usage_reference_ids,
                 retryable=False,
                 failure_kind="usage_parse_error",
@@ -244,6 +247,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 f"model usage parse failed: {exc}",
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
                 retryable=False,
                 failure_kind="usage_parse_error",
@@ -256,6 +260,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 "supplier output usage exceeds the requested output ceiling",
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
                 retryable=False,
                 failure_kind="output_contract_error",
@@ -267,6 +272,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 f"model response parse failed: {exc}",
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
                 retryable=False,
                 failure_kind="response_parse_error",
@@ -278,6 +284,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 str(exc),
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
                 retryable=False,
                 failure_kind="runtime_identity_error",
@@ -287,6 +294,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 f"model runtime identity parse failed: {exc}",
                 raw_reference=raw_reference,
+                raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
                 retryable=False,
                 failure_kind="response_parse_error",
@@ -563,6 +571,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 "quality review requires a normal stop",
                 raw_reference=receipt.raw_reference,
+                raw_response_bytes=receipt.raw_response_bytes,
                 usage_reference_ids=receipt.usage_reference_ids,
                 retryable=False,
                 failure_kind="output_contract_error",
@@ -572,6 +581,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 "quality review requires exactly one candidate",
                 raw_reference=receipt.raw_reference,
+                raw_response_bytes=receipt.raw_response_bytes,
                 usage_reference_ids=receipt.usage_reference_ids,
                 retryable=False,
                 failure_kind="output_contract_error",
@@ -582,6 +592,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 "quality review requires complete text without tool calls",
                 raw_reference=receipt.raw_reference,
+                raw_response_bytes=receipt.raw_response_bytes,
                 usage_reference_ids=receipt.usage_reference_ids,
                 retryable=False,
                 failure_kind="output_contract_error",
@@ -595,6 +606,7 @@ class OpenAICompatibleModelClient:
             raise ModelCallFailure(
                 f"quality review requires a complete JSON object: {exc}",
                 raw_reference=receipt.raw_reference,
+                raw_response_bytes=receipt.raw_response_bytes,
                 usage_reference_ids=receipt.usage_reference_ids,
                 retryable=False,
                 failure_kind="output_contract_error",

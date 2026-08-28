@@ -11,6 +11,8 @@ from types import ModuleType
 import pytest
 from typer.testing import CliRunner
 
+from oamb.public_boundary import scan_public_paths
+
 
 def require(module_name: str) -> ModuleType:
     try:
@@ -105,11 +107,20 @@ def test_built_and_installed_distributions_expose_no_generated_schema_surface(
     source_distribution = next(distribution_root.glob("*.tar.gz"))
     with zipfile.ZipFile(wheel) as archive:
         wheel_names = tuple(archive.namelist())
+        wheel_root = tmp_path / "wheel"
+        archive.extractall(wheel_root)
     with tarfile.open(source_distribution, "r:gz") as archive:
         source_names = tuple(archive.getnames())
+        source_root = tmp_path / "source"
+        archive.extractall(source_root, filter="data")
     for names in (wheel_names, source_names):
         assert not any(name.endswith(".schema.json") for name in names)
         assert not any("/schemas/" in f"/{name}/" for name in names)
+    for distribution_root in (wheel_root, source_root):
+        distribution_paths = tuple(
+            path for path in distribution_root.rglob("*") if path.is_file() or path.is_symlink()
+        )
+        assert scan_public_paths(distribution_root, distribution_paths) == ()
 
     environment = tmp_path / "installed"
     create_environment = subprocess.run(

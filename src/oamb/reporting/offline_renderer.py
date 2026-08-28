@@ -16,6 +16,7 @@ from typing import TypeAlias, cast
 from pydantic import BaseModel, RootModel
 
 from oamb.contracts.base import canonical_decimal_text
+from oamb.contracts.external import ExternalHistoricalEvidenceReport
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.reporting import (
     ComparisonReportModel,
@@ -24,6 +25,7 @@ from oamb.contracts.reporting import (
     ReleaseReportModel,
     RunReportModelV3,
 )
+from oamb.external_evidence.limitations import historical_limitation_texts
 from oamb.reporting.acceptance_contracts import (
     BROWSER_ACCEPTANCE_CONTRACT,
     PERFORMANCE_ACCEPTANCE_CONTRACT,
@@ -33,6 +35,7 @@ from oamb.reporting.acceptance_contracts import (
 
 OfflineReportModel: TypeAlias = (
     RunReportModelV3
+    | ExternalHistoricalEvidenceReport
     | DiagnosticRunReportModel
     | ComparisonReportModel
     | ReleaseReportModel
@@ -58,11 +61,13 @@ def _render_offline_report(
 
     css = _asset_text("report-v1.css")
     script = _asset_text("report-v1.js")
-    origin = (
-        model.origin_kind
-        if isinstance(model, (RunReportModelV3, DiagnosticRunReportModel))
-        else "derived"
-    )
+    origin: str
+    if isinstance(model, (RunReportModelV3, DiagnosticRunReportModel)):
+        origin = model.origin_kind
+    elif isinstance(model, ExternalHistoricalEvidenceReport):
+        origin = model.origin_class.value
+    else:
+        origin = "derived"
     diagnostic_banner = (
         '<section class="diagnostic" role="alert">DIAGNOSTIC — INVALID EVIDENCE. '
         "No final quality or cost claims are present.</section>"
@@ -85,7 +90,7 @@ def _render_offline_report(
     quality_items = _static_quality_items(model)
     measurement_items = _static_measurement_items(model)
     limitations = (
-        "".join(f"<li>{html.escape(limitation)}</li>" for limitation in model.limitations)
+        "".join(f"<li>{html.escape(limitation)}</li>" for limitation in _limitations(model))
         or "<li>None declared.</li>"
     )
     csp = "; ".join(
@@ -197,6 +202,13 @@ def _static_validation_summary(model: OfflineReportModel) -> str:
             f"{model.evidence_validation_result_hash}; issue codes: "
             f"{', '.join(model.validation_issue_codes)}."
         )
+    elif isinstance(model, ExternalHistoricalEvidenceReport):
+        validation_hashes = (model.evidence_validation_result_hash,)
+        return (
+            "Validation: PASS; external factual profile; comparison eligible: false; "
+            "billing complete: false; cost complete: false. Validation evidence: "
+            f"{model.evidence_validation_result_hash}."
+        )
     elif isinstance(model, (ComparisonReportModel, ReleaseReportModel)):
         validation_hashes = model.ordered_evidence_validation_hashes
         boundary = model.claim_boundary
@@ -238,6 +250,25 @@ def _static_identity_summary(model: OfflineReportModel) -> str:
         rows = (
             ("Run ID", model.run_id),
             ("Source identity", source.source_identity),
+            ("Source root", source.source_root_hash),
+            ("Source binding", source.binding_id),
+            ("Validation result", model.evidence_validation_result_hash),
+            ("Report spec", model.report_spec_hash),
+        )
+    elif isinstance(model, ExternalHistoricalEvidenceReport):
+        source = model.ordered_source_bindings[0]
+        rows = (
+            ("External evidence ID", model.external_evidence_id),
+            ("Producer repository", model.producer_repository),
+            ("Producer code revision", model.producer_code_revision),
+            ("Producer base revision", model.producer_base_revision),
+            ("Producer protocol", model.producer_protocol),
+            ("Raw source SHA-256", model.source_sha256),
+            ("Raw source bytes", str(model.source_byte_count)),
+            ("Source attestation SHA-256", model.source_attestation_sha256),
+            ("Source attestation revision", model.source_attestation_revision),
+            ("Importer implementation", model.importer_implementation_hash),
+            ("Compatibility", model.compatibility_status),
             ("Source root", source.source_root_hash),
             ("Source binding", source.binding_id),
             ("Validation result", model.evidence_validation_result_hash),
@@ -293,6 +324,12 @@ def _static_completion_summary(model: OfflineReportModel) -> str:
         )
     if isinstance(model, DiagnosticRunReportModel):
         return "Diagnostic-only run; completion, quality, metrics, usage, and cost are omitted."
+    if isinstance(model, ExternalHistoricalEvidenceReport):
+        return (
+            f"External producer cases: {model.total_cases}; terminal factual results: "
+            f"{model.total_cases}; judged verdicts: {model.total_cases}; no OAMB-native "
+            "capsule, ingestion plan, or attempt ledger is claimed."
+        )
     if isinstance(model, ComparisonReportModel):
         return (
             f"Comparison compatible: {str(model.comparison.comparable).lower()}; "
@@ -313,6 +350,17 @@ def _static_completion_summary(model: OfflineReportModel) -> str:
 def _static_quality_items(model: OfflineReportModel) -> str:
     if isinstance(model, DiagnosticRunReportModel):
         return "<li>Unavailable in diagnostic output.</li>"
+    if isinstance(model, ExternalHistoricalEvidenceReport):
+        rows = [
+            "<li>AMB historical judged accuracy: "
+            f"{model.accuracy.numerator}/{model.accuracy.denominator}; "
+            f"{model.correct_cases}/{model.total_cases}.</li>"
+        ]
+        rows.extend(
+            f"<li>{html.escape(item.category)}: {item.correct_cases}/{item.total_cases}.</li>"
+            for item in model.category_aggregates
+        )
+        return "".join(rows)
     if not isinstance(model, RunReportModelV3) or not model.metric_summaries:
         return "<li>No ordinary metric summaries.</li>"
     return "".join(
@@ -330,6 +378,18 @@ def _static_quality_items(model: OfflineReportModel) -> str:
 def _static_measurement_items(model: OfflineReportModel) -> str:
     if isinstance(model, DiagnosticRunReportModel):
         return "<li>Unavailable in diagnostic output.</li>"
+    if isinstance(model, ExternalHistoricalEvidenceReport):
+        return (
+            "<li>AMB formatted retrieval-view tokens: "
+            f"{model.amb_formatted_view_context_tokens_total} total; exact mean "
+            f"{model.amb_formatted_view_context_tokens_mean.numerator}/"
+            f"{model.amb_formatted_view_context_tokens_mean.denominator}. "
+            "This is not OAMB context_view usage.</li>"
+            f"<li>Producer retrieval timing: {model.retrieval_time_ms_total} ms total; "
+            f"{model.retrieval_time_ms_mean} ms mean.</li>"
+            "<li>Indexing usage: unavailable.</li>"
+            "<li>Complete external-LLM usage: unavailable.</li>"
+        )
     if not isinstance(model, RunReportModelV3) or not model.measurement_lines:
         return "<li>No measurement summaries.</li>"
     rows = []
@@ -351,6 +411,12 @@ def _static_measurement_items(model: OfflineReportModel) -> str:
             "</li>"
         )
     return "".join(rows)
+
+
+def _limitations(model: OfflineReportModel) -> tuple[str, ...]:
+    if isinstance(model, ExternalHistoricalEvidenceReport):
+        return historical_limitation_texts(model.limitation_codes)
+    return model.limitations
 
 
 def _asset_text(name: str) -> str:

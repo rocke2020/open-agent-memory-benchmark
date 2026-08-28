@@ -24,7 +24,7 @@ from oamb.artifacts.validation.phase import (
 from oamb.artifacts.validation.profiles import (
     T8_REPORT_EXPORT_RULE_INVENTORY,
     exact_report_export_profile,
-    t8_profile_catalog,
+    validation_profile_catalog,
 )
 from oamb.artifacts.validation.registry import RuleRegistry, ValidationRule
 from oamb.artifacts.validation.run_evidence import (
@@ -39,6 +39,10 @@ from oamb.contracts.evidence import (
     ValidationIssue,
     ValidationResult,
     ValidationSeverity,
+)
+from oamb.contracts.external import (
+    ExternalHistoricalEvidence,
+    ExternalHistoricalEvidenceReport,
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.reporting import (
@@ -324,7 +328,7 @@ def _expected_evidence_validation_inventory(
         return tuple((rule_id, 1) for rule_id in NATIVE_EVIDENCE_RULE_IDS)
     if validation.validation_profile_id == NATIVE_RUN_EVIDENCE_PROFILE_ID:
         return NATIVE_RUN_EVIDENCE_RULE_INVENTORY
-    definition = t8_profile_catalog().get(validation.validation_profile_id)
+    definition = validation_profile_catalog().get(validation.validation_profile_id)
     if definition is None or definition.profile.stage != ValidationStage.EVIDENCE:
         return None
     return definition.rule_inventory
@@ -336,6 +340,8 @@ def _report_schema_inventory(
 ) -> tuple[str, ...] | None:
     if isinstance(model, DiagnosticRunReportModel):
         return ("diagnostic_run_report_model@1", "report_artifact_manifest@2")
+    if isinstance(model, ExternalHistoricalEvidenceReport):
+        return ("external_historical_evidence_report@1", "report_artifact_manifest@2")
     return _REPORT_SCHEMA_INVENTORY_BY_KIND.get(report_kind)
 
 
@@ -364,6 +370,37 @@ def _model_validation_roots_close(
     validation_targets: tuple[Any, ...],
     validation_hashes: tuple[str, ...],
 ) -> bool:
+    if isinstance(model, ExternalHistoricalEvidenceReport):
+        if (
+            not isinstance(report_spec, ReportSpec)
+            or len(validations) != 1
+            or len(validation_targets) != 1
+            or not isinstance(validation_targets[0], ExternalHistoricalEvidence)
+            or model.evidence_validation_result_hash != validation_hashes[0]
+        ):
+            return False
+        validation = validations[0]
+        expected_profile_hash = canonical_sha256(
+            [
+                "oamb-validation-profile-binding-v1",
+                validation.validation_profile_id,
+                validation.required_rule_ids,
+                validation.implementation_versions,
+            ]
+        )
+        if model.evidence_validation_profile_hash != expected_profile_hash:
+            return False
+        try:
+            from oamb.external_evidence.reduce import reduce_external_historical_report
+
+            external_fresh_model = reduce_external_historical_report(
+                validation_targets[0],
+                validation,
+                report_spec=report_spec,
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+        return external_fresh_model == model
     if isinstance(model, DiagnosticRunReportModel):
         if len(validations) != 1 or len(validation_targets) != 1:
             return False
@@ -484,7 +521,7 @@ def _model_validation_roots_close(
             try:
                 from oamb.reporting.native_reduce import reduce_native_run_report
 
-                fresh_model = reduce_native_run_report(
+                native_fresh_model = reduce_native_run_report(
                     capsule_root,
                     validation,
                     report_spec=report_spec,
@@ -492,7 +529,7 @@ def _model_validation_roots_close(
                 )
             except (OSError, TypeError, ValueError):
                 return False
-            return fresh_model == model
+            return native_fresh_model == model
         return False
     if isinstance(model, (ComparisonReportModel, ReleaseReportModel)):
         return False

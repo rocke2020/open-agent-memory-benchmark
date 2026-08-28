@@ -359,6 +359,7 @@ class ModelCallFailure(RuntimeError):
         message: str,
         *,
         raw_reference: RawReferenceHandle,
+        raw_response_bytes: bytes | None = None,
         usage_reference_ids: tuple[str, ...],
         retryable: bool,
         failure_kind: str = "supplier_error",
@@ -366,6 +367,7 @@ class ModelCallFailure(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.raw_reference = raw_reference
+        self.raw_response_bytes = raw_response_bytes
         self.usage_reference_ids = usage_reference_ids
         self.retryable = retryable
         self.failure_kind = failure_kind

@@ -24,6 +24,7 @@ from oamb.contracts.evidence import (
     DerivationManifest,
     ValidationResult,
 )
+from oamb.contracts.external import ExternalHistoricalEvidenceReport
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.reporting import (
     ComparisonReportModel,
@@ -39,6 +40,7 @@ from oamb.contracts.specifications import (
     SourceEvidenceBinding,
 )
 from oamb.contracts.states import ValidationDisposition
+from oamb.external_evidence.limitations import historical_limitation_texts
 from oamb.reporting.offline_renderer import (
     OfflineReportModel,
     offline_asset_hashes,
@@ -117,7 +119,11 @@ def build_report_derivation(
         export_profile_selector_version=report_spec.export_profile_selector_version,
         audience=report_spec.audience,
         schema_versions=schema_versions,
-        limitations=model.limitations,
+        limitations=(
+            historical_limitation_texts(model.limitation_codes)
+            if isinstance(model, ExternalHistoricalEvidenceReport)
+            else model.limitations
+        ),
     )
     evidence_validation_hash = canonical_sha256(
         ["oamb-ordered-evidence-validations-v1", evidence_validations]
@@ -275,7 +281,10 @@ def _report_kind(
     report_spec: ReportIdentitySpec,
 ) -> ReportKind:
     expected: ReportKind
-    if isinstance(model, (RunReportModelV3, DiagnosticRunReportModel)):
+    if isinstance(
+        model,
+        (RunReportModelV3, DiagnosticRunReportModel, ExternalHistoricalEvidenceReport),
+    ):
         expected = "run"
     elif isinstance(model, ComparisonReportModel):
         expected = "comparison"

@@ -2,17 +2,20 @@
 
 > **TL;DR:** Open Agent Memory Benchmark (OAMB) keeps execution evidence,
 > validation, metrics, resource usage, cost, and reports separate so a partial
-> run cannot be mistaken for a score. The repository currently offers a complete
-> credential-free fake workflow; production provider composition is not yet a
-> supported command-line workflow.
+> run cannot be mistaken for a score. The repository offers a complete
+> credential-free fake workflow, a hash-pinned external historical report, and
+> approval-scoped phase-review commands. None implies that a live provider run
+> passed.
 
 ## Current status
 
-**The offline evidence pipeline is implemented and testable without credentials,
-while live benchmark execution remains gated.** The repository contains
+**The offline evidence pipeline and standalone distribution are implemented and
+testable without credentials, while live benchmark execution remains gated.**
+The repository contains
 exact-pinned REST service preparation for Hindsight, Mem0, and OpenViking,
 strict versioned artifact contracts, fail-closed validation, reducers, quality
-review records, and deterministic offline reports.
+review records, deterministic offline reports, and Linux/macOS clean-checkout
+CI.
 
 No fixture, healthy service, non-empty response, or generated report implies a
 live provider passed, a benchmark score is valid, or a release is ready.
@@ -59,6 +62,42 @@ uv run oamb report build \
 The commands are offline after dependencies are available. They use generated
 fake components, make no provider calls, and write only beneath `.local-demo/`.
 
+## External historical evidence
+
+**The packaged historical view rebuilds from a restricted factual pack without
+the raw producer result.** It remains `external_amb_generated`, compatibility is
+`unknown`, and it contains no OAMB-native attempts, indexing usage, billing
+completeness, comparison, or winner claim.
+
+```bash
+mkdir -p .local-demo/external .local-demo/external-report
+
+uv run oamb external validate \
+  --output .local-demo/external/validation.json
+
+uv run oamb external report \
+  --validation .local-demo/external/validation.json \
+  --output-root .local-demo/external-report
+```
+
+`oamb external import --source ... --output ...` is a separate read-only
+provenance command for the one pinned raw producer artifact. It first verifies
+the complete source byte count and SHA-256, then emits only the repository-owned
+field allowlist. It cannot import an arbitrary self-attested result.
+
+## Phase quality review
+
+**Phase review is a separate post-report operation with its own bundle, plan,
+approval, budget, occurrence, attempts, usage, resources, and cost evidence.**
+Use `oamb phase --help` for the bundle, AI plan/run, externally signed human
+decision import, gate validation, and acceptance-report commands. OAMB never
+loads the human private key or signs a human decision.
+
+The recorded-output reducer is explicitly offline. A model-backed AI review is
+constructed only after the exact role, runtime, approval, budget, request
+inventory, and artifact durability preflight close; normal tests use a fake
+client and make no external call.
+
 ## Runtime contracts
 
 **Persisted artifacts are parsed by strict, immutable, versioned Pydantic
@@ -69,11 +108,12 @@ cross-artifact references, accounting completeness, and report eligibility.
 
 ## Production workflow boundary
 
-**Provider configuration, live execution, eligible comparisons, and the final
-user-facing production workflow remain pending distribution and CLI work.** Do
-not translate the fake commands into a real provider run or reuse their artifact
-root for live evidence. Live calls require separately approved scope, immutable
-runtime bindings, budgets, and retained receipts.
+**Provider configuration, live execution, eligible comparisons, and acceptance
+remain explicit external operations, not installation claims.** Do not
+translate the fake commands into a real provider run or reuse their artifact
+root for live evidence. Every live call requires a separately approved scope,
+immutable runtime binding, budget, unique artifact root, stop conditions, and
+retained raw receipts.
 
 ## Provider API services
 

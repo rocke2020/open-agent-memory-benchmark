@@ -17,6 +17,13 @@ nested answer values, and provenance. They never modify, deduplicate, or
 relabel the immutable source dataset. External historical evidence remains
 external and cannot be converted into OAMB-native execution evidence.
 
+The distributed historical evidence pack is a small factual projection, not a
+benchmark dataset or a native run capsule. It retains ordered case identifiers,
+categories, verdicts, producer-formatted context-token counts, retrieval time,
+and pinned source provenance while excluding questions, answers, contexts,
+reasoning, and raw responses. Its compatibility with OAMB-native runs remains
+`unknown`.
+
 ## Download benchmark inputs
 
 The two scripts resolve immutable Hugging Face revisions through the locked

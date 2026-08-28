@@ -131,6 +131,14 @@ T8_COMPARISON_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
     ("comparison.claim-suppression.v1", 1),
 )
 
+T9_EXTERNAL_EVIDENCE_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
+    ("external.provenance.v1", 1),
+    ("external.transformation.v1", 1),
+    ("external.case-aggregate.v1", 1),
+    ("external.compatibility.v1", 1),
+    ("external.limitations.v1", 1),
+)
+
 ReportKind = Literal["run", "comparison", "release", "phase_acceptance"]
 ReportAudience = Literal["public", "local"]
 REPORT_KINDS: tuple[ReportKind, ...] = (
@@ -368,3 +376,20 @@ def t8_profile_catalog() -> dict[str, ClosedProfileDefinition]:
         ),
     )
     return {definition.profile.profile_id: definition for definition in definitions}
+
+
+def validation_profile_catalog() -> dict[str, ClosedProfileDefinition]:
+    """Return the current catalog without changing the frozen T8 inventory."""
+
+    catalog = t8_profile_catalog()
+    external = _closed_profile(
+        profile_id="oamb-t9-external-amb-historical-v1",
+        stage=ValidationStage.EVIDENCE,
+        rule_inventory=T9_EXTERNAL_EVIDENCE_RULE_INVENTORY,
+        applicability=(
+            "origin=external_amb_generated",
+            "producer_protocol=amb-longmemeval-rag",
+            "compatibility=unknown",
+        ),
+    )
+    return {**catalog, external.profile.profile_id: external}

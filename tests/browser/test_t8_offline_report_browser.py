@@ -8,18 +8,27 @@ from playwright.sync_api import BrowserType, Page, sync_playwright
 
 import oamb.reporting.performance as report_performance
 from oamb.contracts.accounting import ProofStatus
+from oamb.contracts.external import ExternalHistoricalEvidenceReport
 from oamb.contracts.reporting import (
     CompletionSummaryV3,
     ExactRational,
     MeasurementSummaryLine,
 )
 from oamb.contracts.specifications import SourceEvidenceBinding, SourceEvidenceKind
-from oamb.reporting.offline_renderer import render_offline_report
+from oamb.external_evidence.amb import load_packaged_curated_evidence
+from oamb.external_evidence.reduce import reduce_external_historical_report
+from oamb.external_evidence.validation import validate_external_historical_evidence
+from oamb.reporting.offline_renderer import (
+    offline_asset_hashes,
+    offline_renderer_hash,
+    render_offline_report,
+)
 from oamb.reporting.performance import (
     ReportBrowserPerformanceMeasurement,
     enforce_report_browser_performance,
 )
 from oamb.reporting.public import build_metric_summary, build_run_report_model
+from oamb.reporting.roots import build_report_spec
 from tests.reporting.test_t8_offline_renderer import (
     _incomparable_report,
     build_claim_boundary,
@@ -260,6 +269,72 @@ def _open_file_report(page: Page, path: Path) -> tuple[list[str], list[str], lis
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.goto(path.resolve().as_uri(), wait_until="load")
     return external_requests, console_errors, page_errors
+
+
+def _external_historical_report_path(
+    tmp_path: Path,
+) -> tuple[Path, ExternalHistoricalEvidenceReport]:
+    evidence = load_packaged_curated_evidence()
+    validation = validate_external_historical_evidence(evidence)
+    report_spec = build_report_spec(
+        report_kind="run",
+        audience="public",
+        preview_max_field_bytes=4096,
+        preview_total_bytes=65536,
+        display_field_ids=("identity", "completion", "quality", "usage", "limitations"),
+        renderer_hash=offline_renderer_hash(),
+        asset_hashes=offline_asset_hashes(),
+        export_profile_selector_id="public-run-v1",
+        export_profile_selector_version=1,
+    )
+    report = reduce_external_historical_report(
+        evidence,
+        validation,
+        report_spec=report_spec,
+    )
+    path = tmp_path / "external-historical-report.html"
+    path.write_bytes(render_offline_report(report))
+    return path, report
+
+
+def test_external_historical_cases_support_offline_navigation_contract(tmp_path: Path) -> None:
+    path, report = _external_historical_report_path(tmp_path)
+    first_record_id = report.record_projections[0].record_id
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page_errors: list[str] = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(
+            f"{path.resolve().as_uri()}#case={first_record_id}&axis=case",
+            wait_until="load",
+        )
+
+        visible = page.locator('.record[data-axis="case"]:not([hidden])')
+        assert visible.count() == 500
+        assert page.locator(":focus").get_attribute("id") == f"case={first_record_id}"
+
+        verdict_filter = page.get_by_label("Verdict", exact=True)
+        verdict_filter.select_option("incorrect")
+        assert visible.count() == 52
+        verdict_filter.select_option("all")
+        category_filter = page.get_by_label("Capability or type", exact=True)
+        category_filter.select_option("knowledge-update")
+        assert visible.count() == 78
+        category_filter.select_option("all")
+
+        first_visible = visible.first
+        first_visible.focus()
+        first_visible_id = first_visible.get_attribute("id")
+        page.keyboard.press("j")
+        assert page.locator(":focus").get_attribute("data-axis") == "case"
+        assert page.locator(":focus").get_attribute("id") != first_visible_id
+
+        page.evaluate("location.hash = '#case=not-a-record&axis=case'")
+        page.wait_for_function("document.getElementById('oamb-axis-filter').value === 'case'")
+        assert visible.count() == 500
+        assert page_errors == []
+        browser.close()
 
 
 @pytest.mark.parametrize("engine_name", ("chromium", "firefox", "webkit"))

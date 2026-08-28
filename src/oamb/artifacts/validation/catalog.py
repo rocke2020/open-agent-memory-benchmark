@@ -10,7 +10,7 @@ from typing import Any
 
 from oamb.artifacts.atomic import read_regular_file
 from oamb.artifacts.validation.engine import validate_closed_profile
-from oamb.artifacts.validation.profiles import t8_profile_catalog
+from oamb.artifacts.validation.profiles import validation_profile_catalog
 from oamb.artifacts.validation.registry import RuleFunction, RuleRegistry, ValidationRule
 from oamb.contracts.evidence import CapsuleManifest, ValidationResult
 from oamb.contracts.ids import canonical_sha256
@@ -24,7 +24,7 @@ def _build_catalog_registry_for_test(
     disabled_rule_ids: frozenset[str] = frozenset(),
     implementation_versions: Mapping[str, int] | None = None,
 ) -> RuleRegistry:
-    definition = t8_profile_catalog()[profile_id]
+    definition = validation_profile_catalog()[profile_id]
     version_overrides = implementation_versions or {}
     registry = RuleRegistry()
     for rule_id, minimum_version in definition.rule_inventory:
@@ -50,7 +50,7 @@ def _validate_catalog_profile_for_test(
     registry: RuleRegistry,
     profile: ValidationProfile | None = None,
 ) -> ValidationResult:
-    definition = t8_profile_catalog()[profile_id]
+    definition = validation_profile_catalog()[profile_id]
     return validate_closed_profile(
         target,
         target_hash=target_hash,
@@ -80,8 +80,9 @@ def production_catalog_registry(profile_id: str) -> RuleRegistry:
     from oamb.artifacts.validation.reduction import REDUCTION_RULES
     from oamb.artifacts.validation.report_export import REPORT_EXPORT_RULES
     from oamb.artifacts.validation.workload import WORKLOAD_RULES
+    from oamb.external_evidence.validation import EXTERNAL_HISTORICAL_RULES
 
-    definition = t8_profile_catalog()[profile_id]
+    definition = validation_profile_catalog()[profile_id]
     available = {
         rule.rule_id: rule
         for rule in (
@@ -90,6 +91,7 @@ def production_catalog_registry(profile_id: str) -> RuleRegistry:
             *REDUCTION_RULES,
             *PHASE_GATE_RULES,
             *REPORT_EXPORT_RULES,
+            *EXTERNAL_HISTORICAL_RULES,
         )
     }
     registry = RuleRegistry()
@@ -111,6 +113,7 @@ def _production_target_hash(target: Any) -> str:
         ComparisonValidationInput,
     )
     from oamb.artifacts.validation.report_export import ReportExportInput
+    from oamb.contracts.external import ExternalHistoricalEvidence
     from oamb.memory_systems.mem0.profiles import mem0_zero_dispatch_audit_binding
     from oamb.workloads.longmemeval import LongMemEvalBundle
     from oamb.workloads.memoryagentbench import MabManifestBundle
@@ -202,6 +205,8 @@ def _production_target_hash(target: Any) -> str:
                 tuple(sorted(target.scan_paths)),
             ]
         )
+    if isinstance(target, ExternalHistoricalEvidence):
+        return canonical_sha256(target)
     return canonical_sha256(
         [
             "oamb-unsupported-validation-target-v1",

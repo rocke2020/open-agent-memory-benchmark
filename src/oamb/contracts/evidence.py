@@ -728,6 +728,70 @@ def phase_review_occurrence_id(
     )
 
 
+class PhaseReviewOccurrenceRecordV2(StrictContract):
+    schema_name: Literal["phase_review_occurrence_record"] = "phase_review_occurrence_record"
+    schema_version: Literal[2] = 2
+    phase_review_occurrence_id: Sha256
+    phase_id: NonEmptyStr
+    review_bundle_hash: Sha256
+    reviewer_role_binding_hash: Sha256
+    artifact_repository_fingerprint: Sha256
+    ordinal: PositiveInt
+    approval_record_id: Sha256
+    budget_id: NonEmptyStr
+    state: Literal[
+        "planned",
+        "budget_reserved",
+        "running",
+        "sealed",
+        "error",
+        "cancelled",
+        "budget_exceeded",
+        "evidence_inconclusive",
+        "interrupted_unknown_outcome",
+    ]
+    started_at: UtcDateTime | None
+    ended_at: UtcDateTime | None
+
+    @model_validator(mode="after")
+    def occurrence_identity_and_times_are_canonical(self) -> Self:
+        expected = phase_review_occurrence_id_v2(
+            phase_id=self.phase_id,
+            review_bundle_hash=self.review_bundle_hash,
+            reviewer_role_binding_hash=self.reviewer_role_binding_hash,
+            artifact_repository_fingerprint=self.artifact_repository_fingerprint,
+            ordinal=self.ordinal,
+        )
+        if self.phase_review_occurrence_id != expected:
+            raise ValueError("phase-review occurrence identity does not match its payload")
+        if (self.started_at is None) != (self.ended_at is None):
+            raise ValueError("phase-review occurrence timing requires both endpoints")
+        if self.started_at is not None and self.ended_at is not None:
+            if self.ended_at < self.started_at:
+                raise ValueError("phase-review occurrence ends before it starts")
+        return self
+
+
+def phase_review_occurrence_id_v2(
+    *,
+    phase_id: str,
+    review_bundle_hash: str,
+    reviewer_role_binding_hash: str,
+    artifact_repository_fingerprint: str,
+    ordinal: int,
+) -> str:
+    return canonical_sha256(
+        [
+            "oamb-phase-review-occurrence-v2",
+            phase_id,
+            review_bundle_hash,
+            reviewer_role_binding_hash,
+            artifact_repository_fingerprint,
+            ordinal,
+        ]
+    )
+
+
 class CapsuleManifestEntry(StrictContract):
     schema_name: Literal["capsule_manifest_entry"] = "capsule_manifest_entry"
     schema_version: Literal[1] = 1

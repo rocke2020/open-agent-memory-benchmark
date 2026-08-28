@@ -21,6 +21,14 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 | LongMemEval prompt excerpts | Attributed judge PromptPack templates | MIT | Embedded runtime PromptPack data |
 | MemoryAgentBench prompt excerpts | Attributed MAB-65 answer PromptPack templates | MIT | Embedded runtime PromptPack data |
 
+The packaged AMB historical view contains only factual identifiers,
+categories, verdicts, measurements, aggregates, and immutable producer/source
+provenance. OAMB distributes no AMB code, prompt, question, answer, context,
+reasoning, raw response, UI, or documentation expression, and does not relicense
+the producer artifact. The external evidence record pins its producer
+repository/revisions, source path/hash/byte count, attestation hash/revision,
+transformation allowlist, and derived pack hash.
+
 Provider images, source archives, datasets, PromptPacks, and imported evidence
 retain their own upstream licenses and notices. Their inclusion in a local
 workflow does not relicense them under Apache-2.0.

@@ -32,11 +32,20 @@ validated source roots ─┴─→ reporting
   not import concrete runtime, workload, adapter, model, or storage code.
 - `src/oamb/artifacts/validation/` owns early structural rule registration and
   closed validation profiles. Semantic rules live with their later owners.
+- `src/oamb/external_evidence/` owns the read-only, hash-pinned historical
+  evidence boundary. Its reports remain explicitly external and cannot acquire
+  native capsule, attempt, indexing, billing, or compatibility claims.
+- `src/oamb/reporting/` owns deterministic reducers, quality-review planning,
+  export validation, and offline HTML. Phase AI execution is separately
+  approval- and budget-scoped before the selected model client is constructed.
+- `src/oamb/public_boundary.py` owns the fail-closed scan of tracked and
+  distributed public artifacts for local-only paths and symlinks.
 - `provider-services/` owns reproducible local API processes, immutable pins,
   isolated persistent state, and non-destructive service verification. It is
   beside the Python package, never imported by it.
-- Future concrete adapters implement ports without importing runtime or one
-  another. Only the CLI composition root selects concrete implementations.
+- Concrete adapters implement ports without importing runtime or one another.
+  Only an invoked execution command may lazily select a concrete
+  implementation; core import and command help remain implementation-free.
 - `src/oamb/contracts/schema.py` owns the explicit versioned-contract registry
   and fail-closed parser. Persisted `schema_name` and `schema_version` fields
   remain part of the artifact wire format; generated schema snapshots are not
@@ -54,8 +63,9 @@ uv sync --locked --all-groups
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests
-uv run pytest tests/unit tests/contracts -q
+uv run pytest -q
 python3 -m unittest discover -s provider-services/tests -p 'test_*.py' -v
+uv run python scripts/check_public_boundary.py
 uv build
 ```
 

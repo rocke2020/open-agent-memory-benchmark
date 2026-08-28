@@ -14,7 +14,12 @@ from oamb.artifacts.validation.profiles import (
 )
 from oamb.artifacts.validation.registry import RuleRegistry, ValidationRule
 from oamb.contracts.accounting import (
+    AggregationOperator,
+    CostBasis,
+    CostMeasurementSpec,
     CostRecord,
+    IndexingView,
+    PriceSnapshot,
     ProofStatus,
     ResourceUsageRecord,
     TokenStageV2,
@@ -22,11 +27,19 @@ from oamb.contracts.accounting import (
     TokenUsageRecordV3,
 )
 from oamb.contracts.evidence import (
+    AttemptIntentRecord,
+    AttemptReceiptKind,
+    AttemptReceiptRecord,
     AttemptRecordV2,
-    PhaseReviewOccurrenceRecord,
+    BudgetReservationRecord,
+    CloseErrorRecord,
+    OccurrenceClaimRecord,
+    PhaseReviewOccurrenceRecordV2,
+    RunLeaseRecord,
     ValidationIssue,
     ValidationResult,
     ValidationSeverity,
+    phase_review_occurrence_id_v2,
 )
 from oamb.contracts.ids import attempt_id as derive_attempt_id
 from oamb.contracts.ids import canonical_sha256
@@ -42,15 +55,40 @@ from oamb.contracts.reporting import (
 )
 from oamb.contracts.specifications import (
     AIReviewPlan,
+    BindingKind,
     BudgetScopeKindV2,
     BudgetSpecV2,
+    ExecutionEnvironmentBinding,
+    ExecutionOwner,
     ExternalCallApprovalRecord,
     HumanReviewKeyBinding,
+    ModelRole,
+    ModelRoleBindingV2,
+    RoleBindingStatus,
     ValidationProfile,
     ValidationStage,
 )
 from oamb.contracts.states import AttemptOutcome
+from oamb.phase_review_profiles import (
+    FAKE_PHASE_REVIEW_CLIENT_KIND,
+    FAKE_PHASE_REVIEW_CONFIGURED_MODEL,
+    FAKE_PHASE_REVIEW_COST_REASON,
+    FAKE_PHASE_REVIEW_CREDENTIAL_VARIABLE,
+    FAKE_PHASE_REVIEW_ENDPOINT,
+    FAKE_PHASE_REVIEW_PROVIDER,
+    FAKE_PHASE_REVIEW_RESOLVED_MODEL,
+    FAKE_PHASE_REVIEW_WALL_MEASUREMENT_SOURCE,
+    OPENAI_COMPATIBLE_PHASE_REVIEW_CLIENT_KIND,
+    OPENAI_PHASE_REVIEW_WALL_MEASUREMENT_SOURCE,
+    PHASE_REVIEW_INPUT_TOKEN_PRICE_CLASS,
+    PHASE_REVIEW_OUTPUT_TOKEN_PRICE_CLASS,
+    PHASE_REVIEW_TOKEN_PRICE_UNIT_SCALE,
+    PHASE_REVIEW_WALL_DIMENSION_ID,
+    PHASE_REVIEW_WALL_UNIT,
+    phase_review_runtime_hash,
+)
 from oamb.reporting.human_review import (
+    derive_evaluation_phase_gate,
     validate_ai_review_history,
     verify_human_review_record_evidence,
 )
@@ -72,7 +110,17 @@ class PhaseGateValidationInput:
 @dataclass(frozen=True, slots=True)
 class PhaseReviewEvidence:
     plan: AIReviewPlan
-    occurrence: PhaseReviewOccurrenceRecord
+    reviewer_role_binding: ModelRoleBindingV2
+    cost_measurement_spec: CostMeasurementSpec
+    execution_environment: ExecutionEnvironmentBinding
+    price_snapshot: PriceSnapshot | None
+    lease_record: RunLeaseRecord
+    occurrence_claims: tuple[OccurrenceClaimRecord, ...]
+    budget_reservations: tuple[BudgetReservationRecord, ...]
+    attempt_intents: tuple[AttemptIntentRecord, ...]
+    attempt_receipts: tuple[AttemptReceiptRecord, ...]
+    close_errors: tuple[CloseErrorRecord, ...]
+    occurrence: PhaseReviewOccurrenceRecordV2
     approval: ExternalCallApprovalRecord
     budget: BudgetSpecV2
     batch_results: tuple[AIReviewBatchResult, ...]
@@ -82,9 +130,9 @@ class PhaseReviewEvidence:
     usage_records: tuple[TokenUsageRecordV2 | TokenUsageRecordV3, ...]
     resource_records: tuple[ResourceUsageRecord, ...]
     cost_records: tuple[CostRecord, ...]
-    human_key_binding: HumanReviewKeyBinding
-    human_decision_bytes: bytes
-    human_signature_base64: str
+    human_key_binding: HumanReviewKeyBinding | None
+    human_decision_bytes: bytes | None
+    human_signature_base64: str | None
 
 
 def validate_t10_phase_gate(
@@ -136,6 +184,16 @@ def _phase_gate_target_hash(target: PhaseGateValidationInput) -> str:
     else:
         evidence_binding = (
             _hashable_evidence_value(evidence.plan),
+            _hashable_evidence_value(evidence.reviewer_role_binding),
+            _hashable_evidence_value(evidence.cost_measurement_spec),
+            _hashable_evidence_value(evidence.execution_environment),
+            _hashable_evidence_value(evidence.price_snapshot),
+            _hashable_evidence_value(evidence.lease_record),
+            _hashable_evidence_value(evidence.occurrence_claims),
+            _hashable_evidence_value(evidence.budget_reservations),
+            _hashable_evidence_value(evidence.attempt_intents),
+            _hashable_evidence_value(evidence.attempt_receipts),
+            _hashable_evidence_value(evidence.close_errors),
             _hashable_evidence_value(evidence.occurrence),
             _hashable_evidence_value(evidence.approval),
             _hashable_evidence_value(evidence.budget),
@@ -147,12 +205,16 @@ def _phase_gate_target_hash(target: PhaseGateValidationInput) -> str:
             _hashable_evidence_value(evidence.resource_records),
             _hashable_evidence_value(evidence.cost_records),
             _hashable_evidence_value(evidence.human_key_binding),
-            hashlib.sha256(evidence.human_decision_bytes).hexdigest(),
+            (
+                None
+                if evidence.human_decision_bytes is None
+                else hashlib.sha256(evidence.human_decision_bytes).hexdigest()
+            ),
             evidence.human_signature_base64,
         )
     return canonical_sha256(
         [
-            "oamb-t10-phase-gate-validation-target-v2",
+            "oamb-t10-phase-gate-validation-target-v3",
             target.bundle,
             target.gate,
             evidence_binding,
@@ -284,15 +346,50 @@ def _human_approval_rule(target: PhaseGateValidationInput) -> tuple[ValidationIs
     ):
         return (_issue(rule_id, gate.gate_id, "phase-human-approval-mismatch"),)
     assert gate.human_record is not None
-    if evidence is None or not verify_human_review_record_evidence(
-        record=gate.human_record,
-        decision_bytes=evidence.human_decision_bytes,
-        signature_base64=evidence.human_signature_base64,
-        key_binding=evidence.human_key_binding,
-        canonical_ai_record=gate.ai_record,
+    if (
+        evidence is None
+        or evidence.human_key_binding is None
+        or evidence.human_decision_bytes is None
+        or evidence.human_signature_base64 is None
+        or not verify_human_review_record_evidence(
+            record=gate.human_record,
+            decision_bytes=evidence.human_decision_bytes,
+            signature_base64=evidence.human_signature_base64,
+            key_binding=evidence.human_key_binding,
+            canonical_ai_record=gate.ai_record,
+        )
     ):
         return (_issue(rule_id, gate.gate_id, "phase-human-signature-evidence-mismatch"),)
     return ()
+
+
+def phase_ai_review_evidence_closes(
+    bundle: EvaluationReviewBundle,
+    evidence: PhaseReviewEvidence,
+    ai_record: AIQualityReviewRecord,
+) -> bool:
+    try:
+        validate_ai_review_history(bundle.bundle_id, evidence.ordered_ai_history)
+        if (
+            evidence.ordered_ai_history[-1] != ai_record
+            or ai_record.status != QualityReviewStatus.PASS
+        ):
+            return False
+        provisional_gate = derive_evaluation_phase_gate(
+            phase_id=bundle.phase_id,
+            review_bundle_hash=bundle.bundle_id,
+            ordered_ai_history=evidence.ordered_ai_history,
+            human_records=(),
+        )
+        return _review_source_evidence_closes(
+            PhaseGateValidationInput(
+                bundle=bundle,
+                gate=provisional_gate,
+                review_evidence=evidence,
+            )
+        )
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
 
 
 def _review_source_evidence_closes(target: PhaseGateValidationInput) -> bool:
@@ -301,6 +398,7 @@ def _review_source_evidence_closes(target: PhaseGateValidationInput) -> bool:
         return False
     try:
         plan = evidence.plan
+        reviewer_role = evidence.reviewer_role_binding
         occurrence = evidence.occurrence
         approval = evidence.approval
         budget = evidence.budget
@@ -364,13 +462,18 @@ def _review_source_evidence_closes(target: PhaseGateValidationInput) -> bool:
                 for record in evidence.resource_records
             )
         )
+        fake_reviewer = _is_exact_fake_reviewer(evidence)
         costs_closed = bool(
             cost_ids == ai_record.cost_record_ids
             and cost_ids
             and all(
                 record.parent_kind == "phase_review"
                 and record.parent_id == occurrence.phase_review_occurrence_id
-                and record.proof_status == ProofStatus.MEASURED_COMPLETE
+                and (
+                    _fake_not_applicable_cost_closes(record)
+                    if fake_reviewer
+                    else record.proof_status == ProofStatus.MEASURED_COMPLETE
+                )
                 and set(record.source_usage_record_ids) <= set(usage_ids)
                 and set(record.source_resource_record_ids) <= set(resource_ids)
                 for record in evidence.cost_records
@@ -378,6 +481,13 @@ def _review_source_evidence_closes(target: PhaseGateValidationInput) -> bool:
         )
         return bool(
             plan.review_bundle_hash == target.bundle.bundle_id
+            and reviewer_role.binding_id == plan.reviewer_role_binding_hash
+            and reviewer_role.role == ModelRole.QUALITY_REVIEW
+            and reviewer_role.role_status == RoleBindingStatus.SELECTED
+            and reviewer_role.execution_owner == ExecutionOwner.HARNESS
+            and reviewer_role.binding_kind == BindingKind.MODEL_CLIENT
+            and reviewer_role.configuration_fingerprint == plan.reviewer_configuration_hash
+            and budget.role_ceilings[0].provider_budget_cap.provider == reviewer_role.provider
             and ai_history_ids == target.gate.ordered_ai_review_record_hashes
             and ai_history[-1] == ai_record
             and ai_record.review_plan_hash == plan.plan_hash
@@ -421,6 +531,10 @@ def _review_source_evidence_closes(target: PhaseGateValidationInput) -> bool:
             and budget.max_attempts >= plan.expected_attempt_count
             and role_ceiling_ids == (plan.reviewer_role_binding_hash,)
             and budget.role_ceilings[0].max_attempts >= plan.expected_attempt_count
+            and _review_runtime_closes(evidence)
+            and _review_transaction_closes(evidence)
+            and _review_measurement_closes(evidence)
+            and _review_price_closes(evidence)
             and _review_budget_closes(evidence)
             and ai_record.accounting_closed
             and attempts_closed
@@ -430,6 +544,268 @@ def _review_source_evidence_closes(target: PhaseGateValidationInput) -> bool:
         )
     except (AttributeError, IndexError, TypeError, ValueError):
         return False
+
+
+def _review_runtime_closes(evidence: PhaseReviewEvidence) -> bool:
+    role = evidence.reviewer_role_binding
+    if role.redacted_endpoint_fingerprint is None:
+        return False
+    client_kind = (
+        FAKE_PHASE_REVIEW_CLIENT_KIND
+        if _is_exact_fake_reviewer(evidence)
+        else OPENAI_COMPATIBLE_PHASE_REVIEW_CLIENT_KIND
+    )
+    return evidence.plan.reviewer_runtime_hash == phase_review_runtime_hash(
+        role.redacted_endpoint_fingerprint,
+        evidence.execution_environment.environment_hash,
+        client_kind=client_kind,
+    )
+
+
+def _review_transaction_closes(evidence: PhaseReviewEvidence) -> bool:
+    lease = evidence.lease_record
+    occurrence = evidence.occurrence
+    attempts = evidence.attempts
+    claims = evidence.occurrence_claims
+    reservations = evidence.budget_reservations
+    intents = evidence.attempt_intents
+    receipts = evidence.attempt_receipts
+    if (
+        evidence.close_errors
+        or len(attempts) != len(claims)
+        or len(attempts) != len(reservations)
+        or len(attempts) != len(intents)
+        or len(attempts) != len(receipts)
+        or lease.lease_record_hash
+        != canonical_sha256(lease.model_dump(mode="python", exclude={"lease_record_hash"}))
+        or lease.run_id != occurrence.phase_review_occurrence_id
+        or lease.provider_project_id != evidence.reviewer_role_binding.provider
+        or lease.provider_profile_id
+        != canonical_sha256(
+            [
+                "oamb-phase-review-provider-profile-v1",
+                (
+                    FAKE_PHASE_REVIEW_CLIENT_KIND
+                    if _is_exact_fake_reviewer(evidence)
+                    else OPENAI_COMPATIBLE_PHASE_REVIEW_CLIENT_KIND
+                ),
+                evidence.reviewer_role_binding.binding_id,
+            ]
+        )
+        or lease.lease_epoch != 1
+        or lease.predecessor_lease_record_hash is not None
+        or lease.acquired_at > (occurrence.started_at or lease.acquired_at)
+    ):
+        return False
+    planned_inputs = tuple(batch.input_tokens for batch in evidence.plan.case_batches) + (
+        evidence.plan.phase_integrity_input_tokens,
+    )
+    planned_outputs = tuple(batch.maximal_output_tokens for batch in evidence.plan.case_batches) + (
+        evidence.plan.phase_integrity_maximal_output_tokens,
+    )
+    for ordinal, (claim, reservation, intent, receipt, attempt, resource) in enumerate(
+        zip(
+            claims,
+            reservations,
+            intents,
+            receipts,
+            attempts,
+            evidence.resource_records,
+            strict=True,
+        ),
+        1,
+    ):
+        claim_fields = claim.model_dump(
+            mode="python", exclude={"schema_name", "schema_version", "claim_id"}
+        )
+        reservation_fields = reservation.model_dump(
+            mode="python", exclude={"schema_name", "schema_version", "reservation_id"}
+        )
+        expected_receipt_kind = (
+            AttemptReceiptKind.RESPONSE
+            if attempt.outcome == AttemptOutcome.SUCCEEDED
+            else AttemptReceiptKind.ERROR
+        )
+        expected_cost = _planned_review_cost(
+            evidence,
+            input_tokens=planned_inputs[ordinal - 1],
+            output_tokens=planned_outputs[ordinal - 1],
+        )
+        if (
+            claim.claim_id
+            != canonical_sha256(["oamb-phase-review-occurrence-claim-v1", claim_fields])
+            or claim.occurrence_id != occurrence.phase_review_occurrence_id
+            or claim.lease_record_hash != lease.lease_record_hash
+            or claim.lease_epoch != lease.lease_epoch
+            or claim.owner_id != lease.owner_id
+            or claim.stage != "quality_review"
+            or claim.request_fingerprint != attempt.request_fingerprint
+            or claim.reconciliation_capability != attempt.reconciliation_capability
+            or reservation.reservation_id
+            != canonical_sha256(["oamb-phase-review-budget-reservation-v1", reservation_fields])
+            or reservation.budget_id != evidence.budget.budget_id
+            or reservation.scope_kind != BudgetScopeKindV2.PHASE_REVIEW
+            or reservation.scope_id != occurrence.phase_review_occurrence_id
+            or reservation.role_binding_id != evidence.reviewer_role_binding.binding_id
+            or reservation.attempt_id != attempt.attempt_id
+            or reservation.reserved_attempts != 1
+            or reservation.reserved_input_tokens != planned_inputs[ordinal - 1]
+            or reservation.reserved_output_tokens != planned_outputs[ordinal - 1]
+            or reservation.reserved_cost != expected_cost
+            or reservation.currency != evidence.budget.currency
+            or reservation.reserved_provider_units != Decimal("1")
+            or len(reservation.reserved_resource_ceilings) != 1
+            or reservation.reserved_resource_ceilings[0].dimension_id
+            != PHASE_REVIEW_WALL_DIMENSION_ID
+            or reservation.reserved_resource_ceilings[0].unit != PHASE_REVIEW_WALL_UNIT
+            or reservation.reserved_resource_ceilings[0].maximum
+            != reservation.reserved_dispatch_wall_seconds
+            or reservation.reserved_dispatch_wall_seconds < (resource.value or Decimal("0"))
+            or intent.attempt_id != attempt.attempt_id
+            or intent.claim_id != claim.claim_id
+            or intent.reservation_id != reservation.reservation_id
+            or intent.parent_kind != "phase_review"
+            or intent.parent_id != occurrence.phase_review_occurrence_id
+            or intent.role_binding_id != evidence.reviewer_role_binding.binding_id
+            or intent.stage != "quality_review"
+            or intent.request_fingerprint != attempt.request_fingerprint
+            or intent.reconciliation_capability != attempt.reconciliation_capability
+            or intent.idempotency_key_hash != attempt.idempotency_key_hash
+            or claim.claimed_at > intent.sealed_at
+            or intent.sealed_at > attempt.started_at
+            or receipt.attempt_id != attempt.attempt_id
+            or receipt.receipt_kind != expected_receipt_kind
+            or receipt.raw_response_ref != attempt.raw_response_ref
+            or receipt.raw_error_ref != attempt.raw_error_ref
+            or receipt.dispatch_started_at != attempt.started_at
+            or receipt.receipt_observed_at != attempt.ended_at
+            or receipt.provider_request_wall_seconds != (resource.value or Decimal("0"))
+        ):
+            return False
+    return all(
+        record.occurrence_id
+        == phase_review_occurrence_id_v2(
+            phase_id=occurrence.phase_id,
+            review_bundle_hash=occurrence.review_bundle_hash,
+            reviewer_role_binding_hash=occurrence.reviewer_role_binding_hash,
+            artifact_repository_fingerprint=occurrence.artifact_repository_fingerprint,
+            ordinal=record.ordinal,
+        )
+        for record in evidence.ordered_ai_history
+    )
+
+
+def _planned_review_cost(
+    evidence: PhaseReviewEvidence,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+) -> Decimal:
+    if evidence.price_snapshot is None:
+        return Decimal("0")
+    input_price, output_price = evidence.price_snapshot.unit_prices
+    return (Decimal(input_tokens) * input_price + Decimal(output_tokens) * output_price) / Decimal(
+        PHASE_REVIEW_TOKEN_PRICE_UNIT_SCALE
+    )
+
+
+def _review_measurement_closes(evidence: PhaseReviewEvidence) -> bool:
+    spec = evidence.cost_measurement_spec
+    dimensions = spec.dimensions
+    budget = evidence.budget
+    if len(dimensions) != 1 or len(budget.role_ceilings) != 1:
+        return False
+    role = budget.role_ceilings[0]
+    dimension_ids = tuple(item.dimension_id for item in dimensions)
+    if dimension_ids != tuple(item.dimension_id for item in budget.resource_ceilings):
+        return False
+    if dimension_ids != tuple(item.dimension_id for item in role.resource_ceilings):
+        return False
+    dimensions_by_id = {item.dimension_id: item for item in dimensions}
+    expected_measurement_source = (
+        FAKE_PHASE_REVIEW_WALL_MEASUREMENT_SOURCE
+        if _is_exact_fake_reviewer(evidence)
+        else OPENAI_PHASE_REVIEW_WALL_MEASUREMENT_SOURCE
+    )
+    if any(
+        dimension.dimension_id != PHASE_REVIEW_WALL_DIMENSION_ID
+        or dimension.stage != "quality_review"
+        or dimension.operation_kind != "quality_review"
+        or dimension.parent_kind != "phase_review"
+        or dimension.unit != PHASE_REVIEW_WALL_UNIT
+        or not dimension.required
+        or dimension.allowed_meter_sources != (expected_measurement_source,)
+        or dimension.price_class is not None
+        or dimension.indexing_view_rule != IndexingView.NOT_APPLICABLE
+        or dimension.aggregation_operator != AggregationOperator.INTERVAL_UNION
+        for dimension in dimensions
+    ):
+        return False
+    return all(
+        record.dimension_id in dimensions_by_id
+        and record.meter_boundary == record.dimension_id
+        and record.stage == dimensions_by_id[record.dimension_id].stage
+        and record.unit == dimensions_by_id[record.dimension_id].unit
+        and record.measurement_source == expected_measurement_source
+        and record.measurement_spec_id == spec.measurement_spec_id
+        and record.environment_hash == evidence.execution_environment.environment_hash
+        for record in evidence.resource_records
+    )
+
+
+def _review_price_closes(evidence: PhaseReviewEvidence) -> bool:
+    role = evidence.budget.role_ceilings[0]
+    if _is_exact_fake_reviewer(evidence):
+        return evidence.price_snapshot is None and role.price_snapshot_id is None
+    snapshot = evidence.price_snapshot
+    reviewer = evidence.reviewer_role_binding
+    if snapshot is None:
+        return False
+    if (
+        evidence.occurrence.started_at is None
+        or snapshot.effective_at > evidence.occurrence.started_at
+        or snapshot.price_class_ids
+        != (
+            PHASE_REVIEW_INPUT_TOKEN_PRICE_CLASS,
+            PHASE_REVIEW_OUTPUT_TOKEN_PRICE_CLASS,
+        )
+        or len(snapshot.unit_prices) != 2
+        or snapshot.provider != reviewer.provider
+        or snapshot.provider != role.provider_budget_cap.provider
+        or snapshot.currency != evidence.budget.currency
+        or snapshot.currency != role.currency
+        or role.price_snapshot_id != snapshot.price_snapshot_id
+    ):
+        return False
+    usage_by_id = {record.usage_record_id: record for record in evidence.usage_records}
+    input_price, output_price = snapshot.unit_prices
+    for record in evidence.cost_records:
+        try:
+            source_usage = tuple(
+                usage_by_id[source_id] for source_id in record.source_usage_record_ids
+            )
+        except KeyError:
+            return False
+        expected_amount = sum(
+            (
+                Decimal(item.input_tokens or 0) * input_price
+                + Decimal(item.visible_output_tokens or 0) * output_price
+            )
+            / Decimal(PHASE_REVIEW_TOKEN_PRICE_UNIT_SCALE)
+            for item in source_usage
+        )
+        if (
+            not source_usage
+            or record.basis != CostBasis.ESTIMATE_FROM_MEASURED_USAGE
+            or record.proof_status != ProofStatus.MEASURED_COMPLETE
+            or record.indexing_view != IndexingView.NOT_APPLICABLE
+            or record.amount != expected_amount
+            or record.currency != snapshot.currency
+            or record.price_snapshot_id != snapshot.price_snapshot_id
+            or record.reason is not None
+        ):
+            return False
+    return True
 
 
 def _review_budget_closes(evidence: PhaseReviewEvidence) -> bool:
@@ -517,7 +893,10 @@ def _review_budget_closes(evidence: PhaseReviewEvidence) -> bool:
         or role.max_cost is None
         or cost_amount > budget.max_cost
         or cost_amount > role.max_cost
-        or any(item.currency != budget.currency for item in evidence.cost_records)
+        or (
+            not _is_exact_fake_reviewer(evidence)
+            and any(item.currency != budget.currency for item in evidence.cost_records)
+        )
         or Decimal(len(attempt_ids)) > role.provider_budget_cap.maximum_accepted_units
         or role.provider_budget_cap.operation_kind != "quality_review"
         or role.provider_budget_cap.billing_unit != "request"
@@ -572,9 +951,41 @@ def _review_budget_closes(evidence: PhaseReviewEvidence) -> bool:
     )
 
 
+def _is_exact_fake_reviewer(evidence: PhaseReviewEvidence) -> bool:
+    role = evidence.reviewer_role_binding
+    return bool(
+        role.binding_id == evidence.plan.reviewer_role_binding_hash
+        and role.role == ModelRole.QUALITY_REVIEW
+        and role.role_status == RoleBindingStatus.SELECTED
+        and role.execution_owner == ExecutionOwner.HARNESS
+        and role.binding_kind == BindingKind.MODEL_CLIENT
+        and role.provider == FAKE_PHASE_REVIEW_PROVIDER
+        and role.endpoint_reference == FAKE_PHASE_REVIEW_ENDPOINT
+        and role.credential_variable_name == FAKE_PHASE_REVIEW_CREDENTIAL_VARIABLE
+        and role.configured_model == FAKE_PHASE_REVIEW_CONFIGURED_MODEL
+        and role.resolved_model == FAKE_PHASE_REVIEW_RESOLVED_MODEL
+        and role.retry_policy_id == "no-retry-v1"
+        and role.configuration_fingerprint == evidence.plan.reviewer_configuration_hash
+        and evidence.budget.role_ceilings[0].provider_budget_cap.provider
+        == FAKE_PHASE_REVIEW_PROVIDER
+    )
+
+
+def _fake_not_applicable_cost_closes(record: CostRecord) -> bool:
+    return bool(
+        record.proof_status == ProofStatus.NOT_APPLICABLE
+        and record.basis == "actual_supplier_charge"
+        and record.indexing_view == "not_applicable"
+        and record.amount is None
+        and record.currency is None
+        and record.price_snapshot_id is None
+        and record.reason == FAKE_PHASE_REVIEW_COST_REASON
+    )
+
+
 def _attempt_time_closes(
     attempt: AttemptRecordV2,
-    occurrence: PhaseReviewOccurrenceRecord,
+    occurrence: PhaseReviewOccurrenceRecordV2,
     approval: ExternalCallApprovalRecord,
 ) -> bool:
     return bool(

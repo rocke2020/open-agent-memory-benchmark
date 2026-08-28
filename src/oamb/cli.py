@@ -5,33 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import typer
 
 from .artifacts.atomic import atomic_write_bytes
-from .artifacts.store import ArtifactStore
-from .artifacts.validation.fake import validate_fake_capsule
 from .contracts.evidence import ValidationResult
 from .contracts.ids import canonical_json_bytes
-from .contracts.ports import ArtifactStorePort, IngestionPlan, MemorySystemPort
 from .contracts.specifications import RunSpec
 from .contracts.states import ValidationDisposition
-from .memory_systems.fake import ScriptedFakeMemorySystem
-from .model_clients.fake import ScriptedFakeModelClient
-from .reporting.html import build_fake_report
-from .reporting.reduce import reduce_run_summary
-from .runtime.fake_run import (
-    FAKE_RUNTIME_BINDING_HASH,
-    FakeRunArtifacts,
-    FakeRunScenario,
-    build_fake_budget,
-    build_fake_run_spec,
-    resolve_fake_preflight,
-    run_fake_vertical_slice,
-)
-from .runtime.preflight import ArtifactDurabilityPreflight
-from .workloads.fake import GeneratedFakeWorkload
+from .historical_cli import external_app
+from .phase_cli import phase_app
+
+if TYPE_CHECKING:
+    from .contracts.ports import ArtifactStorePort, IngestionPlan, MemorySystemPort
+    from .runtime.fake_run import FakeRunArtifacts, FakeRunScenario
+    from .runtime.preflight import ArtifactDurabilityPreflight
 
 app = typer.Typer(
     name="oamb",
@@ -44,6 +33,8 @@ report_app = typer.Typer(help="Build validated offline reports.")
 app.add_typer(manifest_app, name="manifest")
 app.add_typer(capsule_app, name="capsule")
 app.add_typer(report_app, name="report")
+app.add_typer(phase_app, name="phase")
+app.add_typer(external_app, name="external")
 
 
 @manifest_app.command("build")
@@ -53,6 +44,13 @@ def manifest_build(
     output: Annotated[Path, typer.Option("--output", help="Manifest bundle directory.")],
 ) -> None:
     """Build the generated credential-free T5 input bundle."""
+
+    from .runtime.fake_run import (
+        FAKE_RUNTIME_BINDING_HASH,
+        build_fake_budget,
+        build_fake_run_spec,
+    )
+    from .workloads.fake import GeneratedFakeWorkload
 
     if workload != "fake":
         raise typer.BadParameter("T5 implements only the generated 'fake' workload")
@@ -88,6 +86,8 @@ def preflight_command(
 ) -> None:
     """Resolve the zero-external fake graph before execution."""
 
+    from .runtime.fake_run import resolve_fake_preflight
+
     run_spec_bytes = run_spec.read_bytes()
     parsed = RunSpec.model_validate_json(run_spec_bytes)
     if parsed != _expected_fake_run_spec(parsed.run_id):
@@ -116,11 +116,19 @@ def run_command(
         typer.Option("--resolved-plan", help="Resolved fake plan JSON path."),
     ],
     scenario: Annotated[
-        FakeRunScenario,
+        str,
         typer.Option("--scenario", help="Deterministic fake execution scenario."),
-    ] = FakeRunScenario.STANDARD,
+    ] = "standard",
 ) -> None:
     """Execute the resolved fake plan and seal a source capsule."""
+
+    from .runtime.fake_run import FakeRunScenario, resolve_fake_preflight
+
+    try:
+        parsed_scenario = FakeRunScenario(scenario)
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in FakeRunScenario)
+        raise typer.BadParameter(f"scenario must be one of: {choices}") from exc
 
     document = _load_object(resolved_plan)
     _require_exact_keys(
@@ -171,7 +179,7 @@ def run_command(
     completed = run_generated_fake_vertical_slice(
         output_root=artifact_root,
         run_id=run_spec.run_id,
-        scenario=scenario,
+        scenario=parsed_scenario,
     )
     typer.echo(f"capsule: {completed.capsule_root}")
 
@@ -186,6 +194,8 @@ def capsule_validate(
     ] = False,
 ) -> None:
     """Execute the closed fake evidence profile."""
+
+    from .artifacts.validation.fake import validate_fake_capsule
 
     result = validate_fake_capsule(capsule)
     atomic_write_bytes(output, canonical_json_bytes(result), trusted_root=output.parent)
@@ -204,6 +214,8 @@ def summarize_command(
     output: Annotated[Path, typer.Option("--output", help="RunSummary JSON path.")],
 ) -> None:
     """Build a completion-first summary from validated evidence."""
+
+    from .reporting.reduce import reduce_run_summary
 
     result = ValidationResult.model_validate_json(validation.read_bytes())
     summary = reduce_run_summary(capsule, result)
@@ -233,6 +245,8 @@ def report_build(
 ) -> None:
     """Render, export-validate, and seal one offline report."""
 
+    from .reporting.html import build_fake_report
+
     if audience not in {"public", "local"}:
         raise typer.BadParameter("audience must be 'public' or 'local'")
     result = ValidationResult.model_validate_json(validation.read_bytes())
@@ -257,9 +271,17 @@ def run_generated_fake_vertical_slice(
     *,
     output_root: Path,
     run_id: str,
-    scenario: FakeRunScenario = FakeRunScenario.STANDARD,
+    scenario: FakeRunScenario | None = None,
 ) -> FakeRunArtifacts:
     """Compose the concrete generated fakes only at the CLI boundary."""
+
+    from .artifacts.store import ArtifactStore
+    from .memory_systems.fake import ScriptedFakeMemorySystem
+    from .model_clients.fake import ScriptedFakeModelClient
+    from .runtime.fake_run import FakeRunScenario, run_fake_vertical_slice
+    from .workloads.fake import GeneratedFakeWorkload
+
+    selected_scenario = FakeRunScenario.STANDARD if scenario is None else scenario
 
     workload = GeneratedFakeWorkload()
 
@@ -280,11 +302,14 @@ def run_generated_fake_vertical_slice(
         artifact_store_factory=ArtifactStore,
         memory_factory=memory_factory,
         model_factory=ScriptedFakeModelClient,
-        scenario=scenario,
+        scenario=selected_scenario,
     )
 
 
 def _expected_fake_run_spec(run_id: str) -> RunSpec:
+    from .runtime.fake_run import FAKE_RUNTIME_BINDING_HASH, build_fake_run_spec
+    from .workloads.fake import GeneratedFakeWorkload
+
     workload = GeneratedFakeWorkload()
     dataset = workload.resolve_sources()
     case_manifest = workload.build_case_manifest(dataset)
@@ -311,6 +336,8 @@ def _artifact_durability_document(
 
 
 def _parse_artifact_durability(value: object) -> ArtifactDurabilityPreflight:
+    from .runtime.preflight import ArtifactDurabilityPreflight
+
     if not isinstance(value, dict):
         raise typer.BadParameter("resolved plan artifact proof must be an object")
     expected_keys = {

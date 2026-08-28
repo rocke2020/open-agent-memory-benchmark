@@ -17,6 +17,7 @@ from oamb.artifacts.validation.profiles import (
     ReportKind,
     exact_report_export_profile,
     t8_profile_catalog,
+    validation_profile_catalog,
 )
 from oamb.artifacts.validation.registry import RuleRegistry
 from oamb.contracts.states import ValidationDisposition
@@ -196,6 +197,25 @@ def test_t8_catalog_is_exact_and_contains_no_t11_profile() -> None:
     assert "transport=python_sdk" in mem0_sdk
     assert "support=unsupported" in mem0_sdk
     assert "comparison_eligible=false" in mem0_sdk
+
+
+def test_current_catalog_extends_frozen_t8_with_only_the_t9_external_profile() -> None:
+    t8_catalog = t8_profile_catalog()
+    current_catalog = validation_profile_catalog()
+
+    assert tuple(current_catalog) == (
+        *tuple(t8_catalog),
+        "oamb-t9-external-amb-historical-v1",
+    )
+    external = current_catalog["oamb-t9-external-amb-historical-v1"]
+    assert tuple(rule.rule_id for rule in external.profile.required_rules) == (
+        "external.provenance.v1",
+        "external.transformation.v1",
+        "external.case-aggregate.v1",
+        "external.compatibility.v1",
+        "external.limitations.v1",
+    )
+    assert "repeatability" not in repr(tuple(current_catalog.values())).lower()
 
 
 def test_each_t8_profile_registers_and_executes_every_required_rule_once() -> None:
