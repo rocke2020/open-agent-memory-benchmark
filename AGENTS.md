@@ -28,7 +28,7 @@ validated source roots ─┴─→ reporting
 ```
 
 - `src/oamb/contracts/` owns canonical identities, states, immutable public
-  records, accounting shapes, behavior ports, and schema generation. It must
+  records, accounting shapes, behavior ports, and versioned artifact parsing. It must
   not import concrete runtime, workload, adapter, model, or storage code.
 - `src/oamb/artifacts/validation/` owns early structural rule registration and
   closed validation profiles. Semantic rules live with their later owners.
@@ -37,8 +37,10 @@ validated source roots ─┴─→ reporting
   beside the Python package, never imported by it.
 - Future concrete adapters implement ports without importing runtime or one
   another. Only the CLI composition root selects concrete implementations.
-- `schemas/` is generated from one explicit public-contract registry and is
-  included in the built wheel as package data.
+- `src/oamb/contracts/schema.py` owns the explicit versioned-contract registry
+  and fail-closed parser. Persisted `schema_name` and `schema_version` fields
+  remain part of the artifact wire format; generated schema snapshots are not
+  a repository or package surface.
 
 Avoid generic dumping grounds such as `utils.py`, `providers/`, or `services/`.
 Names should state the property or boundary a module actually owns.
@@ -54,7 +56,6 @@ uv run ruff format --check .
 uv run mypy src tests
 uv run pytest tests/unit tests/contracts -q
 python3 -m unittest discover -s provider-services/tests -p 'test_*.py' -v
-uv run oamb schema check
 uv build
 ```
 
@@ -62,10 +63,9 @@ Implement behavior test-first. Each validator rule needs a valid case and an
 independent planted failure that proves the rejection branch can fire. Run
 focused tests after each red-green cycle, then the affected offline suite.
 
-Generated schemas are never hand-edited. Change the typed model, regenerate
-with `uv run oamb schema build`, inspect the semantic diff, and rerun the drift
-check. Required fields, identity inputs, state meanings, aggregation rules, or
-parser behavior require a new schema/protocol version.
+Change persisted contracts through their typed models and versioned registry.
+Required fields, identity inputs, state meanings, aggregation rules, or parser
+behavior require a new artifact or protocol version plus backward-read tests.
 
 ## Safety and evidence rules
 
@@ -82,7 +82,7 @@ parser behavior require a new schema/protocol version.
 - Preserve provider-returned retrieval order. OAMB owns no reranker.
 - Keep indexing usage and cost on the physical ingestion plan; do not multiply
   it by logical members or cases.
-- Core import, CLI help, schema, and validation commands must not import provider
+- Core import, CLI help, artifact parsing, and validation commands must not import provider
   SDKs, databases, model clients, or credentials. Optional dependencies load
   only inside the selected future factory.
 - Never print secrets, resolved credential values, provider account keys, or
@@ -93,7 +93,7 @@ parser behavior require a new schema/protocol version.
 
 Make the smallest change that closes the requested contract. Preserve unrelated
 work and existing provider state. Use named constants for domain limits and one
-canonical implementation for serialization, identity, transitions, schema
+canonical implementation for serialization, identity, transitions, contract
 registration, and rule inventories.
 
 Before claiming completion, run fail-capable checks against the final tree and

@@ -1,62 +1,90 @@
 # Open Agent Memory Benchmark
 
-Open Agent Memory Benchmark (OAMB) is a clean-room, evidence-first framework
-for comparing self-hosted agent-memory systems through reproducible API
-boundaries. It keeps execution evidence, validation, metrics, resource usage,
-cost, and reports separate so a partial run cannot be mistaken for a score.
+> **TL;DR:** Open Agent Memory Benchmark (OAMB) keeps execution evidence,
+> validation, metrics, resource usage, cost, and reports separate so a partial
+> run cannot be mistaken for a score. The repository currently offers a complete
+> credential-free fake workflow; production provider composition is not yet a
+> supported command-line workflow.
 
-The current repository contains:
+## Current status
 
-- exact-pinned REST service preparation for Hindsight, Mem0, and OpenViking;
-- the dependency-free OAMB contract and behavior-port kernel;
-- deterministic JSON Schema generation and drift checking;
-- fail-closed early structural validation with planted failures;
-- a locked Python package and credential-free Linux/macOS CI gate.
+**The offline evidence pipeline is implemented and testable without credentials,
+while live benchmark execution remains gated.** The repository contains
+exact-pinned REST service preparation for Hindsight, Mem0, and OpenViking,
+strict versioned artifact contracts, fail-closed validation, reducers, quality
+review records, and deterministic offline reports.
 
-No live benchmark, model-readiness probe, memory-conformance write, score, or
-release claim is implied by those components.
+No fixture, healthy service, non-empty response, or generated report implies a
+live provider passed, a benchmark score is valid, or a release is ready.
 
-## Quick start
+## Credential-free workflow
 
-Requirements: Python 3.11 or newer and
+**A source checkout can run one complete fake benchmark path from manifest to
+offline report.** Requirements are Python 3.11 or newer and
 [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync --locked --all-groups
-uv run oamb --help
-uv run pytest tests/unit tests/contracts -q
-uv run oamb schema check
-uv build
+
+mkdir -p .local-demo/inputs .local-demo/capsules .local-demo/reports
+
+uv run oamb manifest build \
+  --workload fake \
+  --run-id readme-fake-run \
+  --output .local-demo/inputs
+
+uv run oamb preflight \
+  --run-spec .local-demo/inputs/run-spec.json \
+  --artifact-root .local-demo/capsules \
+  --output .local-demo/resolved-plan.json
+
+uv run oamb run --resolved-plan .local-demo/resolved-plan.json
+
+uv run oamb capsule validate \
+  .local-demo/capsules/readme-fake-run \
+  --output .local-demo/evidence-validation.json
+
+uv run oamb summarize \
+  .local-demo/capsules/readme-fake-run \
+  --validation .local-demo/evidence-validation.json \
+  --output .local-demo/run-summary.json
+
+uv run oamb report build \
+  .local-demo/capsules/readme-fake-run \
+  --validation .local-demo/evidence-validation.json \
+  --output-root .local-demo/reports \
+  --audience public
 ```
 
-These commands are offline after dependencies are available. They do not read
-provider credentials or start provider services.
+The commands are offline after dependencies are available. They use generated
+fake components, make no provider calls, and write only beneath `.local-demo/`.
 
-## Contract kernel
+## Runtime contracts
 
-Public records are strict, immutable Pydantic models with explicit
-`schema_name` and `schema_version`. `src/oamb/contracts/schema.py` is the only
-public-contract registry. Schemas under `schemas/` are generated artifacts;
-never edit them by hand.
+**Persisted artifacts are parsed by strict, immutable, versioned Pydantic
+models rather than checked-in generated schema files.** Every persisted model
+retains explicit `schema_name` and `schema_version` fields. The registry rejects
+unknown names and versions, while semantic validators enforce identities,
+cross-artifact references, accounting completeness, and report eligibility.
 
-```bash
-uv run oamb schema build
-uv run oamb schema check
-```
+## Production workflow boundary
 
-The early validator covers schema/version, identity, references, counts,
-hashes, state transitions, and configured-value exposure. Semantic workload,
-adapter, accounting, comparison, and export validation arrive with their owning
-implementation layers.
+**Provider configuration, live execution, eligible comparisons, and the final
+user-facing production workflow remain pending distribution and CLI work.** Do
+not translate the fake commands into a real provider run or reuse their artifact
+root for live evidence. Live calls require separately approved scope, immutable
+runtime bindings, budgets, and retained receipts.
 
 ## Provider API services
 
-The default comparison boundary uses REST for all three systems. The optional
-Mem0 Python SDK profile is separate and cannot substitute for REST evidence.
-See [`provider-services/README.md`](provider-services/README.md) for the
+**Service preparation is non-destructive and separate from benchmark
+execution.** The default comparison boundary uses REST for Hindsight, Mem0,
+and OpenViking. The optional Mem0 Python SDK profile is separate and cannot
+substitute for REST evidence. See
+[`provider-services/README.md`](provider-services/README.md) for the
 non-destructive service-only workflow.
 
-Start them explicitly with:
+Start the services explicitly with:
 
 ```bash
 cd provider-services && ./bin/provider-services up
@@ -67,10 +95,12 @@ conformance, or execute a paid evaluation.
 
 ## Project policies
 
+**Security, dataset, and dependency policies are maintained as repository
+documents.**
+
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting and secret safety.
 - [`DATASETS.md`](DATASETS.md) — dataset provenance and redistribution rules.
 - [`THIRD_PARTY.md`](THIRD_PARTY.md) — direct dependency and license inventory.
-- [`AGENTS.md`](AGENTS.md) — contributor and coding-agent conventions.
 
 Licensed under Apache-2.0. Dataset and third-party artifacts retain their own
 licenses and are not relicensed by OAMB.

@@ -3,6 +3,9 @@ from __future__ import annotations
 import importlib
 import subprocess
 import sys
+import tarfile
+import zipfile
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -35,7 +38,7 @@ def test_core_import_and_cli_help_do_not_load_optional_provider_dependencies() -
     cli = require("oamb.cli")
     result = CliRunner().invoke(cli.app, ["--help"])
     assert result.exit_code == 0, result.output
-    assert "schema" in result.output
+    assert "schema" not in result.output.lower()
 
 
 def test_contract_ports_do_not_import_implementation_packages() -> None:
@@ -76,10 +79,89 @@ def test_artifact_validation_does_not_import_reporting_implementation() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_checked_in_schemas_are_available_as_package_data() -> None:
-    schema = require("oamb.contracts.schema")
+def test_generated_schema_snapshots_are_absent_from_source_and_package_configuration() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    pyproject = (repository_root / "pyproject.toml").read_text(encoding="utf-8")
 
-    names = schema.packaged_schema_names()
+    assert not (repository_root / "schemas").exists()
+    assert '"/schemas"' not in pyproject
+    assert '"schemas" = "oamb/schemas"' not in pyproject
 
-    assert "protocol_spec.v1.schema.json" in names
-    assert "validation_result.v1.schema.json" in names
+
+def test_built_and_installed_distributions_expose_no_generated_schema_surface(
+    tmp_path: Path,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    distribution_root = tmp_path / "dist"
+    build = subprocess.run(
+        ["uv", "build", "--out-dir", str(distribution_root)],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert build.returncode == 0, build.stderr
+    wheel = next(distribution_root.glob("*.whl"))
+    source_distribution = next(distribution_root.glob("*.tar.gz"))
+    with zipfile.ZipFile(wheel) as archive:
+        wheel_names = tuple(archive.namelist())
+    with tarfile.open(source_distribution, "r:gz") as archive:
+        source_names = tuple(archive.getnames())
+    for names in (wheel_names, source_names):
+        assert not any(name.endswith(".schema.json") for name in names)
+        assert not any("/schemas/" in f"/{name}/" for name in names)
+
+    environment = tmp_path / "installed"
+    create_environment = subprocess.run(
+        ["uv", "venv", "--python", sys.executable, str(environment)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert create_environment.returncode == 0, create_environment.stderr
+    installed_python = environment / "bin" / "python"
+    install = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--offline",
+            "--python",
+            str(installed_python),
+            str(wheel),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert install.returncode == 0, install.stderr
+    resource_probe = subprocess.run(
+        [
+            str(installed_python),
+            "-c",
+            (
+                "from importlib import resources; "
+                "assert not resources.files('oamb').joinpath('schemas').is_dir()"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert resource_probe.returncode == 0, resource_probe.stderr
+    installed_cli = environment / "bin" / "oamb"
+    help_result = subprocess.run(
+        [str(installed_cli), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    assert "schema" not in help_result.stdout.lower()
+    removed_command = subprocess.run(
+        [str(installed_cli), "schema", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert removed_command.returncode != 0

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import json
-
 from oamb.contracts.reporting import (
     ComparableComparisonReport,
     IncomparableComparisonReport,
 )
-from oamb.contracts.schema import CONTRACT_REGISTRY, parse_contract, schema_bytes
+from oamb.contracts.schema import CONTRACT_REGISTRY, parse_contract
 
-T8_PUBLIC_SCHEMA_KEYS = {
+T8_VERSIONED_CONTRACT_KEYS = {
     ("acceptance_report_spec", 1),
     ("aggregate_metric_delta", 1),
     ("ai_quality_review_record", 1),
@@ -64,18 +62,10 @@ T8_PUBLIC_SCHEMA_KEYS = {
 }
 
 
-def test_t8_public_contract_inventory_is_complete_and_unique() -> None:
-    assert T8_PUBLIC_SCHEMA_KEYS <= set(CONTRACT_REGISTRY)
-    registered = [key for key in CONTRACT_REGISTRY if key in T8_PUBLIC_SCHEMA_KEYS]
-    assert len(registered) == len(T8_PUBLIC_SCHEMA_KEYS)
-
-
-def test_comparison_report_schema_is_one_discriminated_public_contract() -> None:
-    model = CONTRACT_REGISTRY[("comparison_report", 1)]
-    document = json.loads(schema_bytes(model))
-
-    assert document["discriminator"]["propertyName"] == "comparable"
-    assert len(document["oneOf"]) == 2
+def test_t8_versioned_contract_inventory_is_complete_and_unique() -> None:
+    assert T8_VERSIONED_CONTRACT_KEYS <= set(CONTRACT_REGISTRY)
+    registered = [key for key in CONTRACT_REGISTRY if key in T8_VERSIONED_CONTRACT_KEYS]
+    assert len(registered) == len(T8_VERSIONED_CONTRACT_KEYS)
 
 
 def test_comparison_report_parser_selects_both_public_branches() -> None:

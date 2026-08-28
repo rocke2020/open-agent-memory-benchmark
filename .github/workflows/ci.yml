@@ -45,8 +45,5 @@ jobs:
           uv run pytest tests/unit tests/contracts -q
           python3 -m unittest discover -s provider-services/tests -p 'test_*.py' -v
 
-      - name: Generated schema drift
-        run: uv run oamb schema check
-
       - name: Build distributions
         run: uv build

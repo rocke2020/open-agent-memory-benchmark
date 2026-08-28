@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import importlib
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -528,8 +527,8 @@ def test_t4_contract_versions_are_registered_explicitly() -> None:
     assert expected_keys <= set(schema.CONTRACT_REGISTRY)
 
 
-def test_legacy_v1_external_contract_documents_remain_parseable() -> None:
-    schema = require("oamb.contracts.schema")
+def _external_legacy_fixtures() -> tuple[tuple[dict[str, Any], type[Any]], ...]:
+    specifications = require("oamb.contracts.specifications")
     documents = (
         {
             "schema_name": "model_role_binding",
@@ -609,53 +608,214 @@ def test_legacy_v1_external_contract_documents_remain_parseable() -> None:
         },
     )
 
-    assert [item.schema_version for item in map(schema.parse_contract, documents)] == [1] * 5
+    expected_types = (
+        specifications.ModelRoleBinding,
+        specifications.MemorySystemRuntimeBinding,
+        specifications.BudgetSpec,
+        require("oamb.contracts.evidence").AttemptRecord,
+        require("oamb.contracts.accounting").TokenUsageRecord,
+    )
+
+    return tuple(zip(documents, expected_types, strict=True))
 
 
-def test_all_pre_t4_v1_schema_bytes_remain_unchanged() -> None:
-    expected = {
-        "attempt_record.v1.schema.json": "39ff94a93d5e34cd7f216b481f65ab993cabb40c9b1abcc7042436d7a38d82e9",
-        "budget_spec.v1.schema.json": "d090f9830b766e6cae3daddb8142ab7350a6e726dc34228a31bd8cd4c05ae5c1",
-        "capsule_manifest.v1.schema.json": "5b5b76410295e8b08c9b8a98caddef24ef16dab6753b9021d7ede6cef056553b",
-        "capsule_manifest_entry.v1.schema.json": "819575c44fa58c1cf6b8ad46ed5fb26ab8739de4b562c794aa94e73f2d886868",
-        "case_manifest.v1.schema.json": "de7c0ebf66de6557b1dd5e2864561bfd1ee843d432bdefa4078d886eeb4067e9",
-        "case_manifest_entry.v1.schema.json": "3e058a25cd0c6c44c6050c66a43e68e1f48140e0fbfecfd4845e326e9a465c79",
-        "case_record.v1.schema.json": "057adbe9a4b5f6e170de33afb31adf30e10c175a9333ec84dc11f7b2926c98c2",
-        "cost_measurement_spec.v1.schema.json": "57e4a752ad4aae8693c325e4d06014aa5931a5e2dff26b23ba4818fd49a0313d",
-        "cost_record.v1.schema.json": "1eebcfe4c7e9d2c42524f41e8b28030429a09d8e28b70324b534dbe459dcbc27",
-        "dataset_file.v1.schema.json": "8a69235ec067acd72ab03b9f2ca99bc8b5f25366e1c274f26325f3890da32f1c",
-        "dataset_manifest.v1.schema.json": "0f0a619eaf2eae2f1f6d6177afcdabc0b1ec39c874a5476875e3292ff3a0e185",
-        "execution_environment_binding.v1.schema.json": "142e5047324f97e9dd893d1f9697f0e1b2d3915708f901b41575592a40631ce9",
-        "ingestion_plan_manifest.v1.schema.json": "10af804b2181cb9bb648e8e0425e1b1728641d22c8b4e4b7f51ed3d9e7a2b2c9",
-        "ingestion_plan_record.v1.schema.json": "920beed0ac49df899b763e6c00adb48dd72ab3c3daf36803ef15438a25164bdf",
-        "interaction_spec.v1.schema.json": "533c2c22da2864e2119ee6949225ffcb58d49967352e8082d76a57291f412cc9",
-        "logical_context_manifest_entry.v1.schema.json": "517fde256e807c08b0eff8461a26eee2663e0046f570d6ba542bf9773d37aa06",
-        "logical_context_record.v1.schema.json": "ca781bbd59686ae0106cc3f3e9f72835a45a0324896623afad4cb2a78a23723a",
-        "measurement_dimension_spec.v1.schema.json": "33837288ba832487d05a7985c644de89b51237430ec5efc2331dd3a4b8d75b82",
-        "memory_system_runtime_binding.v1.schema.json": "437d1756ff9c7e28dbef29b73a52a34da705f4f7e0e0431728778cc7fea47746",
-        "memory_system_spec.v1.schema.json": "a7006c43eca673c85652eb5effc00a3512adc7c21834afdcb549dc77568756e1",
-        "model_role_binding.v1.schema.json": "fd46bbaacfba0dbb32612b9ca0fb3c67425525b73bdc125132d0d64688283a55",
-        "origin_record.v1.schema.json": "9358b3707107f6be7edba33f2c863696e3ddcaa92ec6b501afb5bc54d80e1c6f",
-        "price_snapshot.v1.schema.json": "5e5a3cff152b3ae81ab3f001cd682a99832926ac7da56351b8a4f2c5aae2b200",
-        "protocol_spec.v1.schema.json": "bfff97c8b2fad85f9671ae84c159c9c665eb5fb7ed14aacb8364bf4d918e81bf",
-        "raw_reference.v1.schema.json": "c88b010a0de1bec2d33e5195d33883a91f2169912d88b19bf450847974dd007d",
-        "report_artifact_manifest.v1.schema.json": "38fe62b3426c9515e9e82b45641c4f7297e08e4d78a9fe77c379130430fa8845",
-        "resource_usage_record.v1.schema.json": "9af1f13c45e4246705281db502f73a067c67020b6232d3c710a109fa5466ccee",
-        "run_record.v1.schema.json": "0a98e2aa90d8bad3f936b37c32bb9f05101cafb163c81124f6ba087f367c8a2f",
-        "run_report_model.v1.schema.json": "5388933b33e7c38cf9ae5892a3123d1aa48249b9703a7de711545b7b4cefbadd",
-        "run_spec.v1.schema.json": "216e59e452ff7f411a0d935da935393651a879daf7cd1d0a98cfc660950b1e0e",
-        "run_summary.v1.schema.json": "3da2f46fc284b766c8671094697b5594d528c8544951d7ef36fe27474f237e4f",
-        "token_usage_record.v1.schema.json": "4f6b5fea666b252e88dbb8b693d6bde2f505848bf9e1617fa5063a418bfa9f9e",
-        "validation_issue.v1.schema.json": "d4d42cb944270028ce849b7bce189ff2b6d2db22f0c874ccb74b499072ab75ac",
-        "validation_profile.v1.schema.json": "1450ab8b15cc92be8f0ed0f6c5beeeb1dd5838f9a2fca79a89e37dca1b62a245",
-        "validation_result.v1.schema.json": "52ccfb2fc44951d8337e5ea954d721fbb8e012c920d81245b64a3ee03d9092e1",
-        "validation_rule_requirement.v1.schema.json": "1a9d19dc309dbab9497f6bc1e94801d8d8155978de21d81a68928f036be52907",
-        "workload_spec.v1.schema.json": "d8da526d00b37374b41b0bbad5799c4bf45f842234176da43a9fbc1c69d7cbe8",
+def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes() -> None:
+    schema = require("oamb.contracts.schema")
+    evidence = require("oamb.contracts.evidence")
+    reporting = require("oamb.contracts.reporting")
+    specifications = require("oamb.contracts.specifications")
+    accounting = require("oamb.contracts.accounting")
+    source_binding = {
+        "schema_name": "source_evidence_binding",
+        "schema_version": 1,
+        "binding_id": HASH,
+        "source_kind": "run",
+        "source_identity": "legacy-run",
+        "source_root_hash": OTHER_HASH,
+        "validation_result_hash": HASH,
+        "source_schema_versions": ["capsule_manifest@1"],
     }
-    schema_directory = Path(__file__).resolve().parents[2] / "schemas"
-    actual = {
-        name: hashlib.sha256((schema_directory / name).read_bytes()).hexdigest()
-        for name in expected
+    run_summary_v1 = {
+        "schema_name": "run_summary",
+        "schema_version": 1,
+        "run_id": "legacy-run",
+        "intended_logical_contexts": 0,
+        "intended_ingestion_plans": 0,
+        "ready_ingestion_plans": 0,
+        "intended_cases": 0,
+        "terminal_cases": 0,
+        "completed_cases": 0,
+        "errored_cases": 0,
+        "unsupported_cases": 0,
+        "cancelled_cases": 0,
+        "budget_exceeded_cases": 0,
+        "billing_complete": False,
+        "cost_complete": False,
     }
+    run_summary_v2 = {
+        **run_summary_v1,
+        "schema_version": 2,
+        "parsed_cases": 0,
+        "evaluated_cases": 0,
+        "judged_cases": 0,
+        "unjudged_cases": 0,
+    }
+    fixtures = (
+        *_external_legacy_fixtures(),
+        (
+            {
+                "schema_name": "case_record",
+                "schema_version": 1,
+                "case_occurrence_id": HASH,
+                "run_id": "legacy-run",
+                "ingestion_occurrence_id": OTHER_HASH,
+                "case_manifest_entry_id": HASH,
+                "state": "error",
+                "retrieval_raw_ref": None,
+                "prompt_sha256": None,
+                "answer_raw_ref": None,
+                "evaluation_raw_ref": None,
+                "attempt_ids": [],
+                "error_stage": "answer",
+            },
+            evidence.CaseRecord,
+        ),
+        (
+            {
+                "schema_name": "case_record",
+                "schema_version": 2,
+                "case_occurrence_id": HASH,
+                "run_id": "legacy-run",
+                "ingestion_occurrence_id": OTHER_HASH,
+                "case_manifest_entry_id": HASH,
+                "state": "error",
+                "retrieval_raw_ref": None,
+                "prompt_sha256": None,
+                "answer_raw_ref": None,
+                "parsed_answer_sha256": None,
+                "evaluation_raw_ref": None,
+                "evaluation_disposition": "not_run",
+                "attempt_ids": [],
+                "error_stage": "answer",
+            },
+            evidence.CaseRecordV2,
+        ),
+        (
+            {
+                "schema_name": "derivation_spec",
+                "schema_version": 1,
+                "derivation_kind": "legacy-report",
+                "ordered_source_bindings": [source_binding],
+                "ordered_source_root_hash": HASH,
+                "transform_spec_hash": OTHER_HASH,
+                "report_spec_hash": None,
+                "reducer_and_renderer_input_hashes": [HASH],
+                "derivation_input_hash": OTHER_HASH,
+            },
+            specifications.DerivationSpec,
+        ),
+        (
+            {
+                "schema_name": "ingestion_plan_record",
+                "schema_version": 1,
+                "ingestion_occurrence_id": HASH,
+                "run_id": "legacy-run",
+                "memory_system_id": "legacy-memory",
+                "ingestion_plan_id": OTHER_HASH,
+                "ordered_member_context_manifest_entry_ids": [HASH],
+                "ordered_case_occurrence_ids": [OTHER_HASH],
+                "state": "pending",
+                "intended_source_count": 1,
+                "accepted_source_count": 0,
+                "failed_source_count": 0,
+                "readiness_evidence_refs": [],
+                "attempt_ids": [],
+                "usage_record_ids": [],
+                "resource_record_ids": [],
+                "cost_record_ids": [],
+            },
+            evidence.IngestionPlanRecord,
+        ),
+        (
+            {
+                "schema_name": "report_artifact_manifest",
+                "schema_version": 1,
+                "report_id": HASH,
+                "ordered_source_root_hashes": [OTHER_HASH],
+                "evidence_validation_hash": HASH,
+                "report_model_hash": OTHER_HASH,
+                "renderer_hash": HASH,
+                "asset_hashes": [OTHER_HASH],
+                "audience": "public",
+                "limitations": ["legacy fixture"],
+            },
+            reporting.ReportArtifactManifest,
+        ),
+        (run_summary_v1, reporting.RunSummary),
+        (
+            {
+                "schema_name": "run_report_model",
+                "schema_version": 1,
+                "report_id": HASH,
+                "source_manifest_hash": OTHER_HASH,
+                "evidence_validation_hash": HASH,
+                "summary": run_summary_v1,
+                "limitations": ["legacy fixture"],
+            },
+            reporting.RunReportModel,
+        ),
+        (
+            {
+                "schema_name": "run_report_model",
+                "schema_version": 2,
+                "report_id": HASH,
+                "source_manifest_hash": OTHER_HASH,
+                "evidence_validation_hash": HASH,
+                "summary": run_summary_v2,
+                "limitations": ["legacy fixture"],
+            },
+            reporting.RunReportModelV2,
+        ),
+        (
+            {
+                "schema_name": "token_usage_record",
+                "schema_version": 2,
+                "usage_record_id": OTHER_HASH,
+                "attempt_id": HASH,
+                "parent_kind": "case",
+                "parent_id": "case-1",
+                "stage": "answer",
+                "operation_kind": "answer_completion",
+                "token_domain": "external_llm",
+                "measurement_source": "supplier_response",
+                "input_tokens": None,
+                "visible_output_tokens": None,
+                "supplier_reported_total_tokens": None,
+                "context_view_tokens": None,
+                "proof_status": "unavailable",
+                "reason": "supplier_usage_missing",
+                "raw_response_ref": None,
+            },
+            accounting.TokenUsageRecordV2,
+        ),
+    )
 
-    assert actual == expected
+    covered_versions = {
+        (document["schema_name"], document["schema_version"]) for document, _ in fixtures
+    }
+    latest_versions: dict[str, int] = {}
+    for name, version in schema.CONTRACT_REGISTRY:
+        latest_versions[name] = max(version, latest_versions.get(name, 0))
+    expected_legacy_versions = {
+        (name, version)
+        for name, version in schema.CONTRACT_REGISTRY
+        if version < latest_versions[name]
+    }
+    assert covered_versions == expected_legacy_versions
+
+    for document, expected_type in fixtures:
+        encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+        parsed = schema.parse_contract(json.loads(encoded))
+        assert type(parsed) is expected_type
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            schema.parse_contract(json.loads(encoded) | {"unknown_field": True})

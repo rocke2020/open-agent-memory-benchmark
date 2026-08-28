@@ -5,8 +5,8 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 
 | Component | Role | License | Distribution |
 |---|---|---|---|
-| Pydantic | Strict immutable contracts and JSON Schema generation | MIT | Runtime dependency |
-| Typer | CLI composition and schema commands | MIT | Runtime dependency |
+| Pydantic | Strict immutable runtime contracts and versioned artifact parsing | MIT | Runtime dependency |
+| Typer | CLI composition | MIT | Runtime dependency |
 | HTTPX | Original REST adapters and OpenAI-compatible model transport | BSD-3-Clause | Runtime dependency |
 | tiktoken | Protocol-frozen ordinary-text token counting and chunking | MIT | Runtime dependency |
 | Apache Arrow | Schema-preserving reads of pinned Parquet workload inputs | Apache-2.0 | Runtime dependency |

@@ -15,7 +15,6 @@ from .artifacts.validation.fake import validate_fake_capsule
 from .contracts.evidence import ValidationResult
 from .contracts.ids import canonical_json_bytes
 from .contracts.ports import ArtifactStorePort, IngestionPlan, MemorySystemPort
-from .contracts.schema import generate_schemas, schema_drift
 from .contracts.specifications import RunSpec
 from .contracts.states import ValidationDisposition
 from .memory_systems.fake import ScriptedFakeMemorySystem
@@ -39,42 +38,12 @@ app = typer.Typer(
     help="Open Agent Memory Benchmark evidence and comparison tooling.",
     no_args_is_help=True,
 )
-schema_app = typer.Typer(help="Generate or verify checked-in public JSON Schemas.")
 manifest_app = typer.Typer(help="Build deterministic workload manifests.")
 capsule_app = typer.Typer(help="Validate immutable source capsules.")
 report_app = typer.Typer(help="Build validated offline reports.")
-app.add_typer(schema_app, name="schema")
 app.add_typer(manifest_app, name="manifest")
 app.add_typer(capsule_app, name="capsule")
 app.add_typer(report_app, name="report")
-
-
-@schema_app.command("build")
-def schema_build(
-    output: Annotated[Path, typer.Option("--output", help="Schema output directory.")] = Path(
-        "schemas"
-    ),
-) -> None:
-    """Generate every registered public contract schema."""
-
-    written = generate_schemas(output)
-    typer.echo(f"generated {len(written)} schemas in {output}")
-
-
-@schema_app.command("check")
-def schema_check(
-    output: Annotated[Path, typer.Option("--output", help="Tracked schema directory.")] = Path(
-        "schemas"
-    ),
-) -> None:
-    """Fail when tracked schemas differ from deterministic generation."""
-
-    drift = schema_drift(output)
-    if drift:
-        for item in drift:
-            typer.echo(item, err=True)
-        raise typer.Exit(code=1)
-    typer.echo(f"schema check passed: {output}")
 
 
 @manifest_app.command("build")

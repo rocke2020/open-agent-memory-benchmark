@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import importlib
-import json
-from pathlib import Path
 from types import ModuleType
 
 import pytest
 from pydantic import ValidationError
 
-EXPECTED_PUBLIC_SCHEMAS = {
+EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "acceptance_report_spec",
     "aggregate_metric_delta",
     "ai_quality_review_record",
@@ -141,74 +139,55 @@ def require_schema() -> ModuleType:
         pytest.fail("oamb.contracts.schema is not implemented", pytrace=False)
 
 
-def test_public_contract_inventory_is_explicit_and_unique() -> None:
+def test_versioned_contract_inventory_is_explicit_and_unique() -> None:
     schema = require_schema()
 
-    actual = {schema._registry_key(model)[0] for model in schema.PUBLIC_CONTRACTS}
+    actual = {schema._registry_key(model)[0] for model in schema.VERSIONED_CONTRACTS}
 
-    assert actual == EXPECTED_PUBLIC_SCHEMAS
-    assert len(schema.CONTRACT_REGISTRY) == len(schema.PUBLIC_CONTRACTS)
+    assert actual == EXPECTED_VERSIONED_CONTRACT_NAMES
+    assert len(schema.CONTRACT_REGISTRY) == len(schema.VERSIONED_CONTRACTS)
     assert set(schema.CONTRACT_REGISTRY) == {
-        *((name, 1) for name in EXPECTED_PUBLIC_SCHEMAS),
+        *((name, 1) for name in EXPECTED_VERSIONED_CONTRACT_NAMES),
         *((name, 2) for name in EXPECTED_V2_SCHEMAS),
         *((name, 3) for name in EXPECTED_V3_SCHEMAS),
     }
 
 
-def test_schema_generation_is_byte_reproducible(tmp_path: Path) -> None:
+def test_contract_registry_exposes_no_generated_schema_maintenance_surface() -> None:
     schema = require_schema()
-    first = tmp_path / "first"
-    second = tmp_path / "second"
+    removed_names = {
+        "PUBLIC_CONTRACTS",
+        "schema_filename",
+        "schema_bytes",
+        "expected_schema_files",
+        "generate_schemas",
+        "schema_drift",
+        "packaged_schema_names",
+    }
 
-    schema.generate_schemas(first)
-    schema.generate_schemas(second)
-
-    first_files = sorted(path.name for path in first.iterdir())
-    second_files = sorted(path.name for path in second.iterdir())
-    assert first_files == second_files
-    assert [path.read_bytes() for path in sorted(first.iterdir())] == [
-        path.read_bytes() for path in sorted(second.iterdir())
-    ]
-    for path in first.iterdir():
-        document = json.loads(path.read_text())
-        assert document
-        assert {"schema_name", "schema_version"} <= set(document["required"])
-        _assert_nested_discriminators_are_required(document)
+    assert not any(hasattr(schema, name) for name in removed_names)
 
 
-def _assert_nested_discriminators_are_required(value: object) -> None:
-    if isinstance(value, dict):
-        properties = value.get("properties")
-        if isinstance(properties, dict) and {"schema_name", "schema_version"} <= set(properties):
-            assert {"schema_name", "schema_version"} <= set(value["required"])
-        for nested in value.values():
-            _assert_nested_discriminators_are_required(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            _assert_nested_discriminators_are_required(nested)
-
-
-def test_decimal_schemas_accept_only_canonical_strings() -> None:
+@pytest.mark.parametrize("maximum", [1.5, "1.0", "01"])
+def test_runtime_parser_rejects_noncanonical_decimal_json(maximum: object) -> None:
     schema = require_schema()
+    document = {
+        "schema_name": "budget_spec",
+        "schema_version": 1,
+        "budget_id": "budget-1",
+        "scope_kind": "run",
+        "scope_id": "run-1",
+        "approval_id": None,
+        "max_attempts": 1,
+        "max_input_tokens": 1,
+        "max_output_tokens": 1,
+        "max_wall_seconds": maximum,
+        "max_cost": None,
+        "currency": None,
+    }
 
-    cost_schema = json.loads(schema.schema_bytes(schema.CONTRACT_REGISTRY[("cost_record", 1)]))
-    amount_schema = cost_schema["properties"]["amount"]["anyOf"][0]
-
-    assert amount_schema["type"] == "string"
-    assert "number" not in json.dumps(amount_schema)
-
-
-def test_schema_check_detects_changed_and_extra_files(tmp_path: Path) -> None:
-    schema = require_schema()
-    schema.generate_schemas(tmp_path)
-    changed = next(tmp_path.iterdir())
-    changed.write_text("{}\n", encoding="utf-8")
-    (tmp_path / "extra.schema.json").write_text("{}\n", encoding="utf-8")
-
-    drift = schema.schema_drift(tmp_path)
-
-    assert any(item.startswith("changed:") for item in drift)
-    assert "extra:extra.schema.json" in drift
+    with pytest.raises(ValidationError, match="decimal"):
+        schema.parse_contract(document)
 
 
 def test_unknown_schema_or_version_fails_closed() -> None:
