@@ -1,6 +1,6 @@
-"""Fail-closed Mem0 exact-profile adapter framework."""
+"""Mem0 v2.0.19 black-box REST adapter and exact-profile fixtures."""
 
-from .adapter import Mem0RestAdapter
+from .adapter import Mem0ReferenceNegativeAdapter, Mem0RestAdapter
 from .profiles import (
     MEM0_REST_PROFILE,
     MEM0_SDK_PROFILE,
@@ -17,7 +17,10 @@ from .projection import (
     MEM0_PROJECTION_MAX_POINTS,
     Mem0Projection,
     Mem0ProjectionPoint,
+    ordered_projection_points,
     parse_projection_pages,
+    projection_source_unit_ids,
+    projection_state_sha256,
 )
 from .sdk import Mem0SdkAdapter, Mem0SdkWorkerBoundary
 from .wire import (
@@ -47,6 +50,7 @@ __all__ = [
     "MEM0_SEARCH_TOP_K",
     "MEM0_SDK_PROFILE",
     "Mem0RestAdapter",
+    "Mem0ReferenceNegativeAdapter",
     "Mem0AddDisposition",
     "Mem0AddEvent",
     "Mem0AddResult",
@@ -67,8 +71,11 @@ __all__ = [
     "encode_add_request",
     "encode_search_request",
     "parse_add_response",
+    "ordered_projection_points",
     "parse_projection_pages",
     "parse_reference_profile_verdict",
     "parse_search_response",
+    "projection_source_unit_ids",
+    "projection_state_sha256",
     "reference_profile_unsupported",
 ]

@@ -17,6 +17,12 @@ from oamb.artifacts.validation.hindsight_evidence import (
     HindsightProjectionEvidence,
     reconstruct_hindsight_projection,
 )
+from oamb.artifacts.validation.mem0_evidence import (
+    MEM0_PROFILE_ID,
+    reconstruct_mem0_candidates,
+    reconstruct_mem0_plan,
+    reconstruct_mem0_projection,
+)
 from oamb.artifacts.validation.openviking_evidence import (
     OPENVIKING_PROFILE_ID,
     OpenVikingPlanEvidence,
@@ -42,6 +48,7 @@ from oamb.contracts.evidence import (
     CaseRecordV3,
     CloseErrorRecord,
     IngestionPlanRecordV2,
+    IngestionPlanRecordV3,
     OccurrenceClaimRecord,
     RunLeaseRecord,
     RunRecord,
@@ -83,6 +90,8 @@ NATIVE_EVIDENCE_RULE_IDS = (
     "native.query-state.v1",
     "native.metric-fraction.v1",
 )
+
+NativePlanRecord = IngestionPlanRecordV2 | IngestionPlanRecordV3
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +234,8 @@ def _parse_native_contract(document: dict[str, Any], content: bytes) -> BaseMode
         return CloseErrorRecord.model_validate_json(content)
     if identity == ("ingestion_plan_record", 2):
         return IngestionPlanRecordV2.model_validate_json(content)
+    if identity == ("ingestion_plan_record", 3):
+        return IngestionPlanRecordV3.model_validate_json(content)
     if identity == ("occurrence_claim_record", 1):
         return OccurrenceClaimRecord.model_validate_json(content)
     if identity == ("run_lease_record", 1):
@@ -327,7 +338,7 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
     ):
         issues.append(_issue(rule_id, manifest.capsule_id, "manifest-identity-mismatch"))
 
-    plans = _contracts(snapshot, IngestionPlanRecordV2)
+    plans = _ingestion_plans(snapshot)
     cases = _contracts(snapshot, CaseRecordV3)
     runs = _contracts(snapshot, RunRecord)
     datasets = _contracts(snapshot, DatasetManifest)
@@ -543,7 +554,7 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
     }
     cost_records = {item.cost_record_id: item for item in _contracts(snapshot, CostRecord)}
     issues: list[ValidationIssue] = []
-    for plan in _contracts(snapshot, IngestionPlanRecordV2):
+    for plan in _ingestion_plans(snapshot):
         if plan.state != IngestionPlanState.SEALED or plan.scope_id is None:
             issues.append(_issue(rule_id, plan.ingestion_occurrence_id, "plan-not-sealed"))
         if not _accounting_ledger_closes(
@@ -566,6 +577,15 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                 )
             )
         if plan.adapter_profile_id == HINDSIGHT_PROFILE_ID:
+            if not isinstance(plan, IngestionPlanRecordV2):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        plan.ingestion_occurrence_id,
+                        "hindsight-plan-version-mismatch",
+                    )
+                )
+                continue
             issues.extend(_hindsight_plan_closure(snapshot, plan, attempts))
             if not _plan_usage_closes(plan, attempts, usage_records):
                 issues.append(
@@ -577,6 +597,15 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                 )
             continue
         if plan.adapter_profile_id == OPENVIKING_PROFILE_ID:
+            if not isinstance(plan, IngestionPlanRecordV2):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        plan.ingestion_occurrence_id,
+                        "openviking-plan-version-mismatch",
+                    )
+                )
+                continue
             try:
                 _openviking_native_plan_evidence(snapshot, plan, attempts)
             except ValueError:
@@ -585,6 +614,32 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                         rule_id,
                         plan.ingestion_occurrence_id,
                         "openviking-plan-evidence-mismatch",
+                    )
+                )
+            if not _plan_usage_closes(plan, attempts, usage_records):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        plan.ingestion_occurrence_id,
+                        "ingestion-usage-ledger-mismatch",
+                    )
+                )
+            continue
+        if plan.adapter_profile_id == MEM0_PROFILE_ID:
+            try:
+                if not isinstance(plan, IngestionPlanRecordV3):
+                    raise ValueError("Mem0 REST requires ingestion-plan evidence v3")
+                reconstruct_mem0_plan(
+                    raw_payloads=snapshot.raw_payloads,
+                    plan=plan,
+                    attempts=attempts,
+                )
+            except ValueError:
+                issues.append(
+                    _issue(
+                        rule_id,
+                        plan.ingestion_occurrence_id,
+                        "mem0-plan-evidence-mismatch",
                     )
                 )
             if not _plan_usage_closes(plan, attempts, usage_records):
@@ -696,7 +751,10 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                 scope_id=plan.scope_id,
             )
             or tuple(projected) != plan.projected_source_unit_ids
-            or plan.projected_source_unit_ids != plan.accepted_source_unit_ids
+            or (
+                isinstance(plan, IngestionPlanRecordV2)
+                and plan.projected_source_unit_ids != plan.accepted_source_unit_ids
+            )
         ):
             issues.append(
                 _issue(
@@ -726,7 +784,7 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
 
 
 def _plan_usage_closes(
-    plan: IngestionPlanRecordV2,
+    plan: NativePlanRecord,
     attempts: dict[str, AttemptRecordV2],
     usage_records: dict[str, TokenUsageRecord | TokenUsageRecordV2 | TokenUsageRecordV3],
 ) -> bool:
@@ -946,9 +1004,7 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
         item.resource_record_id: item for item in _contracts(snapshot, ResourceUsageRecord)
     }
     cost_records = {item.cost_record_id: item for item in _contracts(snapshot, CostRecord)}
-    plans = {
-        item.ingestion_occurrence_id: item for item in _contracts(snapshot, IngestionPlanRecordV2)
-    }
+    plans = {item.ingestion_occurrence_id: item for item in _ingestion_plans(snapshot)}
     issues: list[ValidationIssue] = []
     for case in _contracts(snapshot, CaseRecordV3):
         plan = plans.get(case.ingestion_occurrence_id)
@@ -1130,9 +1186,7 @@ def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
     rule_id = "native.query-state.v1"
     issues: list[ValidationIssue] = []
     attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
-    plans = {
-        item.ingestion_occurrence_id: item for item in _contracts(snapshot, IngestionPlanRecordV2)
-    }
+    plans = {item.ingestion_occurrence_id: item for item in _ingestion_plans(snapshot)}
     for case in _contracts(snapshot, CaseRecordV3):
         if case.adapter_profile_id == HINDSIGHT_PROFILE_ID:
             plan = plans.get(case.ingestion_occurrence_id)
@@ -1164,7 +1218,7 @@ def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
         if case.adapter_profile_id == OPENVIKING_PROFILE_ID:
             plan = plans.get(case.ingestion_occurrence_id)
             try:
-                if plan is None:
+                if not isinstance(plan, IngestionPlanRecordV2):
                     raise ValueError("OpenViking case has no plan evidence")
                 evidence = _openviking_native_plan_evidence(
                     snapshot,
@@ -1193,6 +1247,40 @@ def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
                 or after_projection.state_sha256 != case.post_query_state_sha256
                 or before_projection.state_sha256 != after_projection.state_sha256
                 or before_projection.state_sha256 != evidence.projection.state_sha256
+                or case.query_mutation_status != "unchanged"
+            ):
+                issues.append(_issue(rule_id, case.case_occurrence_id, "query-state-mismatch"))
+            continue
+        if case.adapter_profile_id == MEM0_PROFILE_ID:
+            plan = plans.get(case.ingestion_occurrence_id)
+            try:
+                if not isinstance(plan, IngestionPlanRecordV3):
+                    raise ValueError("Mem0 case has no v3 plan evidence")
+                mem0_plan = reconstruct_mem0_plan(
+                    raw_payloads=snapshot.raw_payloads,
+                    plan=plan,
+                    attempts=attempts,
+                )
+                mem0_before = reconstruct_mem0_projection(
+                    raw_payloads=snapshot.raw_payloads,
+                    references=case.pre_query_projection_raw_refs,
+                    expected_run_id=plan.ingestion_occurrence_id,
+                )
+                mem0_after = reconstruct_mem0_projection(
+                    raw_payloads=snapshot.raw_payloads,
+                    references=case.post_query_projection_raw_refs,
+                    expected_run_id=plan.ingestion_occurrence_id,
+                )
+            except ValueError:
+                issues.append(_issue(rule_id, case.case_occurrence_id, "query-state-mismatch"))
+                continue
+            if (
+                mem0_before.state_sha256 != case.pre_query_state_sha256
+                or mem0_after.state_sha256 != case.post_query_state_sha256
+                or mem0_before.state_sha256 != mem0_after.state_sha256
+                or mem0_before.state_sha256 != plan.protected_state_sha256
+                or mem0_before.capture_sequence <= mem0_plan.projection.capture_sequence
+                or mem0_after.capture_sequence != mem0_before.capture_sequence + 1
                 or case.query_mutation_status != "unchanged"
             ):
                 issues.append(_issue(rule_id, case.case_occurrence_id, "query-state-mismatch"))
@@ -1283,9 +1371,7 @@ def _rebuild_visible(
     case: CaseRecordV3,
     decisions: list[Any],
 ) -> bytes | None:
-    plans = {
-        item.ingestion_occurrence_id: item for item in _contracts(snapshot, IngestionPlanRecordV2)
-    }
+    plans = {item.ingestion_occurrence_id: item for item in _ingestion_plans(snapshot)}
     candidates = _normalized_native_candidates(
         snapshot,
         case,
@@ -1336,7 +1422,7 @@ def _rebuild_visible(
 def _normalized_native_candidates(
     snapshot: _NativeCapsuleSnapshot,
     case: CaseRecordV3,
-    plan: IngestionPlanRecordV2 | None,
+    plan: NativePlanRecord | None,
 ) -> tuple[NativeEvidenceCandidate, ...] | None:
     payload = snapshot.raw_payloads.get(case.retrieval_raw_ref or "")
     if payload is None:
@@ -1357,7 +1443,7 @@ def _normalized_native_candidates(
         except ValueError:
             return None
     if case.adapter_profile_id == OPENVIKING_PROFILE_ID:
-        if plan is None:
+        if not isinstance(plan, IngestionPlanRecordV2):
             return None
         attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
         try:
@@ -1366,6 +1452,23 @@ def _normalized_native_candidates(
                 raw_payloads=snapshot.raw_payloads,
                 case=case,
                 plan=evidence,
+            )
+        except ValueError:
+            return None
+    if case.adapter_profile_id == MEM0_PROFILE_ID:
+        if not isinstance(plan, IngestionPlanRecordV3):
+            return None
+        attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+        try:
+            mem0_evidence = reconstruct_mem0_plan(
+                raw_payloads=snapshot.raw_payloads,
+                plan=plan,
+                attempts=attempts,
+            )
+            return reconstruct_mem0_candidates(
+                raw_payloads=snapshot.raw_payloads,
+                case=case,
+                plan=mem0_evidence,
             )
         except ValueError:
             return None
@@ -1418,7 +1521,7 @@ def _normalized_native_candidates(
 
 def _hindsight_native_projection_evidence(
     snapshot: _NativeCapsuleSnapshot,
-    plan: IngestionPlanRecordV2,
+    plan: NativePlanRecord,
     references: tuple[str, ...],
 ) -> HindsightProjectionEvidence:
     manifests = _contracts(snapshot, CaseManifest)
@@ -1499,7 +1602,7 @@ def _optional_string(value: object) -> str | None:
 
 def _all_raw_references(snapshot: _NativeCapsuleSnapshot) -> tuple[str, ...]:
     references: list[str] = []
-    for plan in _contracts(snapshot, IngestionPlanRecordV2):
+    for plan in _ingestion_plans(snapshot):
         references.extend(plan.scope_raw_refs)
         references.extend(plan.readiness_evidence_refs)
         if plan.inventory_raw_ref is not None:
@@ -1613,6 +1716,16 @@ def _contracts(
     model: type[BaseModel],
 ) -> tuple[Any, ...]:
     return tuple(item for item in snapshot.contracts if isinstance(item, model))
+
+
+def _ingestion_plans(
+    snapshot: _NativeCapsuleSnapshot,
+) -> tuple[NativePlanRecord, ...]:
+    return tuple(
+        item
+        for item in snapshot.contracts
+        if isinstance(item, (IngestionPlanRecordV2, IngestionPlanRecordV3))
+    )
 
 
 def _issue(rule_id: str, evidence_ref: str, code: str) -> ValidationIssue:

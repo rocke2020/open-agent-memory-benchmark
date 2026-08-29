@@ -30,7 +30,7 @@ from oamb.contracts.specifications import (
     SourceEvidenceKind,
 )
 from oamb.contracts.states import ValidationDisposition
-from oamb.memory_systems.mem0 import Mem0RestAdapter
+from oamb.memory_systems.mem0 import Mem0ReferenceNegativeAdapter
 from oamb.reporting.public import (
     build_diagnostic_run_report_model,
     build_phase_acceptance_report,
@@ -73,7 +73,7 @@ def _validation(
 
 
 def _validation_target() -> Mem0AdapterValidationInput:
-    adapter = Mem0RestAdapter()
+    adapter = Mem0ReferenceNegativeAdapter()
     with pytest.raises(MemorySystemProfileUnsupported):
         asyncio.run(adapter.resolve())
     target = mem0_adapter_validation_input(adapter)

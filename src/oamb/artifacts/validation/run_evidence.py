@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from oamb.artifacts.validation.registry import RuleRegistry, ValidationRule
 from oamb.contracts.evidence import (
     CapsuleManifest,
     IngestionPlanRecordV2,
+    IngestionPlanRecordV3,
     ValidationIssue,
     ValidationResult,
     ValidationSeverity,
@@ -47,6 +49,7 @@ _WORKLOAD_MANIFEST_IDS = {
 }
 _ADAPTER_PROFILE_IDS = {
     "oamb-t8-adapter-hindsight-rest-v1": "hindsight-rest-v1",
+    "oamb-t10-adapter-mem0-rest-blackbox-v1": "mem0-rest-v1",
     "oamb-t8-adapter-openviking-rest-v1": "openviking-rest-v1",
 }
 
@@ -131,11 +134,9 @@ def _source_coherence_rule(
             "case_manifest",
             CaseManifest,
         )
-        plans = _contracts(
+        plans = _ingestion_plan_contracts(
             target.capsule_root,
             manifest,
-            "ingestion_plan_record",
-            IngestionPlanRecordV2,
         )
         expected_manifest_id = _WORKLOAD_MANIFEST_IDS[target.workload_profile_id]
         expected_adapter_profile_id = _ADAPTER_PROFILE_IDS[target.adapter_profile_id]
@@ -262,6 +263,26 @@ def _contracts(
         for entry in manifest.source_entries
         if entry.record_kind == record_kind
     )
+
+
+def _ingestion_plan_contracts(
+    root: Path,
+    manifest: CapsuleManifest,
+) -> tuple[IngestionPlanRecordV2 | IngestionPlanRecordV3, ...]:
+    plans: list[IngestionPlanRecordV2 | IngestionPlanRecordV3] = []
+    for entry in manifest.source_entries:
+        if entry.record_kind != "ingestion_plan_record":
+            continue
+        content = read_regular_file(Path(root) / entry.relative_path)
+        document = json.loads(content)
+        version = document.get("schema_version") if isinstance(document, dict) else None
+        if version == 2:
+            plans.append(IngestionPlanRecordV2.model_validate_json(content))
+        elif version == 3:
+            plans.append(IngestionPlanRecordV3.model_validate_json(content))
+        else:
+            raise ValueError("unsupported ingestion-plan record version")
+    return tuple(plans)
 
 
 def _issue(rule_id: str, evidence_ref: str, code: str) -> ValidationIssue:

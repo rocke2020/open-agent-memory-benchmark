@@ -8,7 +8,7 @@ import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Never
 
 import httpx
 
@@ -66,6 +66,7 @@ class SealedRestClient:
         self._base_url = base_url.rstrip("/")
         self._base_header_names = frozenset(name.lower() for name in headers)
         self._total_timeout_seconds = total_timeout_seconds
+        self._transport = transport or httpx.AsyncHTTPTransport()
         self._client = httpx.AsyncClient(
             headers=dict(headers),
             timeout=httpx.Timeout(
@@ -74,7 +75,7 @@ class SealedRestClient:
                 write=write_timeout_seconds,
                 pool=pool_timeout_seconds,
             ),
-            transport=transport,
+            transport=self._transport,
             follow_redirects=False,
         )
         self._accepting_operations = True
@@ -99,16 +100,10 @@ class SealedRestClient:
         try:
             await self._operation_lock.acquire()
         except asyncio.CancelledError as exc:
-            if write_intent:
-                raise MemorySystemCallCancelledBeforeDispatch(
-                    "memory-system write was cancelled before dispatch"
-                ) from exc
-            raise MemorySystemReadCancelled(
-                "memory-system read was cancelled before dispatch"
-            ) from exc
+            self._raise_before_dispatch(write_intent=write_intent, cause=exc)
         try:
             if not self._accepting_operations:
-                raise RuntimeError("memory-system REST client is closed")
+                self._raise_before_dispatch(write_intent=write_intent)
             return await self._request_once(
                 method,
                 path,
@@ -195,11 +190,33 @@ class SealedRestClient:
         return sealed
 
     async def close(self) -> None:
-        self._accepting_operations = False
+        self.stop_accepting()
         async with self._operation_lock:
             if not self._closed:
-                await self._client.aclose()
+                if self._client.is_closed:
+                    await self._transport.aclose()
+                else:
+                    await self._client.aclose()
                 self._closed = True
+
+    def stop_accepting(self) -> None:
+        """Reject new work before an owner begins an ordered shutdown."""
+
+        self._accepting_operations = False
+
+    @staticmethod
+    def _raise_before_dispatch(
+        *,
+        write_intent: bool,
+        cause: BaseException | None = None,
+    ) -> Never:
+        if write_intent:
+            failure: BaseException = MemorySystemCallCancelledBeforeDispatch(
+                "memory-system write was cancelled before dispatch"
+            )
+        else:
+            failure = MemorySystemReadCancelled("memory-system read was cancelled before dispatch")
+        raise failure from cause
 
     def _seal_raw(self, raw_bytes: bytes) -> RawReferenceHandle:
         sha256 = hashlib.sha256(raw_bytes).hexdigest()

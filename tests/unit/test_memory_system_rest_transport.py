@@ -370,6 +370,45 @@ async def test_close_rejects_new_calls_and_waits_for_the_active_call() -> None:
     await closing
 
 
+@pytest.mark.asyncio
+async def test_close_classifies_a_queued_write_as_cancelled_before_dispatch() -> None:
+    rest = _rest_module()
+    active_started = asyncio.Event()
+    release_active = asyncio.Event()
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/active":
+            active_started.set()
+            await release_active.wait()
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = rest.SealedRestClient(
+        store=CapturingStore(),
+        base_url="https://memory.example",
+        headers={},
+        transport=httpx.MockTransport(handler),
+    )
+    active = asyncio.create_task(client.request("GET", "/active"))
+    await active_started.wait()
+    queued_write = asyncio.create_task(
+        client.request("POST", "/queued", json_payload={}, write_intent=True)
+    )
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(client.close())
+    await asyncio.sleep(0)
+    release_active.set()
+
+    assert (await active).status_code == 200
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await queued_write
+
+    assert isinstance(cancelled.value, rest.MemorySystemCallCancelledBeforeDispatch)
+    assert calls == ["/active"]
+    await closing
+
+
 def test_exact_json_object_rejects_duplicate_unknown_and_non_finite_fields() -> None:
     rest = _rest_module()
 

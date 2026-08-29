@@ -117,6 +117,13 @@ T8_ADAPTER_RULE_INVENTORIES: dict[str, tuple[tuple[str, int], ...]] = {
     ),
 }
 
+T10_MEM0_REST_BLACKBOX_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
+    ("adapter.mem0.rest.runtime-profile.v2", 2),
+    ("adapter.mem0.rest.scope-dispatch-projection.v1", 1),
+    ("adapter.mem0.rest.retrieval-order-scope.v1", 1),
+    ("adapter.mem0.rest.query-mutation.v1", 1),
+)
+
 T8_ACCOUNTING_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
     ("accounting.attempt-coverage.v1", 1),
     ("accounting.token-meter-coverage.v1", 1),
@@ -392,4 +399,19 @@ def validation_profile_catalog() -> dict[str, ClosedProfileDefinition]:
             "compatibility=unknown",
         ),
     )
-    return {**catalog, external.profile.profile_id: external}
+    mem0_blackbox = _closed_profile(
+        profile_id="oamb-t10-adapter-mem0-rest-blackbox-v1",
+        stage=ValidationStage.EVIDENCE,
+        rule_inventory=T10_MEM0_REST_BLACKBOX_RULE_INVENTORY,
+        applicability=(
+            "component=adapter",
+            "adapter_profile=mem0-rest-v1",
+            "transport=rest_api",
+            "evaluation=black_box_quality",
+        ),
+    )
+    return {
+        **catalog,
+        external.profile.profile_id: external,
+        mem0_blackbox.profile.profile_id: mem0_blackbox,
+    }

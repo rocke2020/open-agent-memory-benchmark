@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import importlib
 import json
@@ -14,10 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 import oamb.runtime.native_run as native_run_module
 from oamb.artifacts.store import ArtifactStore
+from oamb.artifacts.validation.catalog import validate_catalog_profile
 from oamb.artifacts.validation.native import validate_native_capsule
 from oamb.contracts.accounting import (
     ProofStatus,
@@ -26,7 +29,7 @@ from oamb.contracts.accounting import (
     TokenStageV2,
     TokenUsageRecordV3,
 )
-from oamb.contracts.evidence import CapsuleManifest
+from oamb.contracts.evidence import CapsuleManifest, IngestionPlanRecordV3
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
     AnswerValue,
@@ -38,6 +41,7 @@ from oamb.contracts.ports import (
     IngestionDispatchReceipt,
     IngestionDispatchRequest,
     IngestionPlan,
+    InventoryReceipt,
     JudgeRequest,
     MemorySystemCallCancelledBeforeDispatch,
     MemorySystemCallUnknownOutcome,
@@ -48,13 +52,17 @@ from oamb.contracts.ports import (
     ProjectionReceipt,
     RawPayloadSealRequest,
     RetrievalRequest,
+    RuntimeResolution,
     ScopeAllocationRequest,
     ScopeReceipt,
+    StateDigestReceipt,
     VisibleEvidence,
     VisibleEvidencePolicy,
 )
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.fake import ScriptedFakeMemorySystem
+from oamb.memory_systems.mem0 import Mem0RestAdapter
+from oamb.reporting import native_reduce
 from oamb.runtime.native_run import (
     NativeCancellationEvidenceError,
     NativeRunArtifacts,
@@ -307,6 +315,75 @@ def _memory_factory(
     return _RecordedNativeMemory(store)
 
 
+class _RecordedMem0SubsetMemory(_RecordedNativeMemory):
+    async def resolve(self) -> RuntimeResolution:
+        resolution = await super().resolve()
+        return replace(resolution, memory_system_id="mem0")
+
+    async def project(self, scope: ScopeReceipt) -> ProjectionReceipt:
+        state_sha256 = canonical_sha256(["oamb-mem0-main-projection-v1", ()])
+        inventory = InventoryReceipt(
+            ingestion_occurrence_id=scope.ingestion_occurrence_id,
+            ordered_source_unit_ids=(),
+            raw_reference=self._raw_reference(
+                {
+                    "operation": "inventory",
+                    "ingestion_occurrence_id": scope.ingestion_occurrence_id,
+                    "scope_id": scope.scope_id,
+                    "ordered_source_unit_ids": (),
+                }
+            ),
+        )
+        state = StateDigestReceipt(
+            ingestion_occurrence_id=scope.ingestion_occurrence_id,
+            state_sha256=state_sha256,
+            raw_reference=self._raw_reference(
+                {
+                    "operation": "state_digest",
+                    "ingestion_occurrence_id": scope.ingestion_occurrence_id,
+                    "scope_id": scope.scope_id,
+                    "state_sha256": state_sha256,
+                }
+            ),
+        )
+        supporting = self._raw_reference(
+            {
+                "operation": "projection_support",
+                "ingestion_occurrence_id": scope.ingestion_occurrence_id,
+                "scope_id": scope.scope_id,
+                "ordered_source_unit_ids": (),
+                "state_sha256": state_sha256,
+            }
+        )
+        return ProjectionReceipt(
+            inventory=inventory,
+            state_digest=state,
+            supporting_raw_references=(supporting,),
+        )
+
+    async def retrieve(self, request: RetrievalRequest) -> NativeEvidenceBatch:
+        return NativeEvidenceBatch(
+            raw_reference=self._raw_reference(
+                {
+                    "operation": "retrieve",
+                    "case_occurrence_id": request.case_occurrence_id,
+                    "scope_id": request.scope.scope_id,
+                    "query_sha256": hashlib.sha256(request.query_bytes).hexdigest(),
+                    "top_k": request.top_k,
+                    "candidates": (),
+                }
+            ),
+            candidates=(),
+        )
+
+
+def _mem0_subset_memory_factory(
+    store: ArtifactStorePort,
+    _plans: tuple[IngestionPlan, ...],
+) -> _RecordedMem0SubsetMemory:
+    return _RecordedMem0SubsetMemory(store)
+
+
 def _run_fixture_capsule(tmp_path: Path, run_id: str) -> NativeRunArtifacts:
     return run_native_vertical_slice(
         output_root=tmp_path / "capsules",
@@ -337,6 +414,155 @@ def _run_judged_fixture_capsule(tmp_path: Path, run_id: str) -> NativeRunArtifac
     )
 
 
+def test_native_mem0_rest_writes_v3_for_empty_visible_subset(tmp_path: Path) -> None:
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id="native-mem0-subset",
+        adapter_profile_id="mem0-rest-v1",
+        workload=_NativeFixtureWorkload(),
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_mem0_subset_memory_factory,
+        model_factory=_RecordedNativeModel,
+        answer_role_binding_id="recorded-answer-v1",
+    )
+
+    assert completed.ingestion_plan_records
+    assert all(
+        isinstance(plan, IngestionPlanRecordV3)
+        and plan.projection_semantics == "retrieval_visible_subset"
+        and plan.accepted_source_unit_ids
+        and plan.projected_source_unit_ids == ()
+        for plan in completed.ingestion_plan_records
+    )
+    accounting = native_reduce.build_native_accounting_validation_input(completed.capsule_root)
+    assert accounting.expected_plan_ids == frozenset(
+        plan.ingestion_occurrence_id for plan in completed.ingestion_plan_records
+    )
+
+
+def test_recorded_empty_mem0_rest_capsule_validates_black_box_evidence(
+    tmp_path: Path,
+) -> None:
+    def public_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/openapi.json":
+            return httpx.Response(
+                200,
+                json={
+                    "openapi": "3.1.0",
+                    "info": {"title": "Mem0 REST APIs", "version": "1.0.0"},
+                    "paths": {"/memories": {"post": {}}, "/search": {"post": {}}},
+                },
+            )
+        if request.url.path in {"/memories", "/search"}:
+            return httpx.Response(200, content=b'{"results":[]}')
+        raise AssertionError(f"unexpected Mem0 request: {request.method} {request.url}")
+
+    def inspector_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                content=b'{"status":"ok","mode":"read_only_projection"}',
+            )
+        if request.url.path == "/v1/projection":
+            run_id = request.url.params["run_id"]
+            return httpx.Response(
+                200,
+                json={
+                    "collection": "oamb_memories",
+                    "run_id": run_id,
+                    "count": 0,
+                    "points": [],
+                    "next_cursor": None,
+                },
+            )
+        raise AssertionError(f"unexpected inspector request: {request.method} {request.url}")
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> Mem0RestAdapter:
+        return Mem0RestAdapter(
+            store=store,
+            base_url="https://mem0.example",
+            api_key="fixture-secret",
+            inspector_base_url="https://mem0-inspector.example",
+            inspector_api_key="fixture-inspector-secret",
+            runtime_binding_hash="f" * 64,
+            transport=httpx.MockTransport(public_handler),
+            inspector_transport=httpx.MockTransport(inspector_handler),
+        )
+
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id="native-mem0-recorded-empty",
+        adapter_profile_id="mem0-rest-v1",
+        workload=_NativeFixtureWorkload(),
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=memory_factory,
+        model_factory=_RecordedNativeModel,
+        answer_role_binding_id="recorded-answer-v1",
+    )
+
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, tuple(
+        (issue.rule_id, issue.code) for issue in validation.issues
+    )
+    adapter_validation = validate_catalog_profile(
+        "oamb-t10-adapter-mem0-rest-blackbox-v1",
+        completed.capsule_root,
+    )
+    assert adapter_validation.disposition == ValidationDisposition.VALIDATED, tuple(
+        (issue.rule_id, issue.code) for issue in adapter_validation.issues
+    )
+
+    invalid_root = tmp_path / "mem0-readiness-single-snapshot"
+    shutil.copytree(completed.capsule_root, invalid_root)
+    plan_path = _first_source_document(invalid_root, "ingestion_plan_record", 3)
+    plan_document = json.loads(plan_path.read_bytes())
+    readiness_references = plan_document["readiness_evidence_refs"]
+    summary_references = tuple(
+        reference
+        for reference in readiness_references
+        if _raw_payload_document(invalid_root, reference).get("schema")
+        == "oamb-mem0-projection-receipt-v1"
+    )
+    assert len(summary_references) == 2
+    _mutate_source_document(
+        invalid_root,
+        plan_path,
+        readiness_evidence_refs=tuple(
+            reference for reference in readiness_references if reference != summary_references[-1]
+        ),
+    )
+
+    invalid = validate_catalog_profile(
+        "oamb-t10-adapter-mem0-rest-blackbox-v1",
+        invalid_root,
+    )
+    assert invalid.disposition == ValidationDisposition.INVALID
+    assert "adapter.mem0.rest.scope-dispatch-projection.v1" in invalid.failed_rule_ids
+
+    replayed_post_root = tmp_path / "mem0-replayed-post-query-projection"
+    shutil.copytree(completed.capsule_root, replayed_post_root)
+    case_path = _first_source_document(replayed_post_root, "case_record", 3)
+    case_document = json.loads(case_path.read_bytes())
+    _mutate_source_document(
+        replayed_post_root,
+        case_path,
+        post_query_projection_raw_refs=case_document["pre_query_projection_raw_refs"],
+        post_query_state_sha256=case_document["pre_query_state_sha256"],
+    )
+
+    replayed_post = validate_catalog_profile(
+        "oamb-t10-adapter-mem0-rest-blackbox-v1",
+        replayed_post_root,
+    )
+    assert replayed_post.disposition == ValidationDisposition.INVALID
+    assert "adapter.mem0.rest.query-mutation.v1" in replayed_post.failed_rule_ids
+
+
 def _first_source_document(root: Path, schema_name: str, schema_version: int) -> Path:
     manifest = CapsuleManifest.model_validate_json((root / "capsule-manifest.json").read_bytes())
     for entry in manifest.source_entries:
@@ -365,6 +591,20 @@ def _remove_raw_reference(root: Path, raw_reference: str) -> None:
     )
     (root / entry.relative_path).unlink()
     _reseal_manifest(root)
+
+
+def _raw_payload_document(root: Path, raw_reference: str) -> dict[str, object]:
+    manifest = CapsuleManifest.model_validate_json((root / "capsule-manifest.json").read_bytes())
+    entry = next(
+        item
+        for item in manifest.source_entries
+        if item.record_kind == "raw_payload" and item.record_id == raw_reference
+    )
+    compressed = (root / entry.relative_path).read_bytes()
+    document = json.loads(gzip.decompress(compressed))
+    if not isinstance(document, dict):
+        raise AssertionError("raw payload fixture is not an object")
+    return document
 
 
 def _reseal_manifest(root: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import sys
 import time
 import tomllib
@@ -114,7 +115,7 @@ def source_unit() -> SourceUnit:
     ("profile_name", "comparison_eligible"),
     (("MEM0_REST_PROFILE", True), ("MEM0_SDK_PROFILE", False)),
 )
-def test_v2_0_19_profiles_return_exact_typed_unsupported_verdict(
+def test_v2_0_19_historical_negative_fixtures_remain_zero_dispatch(
     profile_name: str,
     comparison_eligible: bool,
 ) -> None:
@@ -131,7 +132,9 @@ def test_v2_0_19_profiles_return_exact_typed_unsupported_verdict(
     assert profile.is_default_comparison_transport is comparison_eligible
 
     adapter = (
-        mem0.Mem0RestAdapter() if profile_name == "MEM0_REST_PROFILE" else mem0.Mem0SdkAdapter()
+        mem0.Mem0ReferenceNegativeAdapter()
+        if profile_name == "MEM0_REST_PROFILE"
+        else mem0.Mem0SdkAdapter()
     )
     with pytest.raises(MemorySystemProfileUnsupported):
         asyncio.run(adapter.resolve())
@@ -190,7 +193,7 @@ def test_profile_fixture_rejects_unknown_config_field() -> None:
 
 def test_mem0_validation_rejects_a_synthesized_zero_dispatch_claim_without_rejection() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
-    adapter = mem0.Mem0RestAdapter()
+    adapter = mem0.Mem0ReferenceNegativeAdapter()
 
     validation = validate_catalog_profile(
         "oamb-t8-adapter-mem0-rest-v1",
@@ -203,7 +206,7 @@ def test_mem0_validation_rejects_a_synthesized_zero_dispatch_claim_without_rejec
 
 def test_mem0_validation_rejects_a_fabricated_adapter_attestation() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
-    adapter = mem0.Mem0RestAdapter()
+    adapter = mem0.Mem0ReferenceNegativeAdapter()
     with pytest.raises(MemorySystemProfileUnsupported):
         asyncio.run(adapter.resolve())
     fabricated = replace(adapter.validation_audit(), producer_attestation=object())
@@ -222,7 +225,7 @@ def test_mem0_validation_rejects_a_fabricated_adapter_attestation() -> None:
 async def test_rest_profile_rejects_resolve_scope_add_and_search_without_dispatch() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
     dispatcher = CountingDispatcher()
-    adapter = mem0.Mem0RestAdapter(dispatcher=dispatcher)
+    adapter = mem0.Mem0ReferenceNegativeAdapter(dispatcher=dispatcher)
     scope = ScopeReceipt(
         ingestion_occurrence_id="a" * 64,
         scope_id="a" * 64,
@@ -295,7 +298,7 @@ async def test_rest_adapter_close_is_single_flight() -> None:
             self.closed = True
 
     dispatcher = BlockingCloseDispatcher()
-    adapter = mem0.Mem0RestAdapter(dispatcher=dispatcher)
+    adapter = mem0.Mem0ReferenceNegativeAdapter(dispatcher=dispatcher)
     first = asyncio.create_task(adapter.close())
     await dispatcher.close_started.wait()
     second = asyncio.create_task(adapter.close())
@@ -328,7 +331,7 @@ async def test_rest_adapter_cancelled_close_can_retry() -> None:
             self.closed = True
 
     dispatcher = CancelledCloseDispatcher()
-    adapter = mem0.Mem0RestAdapter(dispatcher=dispatcher)
+    adapter = mem0.Mem0ReferenceNegativeAdapter(dispatcher=dispatcher)
     first = asyncio.create_task(adapter.close())
     await dispatcher.first_close_started.wait()
     first.cancel()
@@ -358,7 +361,7 @@ async def test_rest_adapter_failed_close_can_retry() -> None:
             self.closed = True
 
     dispatcher = FailedCloseDispatcher()
-    adapter = mem0.Mem0RestAdapter(dispatcher=dispatcher)
+    adapter = mem0.Mem0ReferenceNegativeAdapter(dispatcher=dispatcher)
 
     with pytest.raises(RuntimeError, match="fixture close failure"):
         await adapter.close()
@@ -423,7 +426,7 @@ def test_rest_request_surface_allows_only_exact_nondestructive_posts() -> None:
         mem0.Mem0RestRequest(method="DELETE", path="/memories", body=b"")
 
 
-def test_add_parser_accepts_exact_events_and_marks_empty_unattested() -> None:
+def test_add_parser_accepts_exact_events_and_marks_empty_provider_outcome() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
 
     successful = mem0.parse_add_response((FIXTURES / "rest" / "add-success.json").read_bytes())
@@ -432,7 +435,7 @@ def test_add_parser_accepts_exact_events_and_marks_empty_unattested() -> None:
     assert successful.disposition is mem0.Mem0AddDisposition.ACCEPTED
     assert successful.events[0].event == "ADD"
     assert successful.events[0].memory == "Rocky prefers jasmine tea."
-    assert empty.disposition is mem0.Mem0AddDisposition.UNATTESTED_EMPTY
+    assert empty.disposition is mem0.Mem0AddDisposition.EMPTY_PROVIDER_OUTCOME
     assert empty.events == ()
 
 
@@ -503,6 +506,31 @@ def test_search_encoder_and_parser_preserve_exact_scope_and_provider_order() -> 
     assert attributed[0].attributed_to == "Rocky"
 
 
+def test_search_parser_preserves_unattributed_provider_memory() -> None:
+    mem0 = importlib.import_module("oamb.memory_systems.mem0")
+    raw = json.dumps(
+        {
+            "results": [
+                {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "memory": "Provider-visible memory without source attribution.",
+                    "hash": None,
+                    "metadata": {},
+                    "score": 0.5,
+                    "created_at": None,
+                    "updated_at": None,
+                    "run_id": RUN_ID,
+                }
+            ]
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    parsed = mem0.parse_search_response(raw, expected_run_id=RUN_ID)
+
+    assert parsed[0].metadata is None
+
+
 def test_search_parser_rejects_unknown_item_field_and_wrong_scope() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
     raw = (FIXTURES / "rest" / "search-extra-field.json").read_bytes()
@@ -540,6 +568,40 @@ def test_projection_parser_accepts_exact_two_page_inspector_envelope() -> None:
         "Rocky drinks tea after lunch.",
     )
     assert projection.points[0].metadata.source_unit_id == SOURCE_ID
+
+
+def test_projection_parser_hashes_unattributed_visible_memory() -> None:
+    mem0 = importlib.import_module("oamb.memory_systems.mem0")
+    raw = json.dumps(
+        {
+            "collection": "oamb_memories",
+            "run_id": RUN_ID,
+            "count": 1,
+            "points": [
+                {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "payload": {
+                        "data": "Provider-visible memory without source attribution.",
+                        "text_lemmatized": "provider visible memory",
+                        "hash": "11111111111111111111111111111111",
+                        "created_at": "2026-08-28T01:02:03+00:00",
+                        "updated_at": "2026-08-28T01:02:03+00:00",
+                        "run_id": RUN_ID,
+                    },
+                }
+            ],
+            "next_cursor": None,
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    projection = mem0.parse_projection_pages(
+        (raw,),
+        expected_collection="oamb_memories",
+        expected_run_id=RUN_ID,
+    )
+
+    assert projection.points[0].metadata is None
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,8 +13,15 @@ from oamb.artifacts.validation.hindsight_evidence import (
     HindsightProjectionEvidence,
     reconstruct_hindsight_projection,
 )
+from oamb.artifacts.validation.mem0_evidence import (
+    MEM0_PROFILE_ID,
+    reconstruct_mem0_candidates,
+    reconstruct_mem0_plan,
+    reconstruct_mem0_projection,
+)
 from oamb.artifacts.validation.native import (
     _contracts,
+    _ingestion_plans,
     _load_native_capsule,
     _manifest_schema_rule,
     _NativeCapsuleSnapshot,
@@ -32,6 +40,7 @@ from oamb.contracts.evidence import (
     AttemptRecordV2,
     CaseRecordV3,
     IngestionPlanRecordV2,
+    IngestionPlanRecordV3,
     RunRecord,
     ValidationIssue,
     ValidationSeverity,
@@ -343,10 +352,12 @@ def _hindsight_projection_evidence(
 
 
 def _mem0_profile(target: Any, expected: Mem0ExactProfile, rule_id: str) -> bool:
-    from oamb.memory_systems.mem0.adapter import Mem0RestAdapter
+    from oamb.memory_systems.mem0.adapter import Mem0ReferenceNegativeAdapter
     from oamb.memory_systems.mem0.sdk import Mem0SdkAdapter
 
-    expected_type = Mem0RestAdapter if expected == MEM0_REST_PROFILE else Mem0SdkAdapter
+    expected_type = (
+        Mem0ReferenceNegativeAdapter if expected == MEM0_REST_PROFILE else Mem0SdkAdapter
+    )
     return bool(
         isinstance(target, Mem0AdapterValidationInput)
         and isinstance(target.adapter, expected_type)
@@ -376,6 +387,225 @@ def _mem0_rest_zero_dispatch_rule(target: Any) -> tuple[ValidationIssue, ...]:
         _mem0_profile(target, MEM0_REST_PROFILE, rule_id) and target.dispatched_operation_count == 0
     )
     return () if exact else (_issue(rule_id, "mem0-rest-v1", "mem0-zero-dispatch-drift"),)
+
+
+def _mem0_rest_blackbox_runtime_rule(target: Any) -> tuple[ValidationIssue, ...]:
+    rule_id = "adapter.mem0.rest.runtime-profile.v2"
+    snapshot = _native_snapshot(target)
+    if snapshot is None:
+        return _wrong_target(rule_id)
+    plans = tuple(
+        plan for plan in _ingestion_plans(snapshot) if isinstance(plan, IngestionPlanRecordV3)
+    )
+    runs = _contracts(snapshot, RunRecord)
+    runtime_hashes = {plan.runtime_binding_hash for plan in plans}
+    has_resolution = any(
+        _accepts_mem0_runtime_resolution(
+            payload,
+            raw_payloads=snapshot.raw_payloads,
+            expected_runtime_binding_hash=next(iter(runtime_hashes), ""),
+        )
+        for payload in snapshot.raw_payloads.values()
+    )
+    exact = bool(
+        _native_structural_closes(snapshot)
+        and plans
+        and len(plans) == len(_ingestion_plans(snapshot))
+        and all(
+            plan.adapter_profile_id == MEM0_PROFILE_ID
+            and plan.memory_system_id == "mem0"
+            and plan.projection_semantics == "retrieval_visible_subset"
+            for plan in plans
+        )
+        and len(runs) == 1
+        and runs[0].state == RunState.FINALIZED
+        and len(runtime_hashes) == 1
+        and has_resolution
+    )
+    evidence_ref = snapshot.manifest.source_manifest_hash if snapshot.manifest else "manifest"
+    return () if exact else (_issue(rule_id, evidence_ref, "mem0-runtime-profile-drift"),)
+
+
+def _mem0_rest_scope_dispatch_projection_rule(
+    target: Any,
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "adapter.mem0.rest.scope-dispatch-projection.v1"
+    snapshot = _native_snapshot(target)
+    if snapshot is None:
+        return _wrong_target(rule_id)
+    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+    plans = _ingestion_plans(snapshot)
+    exact = bool(plans)
+    for plan in plans:
+        try:
+            if not isinstance(plan, IngestionPlanRecordV3):
+                raise ValueError("Mem0 REST plan is not evidence v3")
+            reconstruct_mem0_plan(
+                raw_payloads=snapshot.raw_payloads,
+                plan=plan,
+                attempts=attempts,
+            )
+        except ValueError:
+            exact = False
+            break
+    evidence_ref = snapshot.manifest.source_manifest_hash if snapshot.manifest else "manifest"
+    return () if exact else (_issue(rule_id, evidence_ref, "mem0-scope-dispatch-projection-drift"),)
+
+
+def _mem0_rest_retrieval_order_scope_rule(target: Any) -> tuple[ValidationIssue, ...]:
+    rule_id = "adapter.mem0.rest.retrieval-order-scope.v1"
+    snapshot = _native_snapshot(target)
+    if snapshot is None:
+        return _wrong_target(rule_id)
+    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+    plans = {
+        item.ingestion_occurrence_id: item
+        for item in _ingestion_plans(snapshot)
+        if isinstance(item, IngestionPlanRecordV3)
+    }
+    cases = _contracts(snapshot, CaseRecordV3)
+    exact = bool(cases)
+    for case in cases:
+        plan = plans.get(case.ingestion_occurrence_id)
+        try:
+            if (
+                plan is None
+                or case.adapter_profile_id != MEM0_PROFILE_ID
+                or case.state != CaseState.COMPLETED
+            ):
+                raise ValueError("Mem0 case parentage is invalid")
+            evidence = reconstruct_mem0_plan(
+                raw_payloads=snapshot.raw_payloads,
+                plan=plan,
+                attempts=attempts,
+            )
+            candidates = reconstruct_mem0_candidates(
+                raw_payloads=snapshot.raw_payloads,
+                case=case,
+                plan=evidence,
+            )
+            if (
+                tuple(item.native_id for item in candidates) != case.ordered_native_candidate_ids
+                or tuple(
+                    hashlib.sha256(item.content.encode("utf-8")).hexdigest() for item in candidates
+                )
+                != case.ordered_native_content_sha256
+                or tuple(item.source_unit_id for item in candidates)
+                != case.native_candidate_source_unit_ids
+            ):
+                raise ValueError("Mem0 candidate order or scope drifted")
+        except ValueError:
+            exact = False
+            break
+    evidence_ref = snapshot.manifest.source_manifest_hash if snapshot.manifest else "manifest"
+    return () if exact else (_issue(rule_id, evidence_ref, "mem0-retrieval-order-drift"),)
+
+
+def _mem0_rest_query_mutation_rule(target: Any) -> tuple[ValidationIssue, ...]:
+    rule_id = "adapter.mem0.rest.query-mutation.v1"
+    snapshot = _native_snapshot(target)
+    if snapshot is None:
+        return _wrong_target(rule_id)
+    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+    plans = {
+        item.ingestion_occurrence_id: item
+        for item in _ingestion_plans(snapshot)
+        if isinstance(item, IngestionPlanRecordV3)
+    }
+    cases = _contracts(snapshot, CaseRecordV3)
+    exact = bool(cases)
+    for case in cases:
+        plan = plans.get(case.ingestion_occurrence_id)
+        try:
+            if plan is None:
+                raise ValueError("Mem0 case has no v3 plan")
+            plan_evidence = reconstruct_mem0_plan(
+                raw_payloads=snapshot.raw_payloads,
+                plan=plan,
+                attempts=attempts,
+            )
+            before = reconstruct_mem0_projection(
+                raw_payloads=snapshot.raw_payloads,
+                references=case.pre_query_projection_raw_refs,
+                expected_run_id=plan.ingestion_occurrence_id,
+            )
+            after = reconstruct_mem0_projection(
+                raw_payloads=snapshot.raw_payloads,
+                references=case.post_query_projection_raw_refs,
+                expected_run_id=plan.ingestion_occurrence_id,
+            )
+            if (
+                before.state_sha256 != plan.protected_state_sha256
+                or after.state_sha256 != plan.protected_state_sha256
+                or before.capture_sequence <= plan_evidence.projection.capture_sequence
+                or after.capture_sequence != before.capture_sequence + 1
+                or case.pre_query_state_sha256 != plan.protected_state_sha256
+                or case.post_query_state_sha256 != plan.protected_state_sha256
+                or case.query_mutation_status != "unchanged"
+            ):
+                raise ValueError("Mem0 query state differs from readiness")
+        except ValueError:
+            exact = False
+            break
+    evidence_ref = snapshot.manifest.source_manifest_hash if snapshot.manifest else "manifest"
+    return () if exact else (_issue(rule_id, evidence_ref, "mem0-query-state-drift"),)
+
+
+def _accepts_mem0_openapi(payload: bytes) -> bool:
+    try:
+        document = json.loads(payload)
+        paths = document["paths"]
+        return bool(
+            document["openapi"] == "3.1.0"
+            and document["info"]["title"] == "Mem0 REST APIs"
+            and document["info"]["version"] == "1.0.0"
+            and isinstance(paths["/memories"].get("post"), dict)
+            and isinstance(paths["/search"].get("post"), dict)
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+
+def _accepts_mem0_inspector_health(payload: bytes) -> bool:
+    try:
+        return bool(json.loads(payload) == {"status": "ok", "mode": "read_only_projection"})
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+
+def _accepts_mem0_runtime_resolution(
+    payload: bytes,
+    *,
+    raw_payloads: dict[str, bytes],
+    expected_runtime_binding_hash: str,
+) -> bool:
+    try:
+        document = json.loads(payload)
+        if not isinstance(document, dict) or frozenset(document) != frozenset(
+            {
+                "schema",
+                "release_version",
+                "runtime_binding_hash",
+                "openapi_raw_ref",
+                "inspector_health_raw_ref",
+            }
+        ):
+            return False
+        openapi_ref = document["openapi_raw_ref"]
+        health_ref = document["inspector_health_raw_ref"]
+        return bool(
+            document["schema"] == "oamb-mem0-runtime-resolution-v1"
+            and document["release_version"] == "2.0.19"
+            and document["runtime_binding_hash"] == expected_runtime_binding_hash
+            and isinstance(openapi_ref, str)
+            and isinstance(health_ref, str)
+            and openapi_ref in raw_payloads
+            and health_ref in raw_payloads
+            and _accepts_mem0_openapi(raw_payloads[openapi_ref])
+            and _accepts_mem0_inspector_health(raw_payloads[health_ref])
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
 
 
 def _mem0_sdk_runtime_rule(target: Any) -> tuple[ValidationIssue, ...]:
@@ -638,6 +868,26 @@ ADAPTER_RULES: tuple[ValidationRule, ...] = (
     ValidationRule("adapter.mem0.rest.runtime-profile.v1", 1, _mem0_rest_runtime_rule),
     ValidationRule("adapter.mem0.rest.unsupported-verdict.v1", 1, _mem0_rest_unsupported_rule),
     ValidationRule("adapter.mem0.rest.zero-dispatch.v1", 1, _mem0_rest_zero_dispatch_rule),
+    ValidationRule(
+        "adapter.mem0.rest.runtime-profile.v2",
+        2,
+        _mem0_rest_blackbox_runtime_rule,
+    ),
+    ValidationRule(
+        "adapter.mem0.rest.scope-dispatch-projection.v1",
+        1,
+        _mem0_rest_scope_dispatch_projection_rule,
+    ),
+    ValidationRule(
+        "adapter.mem0.rest.retrieval-order-scope.v1",
+        1,
+        _mem0_rest_retrieval_order_scope_rule,
+    ),
+    ValidationRule(
+        "adapter.mem0.rest.query-mutation.v1",
+        1,
+        _mem0_rest_query_mutation_rule,
+    ),
     ValidationRule("adapter.mem0.sdk.runtime-profile.v1", 1, _mem0_sdk_runtime_rule),
     ValidationRule("adapter.mem0.sdk.unsupported-verdict.v1", 1, _mem0_sdk_unsupported_rule),
     ValidationRule("adapter.mem0.sdk.zero-dispatch.v1", 1, _mem0_sdk_zero_dispatch_rule),

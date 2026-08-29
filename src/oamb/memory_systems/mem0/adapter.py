@@ -1,29 +1,55 @@
-"""Zero-dispatch Mem0 v2.0.19 REST adapter boundary."""
+"""Mem0 v2.0.19 black-box REST adapter and historical negative fixture."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Never, Protocol
+import hashlib
+import json
+import math
+import re
+from dataclasses import dataclass
+from typing import Any, Never, Protocol
 
+import httpx
+
+from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
+    ArtifactStorePort,
     CapabilitySet,
     IngestionDispatch,
     IngestionDispatchReceipt,
     IngestionDispatchRequest,
     IngestionRequest,
     InventoryReceipt,
+    MemorySystemCallCancelledBeforeDispatch,
+    MemorySystemCallFailure,
+    MemorySystemReadCancelled,
     NativeEvidenceBatch,
+    NativeEvidenceCandidate,
     ProjectionReceipt,
+    RawPayloadSealRequest,
+    RawReferenceHandle,
     ReadinessReceipt,
     ReadinessRequest,
     RetrievalRequest,
     RuntimeResolution,
     ScopeAllocationRequest,
     ScopeReceipt,
+    SourceUnit,
     StateDigestReceipt,
+)
+from oamb.memory_systems.rest import (
+    SealedRestClient,
+    SealedRestResponse,
+    bind_sealed_response_validation,
+    link_preceding_raw_references,
+    link_preceding_read_cancellation,
+    parse_exact_json_object,
+    sealed_response_validation_failure,
 )
 
 from .profiles import (
+    MEM0_RELEASE_VERSION,
     MEM0_REST_PROFILE,
     Mem0ExactProfile,
     Mem0OperationAuditEvent,
@@ -32,6 +58,32 @@ from .profiles import (
     build_mem0_operation_audit_event,
     reference_profile_unsupported,
 )
+from .projection import (
+    MEM0_PROJECTION_MAX_PAGES,
+    Mem0Projection,
+    parse_projection_pages,
+    projection_source_unit_ids,
+    projection_state_sha256,
+)
+from .wire import (
+    MEM0_SEARCH_TOP_K,
+    Mem0RestRequest,
+    Mem0SourceMetadata,
+    build_add_http_request,
+    build_search_http_request,
+    parse_add_response,
+    parse_search_response,
+)
+
+MEM0_MEMORY_SYSTEM_ID = "mem0"
+MEM0_COLLECTION = "oamb_memories"
+MEM0_ADD_OPERATION = "mem0_add"
+MEM0_OPENAPI_TITLE = "Mem0 REST APIs"
+MEM0_OPENAPI_VERSION = "1.0.0"
+MEM0_INSPECTOR_MODE = "read_only_projection"
+
+_RUN_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
+_PROJECTION_PAGE_FIELDS = frozenset({"collection", "run_id", "count", "points", "next_cursor"})
 
 
 class Mem0RestDispatcher(Protocol):
@@ -40,7 +92,27 @@ class Mem0RestDispatcher(Protocol):
     async def close(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _ScopeBinding:
+    ingestion_occurrence_id: str
+    ingestion_plan_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedAdd:
+    dispatch: IngestionDispatch
+    request: Mem0RestRequest
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedProjection:
+    native: Mem0Projection
+    receipt: ProjectionReceipt
+
+
 class _ZeroDispatchMem0Adapter:
+    """Historical exact-profile negative producer retained for SDK fixtures."""
+
     def __init__(self, *, profile: Mem0ExactProfile) -> None:
         self._profile = profile
         self._dispatched_operation_count = 0
@@ -107,8 +179,8 @@ class _ZeroDispatchMem0Adapter:
         )
 
 
-class Mem0RestAdapter(_ZeroDispatchMem0Adapter):
-    """Expose exact negative fixtures while refusing all v2.0.19 REST dispatch."""
+class Mem0ReferenceNegativeAdapter(_ZeroDispatchMem0Adapter):
+    """Preserve the T8 v2.0.19 negative fixture without gating live REST."""
 
     def __init__(self, *, dispatcher: Mem0RestDispatcher | None = None) -> None:
         super().__init__(profile=MEM0_REST_PROFILE)
@@ -125,4 +197,635 @@ class Mem0RestAdapter(_ZeroDispatchMem0Adapter):
             self._closed = True
 
 
-__all__ = ["Mem0RestAdapter", "Mem0RestDispatcher"]
+class Mem0RestAdapter:
+    """Original REST adapter for the exact Mem0 v2.0.19 black-box profile."""
+
+    def __init__(
+        self,
+        *,
+        store: ArtifactStorePort,
+        base_url: str,
+        api_key: str,
+        inspector_base_url: str,
+        inspector_api_key: str,
+        runtime_binding_hash: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+        inspector_transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        for label, value in (
+            ("api_key", api_key),
+            ("inspector_api_key", inspector_api_key),
+            ("runtime_binding_hash", runtime_binding_hash),
+        ):
+            if not value:
+                raise ValueError(f"Mem0 {label} is required")
+        if _RUN_ID_PATTERN.fullmatch(runtime_binding_hash) is None:
+            raise ValueError("Mem0 runtime binding hash must be lowercase SHA-256")
+        self._store = store
+        self._runtime_binding_hash = runtime_binding_hash
+        self._public_client = SealedRestClient(
+            store=store,
+            base_url=base_url,
+            headers={"X-API-Key": api_key},
+            transport=transport,
+        )
+        self._inspector_client = SealedRestClient(
+            store=store,
+            base_url=inspector_base_url,
+            headers={"Authorization": f"Bearer {inspector_api_key}"},
+            transport=inspector_transport,
+        )
+        self._resolved = False
+        self._scopes: dict[str, _ScopeBinding] = {}
+        self._allocation_lock = asyncio.Lock()
+        self._planned_adds: dict[str, tuple[_PlannedAdd, ...]] = {}
+        self._attempted_dispatches: set[tuple[str, str]] = set()
+        self._ready_projections: dict[str, _CapturedProjection] = {}
+        self._projection_capture_sequence = 0
+        self._close_lock = asyncio.Lock()
+        self._accepting_operations = True
+        self._public_closed = False
+        self._inspector_closed = False
+
+    async def resolve(self) -> RuntimeResolution:
+        self._require_open()
+        openapi = await self._public_client.request("GET", "/openapi.json")
+        with bind_sealed_response_validation(
+            openapi,
+            message="Mem0 OpenAPI response failed exact-profile validation",
+        ):
+            _validate_openapi(openapi.raw_bytes)
+        health = await self._inspector_client.request("GET", "/health")
+        with bind_sealed_response_validation(
+            health,
+            message="Mem0 inspector health failed exact-profile validation",
+            supporting_raw_references=(openapi.raw_reference,),
+        ):
+            document = parse_exact_json_object(
+                health.raw_bytes,
+                expected_fields=frozenset({"status", "mode"}),
+            )
+            if document != {"status": "ok", "mode": MEM0_INSPECTOR_MODE}:
+                raise ValueError("Mem0 inspector is not the read-only projection profile")
+        binding_bytes = canonical_json_bytes(
+            {
+                "schema": "oamb-mem0-runtime-resolution-v1",
+                "release_version": MEM0_RELEASE_VERSION,
+                "runtime_binding_hash": self._runtime_binding_hash,
+                "openapi_raw_ref": openapi.raw_reference.sha256,
+                "inspector_health_raw_ref": health.raw_reference.sha256,
+            }
+        )
+        self._resolved = True
+        return RuntimeResolution(
+            memory_system_id=MEM0_MEMORY_SYSTEM_ID,
+            runtime_binding_hash=self._runtime_binding_hash,
+            raw_reference=self._seal_raw(binding_bytes),
+        )
+
+    async def capabilities(self) -> CapabilitySet:
+        self._require_open()
+        return CapabilitySet(
+            capability_ids=(
+                "create-only-run-scope",
+                "retrieval-visible-main-projection",
+                "opaque-empty-provider-outcome",
+            ),
+            provider_order_preserved=True,
+            native_reranking_disabled=True,
+        )
+
+    async def allocate_ingestion_scope(
+        self,
+        request: ScopeAllocationRequest,
+    ) -> ScopeReceipt:
+        self._require_open()
+        if not self._resolved:
+            raise RuntimeError("Mem0 resolve must pass before scope allocation")
+        _require_run_id(request.ingestion_occurrence_id)
+        async with self._allocation_lock:
+            if request.ingestion_occurrence_id in self._scopes:
+                raise ValueError("Mem0 run scope was already allocated and cannot replay")
+            captured = await self._capture_native_projection(request.ingestion_occurrence_id)
+            if captured.native.declared_count != 0 or captured.native.points:
+                raise ValueError("Mem0 run scope already contains retrieval-visible memory")
+            self._scopes[request.ingestion_occurrence_id] = _ScopeBinding(
+                ingestion_occurrence_id=request.ingestion_occurrence_id,
+                ingestion_plan_id=request.ingestion_plan_id,
+            )
+            return ScopeReceipt(
+                ingestion_occurrence_id=request.ingestion_occurrence_id,
+                scope_id=request.ingestion_occurrence_id,
+                raw_reference=captured.receipt.inventory.raw_reference,
+                supporting_raw_references=captured.receipt.supporting_raw_references,
+            )
+
+    def plan_ingestion(self, request: IngestionRequest) -> tuple[IngestionDispatch, ...]:
+        self._require_open()
+        binding = self._require_scope(request.scope)
+        if request.scope.scope_id in self._planned_adds:
+            raise ValueError("Mem0 ingestion dispatches are already planned and frozen")
+        sources = request.ordered_source_units
+        if not sources:
+            raise ValueError("Mem0 ingestion requires at least one source unit")
+        if tuple(source.ordinal_1_indexed for source in sources) != tuple(
+            range(1, len(sources) + 1)
+        ):
+            raise ValueError("Mem0 source ordinals must be contiguous and ordered")
+        source_ids = tuple(source.source_unit_id for source in sources)
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("Mem0 source-unit IDs must be unique")
+
+        planned: list[_PlannedAdd] = []
+        for ordinal, source in enumerate(sources, start=1):
+            wire_request = build_add_http_request(
+                messages=_source_messages(source),
+                run_id=request.scope.scope_id,
+                metadata=Mem0SourceMetadata(
+                    ingestion_occurrence_id=binding.ingestion_occurrence_id,
+                    ingestion_plan_id=binding.ingestion_plan_id,
+                    source_unit_id=source.source_unit_id,
+                    source_ordinal=source.ordinal_1_indexed,
+                ),
+            )
+            dispatch = IngestionDispatch(
+                dispatch_ordinal_1_indexed=ordinal,
+                operation_kind=MEM0_ADD_OPERATION,
+                request_fingerprint=canonical_sha256(
+                    [
+                        "oamb-mem0-add-dispatch-v1",
+                        request.scope.scope_id,
+                        ordinal,
+                        source.source_unit_id,
+                        wire_request.body.decode("utf-8"),
+                    ]
+                ),
+                ordered_source_units=(source,),
+            )
+            planned.append(_PlannedAdd(dispatch=dispatch, request=wire_request))
+        result = tuple(planned)
+        self._planned_adds[request.scope.scope_id] = result
+        return tuple(item.dispatch for item in result)
+
+    async def ingest(self, request: IngestionDispatchRequest) -> IngestionDispatchReceipt:
+        self._require_open()
+        self._require_scope(request.scope)
+        planned = self._planned_add(request.scope.scope_id, request.dispatch)
+        dispatch_key = (request.scope.scope_id, request.dispatch.request_fingerprint)
+        if dispatch_key in self._attempted_dispatches:
+            raise ValueError("Mem0 add dispatch was already attempted and cannot replay")
+        self._attempted_dispatches.add(dispatch_key)
+        try:
+            response = await self._public_client.request(
+                planned.request.method,
+                planned.request.path,
+                json_payload=json.loads(planned.request.body),
+                write_intent=True,
+            )
+        except MemorySystemCallCancelledBeforeDispatch:
+            self._attempted_dispatches.remove(dispatch_key)
+            raise
+        with bind_sealed_response_validation(
+            response,
+            message="Mem0 add response failed exact-profile validation",
+        ):
+            parse_add_response(response.raw_bytes)
+        source_id = request.dispatch.ordered_source_units[0].source_unit_id
+        return IngestionDispatchReceipt(
+            attempt_id=request.attempt_id,
+            dispatch=request.dispatch,
+            accepted_source_unit_ids=(source_id,),
+            rejected_source_unit_ids=(),
+            raw_reference=response.raw_reference,
+            raw_response_bytes=response.raw_bytes,
+            usage_records=(),
+        )
+
+    async def wait_ready(self, request: ReadinessRequest) -> ReadinessReceipt:
+        self._require_open()
+        binding = self._require_scope(request.scope)
+        planned = self._planned_adds.get(request.scope.scope_id)
+        if planned is None:
+            raise ValueError("Mem0 readiness has no frozen ingestion plan")
+        planned_source_ids = tuple(
+            item.dispatch.ordered_source_units[0].source_unit_id for item in planned
+        )
+        receipt = request.ingestion_receipt
+        if (
+            request.expected_source_unit_ids != planned_source_ids
+            or receipt.ingestion_occurrence_id != binding.ingestion_occurrence_id
+            or receipt.accepted_source_unit_ids != planned_source_ids
+            or receipt.rejected_source_unit_ids
+            or tuple(item.dispatch for item in receipt.dispatch_receipts)
+            != tuple(item.dispatch for item in planned)
+            or receipt.raw_references
+            != tuple(item.raw_reference for item in receipt.dispatch_receipts)
+        ):
+            raise ValueError("Mem0 readiness receipt does not bind the completed source ledger")
+        for dispatch_receipt in receipt.dispatch_receipts:
+            if (
+                hashlib.sha256(dispatch_receipt.raw_response_bytes).hexdigest()
+                != dispatch_receipt.raw_reference.sha256
+            ):
+                raise ValueError("Mem0 readiness raw add receipt hash does not match")
+            parse_add_response(dispatch_receipt.raw_response_bytes)
+
+        first = await self._capture_native_projection(request.scope.scope_id)
+        second = await self._capture_native_projection(request.scope.scope_id)
+        if (
+            first.receipt.inventory.ordered_source_unit_ids
+            != second.receipt.inventory.ordered_source_unit_ids
+            or first.receipt.state_digest.state_sha256 != second.receipt.state_digest.state_sha256
+        ):
+            raise ValueError("Mem0 retrieval-visible projection did not reach a stable boundary")
+        self._validate_projection_sources(
+            binding=binding,
+            projection=second.native,
+            completed_source_ids=planned_source_ids,
+        )
+        self._ready_projections[request.scope.scope_id] = second
+        return ReadinessReceipt(
+            ingestion_occurrence_id=binding.ingestion_occurrence_id,
+            ready=True,
+            evidence_references=(
+                *receipt.raw_references,
+                first.receipt.inventory.raw_reference,
+                *first.receipt.supporting_raw_references,
+                second.receipt.inventory.raw_reference,
+                *second.receipt.supporting_raw_references,
+            ),
+        )
+
+    async def inventory(self, scope: ScopeReceipt) -> InventoryReceipt:
+        self._require_open()
+        return (await self.project(scope)).inventory
+
+    async def state_digest(self, scope: ScopeReceipt) -> StateDigestReceipt:
+        self._require_open()
+        return (await self.project(scope)).state_digest
+
+    async def project(self, scope: ScopeReceipt) -> ProjectionReceipt:
+        self._require_open()
+        self._require_scope(scope)
+        ready = self._ready_projections.get(scope.scope_id)
+        if ready is None:
+            raise ValueError("Mem0 scope has not passed readiness")
+        captured = await self._capture_native_projection(scope.scope_id)
+        if (
+            captured.receipt.inventory.ordered_source_unit_ids
+            != ready.receipt.inventory.ordered_source_unit_ids
+            or captured.receipt.state_digest.state_sha256 != ready.receipt.state_digest.state_sha256
+        ):
+            raise ValueError("Mem0 projection differs from the readiness-sealed state")
+        return captured.receipt
+
+    async def retrieve(self, request: RetrievalRequest) -> NativeEvidenceBatch:
+        self._require_open()
+        binding = self._require_scope(request.scope)
+        ready = self._ready_projections.get(request.scope.scope_id)
+        if ready is None:
+            raise ValueError("Mem0 scope has not passed readiness")
+        if request.top_k != MEM0_SEARCH_TOP_K:
+            raise ValueError("Mem0 retrieval top_k must equal 100")
+        try:
+            query = request.query_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Mem0 search query must be UTF-8") from exc
+        if not query:
+            raise ValueError("Mem0 search query must not be empty")
+        wire_request = build_search_http_request(query=query, run_id=request.scope.scope_id)
+        response = await self._public_client.request(
+            wire_request.method,
+            wire_request.path,
+            json_payload=json.loads(wire_request.body),
+        )
+        with bind_sealed_response_validation(
+            response,
+            message="Mem0 search response failed exact-profile validation",
+        ):
+            items = parse_search_response(
+                response.raw_bytes,
+                expected_run_id=request.scope.scope_id,
+            )
+            ready_points = {point.native_id: point for point in ready.native.points}
+            candidates: list[NativeEvidenceCandidate] = []
+            for item in items:
+                point = ready_points.get(item.native_id)
+                if point is None or item.memory != point.memory or item.run_id != point.run_id:
+                    raise ValueError("Mem0 search candidate does not match the sealed projection")
+                if item.memory_hash is not None and item.memory_hash != point.memory_hash:
+                    raise ValueError("Mem0 search candidate hash does not match sealed projection")
+                if item.metadata != point.metadata:
+                    raise ValueError(
+                        "Mem0 search candidate source does not match sealed projection"
+                    )
+                if item.metadata is not None and (
+                    item.metadata.ingestion_occurrence_id != binding.ingestion_occurrence_id
+                    or item.metadata.ingestion_plan_id != binding.ingestion_plan_id
+                ):
+                    raise ValueError("Mem0 search candidate belongs to a foreign scope")
+                if item.attributed_to != point.attributed_to:
+                    raise ValueError(
+                        "Mem0 search candidate attribution does not match sealed projection"
+                    )
+                candidates.append(
+                    NativeEvidenceCandidate(
+                        native_id=item.native_id,
+                        native_rank_1_indexed=item.native_rank_1_indexed,
+                        content=item.memory,
+                        native_score=_canonical_score(item.native_score),
+                        provider_evidence_identity=item.native_id,
+                        source_unit_id=(
+                            None if item.metadata is None else item.metadata.source_unit_id
+                        ),
+                        evidence_kind="native_memory",
+                        native_reference=item.native_id,
+                        native_truncated=False,
+                    )
+                )
+        return NativeEvidenceBatch(
+            raw_reference=response.raw_reference,
+            candidates=tuple(candidates),
+        )
+
+    async def close(self) -> None:
+        self._accepting_operations = False
+        self._public_client.stop_accepting()
+        self._inspector_client.stop_accepting()
+        async with self._close_lock:
+            errors: list[BaseException] = []
+            if not self._public_closed:
+                try:
+                    await self._public_client.close()
+                except BaseException as exc:
+                    errors.append(exc)
+                else:
+                    self._public_closed = True
+            if not self._inspector_closed:
+                try:
+                    await self._inspector_client.close()
+                except BaseException as exc:
+                    errors.append(exc)
+                else:
+                    self._inspector_closed = True
+            if errors:
+                if len(errors) == 1:
+                    raise errors[0]
+                raise BaseExceptionGroup("Mem0 REST clients failed to close", errors)
+
+    def _require_open(self) -> None:
+        if not self._accepting_operations:
+            raise RuntimeError("Mem0 REST adapter is closed")
+
+    def _require_scope(self, scope: ScopeReceipt) -> _ScopeBinding:
+        binding = self._scopes.get(scope.scope_id)
+        if (
+            binding is None
+            or scope.scope_id != scope.ingestion_occurrence_id
+            or binding.ingestion_occurrence_id != scope.ingestion_occurrence_id
+        ):
+            raise ValueError("Mem0 scope receipt is unknown or inconsistent")
+        return binding
+
+    def _planned_add(self, scope_id: str, dispatch: IngestionDispatch) -> _PlannedAdd:
+        planned = self._planned_adds.get(scope_id)
+        ordinal_index = dispatch.dispatch_ordinal_1_indexed - 1
+        if (
+            planned is None
+            or ordinal_index < 0
+            or ordinal_index >= len(planned)
+            or dispatch != planned[ordinal_index].dispatch
+            or dispatch.operation_kind != MEM0_ADD_OPERATION
+            or len(dispatch.ordered_source_units) != 1
+        ):
+            raise ValueError("Mem0 add dispatch does not match the frozen plan")
+        return planned[ordinal_index]
+
+    async def _capture_native_projection(self, run_id: str) -> _CapturedProjection:
+        raw_pages: list[bytes] = []
+        responses: list[SealedRestResponse] = []
+        cursor: str | None = None
+        for _ in range(MEM0_PROJECTION_MAX_PAGES):
+            params: dict[str, str] = {"run_id": run_id}
+            if cursor is not None:
+                params["cursor"] = cursor
+            preceding_raw_references = tuple(previous.raw_reference for previous in responses)
+            try:
+                response = await self._inspector_client.request(
+                    "GET",
+                    "/v1/projection",
+                    params=params,
+                )
+            except MemorySystemReadCancelled as exc:
+                if preceding_raw_references:
+                    raise link_preceding_read_cancellation(
+                        exc,
+                        preceding_raw_references=preceding_raw_references,
+                    ) from exc
+                raise
+            except MemorySystemCallFailure as exc:
+                if preceding_raw_references:
+                    raise link_preceding_raw_references(
+                        exc,
+                        preceding_raw_references=preceding_raw_references,
+                    ) from exc
+                raise
+            responses.append(response)
+            with bind_sealed_response_validation(
+                response,
+                message="Mem0 inspector page failed exact-profile validation",
+                supporting_raw_references=tuple(
+                    previous.raw_reference for previous in responses[:-1]
+                ),
+            ):
+                page = parse_exact_json_object(
+                    response.raw_bytes,
+                    expected_fields=_PROJECTION_PAGE_FIELDS,
+                )
+                next_cursor = page["next_cursor"]
+                if next_cursor is not None and not isinstance(next_cursor, str):
+                    raise ValueError("Mem0 inspector cursor must be a string or null")
+            raw_pages.append(response.raw_bytes)
+            cursor = next_cursor
+            if cursor is None:
+                break
+        else:
+            terminal = responses[-1]
+            raise sealed_response_validation_failure(
+                terminal,
+                message="Mem0 inspector projection page limit exceeded",
+                supporting_raw_references=tuple(
+                    previous.raw_reference for previous in responses[:-1]
+                ),
+            )
+        terminal = responses[-1]
+        with bind_sealed_response_validation(
+            terminal,
+            message="Mem0 projection failed exact-profile validation",
+            supporting_raw_references=tuple(previous.raw_reference for previous in responses[:-1]),
+        ):
+            native = parse_projection_pages(
+                tuple(raw_pages),
+                expected_collection=MEM0_COLLECTION,
+                expected_run_id=run_id,
+            )
+            source_ids = projection_source_unit_ids(native)
+            state_sha256 = projection_state_sha256(native)
+        raw_references = tuple(response.raw_reference for response in responses)
+        self._projection_capture_sequence += 1
+        summary_reference = self._seal_raw(
+            canonical_json_bytes(
+                {
+                    "schema": "oamb-mem0-projection-receipt-v1",
+                    "collection": native.collection,
+                    "run_id": native.run_id,
+                    "ordered_source_unit_ids": source_ids,
+                    "state_sha256": state_sha256,
+                    "capture_sequence": self._projection_capture_sequence,
+                    "page_raw_refs": tuple(item.sha256 for item in raw_references),
+                }
+            )
+        )
+        receipt = ProjectionReceipt(
+            inventory=InventoryReceipt(
+                ingestion_occurrence_id=run_id,
+                ordered_source_unit_ids=source_ids,
+                raw_reference=summary_reference,
+            ),
+            state_digest=StateDigestReceipt(
+                ingestion_occurrence_id=run_id,
+                state_sha256=state_sha256,
+                raw_reference=summary_reference,
+            ),
+            supporting_raw_references=raw_references,
+        )
+        return _CapturedProjection(native=native, receipt=receipt)
+
+    @staticmethod
+    def _validate_projection_sources(
+        *,
+        binding: _ScopeBinding,
+        projection: Mem0Projection,
+        completed_source_ids: tuple[str, ...],
+    ) -> None:
+        completed_positions = {
+            source_id: index for index, source_id in enumerate(completed_source_ids)
+        }
+        projected: list[str] = []
+        for point in projection.points:
+            metadata = point.metadata
+            if metadata is None:
+                continue
+            if (
+                metadata.ingestion_occurrence_id != binding.ingestion_occurrence_id
+                or metadata.ingestion_plan_id != binding.ingestion_plan_id
+            ):
+                raise ValueError("Mem0 projection contains foreign scope metadata")
+            if metadata.source_unit_id not in completed_positions:
+                raise ValueError("Mem0 projection contains an unplanned source identity")
+            if metadata.source_ordinal != completed_positions[metadata.source_unit_id] + 1:
+                raise ValueError("Mem0 projection source ordinal differs from the frozen plan")
+            if metadata.source_unit_id not in projected:
+                projected.append(metadata.source_unit_id)
+        positions = tuple(completed_positions[source_id] for source_id in projected)
+        if positions != tuple(sorted(positions)):
+            raise ValueError("Mem0 projected sources changed completed source order")
+
+    def _seal_raw(self, raw_bytes: bytes) -> RawReferenceHandle:
+        return self._store.seal_raw(
+            RawPayloadSealRequest(
+                sha256=hashlib.sha256(raw_bytes).hexdigest(),
+                media_type="application/json",
+                compression="gzip",
+                payload_bytes=raw_bytes,
+            )
+        )
+
+
+def _source_messages(source: SourceUnit) -> tuple[tuple[str, str], ...]:
+    if hashlib.sha256(source.payload_bytes).hexdigest() != source.payload_sha256:
+        raise ValueError("Mem0 source payload hash does not match its bytes")
+    lme_fields = (source.source_reference, source.occurred_at, source.context_text)
+    if any(value is not None for value in lme_fields):
+        if not all(value is not None for value in lme_fields):
+            raise ValueError("Mem0 LongMemEval source metadata must be all present or absent")
+        document = _parse_json(source.payload_bytes)
+        if not isinstance(document, list) or not document:
+            raise ValueError("Mem0 LongMemEval source payload must be a non-empty message list")
+        messages: list[tuple[str, str]] = []
+        for item in document:
+            if not isinstance(item, dict) or frozenset(item) != frozenset({"role", "content"}):
+                raise ValueError("Mem0 LongMemEval message must contain role and content")
+            role = item["role"]
+            content = item["content"]
+            if not isinstance(role, str) or not role or not isinstance(content, str) or not content:
+                raise ValueError("Mem0 LongMemEval role and content must be non-empty strings")
+            messages.append((role, content))
+        return tuple(messages)
+    try:
+        content = source.payload_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Mem0 source payload must be UTF-8") from exc
+    if not content:
+        raise ValueError("Mem0 source payload must not be empty")
+    return (("user", content),)
+
+
+def _validate_openapi(raw_bytes: bytes) -> None:
+    document = _parse_json(raw_bytes)
+    if not isinstance(document, dict):
+        raise ValueError("Mem0 OpenAPI root must be an object")
+    info = document.get("info")
+    paths = document.get("paths")
+    if (
+        document.get("openapi") != "3.1.0"
+        or not isinstance(info, dict)
+        or info.get("title") != MEM0_OPENAPI_TITLE
+        or info.get("version") != MEM0_OPENAPI_VERSION
+        or not isinstance(paths, dict)
+    ):
+        raise ValueError("Mem0 OpenAPI identity does not match the exact server profile")
+    for path in ("/memories", "/search"):
+        operation = paths.get(path)
+        if not isinstance(operation, dict) or "post" not in operation:
+            raise ValueError(f"Mem0 OpenAPI is missing POST {path}")
+
+
+def _parse_json(raw_bytes: bytes) -> object:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON field: {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> Never:
+        raise ValueError(f"non-finite JSON constant: {value}")
+
+    try:
+        return json.loads(
+            raw_bytes,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("response is not valid JSON") from exc
+
+
+def _canonical_score(value: float) -> str:
+    if not math.isfinite(value):
+        raise ValueError("Mem0 native score must be finite")
+    return str(value)
+
+
+def _require_run_id(value: str) -> None:
+    if _RUN_ID_PATTERN.fullmatch(value) is None:
+        raise ValueError("Mem0 run_id must be a full lowercase SHA-256 identifier")
+
+
+__all__ = [
+    "Mem0ReferenceNegativeAdapter",
+    "Mem0RestAdapter",
+    "Mem0RestDispatcher",
+]

@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from oamb.contracts.ids import canonical_sha256
 from oamb.memory_systems.rest import parse_exact_json_object
 
 from .wire import Mem0SourceMetadata
@@ -29,13 +30,17 @@ _REQUIRED_PAYLOAD_FIELDS = frozenset(
         "created_at",
         "updated_at",
         "run_id",
+    }
+)
+_SOURCE_METADATA_FIELDS = frozenset(
+    {
         "oamb_ingestion_occurrence_id",
         "oamb_ingestion_plan_id",
         "oamb_source_unit_id",
         "oamb_source_ordinal",
     }
 )
-_OPTIONAL_PAYLOAD_FIELDS = frozenset({"attributed_to"})
+_OPTIONAL_PAYLOAD_FIELDS = frozenset({"attributed_to"}) | _SOURCE_METADATA_FIELDS
 _ALLOWED_PAYLOAD_FIELDS = _REQUIRED_PAYLOAD_FIELDS | _OPTIONAL_PAYLOAD_FIELDS
 
 
@@ -48,7 +53,7 @@ class Mem0ProjectionPoint:
     created_at: str
     updated_at: str
     run_id: str
-    metadata: Mem0SourceMetadata
+    metadata: Mem0SourceMetadata | None
     attributed_to: str | None
 
 
@@ -59,6 +64,43 @@ class Mem0Projection:
     declared_count: int
     points: tuple[Mem0ProjectionPoint, ...]
     page_count: int
+
+
+def ordered_projection_points(
+    projection: Mem0Projection,
+) -> tuple[Mem0ProjectionPoint, ...]:
+    return tuple(
+        sorted(
+            projection.points,
+            key=lambda point: (
+                math.inf if point.metadata is None else point.metadata.source_ordinal,
+                point.native_id,
+            ),
+        )
+    )
+
+
+def projection_source_unit_ids(projection: Mem0Projection) -> tuple[str, ...]:
+    source_ids: list[str] = []
+    for point in ordered_projection_points(projection):
+        if point.metadata is None:
+            continue
+        if point.metadata.source_unit_id not in source_ids:
+            source_ids.append(point.metadata.source_unit_id)
+    return tuple(source_ids)
+
+
+def projection_state_sha256(projection: Mem0Projection) -> str:
+    return canonical_sha256(
+        [
+            "oamb-mem0-main-projection-v1",
+            projection.collection,
+            projection.run_id,
+            tuple(
+                _projection_point_tuple(point) for point in ordered_projection_points(projection)
+            ),
+        ]
+    )
 
 
 def parse_projection_pages(
@@ -161,8 +203,8 @@ def _parse_projection_point(
     run_id = _require_non_empty_string(payload["run_id"], field_name="projection point run_id")
     if run_id != expected_run_id:
         raise ValueError("projection point run_id does not match the requested scope")
-    metadata = _parse_source_metadata(payload)
-    if metadata.ingestion_occurrence_id != expected_run_id:
+    metadata = _parse_optional_source_metadata(payload)
+    if metadata is not None and metadata.ingestion_occurrence_id != expected_run_id:
         raise ValueError("projection point ingestion occurrence does not match the requested scope")
     attributed_to = payload.get("attributed_to")
     return Mem0ProjectionPoint(
@@ -197,6 +239,28 @@ def _parse_projection_point(
     )
 
 
+def _projection_point_tuple(point: Mem0ProjectionPoint) -> tuple[object, ...]:
+    metadata = point.metadata
+    return (
+        point.native_id,
+        point.memory,
+        point.text_lemmatized,
+        point.memory_hash,
+        point.created_at,
+        point.updated_at,
+        point.run_id,
+        None
+        if metadata is None
+        else (
+            metadata.ingestion_occurrence_id,
+            metadata.ingestion_plan_id,
+            metadata.source_unit_id,
+            metadata.source_ordinal,
+        ),
+        point.attributed_to,
+    )
+
+
 def _parse_source_metadata(payload: dict[str, Any]) -> Mem0SourceMetadata:
     source_ordinal = payload["oamb_source_ordinal"]
     if isinstance(source_ordinal, bool) or not isinstance(source_ordinal, int):
@@ -216,6 +280,17 @@ def _parse_source_metadata(payload: dict[str, Any]) -> Mem0SourceMetadata:
         ),
         source_ordinal=source_ordinal,
     )
+
+
+def _parse_optional_source_metadata(
+    payload: dict[str, Any],
+) -> Mem0SourceMetadata | None:
+    present = frozenset(payload) & _SOURCE_METADATA_FIELDS
+    if not present:
+        return None
+    if present != _SOURCE_METADATA_FIELDS:
+        raise ValueError("projection point source metadata must be complete when present")
+    return _parse_source_metadata(payload)
 
 
 def _parse_cursor(value: object) -> str | None:
@@ -295,5 +370,8 @@ __all__ = [
     "MEM0_PROJECTION_MAX_POINTS",
     "Mem0Projection",
     "Mem0ProjectionPoint",
+    "ordered_projection_points",
     "parse_projection_pages",
+    "projection_source_unit_ids",
+    "projection_state_sha256",
 ]

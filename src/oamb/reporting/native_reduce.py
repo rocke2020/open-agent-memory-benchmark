@@ -31,6 +31,7 @@ from oamb.contracts.evidence import (
     CaseEvaluationDisposition,
     CaseRecordV3,
     IngestionPlanRecordV2,
+    IngestionPlanRecordV3,
     ValidationResult,
 )
 from oamb.contracts.ids import canonical_sha256
@@ -73,6 +74,7 @@ from oamb.workloads.mab65_reduction import reduce_mab65
 from oamb.workloads.memoryagentbench import MAB65_WORKLOAD_ID, MabManifestBundle
 
 TokenRecord = TokenUsageRecord | TokenUsageRecordV2 | TokenUsageRecordV3
+NativePlanRecord = IngestionPlanRecordV2 | IngestionPlanRecordV3
 RecordT = TypeVar("RecordT")
 
 
@@ -83,7 +85,7 @@ class NativeReportReductionError(ValueError):
 @dataclass(frozen=True, slots=True)
 class _NativeReportRecords:
     case_manifest: CaseManifest
-    plans: tuple[IngestionPlanRecordV2, ...]
+    plans: tuple[NativePlanRecord, ...]
     cases: tuple[CaseRecordV3, ...]
     attempts: tuple[AttemptRecordV2, ...]
     tokens: tuple[TokenRecord, ...]
@@ -99,7 +101,7 @@ NATIVE_REPORT_REDUCER_CONTRACT = {
         "capsule_manifest@1",
         "dataset_manifest@1",
         "case_manifest@1",
-        "ingestion_plan_record@2",
+        "ingestion_plan_record@2|3",
         "case_record@3",
         "attempt_record@2",
         "token_usage_record@1|2|3",
@@ -120,7 +122,7 @@ MAB65_REPORT_REDUCER_CONTRACT = {
     "version": 1,
     "input_schemas": (
         "mab_manifest_bundle",
-        "ingestion_plan_record@2",
+        "ingestion_plan_record@2|3",
         "case_record@3",
     ),
     "output_schema": "mab65_report_reduction@1",
@@ -304,7 +306,7 @@ def _build_native_mab65_report_reduction(
     *,
     workload_id: str = MAB65_WORKLOAD_ID,
     validation_target: object | None,
-    plans: tuple[IngestionPlanRecordV2, ...],
+    plans: tuple[NativePlanRecord, ...],
     cases: tuple[CaseRecordV3, ...],
 ) -> Mab65ReportReduction | None:
     if workload_id != MAB65_WORKLOAD_ID:
@@ -445,7 +447,7 @@ def _load_report_records(
     manifest: CapsuleManifest,
 ) -> _NativeReportRecords:
     case_manifests: list[CaseManifest] = []
-    plans: list[IngestionPlanRecordV2] = []
+    plans: list[NativePlanRecord] = []
     cases: list[CaseRecordV3] = []
     attempts: list[AttemptRecordV2] = []
     tokens: list[TokenRecord] = []
@@ -470,7 +472,12 @@ def _load_report_records(
         if entry.record_kind == "case_manifest":
             case_manifests.append(CaseManifest.model_validate_json(content))
         elif entry.record_kind == "ingestion_plan_record":
-            plans.append(IngestionPlanRecordV2.model_validate_json(content))
+            if document["schema_version"] == 2:
+                plans.append(IngestionPlanRecordV2.model_validate_json(content))
+            elif document["schema_version"] == 3:
+                plans.append(IngestionPlanRecordV3.model_validate_json(content))
+            else:
+                raise NativeReportReductionError("unsupported native ingestion-plan record version")
         elif entry.record_kind == "case_record":
             cases.append(CaseRecordV3.model_validate_json(content))
         elif entry.record_kind == "attempt_record":
@@ -496,9 +503,9 @@ def _load_report_records(
 
 
 def _ordered_plans(
-    values: tuple[IngestionPlanRecordV2, ...],
+    values: tuple[NativePlanRecord, ...],
     manifest: CaseManifest,
-) -> tuple[IngestionPlanRecordV2, ...]:
+) -> tuple[NativePlanRecord, ...]:
     by_plan = {item.ingestion_plan_id: item for item in values}
     try:
         return tuple(by_plan[item.ingestion_plan_id] for item in manifest.ingestion_plans)
@@ -520,7 +527,7 @@ def _ordered_cases(
 def _completion_summary(
     run_id: str,
     manifest: CaseManifest,
-    plans: tuple[IngestionPlanRecordV2, ...],
+    plans: tuple[NativePlanRecord, ...],
     cases: tuple[CaseRecordV3, ...],
 ) -> CompletionSummaryV3:
     terminal_states = {
@@ -568,7 +575,7 @@ def _accounting_summary(
     tokens: tuple[TokenRecord, ...],
     resources: tuple[ResourceUsageRecord, ...],
     costs: tuple[CostRecord, ...],
-    plans: tuple[IngestionPlanRecordV2, ...],
+    plans: tuple[NativePlanRecord, ...],
 ) -> AccountingReduction:
     views = _accounting_record_views(tokens, resources, costs)
     return reduce_accounting_records(
@@ -673,7 +680,7 @@ def _accounting_owner(value: str) -> AccountingOwner:
 
 def _record_projections(
     records: _NativeReportRecords,
-    plans: tuple[IngestionPlanRecordV2, ...],
+    plans: tuple[NativePlanRecord, ...],
     cases: tuple[CaseRecordV3, ...],
     attempts: tuple[AttemptRecordV2, ...],
     *,

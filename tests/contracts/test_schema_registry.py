@@ -137,7 +137,12 @@ EXPECTED_V2_SCHEMAS = {
     "token_usage_record",
 }
 
-EXPECTED_V3_SCHEMAS = {"case_record", "run_report_model", "token_usage_record"}
+EXPECTED_V3_SCHEMAS = {
+    "case_record",
+    "ingestion_plan_record",
+    "run_report_model",
+    "token_usage_record",
+}
 
 
 def require_schema() -> ModuleType:

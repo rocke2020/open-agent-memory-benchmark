@@ -462,9 +462,7 @@ class CaseRecordV2(StrictContract):
         return self
 
 
-class IngestionPlanRecordV2(StrictContract):
-    schema_name: Literal["ingestion_plan_record"] = "ingestion_plan_record"
-    schema_version: Literal[2] = 2
+class _NativeIngestionPlanRecord(StrictContract):
     ingestion_occurrence_id: Sha256
     run_id: NonEmptyStr
     memory_system_id: NonEmptyStr
@@ -492,7 +490,7 @@ class IngestionPlanRecordV2(StrictContract):
     cost_record_ids: tuple[Sha256, ...]
 
     @model_validator(mode="after")
-    def native_plan_scope_dispatch_and_projection_close(self) -> Self:
+    def native_plan_scope_and_dispatch_close(self) -> Self:
         for label, values in (
             ("member", self.ordered_member_context_manifest_entry_ids),
             ("case", self.ordered_case_occurrence_ids),
@@ -540,8 +538,42 @@ class IngestionPlanRecordV2(StrictContract):
                 raise ValueError(
                     "ready native ingestion requires complete scope/readiness/projection"
                 )
-            if self.projected_source_unit_ids != self.accepted_source_unit_ids:
-                raise ValueError("native ingestion projection does not match accepted source order")
+        return self
+
+
+class IngestionPlanRecordV2(_NativeIngestionPlanRecord):
+    schema_name: Literal["ingestion_plan_record"] = "ingestion_plan_record"
+    schema_version: Literal[2] = 2
+
+    @model_validator(mode="after")
+    def native_plan_projection_closes_accepted_sources(self) -> Self:
+        if (
+            self.state in {IngestionPlanState.READY, IngestionPlanState.SEALED}
+            and self.projected_source_unit_ids != self.accepted_source_unit_ids
+        ):
+            raise ValueError("native ingestion projection does not match accepted source order")
+        return self
+
+
+class IngestionPlanRecordV3(_NativeIngestionPlanRecord):
+    schema_name: Literal["ingestion_plan_record"] = "ingestion_plan_record"
+    schema_version: Literal[3] = 3
+    memory_system_id: Literal["mem0"] = "mem0"
+    adapter_profile_id: Literal["mem0-rest-v1"] = "mem0-rest-v1"
+    projection_semantics: Literal["retrieval_visible_subset"] = "retrieval_visible_subset"
+
+    @model_validator(mode="after")
+    def native_plan_projection_is_source_ordered_subset(self) -> Self:
+        projected = self.projected_source_unit_ids
+        if len(set(projected)) != len(projected):
+            raise ValueError("Mem0 REST projected source identities must be unique")
+        accepted = self.accepted_source_unit_ids
+        accepted_positions = {source_id: index for index, source_id in enumerate(accepted)}
+        if any(source_id not in accepted_positions for source_id in projected):
+            raise ValueError("Mem0 REST projected source identity was not accepted")
+        positions = tuple(accepted_positions[source_id] for source_id in projected)
+        if positions != tuple(sorted(positions)):
+            raise ValueError("Mem0 REST projected source identities changed source order")
         return self
 
 

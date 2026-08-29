@@ -268,7 +268,16 @@ async def test_all_t7_adapters_satisfy_the_common_memory_system_port(tmp_path: P
             runtime_binding_hash="f" * 64,
             transport=transport,
         ),
-        Mem0RestAdapter(),
+        Mem0RestAdapter(
+            store=store,
+            base_url="https://mem0.example",
+            api_key="fixture-key",
+            inspector_base_url="https://mem0-inspector.example",
+            inspector_api_key="fixture-inspector-key",
+            runtime_binding_hash="a" * 64,
+            transport=transport,
+            inspector_transport=transport,
+        ),
         Mem0SdkAdapter(),
     )
 

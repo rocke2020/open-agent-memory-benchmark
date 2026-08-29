@@ -38,6 +38,7 @@ from oamb.contracts.evidence import (
     CaseRecordV3,
     CloseErrorRecord,
     IngestionPlanRecordV2,
+    IngestionPlanRecordV3,
     OccurrenceClaimRecord,
     RunLeaseRecord,
     RunRecord,
@@ -97,6 +98,8 @@ NATIVE_PROCESS_TERMINATION_SECONDS = 0.10
 NATIVE_OWNER_NAME = "native-run-owner.json"
 NATIVE_OWNER_ID = "native-fixture-owner-v1"
 
+NativeIngestionPlanRecord: TypeAlias = IngestionPlanRecordV2 | IngestionPlanRecordV3
+
 
 class NativeRunOwnershipError(RuntimeError):
     """A create-only run root already has an owner and cannot be replayed."""
@@ -134,7 +137,7 @@ class CapsuleArtifactStorePort(ArtifactStorePort, Protocol):
 class NativeRunArtifacts:
     capsule_root: Path
     manifest: CapsuleManifest
-    ingestion_plan_records: tuple[IngestionPlanRecordV2, ...]
+    ingestion_plan_records: tuple[NativeIngestionPlanRecord, ...]
     case_records: tuple[CaseRecordV3, ...]
 
 
@@ -192,7 +195,7 @@ class _NativeRunReady:
     run_spec_hash: str
     ingestion_occurrence_ids: tuple[str, ...]
     case_occurrence_ids: tuple[str, ...]
-    ingestion_plan_records: tuple[IngestionPlanRecordV2, ...]
+    ingestion_plan_records: tuple[NativeIngestionPlanRecord, ...]
     case_records: tuple[CaseRecordV3, ...]
     sequence: int
 
@@ -809,7 +812,7 @@ async def _run_native_vertical_slice(
             adapter_profile_id,
         ]
     )
-    plan_records: tuple[IngestionPlanRecordV2, ...] = ()
+    plan_records: tuple[NativeIngestionPlanRecord, ...] = ()
     case_records: tuple[CaseRecordV3, ...] = ()
     ingestion_occurrence_ids: tuple[str, ...] = ()
     case_occurrence_ids: tuple[str, ...] = ()
@@ -1025,9 +1028,9 @@ async def _execute_ingestion_plans(
     memory_system_id: str,
     runtime_binding_hash: str,
     adapter_profile_id: str,
-) -> tuple[tuple[IngestionPlanRecordV2, ...], dict[str, ScopeReceipt]]:
+) -> tuple[tuple[NativeIngestionPlanRecord, ...], dict[str, ScopeReceipt]]:
     case_ids = {case.case_manifest_entry_id for case in case_plans}
-    records: list[IngestionPlanRecordV2] = []
+    records: list[NativeIngestionPlanRecord] = []
     scopes: dict[str, ScopeReceipt] = {}
     for plan in plans:
         if not set(plan.ordered_case_manifest_entry_ids) <= case_ids:
@@ -1159,7 +1162,8 @@ async def _execute_ingestion_plans(
         projection = await memory.project(scope)
         _require_projection_occurrence(projection, occurrence_id)
         if (
-            projection.inventory.ordered_source_unit_ids
+            adapter_profile_id != "mem0-rest-v1"
+            and projection.inventory.ordered_source_unit_ids
             != ingestion_receipt.accepted_source_unit_ids
         ):
             raise ValueError("native ready projection differs from accepted source order")
@@ -1167,7 +1171,7 @@ async def _execute_ingestion_plans(
             case_occurrence_id(occurrence_id, case_id)
             for case_id in plan.ordered_case_manifest_entry_ids
         )
-        record = IngestionPlanRecordV2(
+        record_values = dict(
             ingestion_occurrence_id=occurrence_id,
             run_id=state.run_id,
             memory_system_id=memory_system_id,
@@ -1202,6 +1206,16 @@ async def _execute_ingestion_plans(
             resource_record_ids=tuple(resource_record_ids),
             cost_record_ids=tuple(cost_record_ids),
         )
+        record: NativeIngestionPlanRecord
+        if adapter_profile_id == "mem0-rest-v1":
+            record = IngestionPlanRecordV3.model_validate(
+                {
+                    **record_values,
+                    "projection_semantics": "retrieval_visible_subset",
+                }
+            )
+        else:
+            record = IngestionPlanRecordV2.model_validate(record_values)
         _seal(state, "ingestion-plans", occurrence_id, record)
         records.append(record)
     return tuple(records), scopes

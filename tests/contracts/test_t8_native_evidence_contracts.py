@@ -12,6 +12,7 @@ from oamb.contracts.evidence import (
     CaseEvaluationDisposition,
     CaseRecordV3,
     IngestionPlanRecordV2,
+    IngestionPlanRecordV3,
 )
 from oamb.contracts.states import CaseState, IngestionPlanState
 
@@ -26,7 +27,12 @@ def _evidence() -> ModuleType:
     module = importlib.import_module("oamb.contracts.evidence")
     missing = tuple(
         name
-        for name in ("IngestionPlanRecordV2", "CaseRecordV3", "PhaseReviewOccurrenceRecord")
+        for name in (
+            "IngestionPlanRecordV2",
+            "IngestionPlanRecordV3",
+            "CaseRecordV3",
+            "PhaseReviewOccurrenceRecord",
+        )
         if not hasattr(module, name)
     )
     if missing:
@@ -116,6 +122,19 @@ def _case(evidence: ModuleType) -> CaseRecordV3:
     )
 
 
+def _plan_v3(evidence: ModuleType, projected: tuple[str, ...]) -> IngestionPlanRecordV3:
+    v2 = _plan(evidence)
+    values = v2.model_dump(mode="python")
+    values.update(
+        schema_version=3,
+        memory_system_id="mem0",
+        adapter_profile_id="mem0-rest-v1",
+        projected_source_unit_ids=projected,
+        projection_semantics="retrieval_visible_subset",
+    )
+    return cast(IngestionPlanRecordV3, evidence.IngestionPlanRecordV3(**values))
+
+
 def test_native_ingestion_record_closes_scope_dispatch_and_projection() -> None:
     evidence = _evidence()
     plan = _plan(evidence)
@@ -140,6 +159,43 @@ def test_native_ingestion_record_closes_scope_dispatch_and_projection() -> None:
             **{
                 **plan.model_dump(mode="python"),
                 "ordered_dispatch_source_unit_ids": ((SHA_C, SHA_B),),
+            }
+        )
+
+
+@pytest.mark.parametrize("projected", ((), (SHA_B,), (SHA_B, SHA_C)))
+def test_mem0_v3_separates_completed_sources_from_visible_projection(
+    projected: tuple[str, ...],
+) -> None:
+    evidence = _evidence()
+    plan = _plan_v3(evidence, projected)
+
+    assert plan.accepted_source_unit_ids == (SHA_B, SHA_C)
+    assert plan.projected_source_unit_ids == projected
+    assert plan.projection_semantics == "retrieval_visible_subset"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"projected_source_unit_ids": (SHA_C, SHA_B)}, "source order"),
+        ({"projected_source_unit_ids": (SHA_D,)}, "accepted"),
+        ({"adapter_profile_id": "hindsight-rest-v0.9-v1"}, "adapter_profile_id"),
+        ({"projection_semantics": "accepted_exact"}, "projection_semantics"),
+    ),
+)
+def test_mem0_v3_rejects_invalid_subset_or_writer(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    evidence = _evidence()
+    plan = _plan_v3(evidence, (SHA_B,))
+
+    with pytest.raises(ValidationError, match=message):
+        evidence.IngestionPlanRecordV3(
+            **{
+                **plan.model_dump(mode="python"),
+                **overrides,
             }
         )
 

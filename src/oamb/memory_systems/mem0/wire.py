@@ -88,7 +88,7 @@ class Mem0RestRequest:
 
 class Mem0AddDisposition(StrEnum):
     ACCEPTED = "accepted"
-    UNATTESTED_EMPTY = "unattested_empty"
+    EMPTY_PROVIDER_OUTCOME = "empty_provider_outcome"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +110,7 @@ class Mem0SearchItem:
     native_rank_1_indexed: int
     memory: str
     memory_hash: str | None
-    metadata: Mem0SourceMetadata
+    metadata: Mem0SourceMetadata | None
     native_score: float
     created_at: str | None
     updated_at: str | None
@@ -205,7 +205,7 @@ def parse_add_response(raw_bytes: bytes) -> Mem0AddResult:
 
     if not events:
         return Mem0AddResult(
-            disposition=Mem0AddDisposition.UNATTESTED_EMPTY,
+            disposition=Mem0AddDisposition.EMPTY_PROVIDER_OUTCOME,
             events=(),
         )
     return Mem0AddResult(
@@ -262,7 +262,7 @@ def parse_search_response(
                     item["hash"],
                     field_name="search item hash",
                 ),
-                metadata=_parse_source_metadata(item["metadata"]),
+                metadata=_parse_optional_source_metadata(item["metadata"]),
                 native_score=native_score,
                 created_at=_require_optional_string(
                     item["created_at"],
@@ -306,6 +306,12 @@ def _parse_source_metadata(value: object) -> Mem0SourceMetadata:
         ),
         source_ordinal=source_ordinal,
     )
+
+
+def _parse_optional_source_metadata(value: object) -> Mem0SourceMetadata | None:
+    if value == {}:
+        return None
+    return _parse_source_metadata(value)
 
 
 def _encode_exact_json(document: object) -> bytes:
