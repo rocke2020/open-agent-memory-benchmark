@@ -74,6 +74,7 @@ from oamb.workloads.visible_evidence import (
     LME_VISIBLE_EVIDENCE_POLICY,
     build_lme_visible_evidence,
 )
+from tests.unit.test_t10_native_run_control import _control
 
 HARD_CLOSE_STAGE_REACH_BOUND_SECONDS = 2.0
 HARD_CLOSE_RETURN_BOUND_SECONDS = 0.30
@@ -694,6 +695,85 @@ def test_recorded_native_ports_seal_a_root_only_validatable_capsule(tmp_path: Pa
     assert all(record.retrieval_supporting_raw_refs for record in completed.case_records)
     assert all(record.usage_record_ids for record in completed.ingestion_plan_records)
     assert all(record.metric_denominator == 1 for record in completed.case_records)
+
+
+def test_fixture_entrypoint_rejects_live_control_without_lifecycle_composition(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id="controlled-native-valid",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=case_manifest.manifest_hash,
+        workload_id=case_manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="recorded-answer-v1",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="live native execution requires the lifecycle-aware composition root",
+    ):
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=control.run_spec.run_id,
+            adapter_profile_id=control.preflight_record.adapter_profile_id,
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=_memory_factory,
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="recorded-answer-v1",
+            control=control,
+        )
+
+
+def test_validator_rejects_private_live_path_until_complete_control_is_wired(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id="controlled-native-private-path",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=case_manifest.manifest_hash,
+        workload_id=case_manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="recorded-answer-v1",
+    )
+    output_root = tmp_path / "capsules"
+    native_run_module._acquire_native_run_owner(
+        output_root / control.run_spec.run_id, control.run_spec.run_id, control=control
+    )
+    completed = native_run_module._run_native_supervised(
+        native_run_module._NativeRunRequest(
+            output_root=output_root,
+            run_id=control.run_spec.run_id,
+            adapter_profile_id=control.preflight_record.adapter_profile_id,
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=_memory_factory,
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="recorded-answer-v1",
+            judge_model_factory=None,
+            judge_role_binding_id=None,
+            close_timeout_seconds=1.0,
+            control=control,
+        )
+    )
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert any(issue.code == "live-control-composition-unavailable" for issue in validation.issues)
 
 
 def test_native_validator_rejects_case_inventory_removed_from_run_and_root(

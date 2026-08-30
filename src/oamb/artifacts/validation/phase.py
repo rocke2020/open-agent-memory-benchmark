@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -49,6 +48,7 @@ from oamb.contracts.reporting import (
     AIReviewIntegrityResult,
     EvaluationPhaseGate,
     EvaluationReviewBundle,
+    HumanQualityReviewRecord,
     QualityReviewStatus,
     evaluation_review_bundle_id,
     evaluation_review_input_hash,
@@ -61,7 +61,6 @@ from oamb.contracts.specifications import (
     ExecutionEnvironmentBinding,
     ExecutionOwner,
     ExternalCallApprovalRecord,
-    HumanReviewKeyBinding,
     ModelRole,
     ModelRoleBindingV2,
     RoleBindingStatus,
@@ -90,7 +89,6 @@ from oamb.phase_review_profiles import (
 from oamb.reporting.human_review import (
     derive_evaluation_phase_gate,
     validate_ai_review_history,
-    verify_human_review_record_evidence,
 )
 
 T10_PHASE_GATE_RULE_IDS = tuple(rule_id for rule_id, _version in T8_T10_PHASE_GATE_RULE_INVENTORY)
@@ -130,9 +128,7 @@ class PhaseReviewEvidence:
     usage_records: tuple[TokenUsageRecordV2 | TokenUsageRecordV3, ...]
     resource_records: tuple[ResourceUsageRecord, ...]
     cost_records: tuple[CostRecord, ...]
-    human_key_binding: HumanReviewKeyBinding | None
-    human_decision_bytes: bytes | None
-    human_signature_base64: str | None
+    human_record: HumanQualityReviewRecord | None = None
 
 
 def validate_t10_phase_gate(
@@ -204,13 +200,7 @@ def _phase_gate_target_hash(target: PhaseGateValidationInput) -> str:
             _hashable_evidence_value(evidence.usage_records),
             _hashable_evidence_value(evidence.resource_records),
             _hashable_evidence_value(evidence.cost_records),
-            _hashable_evidence_value(evidence.human_key_binding),
-            (
-                None
-                if evidence.human_decision_bytes is None
-                else hashlib.sha256(evidence.human_decision_bytes).hexdigest()
-            ),
-            evidence.human_signature_base64,
+            _hashable_evidence_value(evidence.human_record),
         )
     return canonical_sha256(
         [
@@ -322,6 +312,8 @@ def _review_order_rule(target: PhaseGateValidationInput) -> tuple[ValidationIssu
         return (_issue(rule_id, gate.gate_id, "phase-review-bundle-mismatch"),)
     if target.review_evidence is None:
         return (_issue(rule_id, gate.gate_id, "phase-review-evidence-missing"),)
+    if target.review_evidence.human_record != gate.human_record:
+        return (_issue(rule_id, gate.gate_id, "phase-human-registry-mismatch"),)
     if not _review_source_evidence_closes(target):
         return (_issue(rule_id, gate.gate_id, "phase-review-source-evidence-mismatch"),)
     return ()
@@ -334,9 +326,9 @@ def _human_approval_rule(target: PhaseGateValidationInput) -> tuple[ValidationIs
     expected_coverage = canonical_sha256(
         ["oamb-ai-review-case-coverage-v1", bundle.ordered_case_occurrence_ids]
     )
-    evidence = target.review_evidence
     if (
-        gate.ai_record.status != QualityReviewStatus.PASS
+        gate.schema_version != 2
+        or gate.ai_record.status != QualityReviewStatus.PASS
         or not gate.ai_record.accounting_closed
         or gate.ai_record.case_coverage_hash != expected_coverage
         or gate.human_record is None
@@ -346,20 +338,8 @@ def _human_approval_rule(target: PhaseGateValidationInput) -> tuple[ValidationIs
     ):
         return (_issue(rule_id, gate.gate_id, "phase-human-approval-mismatch"),)
     assert gate.human_record is not None
-    if (
-        evidence is None
-        or evidence.human_key_binding is None
-        or evidence.human_decision_bytes is None
-        or evidence.human_signature_base64 is None
-        or not verify_human_review_record_evidence(
-            record=gate.human_record,
-            decision_bytes=evidence.human_decision_bytes,
-            signature_base64=evidence.human_signature_base64,
-            key_binding=evidence.human_key_binding,
-            canonical_ai_record=gate.ai_record,
-        )
-    ):
-        return (_issue(rule_id, gate.gate_id, "phase-human-signature-evidence-mismatch"),)
+    if gate.human_record.schema_version != 2:
+        return (_issue(rule_id, gate.gate_id, "phase-human-confirmation-version-mismatch"),)
     return ()
 
 
@@ -369,6 +349,8 @@ def phase_ai_review_evidence_closes(
     ai_record: AIQualityReviewRecord,
 ) -> bool:
     try:
+        if evidence.human_record is not None:
+            return False
         validate_ai_review_history(bundle.bundle_id, evidence.ordered_ai_history)
         if (
             evidence.ordered_ai_history[-1] != ai_record

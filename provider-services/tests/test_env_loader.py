@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EnvLoaderTests(unittest.TestCase):
+    def test_file_mode_ignores_failed_stat_stdout_before_portable_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            env_file = directory / ".env"
+            env_file.write_text("OAMB_KEY=value\n", encoding="utf-8")
+            env_file.chmod(0o600)
+            fake_stat = directory / "stat"
+            fake_stat.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"-f\" ]; then\n"
+                "  printf 'unexpected filesystem details\\n'\n"
+                "  exit 1\n"
+                "fi\n"
+                "printf '600\\n'\n",
+                encoding="utf-8",
+            )
+            fake_stat.chmod(0o755)
+            command = '. "$1"; read_file_mode "$2"'
+            result = subprocess.run(
+                ["sh", "-c", command, "sh", str(ROOT / "lib" / "env.sh"), str(env_file)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "600\n")
+
     def test_shell_syntax_in_value_is_never_executed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

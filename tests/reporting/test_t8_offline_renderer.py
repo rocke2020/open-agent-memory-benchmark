@@ -37,6 +37,7 @@ from oamb.contracts.specifications import (
     SourceEvidenceKind,
 )
 from oamb.reporting.public import (
+    build_evaluation_report_model,
     build_mab65_report_reduction,
     build_report_record_projection,
     build_run_report_model,
@@ -821,6 +822,38 @@ def test_native_external_and_comparison_report_snapshots_are_distinct_and_stable
     assert b'"signed_delta"' in first[2]
     assert b'"winner"' not in first[3]
     assert b'"signed_delta"' not in first[3]
+
+
+def test_evaluation_report_embeds_exact_four_run_models_and_eligible_comparison() -> None:
+    base = _run_report()
+    runs_list = []
+    for character in "abcd":
+        payload = base.model_dump(mode="python")
+        payload["summary"]["run_id"] = f"run-{character}"
+        fields = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"schema_name", "schema_version", "report_id"}
+        }
+        payload["report_id"] = run_report_model_v3_id(**fields)
+        runs_list.append(RunReportModelV3.model_validate(payload))
+    runs = (runs_list[0], runs_list[1], runs_list[2], runs_list[3])
+    comparison = _incomparable_report()
+    model = build_evaluation_report_model(
+        phase_id="phase_1_smoke_acceptance",
+        report_spec_hash=SHA_A,
+        ordered_run_models=runs,
+        eligible_comparison_models=(comparison,),
+        unique_case_count=2,
+        limitations=("fixture only",),
+    )
+
+    rendered = _renderer().render_offline_report(model)
+
+    assert model.system_result_count == 4
+    for run in runs:
+        assert run.report_id.encode() in rendered
+    assert comparison.report_id.encode() in rendered
 
 
 def test_mab65_html_golden_preserves_29_25_65_topology_and_component_waterfall() -> None:

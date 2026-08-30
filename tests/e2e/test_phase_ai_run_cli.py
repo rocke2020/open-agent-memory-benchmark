@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import importlib
 import json
 import runpy
@@ -15,8 +14,6 @@ from typing import Any
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from typer.testing import CliRunner
 
 from oamb.artifacts.validation.phase import phase_ai_review_evidence_closes
@@ -55,10 +52,8 @@ from oamb.model_clients.openai_compatible import OpenAICompatibleModelClient
 from oamb.phase_cli_io import load_phase_review_evidence
 from oamb.phase_review_repository import prepare_artifact_repository
 from oamb.reporting.human_review import (
-    build_human_review_key_binding,
+    create_human_quality_review_record,
     derive_evaluation_phase_gate,
-    import_human_review_decision,
-    prepare_human_review_decision,
 )
 from oamb.reporting.review import (
     build_ai_review_plan,
@@ -606,36 +601,15 @@ def test_fake_runner_outputs_validate_through_the_t10_phase_gate(
     ai_record = AIQualityReviewRecord.model_validate_json(
         (fixture.output_directory / "ai-review-record.json").read_bytes()
     )
-    private_key = Ed25519PrivateKey.generate()
-    public_key_base64 = base64.b64encode(
-        private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-    ).decode("ascii")
-    key_binding = build_human_review_key_binding(
-        source_kind="raw",
-        source_reference="phase-runner-e2e",
-        public_key_base64=public_key_base64,
-    )
-    prepared = prepare_human_review_decision(
-        review_bundle_hash=bundle.bundle_id,
-        ai_review_record_hash=ai_record.ai_review_record_id,
+    human_record = create_human_quality_review_record(
+        canonical_ai_record=ai_record,
         status="pass",
-        decided_at=NOW + timedelta(minutes=3),
         nonce="phase-runner-e2e-001",
-        reviewer_label="fixture-operator",
+        operator_id="fixture-operator",
         finding_codes=(),
         evidence_references=(),
-    )
-    signature_base64 = base64.b64encode(private_key.sign(prepared.canonical_bytes)).decode("ascii")
-    human_record = import_human_review_decision(
-        decision_bytes=prepared.canonical_bytes,
-        signature_base64=signature_base64,
-        key_binding=key_binding,
-        canonical_ai_record=ai_record,
         used_nonces=(),
-        imported_at=NOW + timedelta(minutes=4),
+        created_at=NOW + timedelta(minutes=4),
     )
     gate = derive_evaluation_phase_gate(
         phase_id=bundle.phase_id,
@@ -646,15 +620,10 @@ def test_fake_runner_outputs_validate_through_the_t10_phase_gate(
     assert json.loads((fixture.output_directory / "ai-history.json").read_bytes()) == [
         json.loads(canonical_json_bytes(ai_record))
     ]
-    _write_json(fixture.output_directory / "human-key-binding.json", key_binding)
-    (fixture.output_directory / "human-decision.json").write_bytes(prepared.canonical_bytes)
-    (fixture.output_directory / "human-signature.txt").write_text(
-        signature_base64,
-        encoding="ascii",
-    )
     gate_path = tmp_path / "gate.json"
     validation_path = tmp_path / "gate-validation.json"
     _write_json(gate_path, gate)
+    _write_json(fixture.output_directory / "human-review.json", human_record)
 
     validated = runner.invoke(
         app,

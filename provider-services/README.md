@@ -31,7 +31,7 @@ Each `OAMB_PROVIDER_PROJECT` owns new Compose volumes. The project never mounts
 an existing `~/.openviking`, Mem0 history directory, provider checkout, or
 database. Only four HTTP API ports bind to `127.0.0.1`; PostgreSQL and Qdrant
 remain private. `stop` preserves containers, volumes, and data and refuses to
-run while `.runtime/active-run-lease` exists.
+run or memory-conformance lifecycle while `.runtime/active-operation` exists.
 
 The commands in this directory do not run memory ingestion, retrieval, LME, or
 MAB. `verify --services` may provision Mem0 configuration and an OpenViking
@@ -96,7 +96,7 @@ attempt ledger and starts a new project. The final receipt keeps
 `billing_complete=false` and `cost_usd=null`.
 
 The runner and lifecycle commands share one atomic local protocol. Before
-creating `.runtime/active-run-lease`, a runner must acquire
+creating `.runtime/active-operation`, a runner or conformance owner must acquire
 `.runtime/provider-lifecycle.lock`, verify no lifecycle operation owns it,
 create its lease, and release the lifecycle lock. `up`, `stop`, and both
 `verify` modes hold the same lifecycle lock and refuse an active run. The

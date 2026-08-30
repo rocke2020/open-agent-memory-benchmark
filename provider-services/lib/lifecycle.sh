@@ -15,7 +15,9 @@ acquire_lifecycle_lock() {
     trap 'release_lifecycle_lock' 0
     trap 'exit 130' 1 2 15
     [ ! -e "$RUNTIME_DIR/active-run-lease" ] || \
-        die "active OAMB run lease exists; refusing provider lifecycle mutation"
+        die "legacy active OAMB run lease exists; refusing provider lifecycle mutation"
+    [ ! -e "$RUNTIME_DIR/active-operation" ] || \
+        die "active OAMB provider operation exists; refusing provider lifecycle mutation"
     [ ! -e "$RUNTIME_DIR/active-provider-attempt" ] || \
         die "active provider attempt exists; refusing provider lifecycle mutation"
 }

@@ -94,10 +94,45 @@ class BudgetCeiling:
 
 
 @dataclass(frozen=True, slots=True)
+class BudgetOwnerAllocation:
+    owner_id: str
+    maximum: BudgetAmount
+
+    def __post_init__(self) -> None:
+        if not self.owner_id:
+            raise ValueError("budget allocation requires an owner identity")
+
+
+@dataclass(frozen=True, slots=True)
 class ReservationRequest:
     reservation_id: str
-    role_binding_id: str
     maximum: BudgetAmount
+    role_binding_id: str | None = None
+    provider_operation_ceiling_id: str | None = None
+    owner_allocations: tuple[BudgetOwnerAllocation, ...] = ()
+
+    def __post_init__(self) -> None:
+        owners = (self.role_binding_id, self.provider_operation_ceiling_id)
+        legacy_owner_count = sum(owner is not None for owner in owners)
+        if self.owner_allocations:
+            if legacy_owner_count:
+                raise ValueError("multi-owner reservation cannot carry a legacy owner")
+            owner_ids = tuple(allocation.owner_id for allocation in self.owner_allocations)
+            if len(set(owner_ids)) != len(owner_ids):
+                raise ValueError("multi-owner reservation contains duplicate owners")
+        elif legacy_owner_count != 1:
+            raise ValueError("reservation requires exactly one discriminated budget owner")
+
+    @property
+    def allocations(self) -> tuple[BudgetOwnerAllocation, ...]:
+        if self.owner_allocations:
+            return self.owner_allocations
+        return (
+            BudgetOwnerAllocation(
+                self.role_binding_id or self.provider_operation_ceiling_id or "",
+                self.maximum,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,20 +155,26 @@ class BudgetLedger:
         parent_ceiling: BudgetCeiling,
         *,
         role_ceilings: dict[str, BudgetCeiling],
+        provider_operation_ceilings: dict[str, BudgetCeiling] | None = None,
     ) -> None:
+        operation_ceilings = dict(provider_operation_ceilings or {})
+        duplicate_owner_ids = set(role_ceilings) & set(operation_ceilings)
+        if duplicate_owner_ids:
+            raise ValueError("budget owner identities must be unique across owner kinds")
+        owner_ceilings = dict(role_ceilings) | operation_ceilings
         mismatched_currencies = {
-            role: ceiling.currency
-            for role, ceiling in role_ceilings.items()
+            owner: ceiling.currency
+            for owner, ceiling in owner_ceilings.items()
             if ceiling.currency != parent_ceiling.currency
         }
         if mismatched_currencies:
             raise ValueError("role budget currency must match the parent currency")
         self._parent_ceiling = parent_ceiling
-        self._role_ceilings = dict(role_ceilings)
+        self._owner_ceilings = owner_ceilings
         self._reserved = BudgetAmount.zero()
         self._committed = BudgetAmount.zero()
-        self._role_reserved = {role: BudgetAmount.zero() for role in role_ceilings}
-        self._role_committed = {role: BudgetAmount.zero() for role in role_ceilings}
+        self._owner_reserved = {owner: BudgetAmount.zero() for owner in owner_ceilings}
+        self._owner_committed = {owner: BudgetAmount.zero() for owner in owner_ceilings}
         self._reservations: dict[str, _Reservation] = {}
         self._lock = Lock()
 
@@ -141,44 +182,51 @@ class BudgetLedger:
         with self._lock:
             if not request.reservation_id or request.reservation_id in self._reservations:
                 raise ReservationStateError("reservation identity is empty or already exists")
-            role_ceiling = self._role_ceilings.get(request.role_binding_id)
             parent_candidate = self._committed.add(self._reserved).add(request.maximum)
             _require_fits("parent", parent_candidate, self._parent_ceiling.maximum)
-            if role_ceiling is None:
-                raise BudgetExceededError(f"missing role ceiling: {request.role_binding_id}")
-            role_candidate = (
-                self._role_committed[request.role_binding_id]
-                .add(self._role_reserved[request.role_binding_id])
-                .add(request.maximum)
-            )
-            _require_fits("role", role_candidate, role_ceiling.maximum)
+            owner_candidates: list[tuple[str, BudgetAmount]] = []
+            for allocation in request.allocations:
+                owner = allocation.owner_id
+                owner_ceiling = self._owner_ceilings.get(owner)
+                if owner_ceiling is None:
+                    raise BudgetExceededError(f"missing budget-owner ceiling: {owner}")
+                owner_candidate = (
+                    self._owner_committed[owner]
+                    .add(self._owner_reserved[owner])
+                    .add(allocation.maximum)
+                )
+                _require_fits(owner, owner_candidate, owner_ceiling.maximum)
+                owner_candidates.append((owner, owner_candidate))
             self._reserved = self._reserved.add(request.maximum)
-            self._role_reserved[request.role_binding_id] = self._role_reserved[
-                request.role_binding_id
-            ].add(request.maximum)
+            for owner, candidate in owner_candidates:
+                self._owner_reserved[owner] = candidate.subtract(self._owner_committed[owner])
             self._reservations[request.reservation_id] = _Reservation(request, "reserved")
 
     def commit(self, reservation_id: str, *, observed: BudgetAmount) -> None:
         with self._lock:
             reservation = self._active(reservation_id)
             _require_fits("observed", observed, reservation.request.maximum)
-            role = reservation.request.role_binding_id
             self._reserved = self._reserved.subtract(reservation.request.maximum)
             self._committed = self._committed.add(observed)
-            self._role_reserved[role] = self._role_reserved[role].subtract(
-                reservation.request.maximum
-            )
-            self._role_committed[role] = self._role_committed[role].add(observed)
+            for allocation in reservation.request.allocations:
+                owner = allocation.owner_id
+                self._owner_reserved[owner] = self._owner_reserved[owner].subtract(
+                    allocation.maximum
+                )
+                self._owner_committed[owner] = self._owner_committed[owner].add(
+                    allocation.maximum if reservation.request.owner_allocations else observed
+                )
             self._reservations[reservation_id] = _Reservation(reservation.request, "committed")
 
     def cancel_before_dispatch(self, reservation_id: str) -> None:
         with self._lock:
             reservation = self._active(reservation_id)
-            role = reservation.request.role_binding_id
             self._reserved = self._reserved.subtract(reservation.request.maximum)
-            self._role_reserved[role] = self._role_reserved[role].subtract(
-                reservation.request.maximum
-            )
+            for allocation in reservation.request.allocations:
+                owner = allocation.owner_id
+                self._owner_reserved[owner] = self._owner_reserved[owner].subtract(
+                    allocation.maximum
+                )
             self._reservations[reservation_id] = _Reservation(reservation.request, "cancelled")
 
     def mark_unknown(self, reservation_id: str) -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import importlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -9,8 +8,6 @@ from types import ModuleType
 from typing import Any, cast
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from oamb.contracts.accounting import (
     AggregationOperator,
@@ -46,13 +43,9 @@ from oamb.contracts.reporting import (
     AIReviewIntegrityResult,
     EvaluationPhaseGate,
     EvaluationReviewBundle,
-    HumanQualityReviewRecord,
     QualityReviewStatus,
-    SignatureVerificationRecord,
     ai_quality_review_record_identity,
     evaluation_phase_gate_id,
-    human_quality_review_record_id,
-    signature_verification_record_id,
 )
 from oamb.contracts.specifications import (
     AIReviewBatch,
@@ -93,10 +86,8 @@ from oamb.phase_review_profiles import (
     phase_review_runtime_hash,
 )
 from oamb.reporting.human_review import (
-    build_human_review_key_binding,
+    create_human_quality_review_record,
     derive_evaluation_phase_gate,
-    import_human_review_decision,
-    prepare_human_review_decision,
 )
 from oamb.reporting.review import build_evaluation_review_bundle
 
@@ -177,38 +168,15 @@ def _accepted_gate(bundle: EvaluationReviewBundle) -> EvaluationPhaseGate:
             **ai_fields,
         }
     )
-    verification_fields = {
-        "key_binding_id": SHA_A,
-        "trusted_key_fingerprint": f"SHA256:{SHA_B}",
-        "public_key_sha256": SHA_B,
-        "signed_payload_sha256": SHA_C,
-        "signature_sha256": SHA_D,
-        "verified_at": NOW,
-    }
-    verification = SignatureVerificationRecord.model_validate(
-        {
-            "verification_id": signature_verification_record_id(**verification_fields),
-            **verification_fields,
-        }
-    )
-    human_fields = {
-        "review_bundle_hash": review_bundle_hash,
-        "ai_review_record_hash": ai_id,
-        "decision_hash": SHA_A,
-        "signature_verification": verification,
-        "status": "pass",
-        "finding_codes": (),
-        "evidence_references": (),
-        "reviewer_label": "fixture-operator",
-        "decision_nonce": "fixture-nonce",
-        "trusted_key_fingerprint": f"SHA256:{SHA_B}",
-        "created_at": NOW,
-    }
-    human_record = HumanQualityReviewRecord.model_validate(
-        {
-            "human_review_record_id": human_quality_review_record_id(**human_fields),
-            **human_fields,
-        }
+    human_record = create_human_quality_review_record(
+        canonical_ai_record=ai_record,
+        status="pass",
+        operator_id="fixture-operator",
+        nonce="fixture-nonce",
+        finding_codes=(),
+        evidence_references=(),
+        used_nonces=(),
+        created_at=NOW,
     )
     return derive_evaluation_phase_gate(
         phase_id=bundle.phase_id,
@@ -714,36 +682,15 @@ def _accepted_gate_with_evidence(
         accounting_closed=True,
         created_at=NOW + timedelta(minutes=3),
     )
-    private_key = Ed25519PrivateKey.generate()
-    public_key_base64 = base64.b64encode(
-        private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-    ).decode("ascii")
-    key_binding = build_human_review_key_binding(
-        source_kind="raw",
-        source_reference="phase-fixture",
-        public_key_base64=public_key_base64,
-    )
-    prepared = prepare_human_review_decision(
-        review_bundle_hash=bundle.bundle_id,
-        ai_review_record_hash=ai_record.ai_review_record_id,
+    human_record = create_human_quality_review_record(
+        canonical_ai_record=ai_record,
         status="pass",
-        decided_at=NOW + timedelta(minutes=4),
         nonce="phase-fixture-nonce",
-        reviewer_label="fixture-operator",
+        operator_id="fixture-operator",
         finding_codes=(),
         evidence_references=(),
-    )
-    signature_base64 = base64.b64encode(private_key.sign(prepared.canonical_bytes)).decode("ascii")
-    human_record = import_human_review_decision(
-        decision_bytes=prepared.canonical_bytes,
-        signature_base64=signature_base64,
-        key_binding=key_binding,
-        canonical_ai_record=ai_record,
         used_nonces=(),
-        imported_at=NOW + timedelta(minutes=5),
+        created_at=NOW + timedelta(minutes=5),
     )
     gate = derive_evaluation_phase_gate(
         phase_id=bundle.phase_id,
@@ -773,9 +720,7 @@ def _accepted_gate_with_evidence(
         usage_records=usage_records,
         resource_records=resource_records,
         cost_records=cost_records,
-        human_key_binding=key_binding,
-        human_decision_bytes=prepared.canonical_bytes,
-        human_signature_base64=signature_base64,
+        human_record=human_record,
     )
     return bundle, gate, evidence
 
@@ -830,9 +775,7 @@ def test_t10_phase_profile_rejects_unclosed_review_source_evidence() -> None:
         usage_records=(),
         resource_records=(),
         cost_records=(),
-        human_key_binding=placeholder,
-        human_decision_bytes=b"{}",
-        human_signature_base64="invalid",
+        human_record=gate.human_record,
     )
 
     result = phase.validate_t10_phase_gate(bundle, gate, review_evidence=evidence)
@@ -841,7 +784,7 @@ def test_t10_phase_profile_rejects_unclosed_review_source_evidence() -> None:
     assert "phase-review-source-evidence-mismatch" in {issue.code for issue in result.issues}
 
 
-def test_t10_phase_profile_rejects_missing_cost_and_invalid_human_signature() -> None:
+def test_t10_phase_profile_rejects_missing_cost() -> None:
     phase = _phase()
     bundle, gate, evidence = _accepted_gate_with_evidence()
 
@@ -850,16 +793,7 @@ def test_t10_phase_profile_rejects_missing_cost_and_invalid_human_signature() ->
         gate,
         review_evidence=replace(evidence, cost_records=()),
     )
-    invalid_signature = phase.validate_t10_phase_gate(
-        bundle,
-        gate,
-        review_evidence=replace(evidence, human_signature_base64="invalid"),
-    )
-
     assert "phase-review-source-evidence-mismatch" in {issue.code for issue in missing_cost.issues}
-    assert "phase-human-signature-evidence-mismatch" in {
-        issue.code for issue in invalid_signature.issues
-    }
 
 
 def test_t10_phase_target_hash_binds_review_source_evidence() -> None:
@@ -870,7 +804,7 @@ def test_t10_phase_target_hash_binds_review_source_evidence() -> None:
     changed = phase.validate_t10_phase_gate(
         bundle,
         gate,
-        review_evidence=replace(evidence, human_signature_base64="changed"),
+        review_evidence=replace(evidence, cost_records=()),
     )
 
     assert accepted.target_hash != changed.target_hash
@@ -1078,7 +1012,7 @@ def test_t10_phase_profile_rejects_gate_history_hidden_from_source_evidence() ->
     bundle, gate, evidence = _accepted_gate_with_evidence()
     ordered_hashes = ("e" * 64, *gate.ordered_ai_review_record_hashes)
     history_root = canonical_sha256(
-        ["oamb-review-history-v1", ordered_hashes, gate.human_review_record_hash]
+        ["oamb-review-history-v2", ordered_hashes, gate.human_review_record_hash]
     )
     gate_fields = {
         "phase_id": gate.phase_id,

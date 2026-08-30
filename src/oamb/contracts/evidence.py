@@ -17,7 +17,12 @@ from .base import (
     UtcDateTime,
 )
 from .ids import canonical_sha256
-from .specifications import BudgetScopeKindV2, ResourceBudgetCeiling
+from .specifications import (
+    BudgetScopeKindV2,
+    BudgetScopeKindV3,
+    DispatchBudgetOwnerKind,
+    ResourceBudgetCeiling,
+)
 from .states import (
     AttemptOutcome,
     CaseState,
@@ -41,6 +46,17 @@ class ValidationSeverity(StrEnum):
 
 
 class ModelReadinessOccurrenceState(StrEnum):
+    PLANNED = "planned"
+    BUDGET_RESERVED = "budget_reserved"
+    RUNNING = "running"
+    SEALED = "sealed"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    INTERRUPTED_UNKNOWN_OUTCOME = "interrupted_unknown_outcome"
+
+
+class MemoryConformanceOccurrenceState(StrEnum):
     PLANNED = "planned"
     BUDGET_RESERVED = "budget_reserved"
     RUNNING = "running"
@@ -166,6 +182,48 @@ class AttemptRecordV2(StrictContract):
         return self
 
 
+class AttemptRecordV3(StrictContract):
+    schema_name: Literal["attempt_record"] = "attempt_record"
+    schema_version: Literal[3] = 3
+    attempt_id: Sha256
+    parent_kind: Literal[
+        "ingestion_plan", "case", "phase_review", "model_readiness", "memory_conformance"
+    ]
+    parent_id: NonEmptyStr
+    stage: NonEmptyStr
+    ordinal: PositiveInt
+    request_fingerprint: Sha256
+    started_at: UtcDateTime
+    ended_at: UtcDateTime
+    outcome: AttemptOutcome
+    retry_of_attempt_id: Sha256 | None
+    idempotency_key_hash: Sha256 | None
+    reconciliation_capability: Literal["none", "idempotency_key", "receipt_lookup"]
+    raw_response_ref: Sha256 | None
+    raw_error_ref: Sha256 | None
+    index_contribution: IndexContribution
+    superseded_by_attempt_id: Sha256 | None
+
+    @model_validator(mode="after")
+    def coherent_times_and_contribution(self) -> Self:
+        if self.ended_at < self.started_at:
+            raise ValueError("attempt end precedes start")
+        if self.parent_kind == "memory_conformance" and self.stage not in {
+            "scope_allocate",
+            "memory_ingest",
+            "memory_readiness",
+            "memory_projection",
+            "memory_query",
+        }:
+            raise ValueError("memory-conformance attempt uses an unsupported stage")
+        if self.index_contribution == IndexContribution.SUPERSEDED:
+            if self.superseded_by_attempt_id is None:
+                raise ValueError("superseded contribution requires successor attempt")
+        elif self.superseded_by_attempt_id is not None:
+            raise ValueError("only superseded contribution names a successor")
+        return self
+
+
 class RunLeaseRecord(StrictContract):
     schema_name: Literal["run_lease_record"] = "run_lease_record"
     schema_version: Literal[1] = 1
@@ -270,6 +328,67 @@ class ModelReadinessOccurrenceRecord(StrictContract):
         return self
 
 
+class MemoryConformanceOccurrenceRecord(StrictContract):
+    schema_name: Literal["memory_conformance_occurrence_record"] = (
+        "memory_conformance_occurrence_record"
+    )
+    schema_version: Literal[1] = 1
+    occurrence_id: NonEmptyStr
+    provider: NonEmptyStr
+    provider_project_id: NonEmptyStr
+    provider_profile_id: NonEmptyStr
+    provider_scope_id: NonEmptyStr
+    runtime_binding_hash: Sha256
+    approval_id: NonEmptyStr
+    budget_id: NonEmptyStr
+    state: MemoryConformanceOccurrenceState
+    operation_claim_ids: tuple[Sha256, ...]
+    dispatch_route_ids: tuple[NonEmptyStr, ...]
+    attempt_ids: tuple[Sha256, ...]
+    usage_record_ids: tuple[Sha256, ...]
+    resource_record_ids: tuple[Sha256, ...]
+    cost_record_ids: tuple[Sha256, ...]
+    protected_state_before_hash: Sha256
+    protected_state_after_hash: Sha256
+    started_at: UtcDateTime | None
+    ended_at: UtcDateTime | None
+
+    @model_validator(mode="after")
+    def lifecycle_inventory_and_projection_close(self) -> Self:
+        if self.provider_project_id == self.provider_scope_id:
+            raise ValueError("memory-conformance project and scope identities must differ")
+        inventories = (
+            self.operation_claim_ids,
+            self.dispatch_route_ids,
+            self.attempt_ids,
+            self.usage_record_ids,
+            self.resource_record_ids,
+            self.cost_record_ids,
+        )
+        if any(len(set(items)) != len(items) for items in inventories):
+            raise ValueError("memory-conformance inventories cannot contain duplicates")
+        terminal = {
+            MemoryConformanceOccurrenceState.SEALED,
+            MemoryConformanceOccurrenceState.ERROR,
+            MemoryConformanceOccurrenceState.CANCELLED,
+            MemoryConformanceOccurrenceState.BUDGET_EXCEEDED,
+            MemoryConformanceOccurrenceState.INTERRUPTED_UNKNOWN_OUTCOME,
+        }
+        if self.state in terminal:
+            if self.started_at is None or self.ended_at is None:
+                raise ValueError("terminal memory-conformance occurrence requires timestamps")
+        elif self.ended_at is not None:
+            raise ValueError("non-terminal memory-conformance occurrence cannot have an end time")
+        if self.started_at and self.ended_at and self.ended_at < self.started_at:
+            raise ValueError("memory-conformance end precedes start")
+        if (
+            self.state == MemoryConformanceOccurrenceState.SEALED
+            and self.protected_state_before_hash != self.protected_state_after_hash
+        ):
+            raise ValueError("sealed memory-conformance protected state changed during query")
+        return self
+
+
 class BudgetReservationRecord(StrictContract):
     schema_name: Literal["budget_reservation_record"] = "budget_reservation_record"
     schema_version: Literal[1] = 1
@@ -301,6 +420,56 @@ class BudgetReservationRecord(StrictContract):
         return self
 
 
+class BudgetReservationRecordV2(StrictContract):
+    schema_name: Literal["budget_reservation_record"] = "budget_reservation_record"
+    schema_version: Literal[2] = 2
+    reservation_id: Sha256
+    budget_id: NonEmptyStr
+    scope_kind: BudgetScopeKindV3
+    scope_id: NonEmptyStr
+    dispatch_owner_kind: DispatchBudgetOwnerKind
+    role_binding_id: NonEmptyStr | None
+    provider_operation_ceiling_id: NonEmptyStr | None
+    internal_usage_role_binding_ids: tuple[NonEmptyStr, ...]
+    attempt_id: Sha256
+    reserved_attempts: PositiveInt
+    reserved_input_tokens: NonNegativeInt
+    reserved_output_tokens: NonNegativeInt
+    reserved_dispatch_wall_seconds: NonNegativeDecimal
+    reserved_cost: NonNegativeDecimal | None
+    currency: str | None
+    reserved_resource_ceilings: tuple[ResourceBudgetCeiling, ...]
+    reserved_provider_units: NonNegativeDecimal
+    reserved_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def scope_owner_and_resources_close(self) -> Self:
+        if self.scope_kind != BudgetScopeKindV3.MEMORY_CONFORMANCE:
+            raise ValueError("version 2 reservation currently belongs to memory conformance")
+        if self.dispatch_owner_kind == DispatchBudgetOwnerKind.MODEL_ROLE:
+            if self.role_binding_id is None or self.provider_operation_ceiling_id is not None:
+                raise ValueError("model-role reservation requires only its role binding")
+            if self.internal_usage_role_binding_ids:
+                raise ValueError("direct model reservation cannot carry internal usage owners")
+        else:
+            if self.role_binding_id is not None or self.provider_operation_ceiling_id is None:
+                raise ValueError(
+                    "provider-operation reservation requires only its operation ceiling"
+                )
+        if len(set(self.internal_usage_role_binding_ids)) != len(
+            self.internal_usage_role_binding_ids
+        ):
+            raise ValueError("reservation contains duplicate internal usage owners")
+        if (self.reserved_cost is None) != (self.currency is None):
+            raise ValueError("reserved cost and currency must be present together")
+        if self.currency is not None and len(self.currency) != 3:
+            raise ValueError("currency must be an ISO 4217 code")
+        dimensions = tuple(item.dimension_id for item in self.reserved_resource_ceilings)
+        if len(set(dimensions)) != len(dimensions):
+            raise ValueError("reservation contains duplicate resource dimensions")
+        return self
+
+
 class AttemptIntentRecord(StrictContract):
     schema_name: Literal["attempt_intent_record"] = "attempt_intent_record"
     schema_version: Literal[1] = 1
@@ -318,6 +487,51 @@ class AttemptIntentRecord(StrictContract):
 
     @model_validator(mode="after")
     def idempotency_shape(self) -> Self:
+        if self.reconciliation_capability == "idempotency_key":
+            if self.idempotency_key_hash is None:
+                raise ValueError("idempotency-key reconciliation requires its hash")
+        elif self.idempotency_key_hash is not None:
+            raise ValueError("only idempotency-key reconciliation names its hash")
+        return self
+
+
+class AttemptIntentRecordV2(StrictContract):
+    schema_name: Literal["attempt_intent_record"] = "attempt_intent_record"
+    schema_version: Literal[2] = 2
+    attempt_id: Sha256
+    claim_id: Sha256
+    reservation_id: Sha256
+    parent_kind: Literal[
+        "ingestion_plan", "case", "phase_review", "model_readiness", "memory_conformance"
+    ]
+    parent_id: NonEmptyStr
+    dispatch_route_id: NonEmptyStr
+    dispatch_owner_kind: DispatchBudgetOwnerKind
+    role_binding_id: NonEmptyStr | None
+    provider_operation_ceiling_id: NonEmptyStr | None
+    internal_usage_role_binding_ids: tuple[NonEmptyStr, ...]
+    stage: NonEmptyStr
+    request_fingerprint: Sha256
+    reconciliation_capability: Literal["none", "idempotency_key", "receipt_lookup"]
+    idempotency_key_hash: Sha256 | None
+    sealed_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def parent_owner_and_idempotency_close(self) -> Self:
+        if self.parent_kind != "memory_conformance":
+            raise ValueError("version 2 intent currently belongs to memory conformance")
+        if self.dispatch_owner_kind == DispatchBudgetOwnerKind.MODEL_ROLE:
+            if self.role_binding_id is None or self.provider_operation_ceiling_id is not None:
+                raise ValueError("model-role intent requires only its role binding")
+            if self.internal_usage_role_binding_ids:
+                raise ValueError("direct model intent cannot carry internal usage owners")
+        else:
+            if self.role_binding_id is not None or self.provider_operation_ceiling_id is None:
+                raise ValueError("provider-operation intent requires only its operation ceiling")
+        if len(set(self.internal_usage_role_binding_ids)) != len(
+            self.internal_usage_role_binding_ids
+        ):
+            raise ValueError("intent contains duplicate internal usage owners")
         if self.reconciliation_capability == "idempotency_key":
             if self.idempotency_key_hash is None:
                 raise ValueError("idempotency-key reconciliation requires its hash")

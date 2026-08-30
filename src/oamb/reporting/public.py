@@ -13,6 +13,7 @@ from oamb.contracts.reporting import (
     CompletionSummaryV3,
     DiagnosticRunReportModel,
     DisplayPreview,
+    EvaluationReportModel,
     ExactRational,
     Mab65ReportReduction,
     MabCapabilityMetricSummary,
@@ -25,18 +26,29 @@ from oamb.contracts.reporting import (
     ReducerBinding,
     ReleaseReportModel,
     ReportArtifactManifestV2,
+    ReportArtifactManifestV3,
     ReportRecordProjection,
     RunReportModelV3,
     ValidationClaimBoundary,
     comparison_report_model_id,
     diagnostic_run_report_model_id,
+    evaluation_report_model_id,
     metric_summary_id,
     phase_acceptance_report_id,
     release_report_model_id,
     report_artifact_manifest_v2_id,
+    report_artifact_manifest_v3_id,
+    report_artifact_manifest_v3_render_input_hash,
     run_report_model_v3_id,
 )
-from oamb.contracts.specifications import ReportIdentitySpecBinding, SourceEvidenceBinding
+from oamb.contracts.specifications import (
+    EvaluationModelClosure,
+    EvaluationModelClosureEntry,
+    ReportIdentitySpecBinding,
+    ReportIdentitySpecBindingV2,
+    SourceEvidenceBinding,
+    evaluation_model_closure_hash,
+)
 from oamb.workloads.mab65_reduction import Mab65Reduction
 
 
@@ -335,6 +347,110 @@ def build_comparison_report_model(
     )
 
 
+def build_evaluation_report_model(
+    *,
+    phase_id: str,
+    report_spec_hash: str,
+    ordered_run_models: tuple[
+        RunReportModelV3,
+        RunReportModelV3,
+        RunReportModelV3,
+        RunReportModelV3,
+    ],
+    eligible_comparison_models: tuple[ComparisonReportModel, ...],
+    unique_case_count: int,
+    limitations: tuple[str, ...],
+) -> EvaluationReportModel:
+    fields = {
+        "phase_id": phase_id,
+        "report_spec_hash": report_spec_hash,
+        "ordered_run_models": ordered_run_models,
+        "ordered_run_model_hashes": tuple(
+            canonical_sha256(item.model_dump(mode="python")) for item in ordered_run_models
+        ),
+        "eligible_comparison_models": eligible_comparison_models,
+        "eligible_comparison_model_hashes": tuple(
+            canonical_sha256(item.model_dump(mode="python")) for item in eligible_comparison_models
+        ),
+        "unique_case_count": unique_case_count,
+        "system_result_count": sum(item.summary.intended_cases for item in ordered_run_models),
+        "limitations": limitations,
+    }
+    return EvaluationReportModel.model_validate(
+        {"report_id": evaluation_report_model_id(**fields), **fields}
+    )
+
+
+def build_evaluation_model_closure(
+    model: EvaluationReportModel,
+) -> EvaluationModelClosure:
+    run_entries = tuple(
+        EvaluationModelClosureEntry(
+            model_kind="run",
+            report_model_id=run.report_id,
+            canonical_bytes_hash=canonical_sha256(run),
+            ordered_source_root_hash=_ordered_model_source_root_hash(run.ordered_source_bindings),
+            evidence_validation_result_hash=_ordered_model_validation_hash(
+                (run.evidence_validation_result_hash,)
+            ),
+            coverage_hash=canonical_sha256(
+                [
+                    "oamb-evaluation-run-model-coverage-v1",
+                    run.logical_context_ids,
+                    run.ingestion_occurrence_ids,
+                    run.case_occurrence_ids,
+                    tuple(item.record_id for item in run.record_projections),
+                ]
+            ),
+        )
+        for run in model.ordered_run_models
+    )
+    comparison_entries = tuple(
+        EvaluationModelClosureEntry(
+            model_kind="comparison",
+            report_model_id=comparison.report_id,
+            canonical_bytes_hash=canonical_sha256(comparison),
+            ordered_source_root_hash=_ordered_model_source_root_hash(
+                comparison.ordered_source_bindings
+            ),
+            evidence_validation_result_hash=_ordered_model_validation_hash(
+                comparison.ordered_evidence_validation_hashes
+            ),
+            coverage_hash=canonical_sha256(
+                [
+                    "oamb-evaluation-comparison-model-coverage-v1",
+                    comparison.left_run_report_hash,
+                    comparison.right_run_report_hash,
+                    comparison.comparison,
+                ]
+            ),
+        )
+        for comparison in model.eligible_comparison_models
+    )
+    fields: dict[str, object] = {
+        "ordered_run_entries": run_entries,
+        "eligible_comparison_entries": comparison_entries,
+    }
+    return EvaluationModelClosure.model_validate(
+        {
+            **fields,
+            "model_closure_hash": evaluation_model_closure_hash(**fields),
+        }
+    )
+
+
+def _ordered_model_source_root_hash(
+    bindings: tuple[SourceEvidenceBinding, ...],
+) -> str:
+    return canonical_sha256(
+        ["oamb-evaluation-model-source-roots-v1", tuple(item.source_root_hash for item in bindings)]
+    )
+
+
+def _ordered_model_validation_hash(validation_hashes: tuple[str, ...]) -> str:
+    return canonical_sha256(["oamb-evaluation-model-validations-v1", validation_hashes])
+
+
 def build_release_report_model(
     *,
     report_spec_hash: str,
@@ -444,6 +560,56 @@ def build_report_artifact_manifest_v2(
     )
 
 
+def build_report_artifact_manifest_v3(
+    *,
+    report_id: str,
+    report_identity_spec_binding: ReportIdentitySpecBindingV2,
+    ordered_source_bindings: tuple[SourceEvidenceBinding, ...],
+    ordered_evidence_validation_hashes: tuple[str, ...],
+    report_model_hash: str,
+    evaluation_model_closure: EvaluationModelClosure,
+    renderer_hash: str,
+    asset_hashes: tuple[str, ...],
+    browser_contract_hash: str,
+    performance_contract_hash: str,
+    export_profile_selector_id: str,
+    export_profile_selector_version: int,
+    export_profile_hash: str,
+    audience: Literal["local", "public"],
+    schema_versions: tuple[str, ...],
+    limitations: tuple[str, ...],
+) -> ReportArtifactManifestV3:
+    fields = {
+        "report_id": report_id,
+        "report_kind": "evaluation",
+        "report_identity_spec_binding": report_identity_spec_binding,
+        "ordered_source_bindings": ordered_source_bindings,
+        "ordered_evidence_validation_hashes": ordered_evidence_validation_hashes,
+        "report_model_hash": report_model_hash,
+        "evaluation_model_closure": evaluation_model_closure,
+        "renderer_hash": renderer_hash,
+        "asset_hashes": asset_hashes,
+        "browser_contract_hash": browser_contract_hash,
+        "performance_contract_hash": performance_contract_hash,
+        "export_profile_selector_id": export_profile_selector_id,
+        "export_profile_selector_version": export_profile_selector_version,
+        "export_profile_hash": export_profile_hash,
+        "audience": audience,
+        "schema_versions": schema_versions,
+        "limitations": limitations,
+    }
+    render_input_hash = report_artifact_manifest_v3_render_input_hash(**fields)
+    return ReportArtifactManifestV3.model_validate(
+        {
+            "artifact_manifest_id": report_artifact_manifest_v3_id(
+                **fields, render_input_hash=render_input_hash
+            ),
+            "render_input_hash": render_input_hash,
+            **fields,
+        }
+    )
+
+
 def report_model_hash(model: object) -> str:
     return canonical_sha256(model)
 
@@ -451,11 +617,14 @@ def report_model_hash(model: object) -> str:
 __all__ = [
     "build_comparison_report_model",
     "build_diagnostic_run_report_model",
+    "build_evaluation_model_closure",
+    "build_evaluation_report_model",
     "build_mab65_report_reduction",
     "build_metric_summary",
     "build_phase_acceptance_report",
     "build_release_report_model",
     "build_report_artifact_manifest_v2",
+    "build_report_artifact_manifest_v3",
     "build_run_report_model",
     "report_model_hash",
 ]

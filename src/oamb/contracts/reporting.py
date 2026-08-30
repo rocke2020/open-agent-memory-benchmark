@@ -22,7 +22,9 @@ from .base import (
 from .ids import canonical_sha256
 from .specifications import (
     ComparisonCostView,
+    EvaluationModelClosure,
     ReportIdentitySpecBinding,
+    ReportIdentitySpecBindingV2,
     SourceEvidenceBinding,
 )
 
@@ -758,7 +760,7 @@ class SignatureVerificationRecord(StrictContract):
         return self
 
 
-class HumanQualityReviewRecord(StrictContract):
+class HumanQualityReviewRecordV1(StrictContract):
     schema_name: Literal["human_quality_review_record"] = "human_quality_review_record"
     schema_version: Literal[1] = 1
     human_review_record_id: Sha256
@@ -778,7 +780,7 @@ class HumanQualityReviewRecord(StrictContract):
     def human_record_identity_and_signature_bind(self) -> Self:
         if self.trusted_key_fingerprint != self.signature_verification.trusted_key_fingerprint:
             raise ValueError("human review record does not bind its trusted key")
-        expected = human_quality_review_record_id(
+        expected = human_quality_review_record_v1_id(
             review_bundle_hash=self.review_bundle_hash,
             ai_review_record_hash=self.ai_review_record_hash,
             decision_hash=self.decision_hash,
@@ -796,7 +798,7 @@ class HumanQualityReviewRecord(StrictContract):
         return self
 
 
-class EvaluationPhaseGate(StrictContract):
+class EvaluationPhaseGateV1(StrictContract):
     schema_name: Literal["evaluation_phase_gate"] = "evaluation_phase_gate"
     schema_version: Literal[1] = 1
     gate_id: Sha256
@@ -809,7 +811,7 @@ class EvaluationPhaseGate(StrictContract):
     passed_by_ai: bool
     passed_by_human: bool
     ai_record: AIQualityReviewRecord
-    human_record: HumanQualityReviewRecord | None
+    human_record: HumanQualityReviewRecordV1 | None
 
     @model_validator(mode="after")
     def acceptance_flags_are_derived_from_current_records(self) -> Self:
@@ -856,7 +858,7 @@ class EvaluationPhaseGate(StrictContract):
             expected_human = self.human_record.status == "pass"
             if self.passed_by_human != expected_human:
                 raise ValueError("passed_by_human must derive after current AI PASS")
-        expected_gate_id = evaluation_phase_gate_id(
+        expected_gate_id = evaluation_phase_gate_v1_id(
             phase_id=self.phase_id,
             review_bundle_hash=self.review_bundle_hash,
             review_history_root_hash=self.review_history_root_hash,
@@ -871,6 +873,104 @@ class EvaluationPhaseGate(StrictContract):
         return self
 
 
+class HumanQualityReviewRecord(StrictContract):
+    schema_name: Literal["human_quality_review_record"] = "human_quality_review_record"
+    schema_version: Literal[2] = 2
+    human_review_record_id: Sha256
+    review_bundle_hash: Sha256
+    ai_review_record_hash: Sha256
+    status: Literal["pass", "fail"]
+    operator_id: NonEmptyStr
+    confirmation_method: Literal["interactive_exact_hash_phrase_v1"] = (
+        "interactive_exact_hash_phrase_v1"
+    )
+    confirmation_nonce: NonEmptyStr
+    finding_codes: tuple[NonEmptyStr, ...]
+    evidence_references: tuple[NonEmptyStr, ...]
+    created_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def human_confirmation_identity_is_canonical(self) -> Self:
+        if len(set(self.finding_codes)) != len(self.finding_codes):
+            raise ValueError("human review record contains duplicate finding codes")
+        fields = self.model_dump(
+            mode="python",
+            exclude={"schema_name", "schema_version", "human_review_record_id"},
+        )
+        if self.human_review_record_id != human_quality_review_record_id(**fields):
+            raise ValueError("human review record identity does not match its payload")
+        return self
+
+
+class EvaluationPhaseGate(StrictContract):
+    schema_name: Literal["evaluation_phase_gate"] = "evaluation_phase_gate"
+    schema_version: Literal[2] = 2
+    gate_id: Sha256
+    phase_id: NonEmptyStr
+    review_bundle_hash: Sha256
+    review_history_root_hash: Sha256
+    ordered_ai_review_record_hashes: tuple[Sha256, ...]
+    canonical_ai_review_record_hash: Sha256
+    human_review_record_hash: Sha256 | None
+    passed_by_ai: bool
+    passed_by_human: bool
+    ai_record: AIQualityReviewRecord
+    human_record: HumanQualityReviewRecord | None
+
+    @model_validator(mode="after")
+    def acceptance_flags_are_derived_from_v2_records(self) -> Self:
+        if (
+            not self.ordered_ai_review_record_hashes
+            or self.ordered_ai_review_record_hashes[-1] != self.canonical_ai_review_record_hash
+            or len(set(self.ordered_ai_review_record_hashes))
+            != len(self.ordered_ai_review_record_hashes)
+        ):
+            raise ValueError(
+                "phase gate AI review history is empty, duplicated, or selects a non-head"
+            )
+        if self.ai_record.review_bundle_hash != self.review_bundle_hash:
+            raise ValueError("AI record must bind the same review bundle")
+        if self.canonical_ai_review_record_hash != self.ai_record.ai_review_record_id:
+            raise ValueError("phase gate must bind the canonical AI record")
+        expected_history_root = canonical_sha256(
+            [
+                "oamb-review-history-v2",
+                self.ordered_ai_review_record_hashes,
+                self.human_review_record_hash,
+            ]
+        )
+        if self.review_history_root_hash != expected_history_root:
+            raise ValueError("phase gate must bind the complete AI and human review history")
+        expected_ai = self.ai_record.status == QualityReviewStatus.PASS
+        if self.passed_by_ai != expected_ai:
+            raise ValueError("passed_by_ai must derive from the current AI record")
+        if self.human_record is None:
+            if self.human_review_record_hash is not None or self.passed_by_human:
+                raise ValueError("human acceptance requires a human review record")
+        else:
+            if not expected_ai:
+                raise ValueError("human review requires the canonical AI PASS head")
+            if (
+                self.human_record.review_bundle_hash != self.review_bundle_hash
+                or self.human_record.ai_review_record_hash != self.canonical_ai_review_record_hash
+            ):
+                raise ValueError(
+                    "human record must bind the same review bundle and canonical AI record"
+                )
+            if self.human_review_record_hash != self.human_record.human_review_record_id:
+                raise ValueError("phase gate must bind the human review record")
+            expected_human = self.human_record.status == "pass"
+            if self.passed_by_human != expected_human:
+                raise ValueError("passed_by_human must derive after current AI PASS")
+        fields = self.model_dump(
+            mode="python",
+            exclude={"schema_name", "schema_version", "gate_id", "ai_record", "human_record"},
+        )
+        if self.gate_id != evaluation_phase_gate_id(**fields):
+            raise ValueError("evaluation phase gate identity does not match its payload")
+        return self
+
+
 def human_review_decision_id(**fields: object) -> str:
     return canonical_sha256(["oamb-human-review-decision-v1", fields])
 
@@ -879,12 +979,20 @@ def signature_verification_record_id(**fields: object) -> str:
     return canonical_sha256(["oamb-signature-verification-record-v1", fields])
 
 
-def human_quality_review_record_id(**fields: object) -> str:
+def human_quality_review_record_v1_id(**fields: object) -> str:
     return canonical_sha256(["oamb-human-quality-review-record-v1", fields])
 
 
-def evaluation_phase_gate_id(**fields: object) -> str:
+def evaluation_phase_gate_v1_id(**fields: object) -> str:
     return canonical_sha256(["oamb-evaluation-phase-gate-v1", fields])
+
+
+def human_quality_review_record_id(**fields: object) -> str:
+    return canonical_sha256(["oamb-human-quality-review-record-v2", fields])
+
+
+def evaluation_phase_gate_id(**fields: object) -> str:
+    return canonical_sha256(["oamb-evaluation-phase-gate-v2", fields])
 
 
 class RunSummary(StrictContract):
@@ -1550,6 +1658,59 @@ class ComparisonReportModel(StrictContract):
         return self
 
 
+class EvaluationReportModel(StrictContract):
+    schema_name: Literal["evaluation_report_model"] = "evaluation_report_model"
+    schema_version: Literal[1] = 1
+    report_id: Sha256
+    phase_id: NonEmptyStr
+    report_spec_hash: Sha256
+    ordered_run_models: tuple[
+        RunReportModelV3,
+        RunReportModelV3,
+        RunReportModelV3,
+        RunReportModelV3,
+    ]
+    ordered_run_model_hashes: tuple[Sha256, Sha256, Sha256, Sha256]
+    eligible_comparison_models: tuple[ComparisonReportModel, ...]
+    eligible_comparison_model_hashes: tuple[Sha256, ...]
+    unique_case_count: PositiveInt
+    system_result_count: PositiveInt
+    limitations: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def exact_model_bytes_coverage_and_identity_close(self) -> Self:
+        run_ids = tuple(item.report_id for item in self.ordered_run_models)
+        if len(set(run_ids)) != 4:
+            raise ValueError("evaluation report requires four unique ordered run models")
+        expected_run_hashes = tuple(
+            canonical_sha256(item.model_dump(mode="python")) for item in self.ordered_run_models
+        )
+        if self.ordered_run_model_hashes != expected_run_hashes:
+            raise ValueError("evaluation report run-model bytes do not match their hashes")
+        comparison_ids = tuple(item.report_id for item in self.eligible_comparison_models)
+        if not comparison_ids or len(set(comparison_ids)) != len(comparison_ids):
+            raise ValueError("evaluation report requires unique eligible comparison models")
+        expected_comparison_hashes = tuple(
+            canonical_sha256(item.model_dump(mode="python"))
+            for item in self.eligible_comparison_models
+        )
+        if self.eligible_comparison_model_hashes != expected_comparison_hashes:
+            raise ValueError("evaluation comparison-model bytes do not match their hashes")
+        expected_system_results = sum(
+            item.summary.intended_cases for item in self.ordered_run_models
+        )
+        if self.system_result_count != expected_system_results:
+            raise ValueError("evaluation system-result count does not close from run models")
+        if self.unique_case_count > self.system_result_count:
+            raise ValueError("evaluation unique-case count exceeds system results")
+        fields = self.model_dump(
+            mode="python", exclude={"schema_name", "schema_version", "report_id"}
+        )
+        if self.report_id != evaluation_report_model_id(**fields):
+            raise ValueError("evaluation report-model identity does not match its payload")
+        return self
+
+
 class ReleaseReportModel(StrictContract):
     schema_name: Literal["release_report_model"] = "release_report_model"
     schema_version: Literal[1] = 1
@@ -1664,6 +1825,62 @@ class ReportArtifactManifestV2(StrictContract):
         return self
 
 
+class ReportArtifactManifestV3(StrictContract):
+    schema_name: Literal["report_artifact_manifest"] = "report_artifact_manifest"
+    schema_version: Literal[3] = 3
+    artifact_manifest_id: Sha256
+    report_id: Sha256
+    report_kind: Literal["evaluation"] = "evaluation"
+    report_identity_spec_binding: ReportIdentitySpecBindingV2
+    ordered_source_bindings: tuple[SourceEvidenceBinding, ...]
+    ordered_evidence_validation_hashes: tuple[Sha256, ...]
+    report_model_hash: Sha256
+    evaluation_model_closure: EvaluationModelClosure
+    renderer_hash: Sha256
+    asset_hashes: tuple[Sha256, ...]
+    browser_contract_hash: Sha256
+    performance_contract_hash: Sha256
+    export_profile_selector_id: NonEmptyStr
+    export_profile_selector_version: PositiveInt
+    export_profile_hash: Sha256
+    audience: Literal["local", "public"]
+    schema_versions: tuple[NonEmptyStr, ...]
+    limitations: tuple[NonEmptyStr, ...]
+    render_input_hash: Sha256
+
+    @model_validator(mode="after")
+    def evaluation_inventory_and_identity_close(self) -> Self:
+        if not self.ordered_source_bindings or len(self.ordered_source_bindings) != len(
+            self.ordered_evidence_validation_hashes
+        ):
+            raise ValueError("evaluation artifact source and validation roots must align")
+        for label, values in (
+            ("source binding", tuple(item.binding_id for item in self.ordered_source_bindings)),
+            ("validation", self.ordered_evidence_validation_hashes),
+            ("asset", self.asset_hashes),
+            ("schema", self.schema_versions),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"evaluation artifact contains duplicate {label} identities")
+        render_fields = self.model_dump(
+            mode="python",
+            exclude={
+                "schema_name",
+                "schema_version",
+                "artifact_manifest_id",
+                "render_input_hash",
+            },
+        )
+        expected_render_hash = report_artifact_manifest_v3_render_input_hash(**render_fields)
+        if self.render_input_hash != expected_render_hash:
+            raise ValueError("evaluation artifact render-input hash does not match its payload")
+        identity_fields = {**render_fields, "render_input_hash": self.render_input_hash}
+        expected_id = report_artifact_manifest_v3_id(**identity_fields)
+        if self.artifact_manifest_id != expected_id:
+            raise ValueError("evaluation artifact manifest identity does not match its payload")
+        return self
+
+
 def metric_summary_id(**fields: object) -> str:
     return canonical_sha256(["oamb-metric-summary-v1", fields])
 
@@ -1680,6 +1897,10 @@ def comparison_report_model_id(**fields: object) -> str:
     return canonical_sha256(["oamb-comparison-report-model-v1", fields])
 
 
+def evaluation_report_model_id(**fields: object) -> str:
+    return canonical_sha256(["oamb-evaluation-report-model-v1", fields])
+
+
 def release_report_model_id(**fields: object) -> str:
     return canonical_sha256(["oamb-release-report-model-v1", fields])
 
@@ -1690,3 +1911,11 @@ def phase_acceptance_report_id(**fields: object) -> str:
 
 def report_artifact_manifest_v2_id(**fields: object) -> str:
     return canonical_sha256(["oamb-report-artifact-manifest-v2", fields])
+
+
+def report_artifact_manifest_v3_render_input_hash(**fields: object) -> str:
+    return canonical_sha256(["oamb-evaluation-render-input-v3", fields])
+
+
+def report_artifact_manifest_v3_id(**fields: object) -> str:
+    return canonical_sha256(["oamb-report-artifact-manifest-v3", fields])

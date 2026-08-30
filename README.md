@@ -89,9 +89,14 @@ field allowlist. It cannot import an arbitrary self-attested result.
 
 **Phase review is a separate post-report operation with its own bundle, plan,
 approval, budget, occurrence, attempts, usage, resources, and cost evidence.**
-Use `oamb phase --help` for the bundle, AI plan/run, externally signed human
-decision import, gate validation, and acceptance-report commands. OAMB never
-loads the human private key or signs a human decision.
+Use `oamb phase --help` for the bundle, AI plan/run, local human confirmation,
+gate validation, and acceptance-report commands. After the canonical AI review
+passes, `oamb phase human-review record` requires one interactive TTY entry of
+`STATUS BUNDLE_HASH AI_HASH NONCE` and writes one create-only version 2 human
+record at `human-review.json` inside that review evidence directory. A second
+record in the same authoritative review root is rejected. This local benchmark
+confirmation uses no signing key or model client;
+version 1 signed artifacts remain readable only as historical contracts.
 
 The recorded-output reducer is explicitly offline. A model-backed AI review is
 constructed only after the exact role, runtime, approval, budget, request

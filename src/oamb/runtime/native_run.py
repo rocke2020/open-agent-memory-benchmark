@@ -27,6 +27,7 @@ from oamb.contracts.accounting import (
     TokenStageV2,
     TokenUsageRecordV2,
 )
+from oamb.contracts.base import StrictContract
 from oamb.contracts.evidence import (
     AttemptIntentRecord,
     AttemptReceiptKind,
@@ -77,7 +78,14 @@ from oamb.contracts.ports import (
     VisibleEvidencePolicy,
     WorkloadPort,
 )
-from oamb.contracts.specifications import BudgetScopeKindV2
+from oamb.contracts.specifications import (
+    BudgetScopeKindV2,
+    BudgetSpecV2,
+    ExternalCallApprovalRecord,
+    ModelRoleBindingV2,
+    RunPreflightRecord,
+    RunSpec,
+)
 from oamb.contracts.states import (
     AttemptOutcome,
     CaseState,
@@ -139,6 +147,60 @@ class NativeRunArtifacts:
     manifest: CapsuleManifest
     ingestion_plan_records: tuple[NativeIngestionPlanRecord, ...]
     case_records: tuple[CaseRecordV3, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NativeRunControl:
+    """Exact durable authorization and identity closure for one live native run."""
+
+    run_spec: RunSpec
+    preflight_record: RunPreflightRecord
+    approval: ExternalCallApprovalRecord
+    budget: BudgetSpecV2
+    role_bindings: tuple[ModelRoleBindingV2, ...]
+    owner_id: str
+    host_fingerprint: str
+    process_id: int
+    started_at: datetime
+
+    def __post_init__(self) -> None:
+        run_id = self.run_spec.run_id
+        if (
+            self.preflight_record.run_id != run_id
+            or self.approval.scope_kind != BudgetScopeKindV2.RUN
+            or self.approval.scope_id != run_id
+            or self.budget.scope_kind != BudgetScopeKindV2.RUN
+            or self.budget.scope_id != run_id
+            or self.budget.approval_id != self.approval.approval_id
+        ):
+            raise ValueError("live native control run, approval, and budget scopes do not close")
+        if self.preflight_record.run_spec_hash != canonical_sha256(self.run_spec):
+            raise ValueError("live native control preflight does not bind its run spec")
+        if self.preflight_record.approval_hash != self.approval.approval_hash:
+            raise ValueError("live native control preflight does not bind its approval")
+        if self.preflight_record.budget_hash != canonical_sha256(self.budget):
+            raise ValueError("live native control preflight does not bind its budget")
+        if self.preflight_record.runtime_binding_hash != self.run_spec.runtime_binding_hash:
+            raise ValueError("live native control runtime binding does not close")
+        role_ids = tuple(item.binding_id for item in self.role_bindings)
+        if (
+            not role_ids
+            or len(set(role_ids)) != len(role_ids)
+            or role_ids != self.run_spec.model_role_binding_ids
+            or role_ids != self.preflight_record.role_binding_ids
+            or role_ids != self.approval.role_binding_ids
+            or set(item.role_binding_id for item in self.budget.role_ceilings) != set(role_ids)
+        ):
+            raise ValueError("live native control role inventory does not close")
+        if not self.owner_id or not self.host_fingerprint or self.process_id <= 0:
+            raise ValueError("live native control requires concrete owner and host identity")
+        if self.started_at.tzinfo is None or self.started_at.utcoffset() is None:
+            raise ValueError("live native control start time requires an explicit timezone")
+        if not (
+            self.approval.approved_at <= self.started_at < self.approval.expires_at
+            and self.preflight_record.observed_at <= self.started_at
+        ):
+            raise ValueError("live native control is outside its approval/preflight time window")
 
 
 _NativeErrorCategory: TypeAlias = Literal[
@@ -228,6 +290,7 @@ class _NativeRunRequest:
     judge_model_factory: Callable[[ArtifactStorePort], ModelClientPort] | None
     judge_role_binding_id: str | None
     close_timeout_seconds: float
+    control: NativeRunControl | None
 
 
 class _StoppableNativeProcess(Protocol):
@@ -253,13 +316,26 @@ class _NativeExecutionState:
     run_id: str
     lease_record_hash: str
     close_timeout_seconds: float
+    owner_id: str = NATIVE_OWNER_ID
+    budget_id: str = "native-fixture-budget-v1"
+    budget_scope_id: str | None = None
+    started_at: datetime = NATIVE_FIXTURE_STARTED_AT
+    live_timing: bool = False
+    monotonic_started: float | None = None
     sequence: int = 0
 
     def timestamp(self) -> datetime:
         self.sequence += 1
-        return NATIVE_FIXTURE_STARTED_AT + timedelta(microseconds=self.sequence)
+        deterministic_floor = self.started_at + timedelta(microseconds=self.sequence)
+        return (
+            max(datetime.now(UTC), deterministic_floor) if self.live_timing else deterministic_floor
+        )
 
     def monotonic(self) -> Decimal:
+        if self.live_timing:
+            if self.monotonic_started is None:
+                raise RuntimeError("live native timing has no monotonic origin")
+            return Decimal(str(time.monotonic() - self.monotonic_started))
         self.sequence += 1
         return Decimal(self.sequence) / Decimal("1000000")
 
@@ -273,6 +349,32 @@ class _PreparedNativeAttempt:
     ordinal: int
     request_fingerprint: str
     role_binding_id: str
+
+
+def _new_execution_state(
+    request: _NativeRunRequest,
+    store: CapsuleArtifactStorePort,
+    *,
+    sequence: int = 0,
+) -> _NativeExecutionState:
+    control = request.control
+    return _NativeExecutionState(
+        store=store,
+        run_id=request.run_id,
+        lease_record_hash=_native_run_lease(
+            request.run_id,
+            request.adapter_profile_id,
+            control=control,
+        ).lease_record_hash,
+        close_timeout_seconds=request.close_timeout_seconds,
+        owner_id=control.owner_id if control is not None else NATIVE_OWNER_ID,
+        budget_id=(control.budget.budget_id if control is not None else "native-fixture-budget-v1"),
+        budget_scope_id=control.run_spec.run_id if control is not None else None,
+        started_at=control.started_at if control is not None else NATIVE_FIXTURE_STARTED_AT,
+        live_timing=control is not None,
+        monotonic_started=time.monotonic() if control is not None else None,
+        sequence=sequence,
+    )
 
 
 def run_native_vertical_slice(
@@ -289,9 +391,12 @@ def run_native_vertical_slice(
     judge_model_factory: Callable[[ArtifactStorePort], ModelClientPort] | None = None,
     judge_role_binding_id: str | None = None,
     close_timeout_seconds: float = NATIVE_CLOSE_TIMEOUT_SECONDS,
+    control: NativeRunControl | None = None,
 ) -> NativeRunArtifacts:
     """Compose one deterministic native capsule without selecting any live transport."""
 
+    if control is not None:
+        raise ValueError("live native execution requires the lifecycle-aware composition root")
     _require_safe_component(run_id, "run ID")
     if not adapter_profile_id or not answer_role_binding_id:
         raise ValueError("native adapter profile and answer role identities are required")
@@ -299,8 +404,19 @@ def run_native_vertical_slice(
         raise ValueError("native judge model factory and role identity must be configured together")
     if not math.isfinite(close_timeout_seconds) or close_timeout_seconds <= 0:
         raise ValueError("native close timeout must be finite positive")
+    if control is not None:
+        if control.run_spec.run_id != run_id:
+            raise ValueError("live native control run ID does not match the requested run")
+        if control.preflight_record.adapter_profile_id != adapter_profile_id:
+            raise ValueError("live native control adapter profile does not match")
+        if answer_role_binding_id not in control.preflight_record.role_binding_ids:
+            raise ValueError("live native answer role is outside the preflight inventory")
+        if judge_role_binding_id is not None and (
+            judge_role_binding_id not in control.preflight_record.role_binding_ids
+        ):
+            raise ValueError("live native judge role is outside the preflight inventory")
     capsule_root = Path(output_root) / run_id
-    _acquire_native_run_owner(capsule_root, run_id)
+    _acquire_native_run_owner(capsule_root, run_id, control=control)
     return _run_native_supervised(
         _NativeRunRequest(
             output_root=Path(output_root),
@@ -315,6 +431,7 @@ def run_native_vertical_slice(
             judge_model_factory=judge_model_factory,
             judge_role_binding_id=judge_role_binding_id,
             close_timeout_seconds=close_timeout_seconds,
+            control=control,
         )
     )
 
@@ -462,6 +579,7 @@ def _native_process_entry(request: _NativeRunRequest, sender: Connection) -> Non
                 judge_model_factory=request.judge_model_factory,
                 judge_role_binding_id=request.judge_role_binding_id,
                 close_timeout_seconds=request.close_timeout_seconds,
+                control=request.control,
                 lifecycle_sender=sender,
             )
         )
@@ -501,16 +619,7 @@ def _finalize_supervised_native_success(
     ready: _NativeRunReady,
 ) -> NativeRunArtifacts:
     store = request.artifact_store_factory(ready.capsule_root)
-    state = _NativeExecutionState(
-        store=store,
-        run_id=request.run_id,
-        lease_record_hash=_native_run_lease(
-            request.run_id,
-            request.adapter_profile_id,
-        ).lease_record_hash,
-        close_timeout_seconds=request.close_timeout_seconds,
-        sequence=ready.sequence,
-    )
+    state = _new_execution_state(request, store, sequence=ready.sequence)
     _seal_native_run_record(
         state,
         run_spec_hash=ready.run_spec_hash,
@@ -637,16 +746,7 @@ def _seal_supervised_close_failure(
     active_error: BaseException,
 ) -> tuple[BaseException, ...]:
     store = request.artifact_store_factory(request.output_root / request.run_id)
-    state = _NativeExecutionState(
-        store=store,
-        run_id=request.run_id,
-        lease_record_hash=_native_run_lease(
-            request.run_id,
-            request.adapter_profile_id,
-        ).lease_record_hash,
-        close_timeout_seconds=request.close_timeout_seconds,
-        sequence=close.sequence,
-    )
+    state = _new_execution_state(request, store, sequence=close.sequence)
     errors: list[BaseException] = []
     for client_index in range(close.client_index, len(close.clients)):
         profile_id, shutdown_stage = close.clients[client_index]
@@ -717,22 +817,21 @@ def _seal_supervised_process_abort(
     run_spec_hash = (
         progress.run_spec_hash
         if progress is not None
-        else canonical_sha256(
-            [
-                "oamb-native-fixture-crash-run-spec-v1",
-                request.run_id,
-                request.adapter_profile_id,
-            ]
+        else (
+            canonical_sha256(request.control.run_spec)
+            if request.control is not None
+            else canonical_sha256(
+                [
+                    "oamb-native-fixture-crash-run-spec-v1",
+                    request.run_id,
+                    request.adapter_profile_id,
+                ]
+            )
         )
     )
-    state = _NativeExecutionState(
-        store=store,
-        run_id=request.run_id,
-        lease_record_hash=_native_run_lease(
-            request.run_id,
-            request.adapter_profile_id,
-        ).lease_record_hash,
-        close_timeout_seconds=request.close_timeout_seconds,
+    state = _new_execution_state(
+        request,
+        store,
         sequence=progress.sequence if progress is not None else 0,
     )
     errors: list[BaseException] = []
@@ -781,6 +880,7 @@ async def _run_native_vertical_slice(
     judge_model_factory: Callable[[ArtifactStorePort], ModelClientPort] | None,
     judge_role_binding_id: str | None,
     close_timeout_seconds: float,
+    control: NativeRunControl | None = None,
     lifecycle_sender: Connection | None = None,
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
@@ -791,26 +891,40 @@ async def _run_native_vertical_slice(
     case_plans = workload.iter_case_plans(case_manifest)
     if not ingestion_plans or not case_plans:
         raise ValueError("native capsule requires at least one ingestion plan and case")
-    lease = _native_run_lease(run_id, adapter_profile_id)
-    state = _NativeExecutionState(
-        store=store,
+    request_identity = _NativeRunRequest(
+        output_root=output_root,
         run_id=run_id,
-        lease_record_hash=lease.lease_record_hash,
+        adapter_profile_id=adapter_profile_id,
+        workload=workload,
+        visible_evidence_policy=visible_evidence_policy,
+        artifact_store_factory=artifact_store_factory,
+        memory_factory=memory_factory,
+        model_factory=model_factory,
+        answer_role_binding_id=answer_role_binding_id,
+        judge_model_factory=judge_model_factory,
+        judge_role_binding_id=judge_role_binding_id,
         close_timeout_seconds=close_timeout_seconds,
+        control=control,
     )
+    lease = _native_run_lease(run_id, adapter_profile_id, control=control)
+    state = _new_execution_state(request_identity, store)
     _seal(state, "run-leases", lease.lease_record_hash, lease)
     memory: MemorySystemPort | None = None
     answer_model: ModelClientPort | None = None
     judge_model: ModelClientPort | None = None
     execution_error: BaseException | None = None
-    run_spec_hash = canonical_sha256(
-        [
-            "oamb-native-fixture-diagnostic-run-spec-v1",
-            run_id,
-            dataset_manifest.manifest_hash,
-            case_manifest.manifest_hash,
-            adapter_profile_id,
-        ]
+    run_spec_hash = (
+        canonical_sha256(control.run_spec)
+        if control is not None
+        else canonical_sha256(
+            [
+                "oamb-native-fixture-diagnostic-run-spec-v1",
+                run_id,
+                dataset_manifest.manifest_hash,
+                case_manifest.manifest_hash,
+                adapter_profile_id,
+            ]
+        )
     )
     plan_records: tuple[NativeIngestionPlanRecord, ...] = ()
     case_records: tuple[CaseRecordV3, ...] = ()
@@ -818,6 +932,9 @@ async def _run_native_vertical_slice(
     case_occurrence_ids: tuple[str, ...] = ()
     _seal(state, "specs", "dataset-manifest", dataset_manifest)
     _seal(state, "specs", "case-manifest", case_manifest)
+    if control is not None:
+        _require_live_manifest_closure(control, dataset_manifest, case_manifest)
+        _seal_live_control(state, control)
     if lifecycle_sender is not None:
         lifecycle_sender.send(
             _NativeRunProgress(
@@ -836,17 +953,24 @@ async def _run_native_vertical_slice(
         capabilities = await memory.capabilities()
         if not capabilities.provider_order_preserved or not capabilities.native_reranking_disabled:
             raise ValueError("native adapter must preserve provider order with reranking disabled")
-        run_spec_hash = canonical_sha256(
-            [
-                "oamb-native-fixture-run-spec-v1",
-                run_id,
-                dataset_manifest.manifest_hash,
-                case_manifest.manifest_hash,
-                runtime.memory_system_id,
-                runtime.runtime_binding_hash,
-                adapter_profile_id,
-            ]
-        )
+        if control is not None:
+            if (
+                runtime.memory_system_id != control.run_spec.memory_system_id
+                or runtime.runtime_binding_hash != control.run_spec.runtime_binding_hash
+            ):
+                raise ValueError("live native runtime resolution differs from the run spec")
+        else:
+            run_spec_hash = canonical_sha256(
+                [
+                    "oamb-native-fixture-run-spec-v1",
+                    run_id,
+                    dataset_manifest.manifest_hash,
+                    case_manifest.manifest_hash,
+                    runtime.memory_system_id,
+                    runtime.runtime_binding_hash,
+                    adapter_profile_id,
+                ]
+            )
         ingestion_occurrence_ids = tuple(
             ingestion_occurrence_id(run_id, runtime.memory_system_id, plan.ingestion_plan_id)
             for plan in ingestion_plans
@@ -1642,6 +1766,55 @@ def _seal_deterministic_evaluation(
     return _seal_raw(store, payload, media_type="application/json")
 
 
+def _require_live_manifest_closure(
+    control: NativeRunControl,
+    dataset_manifest: object,
+    case_manifest: object,
+) -> None:
+    dataset_hash = getattr(dataset_manifest, "manifest_hash", None)
+    case_hash = getattr(case_manifest, "manifest_hash", None)
+    workload_id = getattr(case_manifest, "workload_id", None)
+    if (
+        dataset_hash != control.run_spec.dataset_manifest_hash
+        or case_hash != control.run_spec.case_manifest_hash
+        or workload_id != control.run_spec.workload_id
+        or dataset_hash != control.preflight_record.dataset_manifest_hash
+        or case_hash != control.preflight_record.subset_manifest_hash
+    ):
+        raise ValueError("live native workload manifests differ from the durable control")
+
+
+def _seal_live_control(state: _NativeExecutionState, control: NativeRunControl) -> None:
+    records: tuple[tuple[str, str, StrictContract], ...] = (
+        ("source/specs/run-spec.json", control.run_spec.run_id, control.run_spec),
+        (
+            "source/specs/run-preflight.json",
+            control.preflight_record.preflight_record_hash,
+            control.preflight_record,
+        ),
+        (
+            "source/specs/external-call-approval.json",
+            control.approval.approval_hash,
+            control.approval,
+        ),
+        ("source/specs/budget.json", control.budget.budget_id, control.budget),
+    )
+    for relative_path, record_id, record in records:
+        seal_source_contract(
+            state.store,
+            relative_path=relative_path,
+            record_id=record_id,
+            record=record,
+        )
+    for binding in control.role_bindings:
+        seal_source_contract(
+            state.store,
+            relative_path=f"source/model-role-bindings/{binding.binding_id}.json",
+            record_id=binding.binding_id,
+            record=binding,
+        )
+
+
 def _seal_raw(store: ArtifactStorePort, payload: bytes, *, media_type: str) -> str:
     raw_sha256 = hashlib.sha256(payload).hexdigest()
     return store.seal_raw(
@@ -1671,7 +1844,7 @@ def _prepare_native_attempt(
         "occurrence_id": parent_id,
         "lease_record_hash": state.lease_record_hash,
         "lease_epoch": 1,
-        "owner_id": NATIVE_OWNER_ID,
+        "owner_id": state.owner_id,
         "stage": stage,
         "request_fingerprint": request_fingerprint,
         "reconciliation_capability": "none",
@@ -1681,9 +1854,9 @@ def _prepare_native_attempt(
     claim = OccurrenceClaimRecord.model_validate({"claim_id": claim_id, **claim_fields})
     reserved_at = state.timestamp()
     reservation_fields = {
-        "budget_id": "native-fixture-budget-v1",
+        "budget_id": state.budget_id,
         "scope_kind": BudgetScopeKindV2.RUN,
-        "scope_id": parent_id,
+        "scope_id": state.budget_scope_id or parent_id,
         "role_binding_id": role_binding_id,
         "attempt_id": attempt_identity,
         "reserved_attempts": 1,
@@ -1997,7 +2170,7 @@ def _seal_native_run_record(
         run_spec_hash=run_spec_hash,
         state=run_state,
         resume_disposition=ResumeDisposition.NOT_APPLICABLE,
-        started_at=NATIVE_FIXTURE_STARTED_AT,
+        started_at=state.started_at,
         ended_at=state.timestamp(),
         ingestion_occurrence_ids=ingestion_occurrence_ids,
         case_occurrence_ids=case_occurrence_ids,
@@ -2010,13 +2183,18 @@ def _elapsed_seconds(started_at: datetime, ended_at: datetime) -> Decimal:
     return Decimal(microseconds) / Decimal("1000000")
 
 
-def _acquire_native_run_owner(capsule_root: Path, run_id: str) -> None:
+def _acquire_native_run_owner(
+    capsule_root: Path,
+    run_id: str,
+    *,
+    control: NativeRunControl | None = None,
+) -> None:
     owner_bytes = canonical_json_bytes(
         {
             "schema_name": "native_run_owner",
             "schema_version": 1,
             "run_id": run_id,
-            "owner_id": NATIVE_OWNER_ID,
+            "owner_id": control.owner_id if control is not None else NATIVE_OWNER_ID,
         }
     )
     result = atomic_write_bytes(
@@ -2028,18 +2206,30 @@ def _acquire_native_run_owner(capsule_root: Path, run_id: str) -> None:
         raise NativeRunOwnershipError(f"native run {run_id!r} is already owned")
 
 
-def _native_run_lease(run_id: str, adapter_profile_id: str) -> RunLeaseRecord:
+def _native_run_lease(
+    run_id: str,
+    adapter_profile_id: str,
+    *,
+    control: NativeRunControl | None = None,
+) -> RunLeaseRecord:
+    provider_project_id = (
+        control.preflight_record.provider_project_id if control is not None else "native-fixture"
+    )
     candidate = RunLeaseRecord(
         lease_record_hash="0" * 64,
         run_id=run_id,
-        provider_project_id="native-fixture",
+        provider_project_id=provider_project_id,
         provider_profile_id=adapter_profile_id,
         lease_epoch=1,
-        owner_id=NATIVE_OWNER_ID,
-        host_fingerprint=canonical_sha256(["oamb-native-fixture-host-v1"]),
-        process_id=1,
+        owner_id=control.owner_id if control is not None else NATIVE_OWNER_ID,
+        host_fingerprint=(
+            control.host_fingerprint
+            if control is not None
+            else canonical_sha256(["oamb-native-fixture-host-v1"])
+        ),
+        process_id=control.process_id if control is not None else 1,
         predecessor_lease_record_hash=None,
-        acquired_at=NATIVE_FIXTURE_STARTED_AT,
+        acquired_at=control.started_at if control is not None else NATIVE_FIXTURE_STARTED_AT,
     )
     return candidate.model_copy(
         update={

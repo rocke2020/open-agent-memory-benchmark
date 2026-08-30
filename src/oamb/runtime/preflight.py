@@ -11,10 +11,12 @@ from typing import Any
 from oamb.config.load import EnvironmentReference
 from oamb.config.resolve import RoleSelection, validate_selected_environment
 from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ports import ArtifactStorePort
 from oamb.contracts.specifications import (
     BindingKind,
     BudgetScopeKindV2,
     BudgetSpecV2,
+    DispatchBudgetRoute,
     ExecutionEnvironmentBinding,
     ExecutionOwner,
     ExternalCallApprovalRecord,
@@ -24,12 +26,17 @@ from oamb.contracts.specifications import (
     ProviderGateStatus,
     ProviderRuntimeProfileAttestation,
     RoleBindingStatus,
+    RunPreflightRecord,
     RuntimeAttestationStatus,
+    SourceEvidenceBinding,
     TransportProfile,
     external_call_approval_hash,
     memory_system_runtime_binding_hash,
     provider_runtime_profile_attestation_hash,
+    run_preflight_record_hash,
 )
+
+from .source_records import seal_source_contract
 
 CONTROLLED_EMBEDDING_MODEL = "qwen3-embedding:0.6b"
 CONTROLLED_EMBEDDING_DIMENSION = 1024
@@ -819,4 +826,99 @@ def resolve_run_plan(request: RunPreflightRequest) -> ResolvedRunPlan:
         execution_environment_binding=request.execution_environment_binding,
         schema_versions=_schema_versions(request),
         plan_hash=canonical_sha256(_plan_hash_payload(request, slots, profile, gates)),
+    )
+
+
+def build_run_preflight_record(
+    *,
+    plan: ResolvedRunPlan,
+    run_id: str,
+    observed_at: datetime,
+    run_spec_hash: str,
+    dataset_manifest_hash: str,
+    subset_manifest_hash: str,
+    adapter_profile_hash: str,
+    provider_service_evidence: SourceEvidenceBinding,
+    memory_conformance_evidence: SourceEvidenceBinding,
+    dispatch_routes: tuple[DispatchBudgetRoute, ...],
+    redacted_endpoint_fingerprints: tuple[str, ...],
+    credential_reference_fingerprints: tuple[str, ...],
+) -> RunPreflightRecord:
+    """Build the public durable closure from one already-resolved live plan."""
+
+    if plan.operation_kind != OperationKind.BENCHMARK_RUN:
+        raise PreflightRejected("run preflight record requires a benchmark-run plan")
+    if plan.adapter_profile is None or plan.runtime_binding is None or plan.approval is None:
+        raise PreflightRejected("run preflight record requires live profile/runtime/approval")
+    profile = plan.adapter_profile
+    if profile.provider_project_id is None:
+        raise PreflightRejected("run preflight record requires a provider project")
+    runtime_binding_hash = getattr(plan.runtime_binding, "runtime_binding_hash", None)
+    approval_hash = getattr(plan.approval, "approval_hash", None)
+    if not isinstance(runtime_binding_hash, str) or not isinstance(approval_hash, str):
+        raise PreflightRejected("run preflight record requires hashed runtime and approval")
+    role_binding_ids_list: list[str] = []
+    for slot in plan.role_slots:
+        if slot.status != ResolutionStatus.RESOLVED:
+            continue
+        binding_value = _contract_value(slot.binding)
+        if not isinstance(binding_value, Mapping):
+            raise PreflightRejected("resolved run role requires a versioned binding")
+        binding_id = binding_value.get("binding_id")
+        if not isinstance(binding_id, str) or not binding_id:
+            raise PreflightRejected("resolved run role requires a binding identity")
+        role_binding_ids_list.append(binding_id)
+    role_binding_ids = tuple(role_binding_ids_list)
+    budget_hash = canonical_sha256(_contract_value(plan.budget_spec))
+    durability_proof_hash = canonical_sha256(
+        [
+            "oamb-artifact-durability-proof-v1",
+            plan.artifact_durability.artifact_root_fingerprint,
+            plan.artifact_durability.available_bytes,
+            plan.artifact_durability.lease_supported,
+            plan.artifact_durability.file_fsync_supported,
+            plan.artifact_durability.directory_fsync_supported,
+            plan.artifact_durability.no_replace_supported,
+        ]
+    )
+    fields = {
+        "run_id": run_id,
+        "observed_at": observed_at,
+        "resolved_plan_hash": plan.plan_hash,
+        "run_spec_hash": run_spec_hash,
+        "dataset_manifest_hash": dataset_manifest_hash,
+        "subset_manifest_hash": subset_manifest_hash,
+        "adapter_profile_id": profile.profile_id,
+        "adapter_profile_hash": adapter_profile_hash,
+        "provider_project_id": profile.provider_project_id,
+        "provider_profile_id": profile.profile_id,
+        "runtime_binding_hash": runtime_binding_hash,
+        "provider_service_evidence": provider_service_evidence,
+        "memory_conformance_evidence": memory_conformance_evidence,
+        "role_binding_ids": role_binding_ids,
+        "dispatch_routes": dispatch_routes,
+        "approval_hash": approval_hash,
+        "budget_hash": budget_hash,
+        "redacted_endpoint_fingerprints": redacted_endpoint_fingerprints,
+        "credential_reference_fingerprints": credential_reference_fingerprints,
+        "artifact_repository_fingerprint": (plan.artifact_durability.artifact_root_fingerprint),
+        "artifact_durability_proof_hash": durability_proof_hash,
+    }
+    return RunPreflightRecord.model_validate(
+        {
+            "preflight_record_hash": run_preflight_record_hash(fields),
+            **fields,
+        }
+    )
+
+
+def seal_run_preflight_record(
+    store: ArtifactStorePort,
+    record: RunPreflightRecord,
+) -> None:
+    seal_source_contract(
+        store,
+        relative_path="source/specs/run-preflight.json",
+        record_id=record.preflight_record_hash,
+        record=record,
     )

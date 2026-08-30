@@ -30,8 +30,6 @@ dependencies = [
   "tiktoken==0.14.0",
   # T6: direct, schema-preserving reads of pinned MemoryAgentBench Parquet files.
   "pyarrow>=19,<24",
-  # T8: public-key-only Ed25519 verification for detached human decisions.
-  "cryptography>=46,<47",
 ]
 
 [project.optional-dependencies]

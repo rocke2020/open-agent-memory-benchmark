@@ -47,7 +47,7 @@ def test_python_run_pointer_blocks_shell_lifecycle_mutation(tmp_path: Path) -> N
     blocked = shell_lifecycle_acquire(runtime)
 
     assert blocked.returncode != 0
-    assert "active OAMB run lease" in blocked.stderr
+    assert "active OAMB provider operation" in blocked.stderr
     assert not (runtime / "provider-lifecycle.lock").exists()
 
     bridge.release_run(authority)
@@ -69,7 +69,7 @@ def test_python_dispatched_attempt_pointer_blocks_shell_lifecycle_mutation(
         lease_record_hash="a" * 64,
     )
     bridge.mark_attempt_dispatched(attempt_id="b" * 64, intent_record_hash="c" * 64)
-    (runtime / "active-run-lease").unlink()
+    (runtime / "active-operation").unlink()
 
     blocked = shell_lifecycle_acquire(runtime)
 
@@ -125,4 +125,4 @@ def test_lifecycle_lock_covers_durable_lease_seal_and_pointer_creation(
     assert not thread.is_alive()
     assert racing_lifecycle.returncode != 0
     assert "another provider lifecycle operation" in racing_lifecycle.stderr
-    assert (runtime / "active-run-lease").is_file()
+    assert (runtime / "active-operation").is_file()

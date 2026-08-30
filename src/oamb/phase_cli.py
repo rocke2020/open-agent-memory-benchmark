@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from oamb import phase_cli_io as _phase_io
-from oamb.artifacts.atomic import atomic_write_bytes, read_regular_file
+from oamb.artifacts.atomic import atomic_write_bytes
 from oamb.artifacts.validation.phase import (
     PhaseGateValidationInput,
     phase_ai_review_evidence_closes,
@@ -32,7 +32,6 @@ from oamb.contracts.specifications import (
     BudgetSpecV2,
     ExecutionEnvironmentBinding,
     ExternalCallApprovalRecord,
-    HumanReviewKeyBinding,
     ModelRoleBindingV2,
     SourceEvidenceBinding,
     SourceEvidenceKind,
@@ -40,9 +39,9 @@ from oamb.contracts.specifications import (
 from oamb.contracts.states import ValidationDisposition
 from oamb.phase_review_profiles import PHASE_REVIEW_CLIENT_KINDS
 from oamb.reporting.human_review import (
+    HumanReviewConfirmationError,
+    create_human_quality_review_record,
     derive_evaluation_phase_gate,
-    import_human_review_decision,
-    prepare_human_review_decision,
 )
 from oamb.reporting.review import (
     build_ai_review_plan,
@@ -66,7 +65,7 @@ ai_review_app = typer.Typer(
     no_args_is_help=True,
 )
 human_review_app = typer.Typer(
-    help="Prepare or verify externally signed human decisions; OAMB never signs.",
+    help="Create one HumanQualityReviewRecord after exact local TTY confirmation.",
     no_args_is_help=True,
 )
 gate_app = typer.Typer(help="Build or validate the immutable T10 phase gate.")
@@ -140,7 +139,7 @@ _PHASE_REVIEW_EVIDENCE_HELP = (
     "approval.json, budget.json, cost-measurement-spec.json, execution-environment.json, "
     "optional live-only price-snapshot.json, batch-results.json, integrity-result.json, "
     "ai-history.json, attempts.json, usage-records.json, resource-records.json, "
-    "cost-records.json, human-key-binding.json, human-decision.json, and human-signature.txt."
+    "and cost-records.json. Human confirmation is a separate create-only record."
 )
 
 
@@ -541,71 +540,6 @@ def ai_review_reduce_recorded(
     typer.echo("status: reduced from recorded outputs; no model call was made")
 
 
-@human_review_app.command("decision-prepare")
-def human_review_decision_prepare(
-    bundle_path: Annotated[Path, typer.Option("--bundle", help="EvaluationReviewBundle JSON.")],
-    ai_review: Annotated[
-        Path,
-        typer.Option("--ai-review", help="Canonical AI PASS record JSON."),
-    ],
-    review_evidence_directory: Annotated[
-        Path,
-        typer.Option(
-            "--review-evidence-directory",
-            help=_PHASE_REVIEW_EVIDENCE_HELP,
-        ),
-    ],
-    status: Annotated[str, typer.Option("--status", help="Human decision: pass or fail.")],
-    decided_at: Annotated[
-        str,
-        typer.Option("--decided-at", help="Decision timestamp with an explicit UTC offset."),
-    ],
-    nonce: Annotated[str, typer.Option("--nonce", help="Fresh human-decision nonce.")],
-    reviewer_label: Annotated[
-        str,
-        typer.Option("--reviewer-label", help="Public-safe reviewer label."),
-    ],
-    output: Annotated[
-        Path,
-        typer.Option("--output", help="Create-only unsigned canonical decision JSON."),
-    ],
-    finding_codes: Annotated[
-        list[str] | None,
-        typer.Option("--finding-code", help="Repeat for each public finding code."),
-    ] = None,
-    evidence_references: Annotated[
-        list[str] | None,
-        typer.Option("--evidence-reference", help="Repeat for each public evidence reference."),
-    ] = None,
-) -> None:
-    """Prepare exact unsigned bytes after interactive bundle-hash confirmation."""
-
-    try:
-        bundle = _phase_io.load_contract(bundle_path, EvaluationReviewBundle)
-        ai_record = _phase_io.load_contract(ai_review, AIQualityReviewRecord)
-        _require_validator_bound_unique_ai_pass_head(
-            bundle,
-            ai_record,
-            review_evidence_directory,
-        )
-        _confirm_bundle_hash(bundle)
-        prepared = prepare_human_review_decision(
-            review_bundle_hash=bundle.bundle_id,
-            ai_review_record_hash=ai_record.ai_review_record_id,
-            status=status,
-            decided_at=_phase_io.parse_utc_datetime(decided_at),
-            nonce=nonce,
-            reviewer_label=reviewer_label,
-            finding_codes=tuple(finding_codes or ()),
-            evidence_references=tuple(evidence_references or ()),
-        )
-        atomic_write_bytes(output, prepared.canonical_bytes, trusted_root=output.parent)
-    except Exception as exc:
-        _raise_cli_error(exc)
-    typer.echo(f"unsigned human decision: {output}")
-    typer.echo("sign these exact bytes outside OAMB with the pinned Ed25519 private key")
-
-
 @human_review_app.command("record")
 def human_review_record(
     bundle_path: Annotated[Path, typer.Option("--bundle", help="EvaluationReviewBundle JSON.")],
@@ -620,62 +554,61 @@ def human_review_record(
             help=_PHASE_REVIEW_EVIDENCE_HELP,
         ),
     ],
-    decision_file: Annotated[
-        Path,
-        typer.Option("--decision-file", help="Canonical unsigned HumanReviewDecision bytes."),
-    ],
-    signature_file: Annotated[
-        Path,
-        typer.Option("--signature-file", help="Detached canonical-base64 Ed25519 signature."),
-    ],
-    key_binding_path: Annotated[
-        Path,
-        typer.Option("--key-binding", help="Pinned HumanReviewKeyBinding JSON."),
-    ],
-    imported_at: Annotated[
+    status: Annotated[str, typer.Option("--status", help="Human decision: pass or fail.")],
+    nonce: Annotated[str, typer.Option("--nonce", help="Fresh human confirmation nonce.")],
+    operator_id: Annotated[
         str,
-        typer.Option("--imported-at", help="Import timestamp with an explicit UTC offset."),
+        typer.Option("--operator-id", help="Public-safe local operator identifier."),
     ],
-    output: Annotated[
-        Path,
-        typer.Option("--output", help="Create-only verified HumanQualityReviewRecord JSON."),
+    created_at: Annotated[
+        str,
+        typer.Option("--created-at", help="Confirmation timestamp with an explicit UTC offset."),
     ],
-    prior_human_reviews: Annotated[
-        list[Path] | None,
-        typer.Option(
-            "--prior-human-review",
-            help="Repeat for append-only prior records whose nonces cannot be reused.",
-        ),
+    finding_codes: Annotated[
+        list[str] | None,
+        typer.Option("--finding-code", help="Repeat for each public finding code."),
+    ] = None,
+    evidence_references: Annotated[
+        list[str] | None,
+        typer.Option("--evidence-reference", help="Repeat for each public evidence reference."),
     ] = None,
 ) -> None:
-    """Verify a detached signature under the pinned public key and import the record."""
+    """Confirm exact status and immutable hashes in one TTY phrase, then create the record."""
 
     try:
         bundle = _phase_io.load_contract(bundle_path, EvaluationReviewBundle)
         ai_record = _phase_io.load_contract(ai_review, AIQualityReviewRecord)
+        evidence = _phase_io.load_phase_review_evidence(review_evidence_directory)
+        if evidence.human_record is not None:
+            raise HumanReviewConfirmationError(
+                "review bundle already has a human quality review record"
+            )
         _require_validator_bound_unique_ai_pass_head(
             bundle,
             ai_record,
             review_evidence_directory,
         )
-        key_binding = _phase_io.load_contract(key_binding_path, HumanReviewKeyBinding)
-        prior_records = tuple(
-            _phase_io.load_contract(path, HumanQualityReviewRecord)
-            for path in prior_human_reviews or ()
+        _confirm_human_review_phrase(
+            status=status,
+            bundle_hash=bundle.bundle_id,
+            ai_review_record_hash=ai_record.ai_review_record_id,
+            nonce=nonce,
         )
-        _confirm_bundle_hash(bundle)
-        record = import_human_review_decision(
-            decision_bytes=read_regular_file(decision_file),
-            signature_base64=_phase_io.read_signature(signature_file),
-            key_binding=key_binding,
+        record = create_human_quality_review_record(
             canonical_ai_record=ai_record,
-            used_nonces=tuple(item.decision_nonce for item in prior_records),
-            imported_at=_phase_io.parse_utc_datetime(imported_at),
+            status=status,
+            nonce=nonce,
+            operator_id=operator_id,
+            finding_codes=tuple(finding_codes or ()),
+            evidence_references=tuple(evidence_references or ()),
+            used_nonces=(),
+            created_at=_phase_io.parse_utc_datetime(created_at),
         )
-        _phase_io.write_contract(output, record)
+        output = review_evidence_directory / "human-review.json"
+        _phase_io.write_contract(output, record, trusted_root=review_evidence_directory)
     except Exception as exc:
         _raise_cli_error(exc)
-    typer.echo(f"verified human review record: {output}")
+    typer.echo(f"human review record: {output}")
 
 
 @gate_app.command("build")
@@ -834,7 +767,7 @@ def acceptance_report_build(
             source_identity=gate.gate_id,
             source_root_hash=validation.target_hash,
             validation_result_hash=validation_hash,
-            source_schema_versions=("evaluation_phase_gate@1",),
+            source_schema_versions=("evaluation_phase_gate@2",),
         )
         target = PhaseGateValidationInput(bundle=bundle, gate=gate, review_evidence=evidence)
         built = build_report_derivation(
@@ -931,14 +864,26 @@ def _require_validator_bound_unique_ai_pass_head(
         raise ValueError("human review requires the validator-bound unique canonical AI PASS head")
 
 
-def _confirm_bundle_hash(bundle: EvaluationReviewBundle) -> None:
-    typer.echo(f"review bundle: {bundle.bundle_id}")
-    typer.echo(f"evaluation report model: {bundle.report_model_hash}")
+def _confirm_human_review_phrase(
+    *,
+    status: str,
+    bundle_hash: str,
+    ai_review_record_hash: str,
+    nonce: str,
+) -> None:
+    canonical_status = status.upper()
+    if canonical_status not in {"PASS", "FAIL"} or status != status.lower():
+        raise ValueError("status must be exactly 'pass' or 'fail'")
+    expected = f"{canonical_status} {bundle_hash} {ai_review_record_hash} {nonce}"
+    typer.echo(f"status: {canonical_status}")
+    typer.echo(f"review bundle: {bundle_hash}")
+    typer.echo(f"AI review record: {ai_review_record_hash}")
+    typer.echo(f"nonce: {nonce}")
     if not _stdin_is_interactive():
-        raise ValueError("bundle-hash confirmation requires an interactive TTY")
-    confirmed = typer.prompt("Retype the exact review bundle hash")
-    if confirmed != bundle.bundle_id:
-        raise ValueError("interactive review bundle hash confirmation did not match")
+        raise ValueError("human review confirmation requires an interactive TTY")
+    confirmed = typer.prompt("Retype STATUS BUNDLE AI NONCE exactly")
+    if confirmed != expected:
+        raise ValueError("interactive human review confirmation phrase did not match")
 
 
 def _stdin_is_interactive() -> bool:

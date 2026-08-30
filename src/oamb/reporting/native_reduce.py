@@ -47,6 +47,7 @@ from oamb.contracts.reporting import (
 from oamb.contracts.specifications import (
     CaseManifest,
     ReportSpec,
+    RunSpec,
     SourceEvidenceBinding,
     SourceEvidenceKind,
 )
@@ -85,6 +86,7 @@ class NativeReportReductionError(ValueError):
 @dataclass(frozen=True, slots=True)
 class _NativeReportRecords:
     case_manifest: CaseManifest
+    run_spec: RunSpec | None
     plans: tuple[NativePlanRecord, ...]
     cases: tuple[CaseRecordV3, ...]
     attempts: tuple[AttemptRecordV2, ...]
@@ -206,6 +208,7 @@ def reduce_native_run_report(
     metrics = _metric_summaries(cases)
     mab65_reduction = _build_native_mab65_report_reduction(
         workload_id=case_manifest.workload_id,
+        manifest_id=case_manifest.manifest_id,
         validation_target=validation_target,
         plans=plans,
         cases=cases,
@@ -234,7 +237,11 @@ def reduce_native_run_report(
     memory_system_ids = tuple(dict.fromkeys(item.memory_system_id for item in plans))
     if len(memory_system_ids) != 1:
         raise NativeReportReductionError("native report requires one memory-system identity")
-    limitations = ["fixture-only native evidence; no live provider call was made"]
+    limitations = (
+        ["live provider execution; supplier billing is reported only when evidenced"]
+        if records.run_spec is not None
+        else ["fixture-only native evidence; no live provider call was made"]
+    )
     if not accounting.billing_complete:
         limitations.append("supplier billing completeness is unavailable")
     if not accounting.cost_complete:
@@ -272,7 +279,11 @@ def reduce_native_run_report(
         audience=report_spec.audience,
         origin_kind="native",
         capsule_id=manifest.capsule_id,
-        protocol_id="native-fixture-protocol-v1",
+        protocol_id=(
+            records.run_spec.protocol_id
+            if records.run_spec is not None
+            else "native-fixture-protocol-v1"
+        ),
         workload_id=case_manifest.workload_id,
         memory_system_id=memory_system_ids[0],
         claim_boundary=build_validation_claim_boundary(
@@ -305,11 +316,12 @@ def reduce_native_run_report(
 def _build_native_mab65_report_reduction(
     *,
     workload_id: str = MAB65_WORKLOAD_ID,
+    manifest_id: str = MAB65_WORKLOAD_ID,
     validation_target: object | None,
     plans: tuple[NativePlanRecord, ...],
     cases: tuple[CaseRecordV3, ...],
 ) -> Mab65ReportReduction | None:
-    if workload_id != MAB65_WORKLOAD_ID:
+    if workload_id != MAB65_WORKLOAD_ID or manifest_id != MAB65_WORKLOAD_ID:
         return None
 
     from oamb.artifacts.validation.run_evidence import (
@@ -447,6 +459,7 @@ def _load_report_records(
     manifest: CapsuleManifest,
 ) -> _NativeReportRecords:
     case_manifests: list[CaseManifest] = []
+    run_specs: list[RunSpec] = []
     plans: list[NativePlanRecord] = []
     cases: list[CaseRecordV3] = []
     attempts: list[AttemptRecordV2] = []
@@ -471,6 +484,8 @@ def _load_report_records(
             source_schema_versions.append(f"{schema_name}@{schema_version}")
         if entry.record_kind == "case_manifest":
             case_manifests.append(CaseManifest.model_validate_json(content))
+        elif entry.record_kind == "run_spec":
+            run_specs.append(RunSpec.model_validate_json(content))
         elif entry.record_kind == "ingestion_plan_record":
             if document["schema_version"] == 2:
                 plans.append(IngestionPlanRecordV2.model_validate_json(content))
@@ -488,10 +503,11 @@ def _load_report_records(
             resources.append(ResourceUsageRecord.model_validate_json(content))
         elif entry.record_kind == "cost_record":
             costs.append(CostRecord.model_validate_json(content))
-    if len(case_manifests) != 1 or not plans or not cases:
+    if len(case_manifests) != 1 or len(run_specs) > 1 or not plans or not cases:
         raise NativeReportReductionError("native capsule report inventory is incomplete")
     return _NativeReportRecords(
         case_manifest=case_manifests[0],
+        run_spec=run_specs[0] if run_specs else None,
         plans=tuple(plans),
         cases=tuple(cases),
         attempts=tuple(attempts),

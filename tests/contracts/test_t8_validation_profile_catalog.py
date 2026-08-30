@@ -40,6 +40,8 @@ EXPECTED_PROFILE_IDS = (
     "oamb-t8-export-run-local-v1",
     "oamb-t8-export-comparison-public-v1",
     "oamb-t8-export-comparison-local-v1",
+    "oamb-t8-export-evaluation-public-v1",
+    "oamb-t8-export-evaluation-local-v1",
     "oamb-t8-export-release-public-v1",
     "oamb-t8-export-release-local-v1",
     "oamb-t8-export-phase-acceptance-public-v1",

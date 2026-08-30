@@ -15,6 +15,7 @@ from oamb.artifacts.capsule import (
     publish_with_last_marker,
     verify_published_directory,
 )
+from oamb.artifacts.validation.profiles import exact_report_export_profile
 from oamb.artifacts.validation.report_export import (
     ReportExportInput,
     validate_report_export,
@@ -29,14 +30,19 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.reporting import (
     ComparisonReportModel,
     DiagnosticRunReportModel,
+    EvaluationReportModel,
     PhaseAcceptanceReport,
     ReleaseReportModel,
+    ReportArtifactManifestV2,
+    ReportArtifactManifestV3,
     RunReportModelV3,
 )
 from oamb.contracts.specifications import (
     AcceptanceReportSpec,
     DerivationSpecV2,
+    DerivationSpecV3,
     ReportSpec,
+    ReportSpecV2,
     SourceEvidenceBinding,
 )
 from oamb.contracts.states import ValidationDisposition
@@ -47,15 +53,20 @@ from oamb.reporting.offline_renderer import (
     offline_renderer_hash,
     render_offline_report,
 )
-from oamb.reporting.public import build_report_artifact_manifest_v2
+from oamb.reporting.public import (
+    build_evaluation_model_closure,
+    build_report_artifact_manifest_v2,
+    build_report_artifact_manifest_v3,
+)
 from oamb.reporting.roots import (
     build_derivation_spec_v2,
+    build_derivation_spec_v3,
     build_report_identity_spec_binding,
 )
 
 DERIVATION_MARKER = "derived-manifest.json"
-ReportIdentitySpec = ReportSpec | AcceptanceReportSpec
-ReportKind = Literal["run", "comparison", "release", "phase_acceptance"]
+ReportIdentitySpec = ReportSpec | ReportSpecV2 | AcceptanceReportSpec
+ReportKind = Literal["run", "comparison", "evaluation", "release", "phase_acceptance"]
 
 
 class ReportExportError(ValueError):
@@ -104,44 +115,88 @@ def build_report_derivation(
     binding = build_report_identity_spec_binding(report_spec)
     validation_hashes = tuple(canonical_sha256(item) for item in evidence_validations)
     report_model_hash = hashlib.sha256(report_model_bytes).hexdigest()
-    artifact = build_report_artifact_manifest_v2(
-        report_id=model.report_id,
-        report_kind=report_kind,
-        report_identity_spec_binding=binding,
-        ordered_source_bindings=ordered_source_bindings,
-        ordered_evidence_validation_hashes=validation_hashes,
-        report_model_hash=report_model_hash,
-        renderer_hash=renderer_hash,
-        asset_hashes=asset_hashes,
-        browser_contract_hash=report_spec.browser_contract_hash,
-        performance_contract_hash=report_spec.performance_contract_hash,
-        export_profile_selector_id=report_spec.export_profile_selector_id,
-        export_profile_selector_version=report_spec.export_profile_selector_version,
-        audience=report_spec.audience,
-        schema_versions=schema_versions,
-        limitations=(
-            historical_limitation_texts(model.limitation_codes)
-            if isinstance(model, ExternalHistoricalEvidenceReport)
-            else model.limitations
-        ),
-    )
     evidence_validation_hash = canonical_sha256(
         ["oamb-ordered-evidence-validations-v1", evidence_validations]
     )
-    derivation = build_derivation_spec_v2(
-        derivation_kind=_derivation_kind(report_kind),
-        ordered_source_bindings=ordered_source_bindings,
-        evidence_validation_result_hash=evidence_validation_hash,
-        transform_spec_hash=transform_spec_hash,
-        report_identity_spec_binding=binding,
-        reducer_and_renderer_input_hashes=(
-            report_model_hash,
-            renderer_hash,
-            *asset_hashes,
-            report_spec.browser_contract_hash,
-            report_spec.performance_contract_hash,
-        ),
+    limitations = (
+        historical_limitation_texts(model.limitation_codes)
+        if isinstance(model, ExternalHistoricalEvidenceReport)
+        else model.limitations
     )
+    reducer_and_renderer_inputs = (
+        report_model_hash,
+        renderer_hash,
+        *asset_hashes,
+        report_spec.browser_contract_hash,
+        report_spec.performance_contract_hash,
+    )
+    artifact: ReportArtifactManifestV2 | ReportArtifactManifestV3
+    if isinstance(model, EvaluationReportModel):
+        if not isinstance(report_spec, ReportSpecV2) or binding.schema_version != 2:
+            raise ValueError("evaluation publication requires the v2 report identity chain")
+        model_closure = build_evaluation_model_closure(model)
+        export_profile_hash = canonical_sha256(
+            exact_report_export_profile(
+                report_kind="evaluation",
+                audience=report_spec.audience,
+            )
+        )
+        artifact = build_report_artifact_manifest_v3(
+            report_id=model.report_id,
+            report_identity_spec_binding=binding,
+            ordered_source_bindings=ordered_source_bindings,
+            ordered_evidence_validation_hashes=validation_hashes,
+            report_model_hash=report_model_hash,
+            evaluation_model_closure=model_closure,
+            renderer_hash=renderer_hash,
+            asset_hashes=asset_hashes,
+            browser_contract_hash=report_spec.browser_contract_hash,
+            performance_contract_hash=report_spec.performance_contract_hash,
+            export_profile_selector_id=report_spec.export_profile_selector_id,
+            export_profile_selector_version=report_spec.export_profile_selector_version,
+            export_profile_hash=export_profile_hash,
+            audience=report_spec.audience,
+            schema_versions=schema_versions,
+            limitations=limitations,
+        )
+        derivation: DerivationSpecV2 | DerivationSpecV3 = build_derivation_spec_v3(
+            ordered_source_bindings=ordered_source_bindings,
+            evidence_validation_result_hash=evidence_validation_hash,
+            transform_spec_hash=transform_spec_hash,
+            report_identity_spec_binding=binding,
+            evaluation_model_closure=model_closure,
+            reducer_and_renderer_input_hashes=reducer_and_renderer_inputs,
+        )
+    else:
+        if isinstance(report_spec, ReportSpecV2) or binding.schema_version != 1:
+            raise ValueError("non-evaluation publication requires the frozen v1/v2 chain")
+        if report_kind == "evaluation":
+            raise ValueError("evaluation publication requires an evaluation report model")
+        artifact = build_report_artifact_manifest_v2(
+            report_id=model.report_id,
+            report_kind=report_kind,
+            report_identity_spec_binding=binding,
+            ordered_source_bindings=ordered_source_bindings,
+            ordered_evidence_validation_hashes=validation_hashes,
+            report_model_hash=report_model_hash,
+            renderer_hash=renderer_hash,
+            asset_hashes=asset_hashes,
+            browser_contract_hash=report_spec.browser_contract_hash,
+            performance_contract_hash=report_spec.performance_contract_hash,
+            export_profile_selector_id=report_spec.export_profile_selector_id,
+            export_profile_selector_version=report_spec.export_profile_selector_version,
+            audience=report_spec.audience,
+            schema_versions=schema_versions,
+            limitations=limitations,
+        )
+        derivation = build_derivation_spec_v2(
+            derivation_kind=_derivation_kind(report_kind),
+            ordered_source_bindings=ordered_source_bindings,
+            evidence_validation_result_hash=evidence_validation_hash,
+            transform_spec_hash=transform_spec_hash,
+            report_identity_spec_binding=binding,
+            reducer_and_renderer_input_hashes=reducer_and_renderer_inputs,
+        )
     spec_name = (
         "acceptance-report-spec.json"
         if isinstance(report_spec, AcceptanceReportSpec)
@@ -163,7 +218,11 @@ def build_report_derivation(
 
     attempt_id = canonical_sha256(
         [
-            "oamb-report-derivation-attempt-v2",
+            (
+                "oamb-report-derivation-attempt-v3"
+                if isinstance(derivation, DerivationSpecV3)
+                else "oamb-report-derivation-attempt-v2"
+            ),
             derivation.derivation_input_hash,
             evidence_validation_hash,
         ]
@@ -197,9 +256,16 @@ def build_report_derivation(
         raise ReportExportError(export_validation, attempt_directory)
 
     export_validation_hash = canonical_sha256(export_validation)
-    derivation_id = derive_publication_id_v2(
-        derivation,
-        export_validation_result_hash=export_validation_hash,
+    derivation_id = (
+        derive_publication_id_v3(
+            derivation,
+            export_validation_result_hash=export_validation_hash,
+        )
+        if isinstance(derivation, DerivationSpecV3)
+        else derive_publication_id_v2(
+            derivation,
+            export_validation_result_hash=export_validation_hash,
+        )
     )
     committed_payloads = dict(payloads)
     committed_payloads["export-validation.json"] = export_bytes
@@ -253,6 +319,20 @@ def derive_publication_id_v2(
     )
 
 
+def derive_publication_id_v3(
+    derivation: DerivationSpecV3,
+    *,
+    export_validation_result_hash: str,
+) -> str:
+    return canonical_sha256(
+        [
+            "oamb-report-publication-v3",
+            derivation.derivation_input_hash,
+            export_validation_result_hash,
+        ]
+    )
+
+
 def audit_report_envelope(final_directory: Path) -> None:
     final_directory = Path(final_directory)
     verify_published_directory(final_directory, DERIVATION_MARKER)
@@ -288,13 +368,15 @@ def _report_kind(
         expected = "run"
     elif isinstance(model, ComparisonReportModel):
         expected = "comparison"
+    elif isinstance(model, EvaluationReportModel):
+        expected = "evaluation"
     elif isinstance(model, ReleaseReportModel):
         expected = "release"
     elif isinstance(model, PhaseAcceptanceReport):
         expected = "phase_acceptance"
     else:
         raise TypeError("unsupported offline report model")
-    if isinstance(report_spec, ReportSpec):
+    if isinstance(report_spec, (ReportSpec, ReportSpecV2)):
         if report_spec.report_kind != expected:
             raise ValueError("report model and ReportSpec kind do not match")
     elif expected != "phase_acceptance":
@@ -306,6 +388,7 @@ def _derivation_kind(report_kind: ReportKind) -> str:
     return {
         "run": "run_report",
         "comparison": "comparison_report",
+        "evaluation": "evaluation_report",
         "release": "release_report",
         "phase_acceptance": "phase_acceptance_report",
     }[report_kind]
@@ -321,4 +404,5 @@ __all__ = [
     "audit_report_envelope",
     "build_report_derivation",
     "derive_publication_id_v2",
+    "derive_publication_id_v3",
 ]

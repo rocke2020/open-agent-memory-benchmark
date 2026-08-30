@@ -2,6 +2,19 @@
 
 # Keep the operator file inside the simple grammar interpreted identically by
 # this bundle and Docker Compose. Values remain inert text.
+read_file_mode() {
+    target=$1
+    if mode=$(stat -f '%Lp' "$target" 2>/dev/null); then
+        printf '%s\n' "$mode"
+        return 0
+    fi
+    if mode=$(stat -c '%a' "$target" 2>/dev/null); then
+        printf '%s\n' "$mode"
+        return 0
+    fi
+    return 1
+}
+
 validate_env_file() {
     awk '
         /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }

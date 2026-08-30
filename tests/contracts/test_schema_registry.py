@@ -50,6 +50,7 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "diagnostic_run_report_model",
     "display_preview",
     "evaluation_phase_gate",
+    "evaluation_report_model",
     "evaluation_review_bundle",
     "exact_rational",
     "execution_environment_binding",
@@ -78,6 +79,7 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "measurement_summary_line",
     "memory_system_runtime_binding",
     "memory_system_spec",
+    "memory_conformance_occurrence_record",
     "model_readiness_occurrence_record",
     "model_role_binding",
     "metric_spec",
@@ -88,10 +90,12 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "paired_metric_delta",
     "phase_acceptance_report",
     "phase_review_occurrence_record",
+    "report_spec",
     "price_snapshot",
     "prompt_pack_manifest",
     "protocol_spec",
     "provider_budget_cap",
+    "provider_operation_budget_ceiling",
     "provider_runtime_profile_attestation",
     "provider_service_evidence_manifest",
     "raw_reference",
@@ -101,17 +105,18 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "report_artifact_manifest",
     "report_identity_spec_binding",
     "report_record_projection",
-    "report_spec",
     "resource_usage_record",
     "resource_budget_ceiling",
     "role_budget_ceiling",
     "run_lease_heartbeat_record",
     "run_lease_record",
     "run_record",
+    "run_preflight_record",
     "run_report_model",
     "run_spec",
     "run_summary",
     "source_evidence_binding",
+    "dispatch_budget_route",
     "signature_verification_record",
     "token_usage_record",
     "validation_issue",
@@ -124,25 +129,38 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
 
 EXPECTED_V2_SCHEMAS = {
     "attempt_record",
+    "attempt_intent_record",
+    "budget_reservation_record",
     "budget_spec",
     "case_record",
     "derivation_spec",
+    "external_call_approval_record",
+    "evaluation_phase_gate",
+    "human_quality_review_record",
     "ingestion_plan_record",
     "memory_system_runtime_binding",
     "model_role_binding",
     "phase_review_occurrence_record",
     "report_artifact_manifest",
+    "report_identity_spec_binding",
+    "report_spec",
     "run_report_model",
     "run_summary",
     "token_usage_record",
 }
 
 EXPECTED_V3_SCHEMAS = {
+    "attempt_record",
+    "budget_spec",
     "case_record",
+    "derivation_spec",
     "ingestion_plan_record",
+    "report_artifact_manifest",
     "run_report_model",
     "token_usage_record",
 }
+
+EXPECTED_V4_SCHEMAS = {"token_usage_record"}
 
 
 def require_schema() -> ModuleType:
@@ -163,6 +181,7 @@ def test_versioned_contract_inventory_is_explicit_and_unique() -> None:
         *((name, 1) for name in EXPECTED_VERSIONED_CONTRACT_NAMES),
         *((name, 2) for name in EXPECTED_V2_SCHEMAS),
         *((name, 3) for name in EXPECTED_V3_SCHEMAS),
+        *((name, 4) for name in EXPECTED_V4_SCHEMAS),
     }
 
 

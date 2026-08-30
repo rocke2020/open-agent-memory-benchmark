@@ -34,6 +34,7 @@ from oamb.contracts.reporting import (
     AIQualityReviewRecord,
     AIReviewBatchResult,
     AIReviewIntegrityResult,
+    HumanQualityReviewRecord,
 )
 from oamb.contracts.schema import parse_contract
 from oamb.contracts.specifications import (
@@ -41,7 +42,6 @@ from oamb.contracts.specifications import (
     BudgetSpecV2,
     ExecutionEnvironmentBinding,
     ExternalCallApprovalRecord,
-    HumanReviewKeyBinding,
     ModelRoleBindingV2,
 )
 from oamb.phase_review_profiles import (
@@ -64,19 +64,6 @@ def load_phase_review_evidence(root: Path) -> PhaseReviewEvidence:
         price_snapshot = None
     else:
         price_snapshot = load_contract(price_snapshot_path, PriceSnapshot)
-    human_paths = (
-        root / "human-key-binding.json",
-        root / "human-decision.json",
-        root / "human-signature.txt",
-    )
-    present_human_paths = tuple(path for path in human_paths if path.exists() or path.is_symlink())
-    if present_human_paths and len(present_human_paths) != len(human_paths):
-        raise ValueError("phase review evidence contains an incomplete human evidence set")
-    human_key_binding = (
-        None if not present_human_paths else load_contract(human_paths[0], HumanReviewKeyBinding)
-    )
-    human_decision_bytes = None if not present_human_paths else read_regular_file(human_paths[1])
-    human_signature_base64 = None if not present_human_paths else read_signature(human_paths[2])
     return PhaseReviewEvidence(
         plan=load_contract(root / "plan.json", AIReviewPlan),
         reviewer_role_binding=reviewer_role,
@@ -118,9 +105,11 @@ def load_phase_review_evidence(root: Path) -> PhaseReviewEvidence:
             root / "resource-records.json", ResourceUsageRecord
         ),
         cost_records=load_contract_sequence(root / "cost-records.json", CostRecord),
-        human_key_binding=human_key_binding,
-        human_decision_bytes=human_decision_bytes,
-        human_signature_base64=human_signature_base64,
+        human_record=(
+            None
+            if not (root / "human-review.json").exists()
+            else load_contract(root / "human-review.json", HumanQualityReviewRecord)
+        ),
     )
 
 
@@ -215,15 +204,6 @@ def read_utf8(path: Path) -> str:
         raise ValueError(f"{path} is not strict UTF-8") from exc
 
 
-def read_signature(path: Path) -> str:
-    value = read_utf8(path)
-    if value.endswith("\n"):
-        value = value[:-1]
-    if not value or value != value.strip() or "\n" in value or "\r" in value:
-        raise ValueError("detached signature file must contain one canonical-base64 line")
-    return value
-
-
 def string_value(document: dict[str, object], key: str) -> str:
     value = document[key]
     if not isinstance(value, str) or not value:
@@ -284,7 +264,6 @@ __all__ = [
     "load_phase_review_evidence",
     "optional_string_value",
     "parse_utc_datetime",
-    "read_signature",
     "read_utf8",
     "string_tuple",
     "string_value",

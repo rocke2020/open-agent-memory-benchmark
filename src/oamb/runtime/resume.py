@@ -215,12 +215,13 @@ class ProviderLifecycleBridge:
     """Shares the provider-services lifecycle lock and active ownership pointers."""
 
     _LIFECYCLE_LOCK_NAME = "provider-lifecycle.lock"
-    _ACTIVE_RUN_NAME = "active-run-lease"
+    _LEGACY_ACTIVE_RUN_NAME = "active-run-lease"
+    _ACTIVE_OPERATION_NAME = "active-operation"
     _ACTIVE_ATTEMPT_NAME = "active-provider-attempt"
 
     def __init__(self, provider_runtime_directory: Path) -> None:
         self._runtime_directory = provider_runtime_directory
-        self._active_authority: _RunLeaseAuthority | None = None
+        self._active_authority: _RunLeaseAuthority | _MemoryConformanceAuthority | None = None
 
     def acquire_run(
         self,
@@ -236,8 +237,10 @@ class ProviderLifecycleBridge:
             raise ResumeRejectedError("lease epoch must be positive")
         _require_sha256(lease_record_hash)
         document = {
-            "schema_name": "oamb_provider_active_run_pointer",
+            "schema_name": "oamb_provider_active_operation_pointer",
             "schema_version": 1,
+            "kind": "benchmark_run",
+            "owner": run_id,
             "run_id": run_id,
             "provider_project": provider_project,
             "profile_id": profile_id,
@@ -245,19 +248,31 @@ class ProviderLifecycleBridge:
             "lease_record_sha256": lease_record_hash,
         }
         with self._lifecycle_lock():
-            if (self._runtime_directory / self._ACTIVE_RUN_NAME).exists():
-                raise ResumeRejectedError("an active run lease already exists")
-            if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
-                raise ResumeRejectedError("an active provider attempt already exists")
+            self._require_operation_slot_available()
             if durable_lease is not None:
                 durable_lease()
             self._write_create_only(
-                self._runtime_directory / self._ACTIVE_RUN_NAME,
+                self._runtime_directory / self._ACTIVE_OPERATION_NAME,
                 canonical_json_bytes(document),
             )
         authority = _RunLeaseAuthority(lease_record_hash)
         self._active_authority = authority
         return authority
+
+    def acquire_memory_conformance(
+        self,
+        *,
+        occurrence_id: str,
+        conformance_spec_hash: str,
+        provider_project: str,
+        profile_id: str,
+        owner: str,
+    ) -> _MemoryConformanceAuthority:
+        del occurrence_id, conformance_spec_hash, provider_project, profile_id, owner
+        raise ResumeRejectedError(
+            "memory conformance requires the closed composition root with a registered "
+            "specification and internally verified terminal manifest"
+        )
 
     def release_run(self, authority: _RunLeaseAuthority) -> None:
         if authority is not self._active_authority:
@@ -265,13 +280,33 @@ class ProviderLifecycleBridge:
         with self._lifecycle_lock():
             if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
                 raise ResumeRejectedError("active provider attempt blocks run release")
-            path = self._runtime_directory / self._ACTIVE_RUN_NAME
-            document = self._read_pointer(self._ACTIVE_RUN_NAME, "active run")
+            path = self._runtime_directory / self._ACTIVE_OPERATION_NAME
+            document = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
+            if document.get("kind") != "benchmark_run":
+                raise ResumeRejectedError("active operation is not a benchmark run")
             if document.get("lease_record_sha256") != authority.lease_record_hash:
                 raise ResumeRejectedError("active run lease hash does not match")
             path.unlink()
             _fsync_directory(self._runtime_directory)
         self._active_authority = None
+
+    def release_memory_conformance(
+        self,
+        authority: _MemoryConformanceAuthority,
+    ) -> None:
+        del authority
+        raise ResumeRejectedError(
+            "memory conformance requires the closed composition root with an internally "
+            "verified terminal manifest"
+        )
+
+    def _require_operation_slot_available(self) -> None:
+        if (self._runtime_directory / self._LEGACY_ACTIVE_RUN_NAME).exists():
+            raise ResumeRejectedError("a legacy active run lease already exists")
+        if (self._runtime_directory / self._ACTIVE_OPERATION_NAME).exists():
+            raise ResumeRejectedError("an active provider operation already exists")
+        if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
+            raise ResumeRejectedError("an active provider attempt already exists")
 
     def recover_stale_run(
         self,
@@ -288,8 +323,10 @@ class ProviderLifecycleBridge:
         if self._active_authority is not None:
             raise ResumeRejectedError("current process already owns a run lease")
         successor_document = {
-            "schema_name": "oamb_provider_active_run_pointer",
+            "schema_name": "oamb_provider_active_operation_pointer",
             "schema_version": 1,
+            "kind": "benchmark_run",
+            "owner": successor.run_id,
             "run_id": successor.run_id,
             "provider_project": successor.provider_project_id,
             "profile_id": successor.provider_profile_id,
@@ -299,7 +336,9 @@ class ProviderLifecycleBridge:
         with self._lifecycle_lock():
             if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
                 raise ResumeRejectedError("active provider attempt blocks stale-lease recovery")
-            current = self._read_pointer(self._ACTIVE_RUN_NAME, "active run")
+            current = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
+            if current.get("kind") != "benchmark_run":
+                raise ResumeRejectedError("stale recovery requires a benchmark operation")
             previous_document = {
                 "run_id": previous.run_id,
                 "provider_project": previous.provider_project_id,
@@ -346,7 +385,7 @@ class ProviderLifecycleBridge:
             )
             if points_to_previous:
                 self._write_replace(
-                    self._runtime_directory / self._ACTIVE_RUN_NAME,
+                    self._runtime_directory / self._ACTIVE_OPERATION_NAME,
                     canonical_json_bytes(successor_document),
                 )
         authority = _RunLeaseAuthority(successor.lease_record_hash)
@@ -358,11 +397,12 @@ class ProviderLifecycleBridge:
         _require_sha256(intent_record_hash)
         authority = self._active_authority
         if authority is None:
-            raise ResumeRejectedError("provider dispatch requires the current lease authority")
+            raise ResumeRejectedError("provider dispatch requires the current operation authority")
         with self._lifecycle_lock():
-            run_document = self._read_pointer(self._ACTIVE_RUN_NAME, "active run")
-            if run_document.get("lease_record_sha256") != authority.lease_record_hash:
-                raise ResumeRejectedError("provider dispatch lease authority does not match")
+            operation = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
+            operation_kind, operation_id, operation_hash = _operation_authority_fields(
+                operation, authority
+            )
             if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
                 raise ResumeRejectedError("an active provider attempt already exists")
             self._write_create_only(
@@ -370,11 +410,12 @@ class ProviderLifecycleBridge:
                 canonical_json_bytes(
                     {
                         "schema_name": "oamb_provider_active_attempt_pointer",
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "attempt_id": attempt_id,
                         "intent_record_sha256": intent_record_hash,
-                        "run_id": run_document["run_id"],
-                        "lease_record_sha256": run_document["lease_record_sha256"],
+                        "operation_kind": operation_kind,
+                        "operation_id": operation_id,
+                        "operation_record_sha256": operation_hash,
                     }
                 ),
             )
@@ -383,15 +424,14 @@ class ProviderLifecycleBridge:
         _require_sha256(expected_intent_record_hash)
         authority = self._active_authority
         if authority is None:
-            raise ResumeRejectedError("provider receipt requires the current lease authority")
+            raise ResumeRejectedError("provider receipt requires the current operation authority")
         with self._lifecycle_lock():
-            run_document = self._read_pointer(self._ACTIVE_RUN_NAME, "active run")
-            if run_document.get("lease_record_sha256") != authority.lease_record_hash:
-                raise ResumeRejectedError("provider receipt lease authority does not match")
+            operation = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
+            _, _, operation_hash = _operation_authority_fields(operation, authority)
             document = self._read_pointer(self._ACTIVE_ATTEMPT_NAME, "active provider attempt")
             if (
                 document.get("intent_record_sha256") != expected_intent_record_hash
-                or document.get("lease_record_sha256") != authority.lease_record_hash
+                or document.get("operation_record_sha256") != operation_hash
             ):
                 raise ResumeRejectedError("active provider attempt intent hash does not match")
             path = self._runtime_directory / self._ACTIVE_ATTEMPT_NAME
@@ -408,47 +448,77 @@ class ProviderLifecycleBridge:
             raise ResumeRejectedError(f"{label} pointer is absent or malformed") from exc
         if not isinstance(document, dict):
             raise ResumeRejectedError(f"{label} pointer is malformed")
-        if name == self._ACTIVE_RUN_NAME:
-            expected_keys = {
-                "schema_name",
-                "schema_version",
-                "run_id",
-                "provider_project",
-                "profile_id",
-                "lease_epoch",
-                "lease_record_sha256",
-            }
-            valid = (
-                set(document) == expected_keys
-                and document.get("schema_name") == "oamb_provider_active_run_pointer"
+        if name == self._ACTIVE_OPERATION_NAME:
+            common_valid = (
+                document.get("schema_name") == "oamb_provider_active_operation_pointer"
                 and document.get("schema_version") == 1
                 and all(
                     isinstance(document.get(key), str) and bool(document.get(key))
-                    for key in ("run_id", "provider_project", "profile_id")
+                    for key in ("owner", "provider_project", "profile_id")
                 )
-                and isinstance(document.get("lease_epoch"), int)
-                and not isinstance(document.get("lease_epoch"), bool)
-                and int(document["lease_epoch"]) >= 1
-                and _is_sha256(document.get("lease_record_sha256"))
             )
+            if document.get("kind") == "benchmark_run":
+                expected_keys = {
+                    "schema_name",
+                    "schema_version",
+                    "kind",
+                    "owner",
+                    "run_id",
+                    "provider_project",
+                    "profile_id",
+                    "lease_epoch",
+                    "lease_record_sha256",
+                }
+                valid = (
+                    common_valid
+                    and set(document) == expected_keys
+                    and isinstance(document.get("run_id"), str)
+                    and bool(document.get("run_id"))
+                    and isinstance(document.get("lease_epoch"), int)
+                    and not isinstance(document.get("lease_epoch"), bool)
+                    and int(document["lease_epoch"]) >= 1
+                    and _is_sha256(document.get("lease_record_sha256"))
+                )
+            elif document.get("kind") == "memory_conformance":
+                expected_keys = {
+                    "schema_name",
+                    "schema_version",
+                    "kind",
+                    "owner",
+                    "occurrence_id",
+                    "conformance_spec_sha256",
+                    "provider_project",
+                    "profile_id",
+                }
+                valid = (
+                    common_valid
+                    and set(document) == expected_keys
+                    and isinstance(document.get("occurrence_id"), str)
+                    and bool(document.get("occurrence_id"))
+                    and _is_sha256(document.get("conformance_spec_sha256"))
+                )
+            else:
+                valid = False
         else:
             expected_keys = {
                 "schema_name",
                 "schema_version",
                 "attempt_id",
                 "intent_record_sha256",
-                "run_id",
-                "lease_record_sha256",
+                "operation_kind",
+                "operation_id",
+                "operation_record_sha256",
             }
             valid = (
                 set(document) == expected_keys
                 and document.get("schema_name") == "oamb_provider_active_attempt_pointer"
-                and document.get("schema_version") == 1
-                and isinstance(document.get("run_id"), str)
-                and bool(document.get("run_id"))
+                and document.get("schema_version") == 2
+                and document.get("operation_kind") in {"benchmark_run", "memory_conformance"}
+                and isinstance(document.get("operation_id"), str)
+                and bool(document.get("operation_id"))
                 and _is_sha256(document.get("attempt_id"))
                 and _is_sha256(document.get("intent_record_sha256"))
-                and _is_sha256(document.get("lease_record_sha256"))
+                and _is_sha256(document.get("operation_record_sha256"))
             )
         if not valid:
             raise ResumeRejectedError(f"{label} pointer is malformed")
@@ -511,6 +581,32 @@ class ProviderLifecycleBridge:
 @dataclass(frozen=True, slots=True)
 class _RunLeaseAuthority:
     lease_record_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryConformanceAuthority:
+    conformance_spec_hash: str
+
+
+def _operation_authority_fields(
+    document: dict[str, object],
+    authority: _RunLeaseAuthority | _MemoryConformanceAuthority,
+) -> tuple[str, str, str]:
+    if isinstance(authority, _RunLeaseAuthority):
+        if document.get("kind") != "benchmark_run":
+            raise ResumeRejectedError("operation authority kind does not match benchmark run")
+        record_hash = document.get("lease_record_sha256")
+        operation_id = document.get("run_id")
+        expected_hash = authority.lease_record_hash
+    else:
+        if document.get("kind") != "memory_conformance":
+            raise ResumeRejectedError("operation authority kind does not match conformance")
+        record_hash = document.get("conformance_spec_sha256")
+        operation_id = document.get("occurrence_id")
+        expected_hash = authority.conformance_spec_hash
+    if record_hash != expected_hash or not isinstance(operation_id, str):
+        raise ResumeRejectedError("provider operation authority does not match")
+    return str(document["kind"]), operation_id, expected_hash
 
 
 def _require_sha256(value: str) -> None:

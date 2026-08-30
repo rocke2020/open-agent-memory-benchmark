@@ -53,6 +53,17 @@ class TokenStageV2(StrEnum):
     MODEL_READINESS = "model_readiness"
 
 
+class TokenStageV3(StrEnum):
+    MEMORY_INGEST = "memory_ingest"
+    MEMORY_QUERY = "memory_query"
+    CONTEXT_VIEW = "context_view"
+    ANSWER = "answer"
+    JUDGE = "judge"
+    QUALITY_REVIEW = "quality_review"
+    MODEL_READINESS = "model_readiness"
+    MEMORY_CONFORMANCE = "memory_conformance"
+
+
 class TokenDomain(StrEnum):
     LOCAL_CONTEXT_VIEW = "local_context_view"
     EXTERNAL_LLM = "external_llm"
@@ -370,6 +381,28 @@ class TokenUsageRecordV3(StrictContract):
                 raise ValueError("model-readiness usage requires its matching token stage")
         elif self.stage == TokenStageV2.MODEL_READINESS:
             raise ValueError("model-readiness token stage requires its matching parent")
+        return self
+
+
+class TokenUsageRecordV4(TokenUsageRecordV3):
+    schema_version: Literal[4] = 4  # type: ignore[assignment]
+    parent_kind: Literal[
+        "ingestion_plan", "case", "phase_review", "model_readiness", "memory_conformance"
+    ]  # type: ignore[assignment]
+    stage: TokenStageV3  # type: ignore[assignment]
+    usage_owner_role_binding_id: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def conformance_parent_and_stage_match(self) -> Self:
+        if self.parent_kind == "memory_conformance":
+            if self.stage != TokenStageV3.MEMORY_CONFORMANCE:
+                raise ValueError("memory-conformance usage requires its matching token stage")
+            if self.usage_owner_role_binding_id is None:
+                raise ValueError("memory-conformance usage requires its role owner")
+        elif self.stage == TokenStageV3.MEMORY_CONFORMANCE:
+            raise ValueError("memory-conformance token stage requires its matching parent")
+        elif self.usage_owner_role_binding_id is not None:
+            raise ValueError("only memory-conformance usage carries a role owner")
         return self
 
 

@@ -48,7 +48,7 @@ compose() {
 
 check_env_file() {
     [ -f "$ENV_FILE" ] || die "copy .env.example to .env and configure it"
-    mode=$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE" 2>/dev/null || true)
+    mode=$(read_file_mode "$ENV_FILE" || true)
     [ "$mode" = "600" ] || die "$ENV_FILE must have mode 0600 (found ${mode:-unknown})"
     validate_env_file "$ENV_FILE" || die "$ENV_FILE uses duplicate keys or unsupported dotenv syntax"
 }

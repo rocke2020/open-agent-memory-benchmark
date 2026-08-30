@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-import importlib
 from datetime import UTC, datetime
-from types import ModuleType
 
 import pytest
 
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.reporting import (
     AIQualityReviewRecord,
+    HumanQualityReviewRecord,
     QualityReviewStatus,
     ai_quality_review_record_identity,
+)
+from oamb.reporting.human_review import (
+    HumanReviewConfirmationError,
+    ReviewHistoryError,
+    create_human_quality_review_record,
+    derive_evaluation_phase_gate,
 )
 
 SHA_A = "a" * 64
@@ -18,28 +23,7 @@ SHA_B = "b" * 64
 SHA_C = "c" * 64
 SHA_D = "d" * 64
 AI_REVIEW_RECORD_ID = "38a29206e3d7c9b66e6bb15be1f245b6fe39401e03076c072f3dae75d7c78c80"
-PUBLIC_KEY_BASE64 = "C8aRhmD01ZtA8t71pqhqWswBAaFCabPNqUETOcDkY/g="
-SIGNATURE_BASE64 = (
-    "mMNlMSX1DwgRjPpxCiCITURhVSOeJO5DuiZnkn+EPx8bJPjSEWJ1OL5xSTm6g/AT5IKNSLv12VkdHR+uvM2CCA=="
-)
-EXPECTED_DECISION_JSON = (
-    '{"ai_review_record_hash":"38a29206e3d7c9b66e6bb15be1f245b6fe39401e03076c072f3dae75d7c78c80",'
-    '"decided_at":"2026-08-28T01:00:00+00:00",'
-    '"decision_id":"4ff51f94e4462fc02bff3ccd5fc8fa8991b3c51cefd2164292534db235ef1316",'
-    '"evidence_references":[],"finding_codes":[],"nonce":"nonce-001",'
-    '"review_bundle_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
-    '"reviewer_label":"operator","schema_name":"human_review_decision","schema_version":1,'
-    '"status":"pass"}'
-)
 CREATED_AT = datetime(2026, 8, 28, tzinfo=UTC)
-DECIDED_AT = datetime(2026, 8, 28, 1, tzinfo=UTC)
-
-
-def _human_review() -> ModuleType:
-    try:
-        return importlib.import_module("oamb.reporting.human_review")
-    except ModuleNotFoundError:
-        pytest.fail("oamb.reporting.human_review is not implemented", pytrace=False)
 
 
 def _ai_record(
@@ -90,117 +74,83 @@ def _ai_record(
     return record
 
 
-def test_signed_human_decision_import_uses_only_the_pinned_public_key() -> None:
-    human_review = _human_review()
+def test_local_human_confirmation_creates_v2_record_and_v2_gate_without_a_key() -> None:
     ai_record = _ai_record()
-    key_binding = human_review.build_human_review_key_binding(
-        source_kind="raw",
-        source_reference="test-vector",
-        public_key_base64=PUBLIC_KEY_BASE64,
-    )
-    prepared = human_review.prepare_human_review_decision(
-        review_bundle_hash=SHA_B,
-        ai_review_record_hash=ai_record.ai_review_record_id,
-        status="pass",
-        decided_at=DECIDED_AT,
-        nonce="nonce-001",
-        reviewer_label="operator",
-        finding_codes=(),
-        evidence_references=(),
-    )
-
-    assert prepared.canonical_bytes.decode("utf-8") == EXPECTED_DECISION_JSON
-    record = human_review.import_human_review_decision(
-        decision_bytes=prepared.canonical_bytes,
-        signature_base64=SIGNATURE_BASE64,
-        key_binding=key_binding,
+    record = create_human_quality_review_record(
         canonical_ai_record=ai_record,
-        used_nonces=(),
-        imported_at=datetime(2026, 8, 28, 2, tzinfo=UTC),
-    )
-
-    assert record.status == "pass"
-    assert record.decision_nonce == "nonce-001"
-    assert record.trusted_key_fingerprint == key_binding.fingerprint
-    assert record.signature_verification.algorithm == "ed25519"
-
-
-def test_human_import_rejects_bad_signature_replay_and_nonpassing_ai() -> None:
-    human_review = _human_review()
-    ai_record = _ai_record()
-    key_binding = human_review.build_human_review_key_binding(
-        source_kind="raw",
-        source_reference="test-vector",
-        public_key_base64=PUBLIC_KEY_BASE64,
-    )
-    prepared = human_review.prepare_human_review_decision(
-        review_bundle_hash=SHA_B,
-        ai_review_record_hash=ai_record.ai_review_record_id,
         status="pass",
-        decided_at=DECIDED_AT,
         nonce="nonce-001",
-        reviewer_label="operator",
+        operator_id="operator",
         finding_codes=(),
         evidence_references=(),
+        used_nonces=(),
+        created_at=CREATED_AT,
     )
 
-    with pytest.raises(human_review.HumanReviewImportError, match="signature"):
-        human_review.import_human_review_decision(
-            decision_bytes=prepared.canonical_bytes,
-            signature_base64=SIGNATURE_BASE64[:-2] + "AA",
-            key_binding=key_binding,
+    assert isinstance(record, HumanQualityReviewRecord)
+    assert record.schema_version == 2
+    assert record.review_bundle_hash == SHA_B
+    assert record.ai_review_record_hash == AI_REVIEW_RECORD_ID
+    assert record.status == "pass"
+    assert record.operator_id == "operator"
+    assert record.confirmation_nonce == "nonce-001"
+    assert record.confirmation_method == "interactive_exact_hash_phrase_v1"
+    assert "signature" not in record.model_dump(mode="json")
+    assert "key" not in record.model_dump(mode="json")
+
+    gate = derive_evaluation_phase_gate(
+        phase_id="fixture_phase",
+        review_bundle_hash=SHA_B,
+        ordered_ai_history=(ai_record,),
+        human_records=(record,),
+    )
+
+    assert gate.schema_version == 2
+    assert gate.passed_by_ai is True
+    assert gate.passed_by_human is True
+    assert gate.human_record == record
+
+
+def test_local_human_confirmation_rejects_replayed_nonce_and_nonpassing_ai() -> None:
+    ai_record = _ai_record()
+    with pytest.raises(HumanReviewConfirmationError, match="nonce"):
+        create_human_quality_review_record(
             canonical_ai_record=ai_record,
-            used_nonces=(),
-            imported_at=datetime(2026, 8, 28, 2, tzinfo=UTC),
-        )
-    with pytest.raises(human_review.HumanReviewImportError, match="nonce"):
-        human_review.import_human_review_decision(
-            decision_bytes=prepared.canonical_bytes,
-            signature_base64=SIGNATURE_BASE64,
-            key_binding=key_binding,
-            canonical_ai_record=ai_record,
+            status="pass",
+            nonce="nonce-001",
+            operator_id="operator",
+            finding_codes=(),
+            evidence_references=(),
             used_nonces=("nonce-001",),
-            imported_at=datetime(2026, 8, 28, 2, tzinfo=UTC),
+            created_at=CREATED_AT,
         )
-    with pytest.raises(human_review.HumanReviewImportError, match="AI PASS"):
-        human_review.import_human_review_decision(
-            decision_bytes=prepared.canonical_bytes,
-            signature_base64=SIGNATURE_BASE64,
-            key_binding=key_binding,
+    with pytest.raises(HumanReviewConfirmationError, match="AI PASS"):
+        create_human_quality_review_record(
             canonical_ai_record=_ai_record(QualityReviewStatus.FAIL),
+            status="fail",
+            nonce="nonce-002",
+            operator_id="operator",
+            finding_codes=("REPORT_CLAIM_DEFECT",),
+            evidence_references=(),
             used_nonces=(),
-            imported_at=datetime(2026, 8, 28, 2, tzinfo=UTC),
+            created_at=CREATED_AT,
         )
 
 
 def test_phase_gate_hashes_complete_ai_then_human_history_and_rejects_duplicates() -> None:
-    human_review = _human_review()
     ai_record = _ai_record()
-    key_binding = human_review.build_human_review_key_binding(
-        source_kind="raw",
-        source_reference="test-vector",
-        public_key_base64=PUBLIC_KEY_BASE64,
-    )
-    prepared = human_review.prepare_human_review_decision(
-        review_bundle_hash=SHA_B,
-        ai_review_record_hash=ai_record.ai_review_record_id,
+    human_record = create_human_quality_review_record(
+        canonical_ai_record=ai_record,
         status="pass",
-        decided_at=DECIDED_AT,
         nonce="nonce-001",
-        reviewer_label="operator",
+        operator_id="operator",
         finding_codes=(),
         evidence_references=(),
-    )
-    human_record = human_review.import_human_review_decision(
-        decision_bytes=prepared.canonical_bytes,
-        signature_base64=SIGNATURE_BASE64,
-        key_binding=key_binding,
-        canonical_ai_record=ai_record,
         used_nonces=(),
-        imported_at=datetime(2026, 8, 28, 2, tzinfo=UTC),
+        created_at=CREATED_AT,
     )
 
-    gate = human_review.derive_evaluation_phase_gate(
+    gate = derive_evaluation_phase_gate(
         phase_id="fixture_phase",
         review_bundle_hash=SHA_B,
         ordered_ai_history=(ai_record,),
@@ -210,8 +160,8 @@ def test_phase_gate_hashes_complete_ai_then_human_history_and_rejects_duplicates
     assert gate.passed_by_ai is True
     assert gate.passed_by_human is True
     assert gate.review_history_root_hash != ai_record.history_root_hash
-    with pytest.raises(human_review.ReviewHistoryError, match="human review"):
-        human_review.derive_evaluation_phase_gate(
+    with pytest.raises(ReviewHistoryError, match="human review"):
+        derive_evaluation_phase_gate(
             phase_id="fixture_phase",
             review_bundle_hash=SHA_B,
             ordered_ai_history=(ai_record,),

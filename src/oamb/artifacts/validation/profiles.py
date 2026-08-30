@@ -146,11 +146,12 @@ T9_EXTERNAL_EVIDENCE_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
     ("external.limitations.v1", 1),
 )
 
-ReportKind = Literal["run", "comparison", "release", "phase_acceptance"]
+ReportKind = Literal["run", "comparison", "evaluation", "release", "phase_acceptance"]
 ReportAudience = Literal["public", "local"]
 REPORT_KINDS: tuple[ReportKind, ...] = (
     "run",
     "comparison",
+    "evaluation",
     "release",
     "phase_acceptance",
 )
@@ -275,7 +276,7 @@ def report_export_profile() -> ValidationProfile:
             for rule_id, minimum_version in T8_REPORT_EXPORT_RULE_INVENTORY
         ),
         applicability=(
-            "report_kind=run|comparison|release|phase_acceptance",
+            "report_kind=run|comparison|evaluation|release|phase_acceptance",
             "audience=public|local",
         ),
     )

@@ -136,7 +136,7 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn("verify --services", command)
         self.assertIn("verify --model-readiness", command)
         self.assertIn("stop", command)
-        self.assertIn("active-run-lease", lifecycle)
+        self.assertIn("active-operation", lifecycle)
         self.assertIn("provider-project.attestation", command)
         self.assertIn("verify_project_attestation", command)
         self.assertIn("provider-lifecycle.lock", command)

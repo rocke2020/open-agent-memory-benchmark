@@ -20,25 +20,50 @@ from oamb.artifacts.validation.phase import (
     PhaseGateValidationInput,
     validate_t10_phase_gate,
 )
+from oamb.artifacts.validation.reduction import comparison_validation_input
 from oamb.contracts.evidence import ValidationResult
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.ports import MemorySystemProfileUnsupported
-from oamb.contracts.reporting import CompletionSummaryV3, DisplayPreview, RunReportModelV3
+from oamb.contracts.reporting import (
+    ComparisonControlBinding,
+    ComparisonControlSnapshot,
+    CompletionSummaryV3,
+    DisplayPreview,
+    ExactRational,
+    PairedMetricDelta,
+    RunReportModelV3,
+    comparison_report_model_id,
+    evaluation_report_model_id,
+    run_report_model_v3_id,
+)
 from oamb.contracts.specifications import (
+    ComparisonCostView,
     ReportSpec,
     SourceEvidenceBinding,
     SourceEvidenceKind,
 )
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.mem0 import Mem0ReferenceNegativeAdapter
+from oamb.reporting.compare import (
+    REQUIRED_COMPARISON_CONTROL_IDS,
+    build_comparison_pair_binding,
+    build_comparison_spec,
+)
 from oamb.reporting.public import (
+    build_comparison_report_model,
     build_diagnostic_run_report_model,
+    build_evaluation_report_model,
     build_phase_acceptance_report,
     build_run_report_model,
 )
-from oamb.reporting.roots import build_acceptance_report_spec, build_report_spec
+from oamb.reporting.roots import (
+    build_acceptance_report_spec,
+    build_evaluation_report_spec,
+    build_report_spec,
+)
 from tests.contracts.test_t8_phase_validation import _accepted_gate_with_evidence
 from tests.reporting.test_t8_offline_renderer import (
+    _run_report,
     build_claim_boundary,
     build_record_projections,
 )
@@ -72,10 +97,11 @@ def _validation(
     return production.model_copy(update={"validation_profile_id": profile_id})
 
 
-def _validation_target() -> Mem0AdapterValidationInput:
+def _validation_target(*, resolve_attempts: int = 1) -> Mem0AdapterValidationInput:
     adapter = Mem0ReferenceNegativeAdapter()
-    with pytest.raises(MemorySystemProfileUnsupported):
-        asyncio.run(adapter.resolve())
+    for _index in range(resolve_attempts):
+        with pytest.raises(MemorySystemProfileUnsupported):
+            asyncio.run(adapter.resolve())
     target = mem0_adapter_validation_input(adapter)
     asyncio.run(adapter.close())
     return target
@@ -179,6 +205,346 @@ def _bind_run_model_to_spec(model: RunReportModelV3, spec: ReportSpec) -> RunRep
             ),
         }
     )
+
+
+def _evaluation_model_spec_and_sources() -> tuple[
+    Any,
+    Any,
+    tuple[SourceEvidenceBinding, ...],
+    tuple[ValidationResult, ...],
+    tuple[Any, ...],
+]:
+    renderer = _renderer()
+    spec = build_evaluation_report_spec(
+        audience="public",
+        preview_max_field_bytes=4096,
+        preview_total_bytes=65536,
+        display_field_ids=("phase", "runs", "comparisons", "cases", "limitations"),
+        renderer_hash=renderer.offline_renderer_hash(),
+        asset_hashes=renderer.offline_asset_hashes(),
+        export_profile_selector_id="public-evaluation-v1",
+        export_profile_selector_version=1,
+    )
+    spec_hash = canonical_sha256(spec)
+    base = _run_report()
+    targets = tuple(_validation_target(resolve_attempts=index) for index in range(1, 5))
+    validations = tuple(
+        validate_catalog_profile("oamb-t8-adapter-mem0-rest-v1", target) for target in targets
+    )
+    validation_profile_hash = canonical_sha256(
+        [
+            "oamb-validation-profile-binding-v1",
+            validations[0].validation_profile_id,
+            validations[0].required_rule_ids,
+            validations[0].implementation_versions,
+        ]
+    )
+    runs = []
+    run_case_manifest_ids = (SHA_A, SHA_A, SHA_B, SHA_B)
+    for index, character in enumerate("abcd"):
+        validation = validations[index]
+        validation_hash = canonical_sha256(validation)
+        case_occurrence_id = hashlib.sha256(f"case-occurrence-{character}".encode()).hexdigest()
+        source = SourceEvidenceBinding(
+            binding_id=hashlib.sha256(f"binding-{character}".encode()).hexdigest(),
+            source_kind=SourceEvidenceKind.RUN,
+            source_identity=f"evaluation-run-{character}",
+            source_root_hash=validation.target_hash,
+            validation_result_hash=validation_hash,
+            source_schema_versions=("capsule_manifest@1",),
+        )
+        payload = base.model_dump(mode="python")
+        payload["summary"]["run_id"] = f"evaluation-run-{character}"
+        payload["report_spec_hash"] = spec_hash
+        payload["ordered_source_bindings"] = (source.model_dump(mode="python"),)
+        payload["evidence_validation_profile_hash"] = validation_profile_hash
+        payload["evidence_validation_result_hash"] = validation_hash
+        payload["claim_boundary"] = build_claim_boundary(
+            rule_count=len(validation.required_rule_ids)
+        ).model_dump(mode="python")
+        payload["case_occurrence_ids"] = (case_occurrence_id,)
+        case_projection = next(
+            item for item in payload["record_projections"] if item["axis"] == "case"
+        )
+        case_projection["record_id"] = case_occurrence_id
+        case_projection["detail_items"] = (
+            ("case_manifest_entry_id", run_case_manifest_ids[index]),
+            *tuple(case_projection["detail_items"]),
+        )
+        fields = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"schema_name", "schema_version", "report_id"}
+        }
+        payload["report_id"] = run_report_model_v3_id(**fields)
+        runs.append(RunReportModelV3.model_validate(payload))
+    controls = tuple(
+        ComparisonControlBinding(control_id=control_id, value_hash=SHA_C)
+        for control_id in REQUIRED_COMPARISON_CONTROL_IDS
+    )
+    left = ComparisonControlSnapshot(
+        run_id=runs[0].summary.run_id,
+        source_root_hash=runs[0].ordered_source_bindings[0].source_root_hash,
+        memory_system_id="memory-left",
+        provider_native_profile_hash=SHA_C,
+        controls=controls,
+    )
+    right = ComparisonControlSnapshot(
+        run_id=runs[1].summary.run_id,
+        source_root_hash=runs[1].ordered_source_bindings[0].source_root_hash,
+        memory_system_id="memory-right",
+        provider_native_profile_hash=SHA_D,
+        controls=controls,
+    )
+    pair = build_comparison_pair_binding(
+        case_manifest_entry_id=SHA_A,
+        left_case_occurrence_id=runs[0].case_occurrence_ids[0],
+        right_case_occurrence_id=runs[1].case_occurrence_ids[0],
+        metric_id="fixture-exact-v1",
+    )
+    spec_target = build_comparison_spec(
+        left_run_id=left.run_id,
+        right_run_id=right.run_id,
+        cost_view=ComparisonCostView.NONE,
+        ordered_pair_bindings=(pair,),
+        required_control_ids=REQUIRED_COMPARISON_CONTROL_IDS,
+        comparison_policy_hash=SHA_D,
+        winner_reducer=None,
+        cost_control=None,
+    )
+    delta = PairedMetricDelta(
+        case_manifest_entry_id=SHA_A,
+        left_case_occurrence_id=runs[0].case_occurrence_ids[0],
+        right_case_occurrence_id=runs[1].case_occurrence_ids[0],
+        metric_id="fixture-exact-v1",
+        left=ExactRational(numerator=1, denominator=1),
+        right=ExactRational(numerator=0, denominator=1),
+        signed_delta=ExactRational(numerator=1, denominator=1),
+        absolute_delta=ExactRational(numerator=1, denominator=1),
+    )
+    comparison_target = comparison_validation_input(
+        spec=spec_target,
+        left=left,
+        right=right,
+        paired_metric_deltas=(delta,),
+    )
+    comparison_validation = validate_catalog_profile(
+        "oamb-t8-comparison-paired-native-v1", comparison_target
+    )
+    comparison = build_comparison_report_model(
+        report_spec_hash=spec_hash,
+        ordered_source_bindings=(
+            runs[0].ordered_source_bindings[0],
+            runs[1].ordered_source_bindings[0],
+        ),
+        ordered_evidence_validation_hashes=(
+            runs[0].evidence_validation_result_hash,
+            runs[1].evidence_validation_result_hash,
+        ),
+        left_run_report_hash=canonical_sha256(runs[0]),
+        right_run_report_hash=canonical_sha256(runs[1]),
+        claim_boundary=build_claim_boundary(
+            rule_count=len(comparison_validation.required_rule_ids)
+        ),
+        comparison=comparison_target.report,
+        limitations=("fixture comparison",),
+    )
+    model = build_evaluation_report_model(
+        phase_id="fixture-evaluation",
+        report_spec_hash=spec_hash,
+        ordered_run_models=(runs[0], runs[1], runs[2], runs[3]),
+        eligible_comparison_models=(comparison,),
+        unique_case_count=2,
+        limitations=("fixture only",),
+    )
+    comparison_source = SourceEvidenceBinding(
+        binding_id=hashlib.sha256(b"comparison-source-binding").hexdigest(),
+        source_kind=SourceEvidenceKind.DERIVATION,
+        source_identity=comparison.report_id,
+        source_root_hash=comparison_validation.target_hash,
+        validation_result_hash=canonical_sha256(comparison_validation),
+        source_schema_versions=("comparison_report_model@1",),
+    )
+    sources = (
+        *(run.ordered_source_bindings[0] for run in runs),
+        comparison_source,
+    )
+    return (
+        model,
+        spec,
+        sources,
+        (*validations, comparison_validation),
+        (*targets, comparison_target),
+    )
+
+
+def test_evaluation_publication_uses_v2_v2_v3_v3_and_offline_html(tmp_path: Path) -> None:
+    publication = _publication()
+    model, spec, sources, validations, validation_targets = _evaluation_model_spec_and_sources()
+
+    built = publication.build_report_derivation(
+        model=model,
+        report_spec=spec,
+        ordered_source_bindings=sources,
+        evidence_validations=validations,
+        evidence_validation_targets=validation_targets,
+        transform_spec_hash=SHA_D,
+        schema_versions=("evaluation_report_model@1", "report_artifact_manifest@3"),
+        output_root=tmp_path,
+        committed_at=COMMITTED_AT,
+    )
+
+    derivation = (built.final_directory / "derivation-spec.json").read_text()
+    artifact = (built.final_directory / "report-artifact-manifest.json").read_text()
+    html = built.report_path.read_text()
+    assert '"schema_version":3' in derivation
+    assert '"schema_version":3' in artifact
+    assert '<meta name="color-scheme" content="light dark">' in html
+    assert "https://" not in html and "http://" not in html
+
+
+def test_evaluation_export_rejects_self_hashed_comparison_with_foreign_run_hashes(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, sources, validations, validation_targets = _evaluation_model_spec_and_sources()
+    comparison_payload = model.eligible_comparison_models[0].model_dump(mode="python")
+    comparison_payload["left_run_report_hash"] = hashlib.sha256(b"foreign-left").hexdigest()
+    comparison_payload["right_run_report_hash"] = hashlib.sha256(b"foreign-right").hexdigest()
+    comparison_fields = {
+        key: value
+        for key, value in comparison_payload.items()
+        if key not in {"schema_name", "schema_version", "report_id"}
+    }
+    comparison_payload["report_id"] = comparison_report_model_id(**comparison_fields)
+    foreign_comparison = type(model.eligible_comparison_models[0]).model_validate(
+        comparison_payload
+    )
+    foreign_model = build_evaluation_report_model(
+        phase_id=model.phase_id,
+        report_spec_hash=model.report_spec_hash,
+        ordered_run_models=model.ordered_run_models,
+        eligible_comparison_models=(foreign_comparison,),
+        unique_case_count=model.unique_case_count,
+        limitations=model.limitations,
+    )
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=foreign_model,
+            report_spec=spec,
+            ordered_source_bindings=sources,
+            evidence_validations=validations,
+            evidence_validation_targets=validation_targets,
+            transform_spec_hash=SHA_D,
+            schema_versions=("evaluation_report_model@1", "report_artifact_manifest@3"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+
+
+def test_evaluation_export_requires_exact_run_and_comparison_source_validation_closure(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, sources, validations, validation_targets = _evaluation_model_spec_and_sources()
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=model,
+            report_spec=spec,
+            ordered_source_bindings=sources[:-1],
+            evidence_validations=validations[:-1],
+            evidence_validation_targets=validation_targets[:-1],
+            transform_spec_hash=SHA_D,
+            schema_versions=("evaluation_report_model@1", "report_artifact_manifest@3"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+
+
+def test_evaluation_export_rederives_unique_case_coverage_from_display_projections(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, sources, validations, validation_targets = _evaluation_model_spec_and_sources()
+    payload = model.model_dump(mode="python")
+    payload["unique_case_count"] = 1
+    fields = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"schema_name", "schema_version", "report_id"}
+    }
+    payload["report_id"] = evaluation_report_model_id(**fields)
+    forged_model = type(model).model_validate(payload)
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=forged_model,
+            report_spec=spec,
+            ordered_source_bindings=sources,
+            evidence_validations=validations,
+            evidence_validation_targets=validation_targets,
+            transform_spec_hash=SHA_D,
+            schema_versions=("evaluation_report_model@1", "report_artifact_manifest@3"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
+
+
+def test_evaluation_export_rejects_duplicate_system_case_display_coverage(
+    tmp_path: Path,
+) -> None:
+    publication = _publication()
+    model, spec, sources, validations, validation_targets = _evaluation_model_spec_and_sources()
+    duplicated_run_payload = model.ordered_run_models[3].model_dump(mode="python")
+    duplicated_case_id = model.ordered_run_models[2].case_occurrence_ids[0]
+    duplicated_run_payload["case_occurrence_ids"] = (duplicated_case_id,)
+    case_projection = next(
+        item for item in duplicated_run_payload["record_projections"] if item["axis"] == "case"
+    )
+    case_projection["record_id"] = duplicated_case_id
+    run_fields = {
+        key: value
+        for key, value in duplicated_run_payload.items()
+        if key not in {"schema_name", "schema_version", "report_id"}
+    }
+    duplicated_run_payload["report_id"] = run_report_model_v3_id(**run_fields)
+    duplicated_run = RunReportModelV3.model_validate(duplicated_run_payload)
+    duplicated_model = build_evaluation_report_model(
+        phase_id=model.phase_id,
+        report_spec_hash=model.report_spec_hash,
+        ordered_run_models=(
+            model.ordered_run_models[0],
+            model.ordered_run_models[1],
+            model.ordered_run_models[2],
+            duplicated_run,
+        ),
+        eligible_comparison_models=model.eligible_comparison_models,
+        unique_case_count=model.unique_case_count,
+        limitations=model.limitations,
+    )
+
+    with pytest.raises(publication.ReportExportError) as captured:
+        publication.build_report_derivation(
+            model=duplicated_model,
+            report_spec=spec,
+            ordered_source_bindings=sources,
+            evidence_validations=validations,
+            evidence_validation_targets=validation_targets,
+            transform_spec_hash=SHA_D,
+            schema_versions=("evaluation_report_model@1", "report_artifact_manifest@3"),
+            output_root=tmp_path,
+            committed_at=COMMITTED_AT,
+        )
+
+    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
 
 
 def _phase_model_spec_and_validation() -> tuple[Any, Any, Any, tuple[Any, Any]]:

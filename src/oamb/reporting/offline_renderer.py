@@ -21,6 +21,7 @@ from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.reporting import (
     ComparisonReportModel,
     DiagnosticRunReportModel,
+    EvaluationReportModel,
     PhaseAcceptanceReport,
     ReleaseReportModel,
     RunReportModelV3,
@@ -38,6 +39,7 @@ OfflineReportModel: TypeAlias = (
     | ExternalHistoricalEvidenceReport
     | DiagnosticRunReportModel
     | ComparisonReportModel
+    | EvaluationReportModel
     | ReleaseReportModel
     | PhaseAcceptanceReport
 )
@@ -212,6 +214,10 @@ def _static_validation_summary(model: OfflineReportModel) -> str:
     elif isinstance(model, (ComparisonReportModel, ReleaseReportModel)):
         validation_hashes = model.ordered_evidence_validation_hashes
         boundary = model.claim_boundary
+    elif isinstance(model, EvaluationReportModel):
+        validation_hashes = tuple(
+            item.evidence_validation_result_hash for item in model.ordered_run_models
+        )
     else:
         validation_hashes = (model.evaluation_export_validation_hash,)
     joined = ", ".join(validation_hashes)
@@ -292,6 +298,16 @@ def _static_identity_summary(model: OfflineReportModel) -> str:
             ("Comparison report roots", ", ".join(model.comparison_report_hashes)),
             ("Report spec", model.report_spec_hash),
         )
+    elif isinstance(model, EvaluationReportModel):
+        rows = (
+            ("Phase", model.phase_id),
+            ("Run report roots", ", ".join(model.ordered_run_model_hashes)),
+            (
+                "Comparison report roots",
+                ", ".join(model.eligible_comparison_model_hashes),
+            ),
+            ("Report spec", model.report_spec_hash),
+        )
     else:
         rows = (
             ("Phase", model.phase_id),
@@ -340,6 +356,13 @@ def _static_completion_summary(model: OfflineReportModel) -> str:
             f"Run reports: {len(model.run_report_hashes)}; "
             f"Comparison reports: {len(model.comparison_report_hashes)}."
         )
+    if isinstance(model, EvaluationReportModel):
+        return (
+            f"Run reports: {len(model.ordered_run_models)}; "
+            f"unique cases: {model.unique_case_count}; "
+            f"system results: {model.system_result_count}; "
+            f"eligible comparisons: {len(model.eligible_comparison_models)}."
+        )
     return (
         f"Review current: {str(model.review_current).lower()}; "
         f"Passed by AI: {str(model.passed_by_ai).lower()}; "
@@ -361,6 +384,12 @@ def _static_quality_items(model: OfflineReportModel) -> str:
             for item in model.category_aggregates
         )
         return "".join(rows)
+    if isinstance(model, EvaluationReportModel):
+        return "".join(
+            f"<li>{html.escape(run.memory_system_id)} / "
+            f"{html.escape(run.workload_id)}: {len(run.metric_summaries)} metric strata.</li>"
+            for run in model.ordered_run_models
+        )
     if not isinstance(model, RunReportModelV3) or not model.metric_summaries:
         return "<li>No ordinary metric summaries.</li>"
     return "".join(
@@ -390,6 +419,9 @@ def _static_measurement_items(model: OfflineReportModel) -> str:
             "<li>Indexing usage: unavailable.</li>"
             "<li>Complete external-LLM usage: unavailable.</li>"
         )
+    if isinstance(model, EvaluationReportModel):
+        count = sum(len(run.measurement_lines) for run in model.ordered_run_models)
+        return f"<li>Bound run measurement lines: {count}.</li>"
     if not isinstance(model, RunReportModelV3) or not model.measurement_lines:
         return "<li>No measurement summaries.</li>"
     rows = []

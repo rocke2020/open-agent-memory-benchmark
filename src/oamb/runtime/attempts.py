@@ -9,17 +9,24 @@ from typing import Protocol
 from oamb.contracts.base import StrictContract
 from oamb.contracts.evidence import (
     AttemptIntentRecord,
+    AttemptIntentRecordV2,
     AttemptReceiptRecord,
     AttemptRecordV2,
+    AttemptRecordV3,
     BudgetReservationRecord,
+    BudgetReservationRecordV2,
     OccurrenceClaimRecord,
 )
 from oamb.contracts.ids import canonical_json_bytes
 from oamb.contracts.ports import ArtifactStorePort, RawPayloadSealRequest
-from oamb.contracts.specifications import BudgetScopeKindV2
+from oamb.contracts.specifications import BudgetScopeKindV2, BudgetScopeKindV3
 from oamb.contracts.states import AttemptOutcome
 
-from .budget import BudgetAmount, BudgetLedger, ReservationRequest
+from .budget import (
+    BudgetAmount,
+    BudgetLedger,
+    ReservationRequest,
+)
 from .source_records import seal_source_contract
 
 
@@ -35,7 +42,7 @@ class ProviderLifecyclePort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class _PreparedAttempt:
-    intent: AttemptIntentRecord
+    intent: AttemptIntentRecord | AttemptIntentRecordV2
     reservation_id: str
     intent_record_hash: str
     dispatched: bool = False
@@ -61,18 +68,25 @@ class AttemptCoordinator:
         self,
         *,
         claim: OccurrenceClaimRecord,
-        reservation: BudgetReservationRecord,
-        intent: AttemptIntentRecord,
+        reservation: BudgetReservationRecord | BudgetReservationRecordV2,
+        intent: AttemptIntentRecord | AttemptIntentRecordV2,
         maximum: BudgetAmount,
     ) -> None:
-        self._validate_prepare(claim, reservation, intent, maximum)
-        self._budget.reserve(
-            ReservationRequest(
-                reservation_id=reservation.reservation_id,
-                role_binding_id=reservation.role_binding_id,
-                maximum=maximum,
+        if isinstance(reservation, BudgetReservationRecordV2) or isinstance(
+            intent, AttemptIntentRecordV2
+        ):
+            raise AttemptOrderingError(
+                "memory conformance requires explicit owner allocations from the closed "
+                "composition root"
             )
+        self._validate_prepare(claim, reservation, intent, maximum)
+        assert isinstance(reservation, BudgetReservationRecord)
+        reservation_request = ReservationRequest(
+            reservation_id=reservation.reservation_id,
+            maximum=maximum,
+            role_binding_id=reservation.role_binding_id,
         )
+        self._budget.reserve(reservation_request)
         self._seal("occurrence-claims", claim.claim_id, claim)
         self._seal("budget-reservations", reservation.reservation_id, reservation)
         self._seal("attempt-intents", intent.attempt_id, intent)
@@ -136,7 +150,7 @@ class AttemptCoordinator:
             receipt_sealed=True,
         )
 
-    def seal_terminal(self, attempt: AttemptRecordV2) -> None:
+    def seal_terminal(self, attempt: AttemptRecordV2 | AttemptRecordV3) -> None:
         prepared = self._require_prepared(attempt.attempt_id)
         self._validate_terminal(prepared, attempt)
         self._seal("attempts", attempt.attempt_id, attempt)
@@ -145,7 +159,7 @@ class AttemptCoordinator:
         self,
         *,
         reservation_id: str,
-        attempt: AttemptRecordV2,
+        attempt: AttemptRecordV2 | AttemptRecordV3,
     ) -> None:
         prepared = self._require_prepared(attempt.attempt_id)
         if reservation_id != prepared.reservation_id:
@@ -179,10 +193,18 @@ class AttemptCoordinator:
     @staticmethod
     def _validate_prepare(
         claim: OccurrenceClaimRecord,
-        reservation: BudgetReservationRecord,
-        intent: AttemptIntentRecord,
+        reservation: BudgetReservationRecord | BudgetReservationRecordV2,
+        intent: AttemptIntentRecord | AttemptIntentRecordV2,
         maximum: BudgetAmount,
     ) -> None:
+        legacy_pair = isinstance(reservation, BudgetReservationRecord) and isinstance(
+            intent, AttemptIntentRecord
+        )
+        conformance_pair = isinstance(reservation, BudgetReservationRecordV2) and isinstance(
+            intent, AttemptIntentRecordV2
+        )
+        if not (legacy_pair or conformance_pair):
+            raise AttemptOrderingError("reservation and intent contract versions differ")
         if intent.attempt_id != reservation.attempt_id:
             raise AttemptOrderingError("intent and reservation attempt IDs differ")
         if intent.claim_id != claim.claim_id or intent.reservation_id != reservation.reservation_id:
@@ -195,12 +217,16 @@ class AttemptCoordinator:
             raise AttemptOrderingError("intent reconciliation differs from claimed occurrence")
         if intent.request_fingerprint != claim.request_fingerprint:
             raise AttemptOrderingError("intent and claim request fingerprints differ")
-        expected_scope_kind = {
-            "ingestion_plan": BudgetScopeKindV2.RUN,
-            "case": BudgetScopeKindV2.RUN,
-            "phase_review": BudgetScopeKindV2.PHASE_REVIEW,
-            "model_readiness": BudgetScopeKindV2.MODEL_READINESS,
-        }[intent.parent_kind]
+        expected_scope_kind = (
+            BudgetScopeKindV3.MEMORY_CONFORMANCE
+            if conformance_pair
+            else {
+                "ingestion_plan": BudgetScopeKindV2.RUN,
+                "case": BudgetScopeKindV2.RUN,
+                "phase_review": BudgetScopeKindV2.PHASE_REVIEW,
+                "model_readiness": BudgetScopeKindV2.MODEL_READINESS,
+            }[intent.parent_kind]
+        )
         if (
             reservation.scope_kind != expected_scope_kind
             or reservation.scope_id != intent.parent_id
@@ -208,6 +234,18 @@ class AttemptCoordinator:
             raise AttemptOrderingError("reservation scope differs from the attempt parent")
         if intent.role_binding_id != reservation.role_binding_id:
             raise AttemptOrderingError("intent and reservation roles differ")
+        if conformance_pair:
+            assert isinstance(reservation, BudgetReservationRecordV2)
+            assert isinstance(intent, AttemptIntentRecordV2)
+            if (
+                intent.dispatch_owner_kind != reservation.dispatch_owner_kind
+                or intent.provider_operation_ceiling_id != reservation.provider_operation_ceiling_id
+                or intent.internal_usage_role_binding_ids
+                != reservation.internal_usage_role_binding_ids
+            ):
+                raise AttemptOrderingError(
+                    "intent and reservation discriminated budget owners differ"
+                )
         expected_resources = tuple(
             (item.dimension_id, item.maximum, item.unit)
             for item in reservation.reserved_resource_ceilings
@@ -230,9 +268,11 @@ class AttemptCoordinator:
     @staticmethod
     def _validate_terminal(
         prepared: _PreparedAttempt,
-        attempt: AttemptRecordV2,
+        attempt: AttemptRecordV2 | AttemptRecordV3,
     ) -> None:
         intent = prepared.intent
+        if isinstance(intent, AttemptIntentRecordV2) != isinstance(attempt, AttemptRecordV3):
+            raise AttemptOrderingError("terminal attempt contract version differs from intent")
         if (
             attempt.parent_kind != intent.parent_kind
             or attempt.parent_id != intent.parent_id

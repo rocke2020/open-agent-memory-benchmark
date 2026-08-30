@@ -11,10 +11,12 @@ import pytest
 from oamb.artifacts.store import ArtifactStore
 from oamb.contracts.evidence import (
     AttemptIntentRecord,
+    AttemptIntentRecordV2,
     AttemptReceiptKind,
     AttemptReceiptRecord,
     AttemptRecordV2,
     BudgetReservationRecord,
+    BudgetReservationRecordV2,
     OccurrenceClaimRecord,
 )
 from oamb.contracts.ports import (
@@ -25,7 +27,12 @@ from oamb.contracts.ports import (
     RawPayloadSealRequest,
     RawReferenceHandle,
 )
-from oamb.contracts.specifications import BudgetScopeKindV2, ResourceBudgetCeiling
+from oamb.contracts.specifications import (
+    BudgetScopeKindV2,
+    BudgetScopeKindV3,
+    DispatchBudgetOwnerKind,
+    ResourceBudgetCeiling,
+)
 from oamb.contracts.states import AttemptOutcome, IndexContribution
 from oamb.runtime.attempts import AttemptCoordinator, AttemptOrderingError
 from oamb.runtime.budget import (
@@ -180,6 +187,73 @@ def test_prepare_seals_claim_reservation_and_intent_before_dispatch(tmp_path: Pa
         f"source/attempt-intents/{ATTEMPT_ID}.json",
     ]
     assert budget.snapshot().reserved == maximum()
+
+
+def test_prepare_version_dispatches_memory_conformance_provider_operation(
+    tmp_path: Path,
+) -> None:
+    conformance_claim = claim().model_copy(
+        update={"occurrence_id": "conformance-1", "stage": "memory_ingest"}
+    )
+    conformance_reservation = BudgetReservationRecordV2(
+        reservation_id=RESERVATION_ID,
+        budget_id="conformance-budget",
+        scope_kind=BudgetScopeKindV3.MEMORY_CONFORMANCE,
+        scope_id="conformance-1",
+        dispatch_owner_kind=DispatchBudgetOwnerKind.PROVIDER_OPERATION,
+        role_binding_id=None,
+        provider_operation_ceiling_id="mem0-ingest-cap",
+        internal_usage_role_binding_ids=("mem0-extraction", "controlled-embedding"),
+        attempt_id=ATTEMPT_ID,
+        reserved_attempts=1,
+        reserved_input_tokens=10,
+        reserved_output_tokens=5,
+        reserved_dispatch_wall_seconds=Decimal("2"),
+        reserved_cost=Decimal("0.1"),
+        currency="USD",
+        reserved_resource_ceilings=reservation().reserved_resource_ceilings,
+        reserved_provider_units=Decimal("1"),
+        reserved_at=NOW,
+    )
+    conformance_intent = AttemptIntentRecordV2(
+        attempt_id=ATTEMPT_ID,
+        claim_id=CLAIM_ID,
+        reservation_id=RESERVATION_ID,
+        parent_kind="memory_conformance",
+        parent_id="conformance-1",
+        dispatch_route_id="mem0-ingest-route",
+        dispatch_owner_kind=DispatchBudgetOwnerKind.PROVIDER_OPERATION,
+        role_binding_id=None,
+        provider_operation_ceiling_id="mem0-ingest-cap",
+        internal_usage_role_binding_ids=("mem0-extraction", "controlled-embedding"),
+        stage="memory_ingest",
+        request_fingerprint=REQUEST_HASH,
+        reconciliation_capability="none",
+        idempotency_key_hash=None,
+        sealed_at=NOW,
+    )
+    ceiling = BudgetCeiling(maximum=maximum(), currency="USD")
+    store = RecordingStore(tmp_path / "capsule")
+    coordinator = AttemptCoordinator(
+        store,
+        BudgetLedger(
+            ceiling,
+            role_ceilings={
+                "mem0-extraction": ceiling,
+                "controlled-embedding": ceiling,
+            },
+            provider_operation_ceilings={"mem0-ingest-cap": ceiling},
+        ),
+    )
+
+    with pytest.raises(AttemptOrderingError, match="explicit owner allocations"):
+        coordinator.prepare(
+            claim=conformance_claim,
+            reservation=conformance_reservation,
+            intent=conformance_intent,
+            maximum=maximum(),
+        )
+    assert store.events == []
 
 
 @pytest.mark.parametrize(

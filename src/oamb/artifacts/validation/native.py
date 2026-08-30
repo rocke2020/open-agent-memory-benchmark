@@ -62,7 +62,15 @@ from oamb.contracts.ids import (
     ingestion_occurrence_id,
 )
 from oamb.contracts.ports import NativeEvidenceCandidate
-from oamb.contracts.specifications import CaseManifest, DatasetManifest
+from oamb.contracts.specifications import (
+    BudgetSpecV2,
+    CaseManifest,
+    DatasetManifest,
+    ExternalCallApprovalRecord,
+    ModelRoleBindingV2,
+    RunPreflightRecord,
+    RunSpec,
+)
 from oamb.contracts.states import (
     AttemptOutcome,
     CaseState,
@@ -201,7 +209,12 @@ def _load_native_capsule(root: Path) -> _NativeCapsuleSnapshot:
                 if (
                     document.get("schema_name") != entry.record_kind
                     or _source_record_id(document) != entry.record_id
-                    or path.stem != entry.record_id
+                    or not _source_path_identity_matches(
+                        entry.relative_path,
+                        path.stem,
+                        entry.record_id,
+                        document.get("schema_name"),
+                    )
                 ):
                     raise ValueError("source contract identity does not match its manifest entry")
             except Exception:
@@ -256,6 +269,16 @@ def _parse_native_contract(document: dict[str, Any], content: bytes) -> BaseMode
         return ResourceUsageRecord.model_validate_json(content)
     if identity == ("cost_record", 1):
         return CostRecord.model_validate_json(content)
+    if identity == ("run_spec", 1):
+        return RunSpec.model_validate_json(content)
+    if identity == ("run_preflight_record", 1):
+        return RunPreflightRecord.model_validate_json(content)
+    if identity == ("external_call_approval_record", 1):
+        return ExternalCallApprovalRecord.model_validate_json(content)
+    if identity == ("budget_spec", 2):
+        return BudgetSpecV2.model_validate_json(content)
+    if identity == ("model_role_binding", 2):
+        return ModelRoleBindingV2.model_validate_json(content)
     if not isinstance(identity[0], str) or not isinstance(identity[1], int):
         raise ValueError("source contract has no schema identity")
     raise ValueError(f"unsupported source contract schema identity: {identity[0]}@{identity[1]}")
@@ -276,10 +299,15 @@ def _source_record_id(document: dict[str, Any]) -> str | None:
         "token_usage_record": "usage_record_id",
         "resource_usage_record": "resource_record_id",
         "cost_record": "cost_record_id",
+        "model_role_binding": "binding_id",
     }
     fixed_ids = {
         "case_manifest": "case-manifest",
         "dataset_manifest": "dataset-manifest",
+        "run_spec": "run-spec",
+        "run_preflight_record": "run-preflight",
+        "external_call_approval_record": "external-call-approval",
+        "budget_spec": "budget",
     }
     schema_name = document.get("schema_name")
     field = identity_fields.get(schema_name) if isinstance(schema_name, str) else None
@@ -287,6 +315,23 @@ def _source_record_id(document: dict[str, Any]) -> str | None:
         value = document.get(field)
         return value if isinstance(value, str) else None
     return fixed_ids.get(schema_name) if isinstance(schema_name, str) else None
+
+
+def _source_path_identity_matches(
+    relative_path: str,
+    path_stem: str,
+    record_id: str,
+    schema_name: object,
+) -> bool:
+    if path_stem == record_id:
+        return True
+    fixed_paths = {
+        "run_spec": "source/specs/run-spec.json",
+        "run_preflight_record": "source/specs/run-preflight.json",
+        "external_call_approval_record": "source/specs/external-call-approval.json",
+        "budget_spec": "source/specs/budget.json",
+    }
+    return isinstance(schema_name, str) and fixed_paths.get(schema_name) == relative_path
 
 
 def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
@@ -343,6 +388,8 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
     runs = _contracts(snapshot, RunRecord)
     datasets = _contracts(snapshot, DatasetManifest)
     case_manifests = _contracts(snapshot, CaseManifest)
+    run_specs = _contracts(snapshot, RunSpec)
+    run_preflights = _contracts(snapshot, RunPreflightRecord)
     expected_plan_occurrence_ids: tuple[str, ...] = ()
     expected_case_occurrence_ids: tuple[str, ...] = ()
     if not plans or not cases or len(datasets) != 1 or len(case_manifests) != 1:
@@ -365,17 +412,27 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
             for plan in plans
         ):
             issues.append(_issue(rule_id, manifest.capsule_id, "runtime-binding-drift"))
-        expected_run_spec_hash = canonical_sha256(
-            [
-                "oamb-native-fixture-run-spec-v1",
-                manifest.run_id,
-                datasets[0].manifest_hash,
-                case_manifests[0].manifest_hash,
-                first.memory_system_id,
-                first.runtime_binding_hash,
-                first.adapter_profile_id,
-            ]
-        )
+        if run_specs or run_preflights:
+            issues.append(
+                _issue(
+                    rule_id,
+                    manifest.capsule_id,
+                    "live-control-composition-unavailable",
+                )
+            )
+            expected_run_spec_hash = ""
+        else:
+            expected_run_spec_hash = canonical_sha256(
+                [
+                    "oamb-native-fixture-run-spec-v1",
+                    manifest.run_id,
+                    datasets[0].manifest_hash,
+                    case_manifests[0].manifest_hash,
+                    first.memory_system_id,
+                    first.runtime_binding_hash,
+                    first.adapter_profile_id,
+                ]
+            )
         if manifest.run_spec_hash != expected_run_spec_hash:
             issues.append(_issue(rule_id, manifest.capsule_id, "run-spec-binding-mismatch"))
         case_manifest = case_manifests[0]
@@ -520,7 +577,7 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
                 == attempt.request_fingerprint
                 == intent.request_fingerprint
                 and reservation.attempt_id == attempt_id
-                and reservation.scope_id == attempt.parent_id
+                and reservation.scope_id == (manifest.run_id if run_specs else attempt.parent_id)
                 and reservation.role_binding_id == intent.role_binding_id
                 and intent.sealed_at <= attempt.started_at
                 and receipt.dispatch_started_at == attempt.started_at

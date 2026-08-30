@@ -26,6 +26,7 @@ from oamb.artifacts.validation.profiles import (
     exact_report_export_profile,
     validation_profile_catalog,
 )
+from oamb.artifacts.validation.reduction import ComparisonValidationInput
 from oamb.artifacts.validation.registry import RuleRegistry, ValidationRule
 from oamb.artifacts.validation.run_evidence import (
     NATIVE_RUN_EVIDENCE_PROFILE_ID,
@@ -48,15 +49,19 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.reporting import (
     ComparisonReportModel,
     DiagnosticRunReportModel,
+    EvaluationReportModel,
     PhaseAcceptanceReport,
     ReleaseReportModel,
     ReportArtifactManifestV2,
+    ReportArtifactManifestV3,
     RunReportModelV3,
 )
 from oamb.contracts.specifications import (
     AcceptanceReportSpec,
     DerivationSpecV2,
+    DerivationSpecV3,
     ReportSpec,
+    ReportSpecV2,
     SourceEvidenceBinding,
     ValidationStage,
 )
@@ -71,17 +76,19 @@ from oamb.reporting.offline_renderer import (
     offline_renderer_hash,
     render_offline_report,
 )
+from oamb.reporting.public import build_evaluation_model_closure
 
-ReportIdentitySpec = ReportSpec | AcceptanceReportSpec
+ReportIdentitySpec = ReportSpec | ReportSpecV2 | AcceptanceReportSpec
 
 _EXPORT_SELECTOR_BY_KIND_AND_AUDIENCE = {
     (report_kind, audience): (f"{audience}-{report_kind.replace('_', '-')}-v1", 1)
-    for report_kind in ("run", "comparison", "release", "phase_acceptance")
+    for report_kind in ("run", "comparison", "evaluation", "release", "phase_acceptance")
     for audience in ("public", "local")
 }
 _REPORT_SCHEMA_INVENTORY_BY_KIND = {
     "run": ("run_report_model@3", "report_artifact_manifest@2"),
     "comparison": ("comparison_report_model@1", "report_artifact_manifest@2"),
+    "evaluation": ("evaluation_report_model@1", "report_artifact_manifest@3"),
     "release": ("release_report_model@1", "report_artifact_manifest@2"),
     "phase_acceptance": ("phase_acceptance_report@1", "report_artifact_manifest@2"),
 }
@@ -92,9 +99,9 @@ class ReportExportInput:
     payloads: Mapping[str, bytes]
     scan_paths: frozenset[str]
     model: OfflineReportModel
-    artifact_manifest: ReportArtifactManifestV2
+    artifact_manifest: ReportArtifactManifestV2 | ReportArtifactManifestV3
     report_spec: ReportIdentitySpec
-    derivation_spec: DerivationSpecV2
+    derivation_spec: DerivationSpecV2 | DerivationSpecV3
     ordered_source_bindings: tuple[SourceEvidenceBinding, ...]
     evidence_validations: tuple[ValidationResult, ...]
     evidence_validation_targets: tuple[Any, ...]
@@ -106,7 +113,7 @@ def validate_report_export(
 ) -> ValidationResult:
     report_kind = (
         target.report_spec.report_kind
-        if isinstance(target.report_spec, ReportSpec)
+        if isinstance(target.report_spec, (ReportSpec, ReportSpecV2))
         else "phase_acceptance"
     )
     selected_profile = exact_report_export_profile(
@@ -231,9 +238,14 @@ def _canonical_bindings_rule(target: ReportExportInput) -> tuple[ValidationIssue
         getattr(target.model, "acceptance_report_spec_hash", None),
     )
     artifact = target.artifact_manifest
+    evaluation = isinstance(target.model, EvaluationReportModel)
+    expected_evaluation_closure = None
+    if isinstance(target.model, EvaluationReportModel):
+        expected_evaluation_closure = build_evaluation_model_closure(target.model)
     model_validation_roots_close = _model_validation_roots_close(
         target.model,
         target.report_spec,
+        target.ordered_source_bindings,
         target.evidence_validations,
         target.evidence_validation_targets,
         expected_validation_hashes,
@@ -242,8 +254,42 @@ def _canonical_bindings_rule(target: ReportExportInput) -> tuple[ValidationIssue
     expected_selector = _EXPORT_SELECTOR_BY_KIND_AND_AUDIENCE.get(
         (report_kind, target.report_spec.audience)
     )
+    expected_spec_kind = (
+        "acceptance_report"
+        if isinstance(target.report_spec, AcceptanceReportSpec)
+        else "benchmark_report"
+    )
+    expected_spec_id = (
+        target.report_spec.acceptance_report_spec_id
+        if isinstance(target.report_spec, AcceptanceReportSpec)
+        else target.report_spec.report_spec_id
+    )
+    identity_binding = artifact.report_identity_spec_binding
+    version_chain_closed = (
+        isinstance(target.report_spec, ReportSpecV2)
+        and isinstance(target.derivation_spec, DerivationSpecV3)
+        and isinstance(artifact, ReportArtifactManifestV3)
+        and identity_binding.schema_version == 2
+        and target.derivation_spec.report_identity_spec_binding == identity_binding
+        and target.derivation_spec.evaluation_model_closure == expected_evaluation_closure
+        and artifact.evaluation_model_closure == expected_evaluation_closure
+        and artifact.export_profile_hash
+        == canonical_sha256(
+            exact_report_export_profile(
+                report_kind="evaluation",
+                audience=target.report_spec.audience,
+            )
+        )
+        if evaluation
+        else isinstance(target.derivation_spec, DerivationSpecV2)
+        and isinstance(artifact, ReportArtifactManifestV2)
+        and not isinstance(target.report_spec, ReportSpecV2)
+        and identity_binding.schema_version == 1
+        and target.derivation_spec.report_identity_spec_binding == identity_binding
+    )
     if (
         not exact_bytes
+        or not version_chain_closed
         or len(target.ordered_source_bindings) != len(target.evidence_validations)
         or len(target.evidence_validations) != len(target.evidence_validation_targets)
         or not validation_closed
@@ -275,6 +321,11 @@ def _canonical_bindings_rule(target: ReportExportInput) -> tuple[ValidationIssue
         or target.report_spec.performance_contract_hash != performance_acceptance_contract_hash()
         or artifact.report_identity_spec_binding
         != target.derivation_spec.report_identity_spec_binding
+        or identity_binding.spec_kind != expected_spec_kind
+        or identity_binding.spec_schema_name != target.report_spec.schema_name
+        or identity_binding.spec_schema_version != target.report_spec.schema_version
+        or identity_binding.spec_id != expected_spec_id
+        or identity_binding.spec_hash != spec_hash
     ):
         return (_issue(rule_id, "report-artifact-manifest.json", "report-binding-mismatch"),)
     return ()
@@ -366,6 +417,7 @@ def _fresh_evidence_validation(
 def _model_validation_roots_close(
     model: OfflineReportModel,
     report_spec: ReportIdentitySpec,
+    source_bindings: tuple[SourceEvidenceBinding, ...],
     validations: tuple[ValidationResult, ...],
     validation_targets: tuple[Any, ...],
     validation_hashes: tuple[str, ...],
@@ -531,6 +583,27 @@ def _model_validation_roots_close(
                 return False
             return native_fresh_model == model
         return False
+    if isinstance(model, EvaluationReportModel):
+        if not isinstance(report_spec, ReportSpecV2):
+            return False
+        try:
+            closure = build_evaluation_model_closure(model)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            model.report_spec_hash == canonical_sha256(report_spec)
+            and tuple(item.report_id for item in model.ordered_run_models)
+            == tuple(item.report_model_id for item in closure.ordered_run_entries)
+            and tuple(item.report_id for item in model.eligible_comparison_models)
+            == tuple(item.report_model_id for item in closure.eligible_comparison_entries)
+            and _evaluation_sources_and_coverage_close(
+                model,
+                source_bindings,
+                validations,
+                validation_targets,
+                validation_hashes,
+            )
+        )
     if isinstance(model, (ComparisonReportModel, ReleaseReportModel)):
         return False
     if isinstance(model, PhaseAcceptanceReport):
@@ -572,6 +645,106 @@ def _model_validation_roots_close(
             and model.evidence_references == human.evidence_references
         )
     return True
+
+
+def _evaluation_sources_and_coverage_close(
+    model: EvaluationReportModel,
+    source_bindings: tuple[SourceEvidenceBinding, ...],
+    validations: tuple[ValidationResult, ...],
+    validation_targets: tuple[Any, ...],
+    validation_hashes: tuple[str, ...],
+) -> bool:
+    run_count = len(model.ordered_run_models)
+    comparisons = model.eligible_comparison_models
+    expected_source_count = run_count + len(comparisons)
+    if not (
+        run_count == 4
+        and len(source_bindings)
+        == len(validations)
+        == len(validation_targets)
+        == len(validation_hashes)
+        == expected_source_count
+    ):
+        return False
+
+    run_sources = tuple(run.ordered_source_bindings[0] for run in model.ordered_run_models)
+    if source_bindings[:run_count] != run_sources:
+        return False
+    for run, validation, validation_hash in zip(
+        model.ordered_run_models,
+        validations[:run_count],
+        validation_hashes[:run_count],
+        strict=True,
+    ):
+        expected_profile_hash = canonical_sha256(
+            [
+                "oamb-validation-profile-binding-v1",
+                validation.validation_profile_id,
+                validation.required_rule_ids,
+                validation.implementation_versions,
+            ]
+        )
+        if (
+            run.evidence_validation_profile_hash != expected_profile_hash
+            or run.evidence_validation_result_hash != validation_hash
+        ):
+            return False
+
+    run_index_by_source = {source: index for index, source in enumerate(run_sources)}
+    if len(run_index_by_source) != run_count:
+        return False
+    for offset, comparison in enumerate(comparisons, run_count):
+        target = validation_targets[offset]
+        source = source_bindings[offset]
+        validation = validations[offset]
+        try:
+            left_index = run_index_by_source[comparison.ordered_source_bindings[0]]
+            right_index = run_index_by_source[comparison.ordered_source_bindings[1]]
+        except KeyError:
+            return False
+        left_run = model.ordered_run_models[left_index]
+        right_run = model.ordered_run_models[right_index]
+        if (
+            left_index == right_index
+            or comparison.ordered_evidence_validation_hashes
+            != (
+                left_run.evidence_validation_result_hash,
+                right_run.evidence_validation_result_hash,
+            )
+            or comparison.left_run_report_hash != canonical_sha256(left_run)
+            or comparison.right_run_report_hash != canonical_sha256(right_run)
+            or not isinstance(target, ComparisonValidationInput)
+            or target.report != comparison.comparison
+            or target.left.run_id != left_run.summary.run_id
+            or target.right.run_id != right_run.summary.run_id
+            or source.source_root_hash != validation.target_hash
+            or source.validation_result_hash != validation_hashes[offset]
+        ):
+            return False
+
+    case_occurrence_ids: list[str] = []
+    case_manifest_entry_ids: list[str] = []
+    for run in model.ordered_run_models:
+        case_projections = tuple(
+            projection for projection in run.record_projections if projection.axis == "case"
+        )
+        if tuple(item.record_id for item in case_projections) != run.case_occurrence_ids:
+            return False
+        for projection in case_projections:
+            case_manifest_entry_id = dict(projection.detail_items).get("case_manifest_entry_id")
+            if (
+                case_manifest_entry_id is None
+                or len(case_manifest_entry_id) != 64
+                or any(character not in "0123456789abcdef" for character in case_manifest_entry_id)
+            ):
+                return False
+            case_manifest_entry_ids.append(case_manifest_entry_id)
+        case_occurrence_ids.extend(run.case_occurrence_ids)
+    return bool(
+        len(case_occurrence_ids) == len(set(case_occurrence_ids))
+        and model.system_result_count == len(case_occurrence_ids)
+        and model.unique_case_count == len(set(case_manifest_entry_ids))
+    )
 
 
 def _safe_html_rule(target: ReportExportInput) -> tuple[ValidationIssue, ...]:

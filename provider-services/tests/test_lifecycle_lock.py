@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -34,13 +33,37 @@ printf 'acquired\\n'
             self.assertEqual(result.stdout, "acquired\n")
             self.assertFalse((runtime / "provider-lifecycle.lock").exists())
 
-    def test_active_run_fails_and_releases_lifecycle_lock(self) -> None:
+    def test_benchmark_active_operation_fails_and_releases_lifecycle_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)
-            (runtime / "active-run-lease").write_text("active\n", encoding="utf-8")
+            (runtime / "active-operation").write_text(
+                '{"kind":"benchmark_run"}\n', encoding="utf-8"
+            )
             result = self.run_acquire(runtime)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("active OAMB run lease", result.stderr)
+            self.assertIn("active OAMB provider operation", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_conformance_active_operation_fails_between_provider_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "active-operation").write_text(
+                '{"kind":"memory_conformance"}\n', encoding="utf-8"
+            )
+            result = self.run_acquire(runtime)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active OAMB provider operation", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_legacy_active_run_lease_fails_and_releases_lifecycle_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "active-run-lease").write_text("legacy\n", encoding="utf-8")
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("legacy active OAMB run lease", result.stderr)
             self.assertFalse((runtime / "provider-lifecycle.lock").exists())
 
     def test_dispatched_provider_attempt_fails_and_releases_lifecycle_lock(self) -> None:

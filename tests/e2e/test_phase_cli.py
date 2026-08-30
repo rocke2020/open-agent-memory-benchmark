@@ -22,7 +22,6 @@ from oamb.contracts.reporting import (
     EvaluationPhaseGate,
     EvaluationReviewBundle,
     HumanQualityReviewRecord,
-    HumanReviewDecision,
     PhaseAcceptanceReport,
 )
 from oamb.contracts.specifications import AIReviewPlan
@@ -79,14 +78,13 @@ def test_phase_cli_help_exposes_explicit_review_and_human_boundaries() -> None:
     assert "Model client profile: fake" in review_run.output
     assert "openai-compatible" in review_run.output
     assert "without dispatching" in review_reduce.output
-    assert "decision-prepare" in human_review.output
     assert "record" in human_review.output
-    assert "OAMB never signs" in human_review.output
+    assert "decision-prepare" not in human_review.output
+    assert "sign" not in human_review.output.lower()
     assert "ordered_capsule_hashes" in bundle_build.output
     assert "projection_spec_hash" in review_plan.output
     assert "occurrence_id" in review_reduce.output
-    assert "human-decision.json" in gate_validate.output
-    assert "human-signature.txt" in gate_validate.output
+    assert "HumanQualityReviewRecord" in human_review.output
 
 
 def test_core_cli_and_help_do_not_import_model_clients_or_concrete_adapters() -> None:
@@ -296,9 +294,6 @@ def test_phase_bundle_plan_and_recorded_ai_reduction_are_create_only(tmp_path: P
 
 
 def _write_review_evidence(root: Path, evidence: PhaseReviewEvidence) -> None:
-    assert evidence.human_key_binding is not None
-    assert evidence.human_decision_bytes is not None
-    assert evidence.human_signature_base64 is not None
     _write_json(root / "plan.json", evidence.plan)
     _write_json(root / "role-binding.json", evidence.reviewer_role_binding)
     _write_json(root / "cost-measurement-spec.json", evidence.cost_measurement_spec)
@@ -322,9 +317,6 @@ def _write_review_evidence(root: Path, evidence: PhaseReviewEvidence) -> None:
     _write_json(root / "usage-records.json", evidence.usage_records)
     _write_json(root / "resource-records.json", evidence.resource_records)
     _write_json(root / "cost-records.json", evidence.cost_records)
-    _write_json(root / "human-key-binding.json", evidence.human_key_binding)
-    (root / "human-decision.json").write_bytes(evidence.human_decision_bytes)
-    (root / "human-signature.txt").write_text(evidence.human_signature_base64, encoding="ascii")
 
 
 def _reduce_shape_only_pass(root: Path, evidence: PhaseReviewEvidence) -> Path:
@@ -408,50 +400,15 @@ def test_phase_human_gate_validation_and_acceptance_report_offline_chain(
     assert accepted_gate.human_record is not None
     bundle_path = tmp_path / "bundle.json"
     ai_path = tmp_path / "ai.json"
-    key_path = tmp_path / "human-key.json"
-    decision_path = tmp_path / "decision.json"
-    signature_path = tmp_path / "signature.txt"
-    human_path = tmp_path / "human.json"
     gate_path = tmp_path / "gate.json"
     review_evidence_root = tmp_path / "review-evidence"
+    human_path = review_evidence_root / "human-review.json"
     validation_path = tmp_path / "phase-validation.json"
     _write_json(bundle_path, bundle)
     _write_json(ai_path, accepted_gate.ai_record)
-    _write_json(key_path, evidence.human_key_binding)
-    signature_path.write_text(evidence.human_signature_base64, encoding="ascii")
-    decision = HumanReviewDecision.model_validate_json(evidence.human_decision_bytes)
     _write_review_evidence(review_evidence_root, evidence)
 
-    prepared = runner.invoke(
-        app,
-        [
-            "phase",
-            "human-review",
-            "decision-prepare",
-            "--bundle",
-            str(bundle_path),
-            "--ai-review",
-            str(ai_path),
-            "--review-evidence-directory",
-            str(review_evidence_root),
-            "--status",
-            decision.status,
-            "--decided-at",
-            decision.decided_at.isoformat(),
-            "--nonce",
-            decision.nonce,
-            "--reviewer-label",
-            decision.reviewer_label,
-            "--output",
-            str(decision_path),
-        ],
-        input=f"{bundle.bundle_id}\n",
-    )
-
-    assert prepared.exit_code == 0, prepared.output
-    assert decision_path.read_bytes() == evidence.human_decision_bytes
-
-    imported = runner.invoke(
+    recorded = runner.invoke(
         app,
         [
             "phase",
@@ -463,21 +420,22 @@ def test_phase_human_gate_validation_and_acceptance_report_offline_chain(
             str(ai_path),
             "--review-evidence-directory",
             str(review_evidence_root),
-            "--decision-file",
-            str(decision_path),
-            "--signature-file",
-            str(signature_path),
-            "--key-binding",
-            str(key_path),
-            "--imported-at",
+            "--status",
+            accepted_gate.human_record.status,
+            "--nonce",
+            accepted_gate.human_record.confirmation_nonce,
+            "--operator-id",
+            accepted_gate.human_record.operator_id,
+            "--created-at",
             accepted_gate.human_record.created_at.isoformat(),
-            "--output",
-            str(human_path),
         ],
-        input=f"{bundle.bundle_id}\n",
+        input=(
+            f"PASS {bundle.bundle_id} {accepted_gate.ai_record.ai_review_record_id} "
+            f"{accepted_gate.human_record.confirmation_nonce}\n"
+        ),
     )
 
-    assert imported.exit_code == 0, imported.output
+    assert recorded.exit_code == 0, recorded.output
     human = HumanQualityReviewRecord.model_validate_json(human_path.read_bytes())
     assert human == accepted_gate.human_record
 
@@ -553,23 +511,17 @@ def test_phase_human_gate_validation_and_acceptance_report_offline_chain(
     assert model.passed_by_human is True
 
 
-def test_human_record_import_rejects_noninteractive_confirmation_before_write(
+def test_human_record_rejects_noninteractive_confirmation_before_write(
     tmp_path: Path,
 ) -> None:
     runner = CliRunner()
     bundle, gate, evidence = _accepted_gate_with_evidence()
     bundle_path = tmp_path / "bundle.json"
     ai_path = tmp_path / "ai.json"
-    key_path = tmp_path / "human-key.json"
-    decision_path = tmp_path / "decision.json"
-    signature_path = tmp_path / "signature.txt"
     review_evidence_root = tmp_path / "review-evidence"
-    output = tmp_path / "human.json"
+    output = review_evidence_root / "human-review.json"
     _write_json(bundle_path, bundle)
     _write_json(ai_path, gate.ai_record)
-    _write_json(key_path, evidence.human_key_binding)
-    decision_path.write_bytes(evidence.human_decision_bytes)
-    signature_path.write_text(evidence.human_signature_base64, encoding="ascii")
     _write_review_evidence(review_evidence_root, evidence)
 
     rejected = runner.invoke(
@@ -584,16 +536,14 @@ def test_human_record_import_rejects_noninteractive_confirmation_before_write(
             str(ai_path),
             "--review-evidence-directory",
             str(review_evidence_root),
-            "--decision-file",
-            str(decision_path),
-            "--signature-file",
-            str(signature_path),
-            "--key-binding",
-            str(key_path),
-            "--imported-at",
+            "--status",
+            "pass",
+            "--nonce",
+            gate.human_record.confirmation_nonce if gate.human_record else "fixture-nonce",
+            "--operator-id",
+            gate.human_record.operator_id if gate.human_record else "fixture-operator",
+            "--created-at",
             gate.human_record.created_at.isoformat() if gate.human_record else "",
-            "--output",
-            str(output),
         ],
         input=f"{bundle.bundle_id}\n",
     )
@@ -603,51 +553,59 @@ def test_human_record_import_rejects_noninteractive_confirmation_before_write(
     assert not output.exists()
 
 
-def test_human_decision_rejects_shape_only_recorded_pass_before_write(
+def test_human_record_uses_one_canonical_create_only_path_per_review_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(phase_cli, "_stdin_is_interactive", lambda: True)
     bundle, gate, evidence = _accepted_gate_with_evidence()
-    forged_ai_path = _reduce_shape_only_pass(tmp_path / "forged", evidence)
-    forged_ai = AIQualityReviewRecord.model_validate_json(forged_ai_path.read_bytes())
-    assert forged_ai != gate.ai_record
+    assert gate.human_record is not None
     bundle_path = tmp_path / "bundle.json"
-    review_evidence_root = tmp_path / "review-evidence"
-    output = tmp_path / "decision.json"
+    ai_path = tmp_path / "ai.json"
+    review_root = tmp_path / "review-evidence"
     _write_json(bundle_path, bundle)
-    _write_review_evidence(review_evidence_root, evidence)
-
-    result = CliRunner().invoke(
+    _write_json(ai_path, gate.ai_record)
+    _write_review_evidence(review_root, evidence)
+    common = [
+        "phase",
+        "human-review",
+        "record",
+        "--bundle",
+        str(bundle_path),
+        "--ai-review",
+        str(ai_path),
+        "--review-evidence-directory",
+        str(review_root),
+        "--status",
+        "pass",
+        "--operator-id",
+        gate.human_record.operator_id,
+        "--created-at",
+        gate.human_record.created_at.isoformat(),
+    ]
+    runner = CliRunner()
+    first_nonce = "canonical-review-1"
+    first = runner.invoke(
         app,
-        [
-            "phase",
-            "human-review",
-            "decision-prepare",
-            "--bundle",
-            str(bundle_path),
-            "--ai-review",
-            str(forged_ai_path),
-            "--review-evidence-directory",
-            str(review_evidence_root),
-            "--status",
-            "pass",
-            "--decided-at",
-            CREATED_AT.isoformat(),
-            "--nonce",
-            "forged-ai-decision",
-            "--reviewer-label",
-            "fixture-operator",
-            "--output",
-            str(output),
-        ],
-        input=f"{bundle.bundle_id}\n",
+        [*common, "--nonce", first_nonce],
+        input=f"PASS {bundle.bundle_id} {gate.ai_record.ai_review_record_id} {first_nonce}\n",
     )
 
-    assert result.exit_code != 0
-    assert "not freshly VALIDATED" in result.output
-    assert "Traceback" not in result.output
-    assert not output.exists()
+    assert first.exit_code == 0, first.output
+    canonical_path = review_root / "human-review.json"
+    first_bytes = canonical_path.read_bytes()
+
+    second = runner.invoke(
+        app,
+        [*common, "--nonce", "canonical-review-2"],
+        input=(
+            f"PASS {bundle.bundle_id} {gate.ai_record.ai_review_record_id} canonical-review-2\n"
+        ),
+    )
+
+    assert second.exit_code != 0
+    assert "already has a human quality review record" in second.output
+    assert canonical_path.read_bytes() == first_bytes
 
 
 def test_human_record_rejects_shape_only_recorded_pass_before_write(
@@ -660,7 +618,7 @@ def test_human_record_rejects_shape_only_recorded_pass_before_write(
     assert gate.human_record is not None
     bundle_path = tmp_path / "bundle.json"
     review_evidence_root = tmp_path / "review-evidence"
-    output = tmp_path / "human.json"
+    output = review_evidence_root / "human-review.json"
     _write_json(bundle_path, bundle)
     _write_review_evidence(review_evidence_root, evidence)
 
@@ -676,18 +634,18 @@ def test_human_record_rejects_shape_only_recorded_pass_before_write(
             str(forged_ai_path),
             "--review-evidence-directory",
             str(review_evidence_root),
-            "--decision-file",
-            str(review_evidence_root / "human-decision.json"),
-            "--signature-file",
-            str(review_evidence_root / "human-signature.txt"),
-            "--key-binding",
-            str(review_evidence_root / "human-key-binding.json"),
-            "--imported-at",
+            "--status",
+            "pass",
+            "--nonce",
+            "forged-ai-confirmation",
+            "--operator-id",
+            "fixture-operator",
+            "--created-at",
             gate.human_record.created_at.isoformat(),
-            "--output",
-            str(output),
         ],
-        input=f"{bundle.bundle_id}\n",
+        input=(
+            f"PASS {bundle.bundle_id} {gate.ai_record.ai_review_record_id} forged-ai-confirmation\n"
+        ),
     )
 
     assert result.exit_code != 0
@@ -696,24 +654,14 @@ def test_human_record_rejects_shape_only_recorded_pass_before_write(
     assert not output.exists()
 
 
-def test_phase_ai_evidence_validation_requires_no_prior_human_signature(
+def test_phase_ai_evidence_validation_requires_no_prior_human_artifact(
     tmp_path: Path,
 ) -> None:
     bundle, gate, evidence = _accepted_gate_with_evidence()
     review_evidence_root = tmp_path / "review-evidence"
     _write_review_evidence(review_evidence_root, evidence)
-    for name in (
-        "human-key-binding.json",
-        "human-decision.json",
-        "human-signature.txt",
-    ):
-        (review_evidence_root / name).unlink()
-
     loaded = load_phase_review_evidence(review_evidence_root)
 
-    assert loaded.human_key_binding is None
-    assert loaded.human_decision_bytes is None
-    assert loaded.human_signature_base64 is None
     assert phase_ai_review_evidence_closes(bundle, loaded, gate.ai_record)
 
 

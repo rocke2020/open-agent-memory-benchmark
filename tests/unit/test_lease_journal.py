@@ -107,12 +107,12 @@ def test_lease_journal_seals_canonical_lease_before_provider_pointer(tmp_path: P
     journal.acquire(record)
 
     assert (store.root / "source/run-leases/1.json").is_file()
-    assert (provider_runtime / "active-run-lease").is_file()
+    assert (provider_runtime / "active-operation").is_file()
     assert journal.current_lease_hash == record.lease_record_hash
 
     journal.release()
 
-    assert not (provider_runtime / "active-run-lease").exists()
+    assert not (provider_runtime / "active-operation").exists()
     assert (store.root / "source/run-leases/1.json").is_file()
     assert journal.current_lease_hash is None
 
@@ -129,7 +129,7 @@ def test_released_lease_record_cannot_be_reused_as_a_new_acquisition(tmp_path: P
     with pytest.raises(ResumeRejectedError, match="already sealed"):
         journal.acquire(record)
 
-    assert not (tmp_path / "provider-runtime" / "active-run-lease").exists()
+    assert not (tmp_path / "provider-runtime" / "active-operation").exists()
 
 
 def test_stale_lease_recovery_seals_audited_chain_before_pointer_switch(
@@ -161,7 +161,7 @@ def test_stale_lease_recovery_seals_audited_chain_before_pointer_switch(
     assert (
         store.root / f"source/recovery-decisions/{decision.recovery_decision_id}.json"
     ).is_file()
-    pointer = (runtime / "active-run-lease").read_text(encoding="utf-8")
+    pointer = (runtime / "active-operation").read_text(encoding="utf-8")
     assert successor.lease_record_hash in pointer
     assert previous.lease_record_hash not in pointer
     assert recovering.current_lease_hash == successor.lease_record_hash
@@ -192,7 +192,7 @@ def test_stale_lease_recovery_rejects_a_live_owner_without_writes(tmp_path: Path
 
     assert not (store.root / "source/run-leases/2.json").exists()
     assert not (store.root / "source/recovery-decisions").exists()
-    assert previous.lease_record_hash in (runtime / "active-run-lease").read_text(encoding="utf-8")
+    assert previous.lease_record_hash in (runtime / "active-operation").read_text(encoding="utf-8")
 
 
 def test_stale_recovery_rejects_a_caller_tampered_previous_lease(tmp_path: Path) -> None:
@@ -322,7 +322,7 @@ def test_attempt_pointer_clear_requires_the_current_in_process_lease_authority(
     )
     owner.mark_attempt_dispatched(attempt_id="b" * 64, intent_record_hash="c" * 64)
 
-    with pytest.raises(ResumeRejectedError, match="current lease authority"):
+    with pytest.raises(ResumeRejectedError, match="current operation authority"):
         ProviderLifecycleBridge(runtime).clear_attempt_after_receipt("c" * 64)
 
     assert (runtime / "active-provider-attempt").exists()

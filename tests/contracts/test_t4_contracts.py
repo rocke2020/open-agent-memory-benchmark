@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from oamb.contracts.ids import canonical_sha256
+
 HASH = "a" * 64
 OTHER_HASH = "b" * 64
 NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
@@ -625,6 +627,7 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
     reporting = require("oamb.contracts.reporting")
     specifications = require("oamb.contracts.specifications")
     accounting = require("oamb.contracts.accounting")
+    states = require("oamb.contracts.states")
     source_binding = {
         "schema_name": "source_evidence_binding",
         "schema_version": 1,
@@ -660,8 +663,276 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         "judged_cases": 0,
         "unjudged_cases": 0,
     }
+    legacy_budget = specifications.BudgetSpecV2(
+        budget_id="legacy-budget-v2",
+        scope_kind=specifications.BudgetScopeKindV2.RUN,
+        scope_id="legacy-run",
+        approval_id="legacy-approval-v1",
+        max_attempts=1,
+        max_input_tokens=0,
+        max_output_tokens=0,
+        max_dispatch_wall_seconds=Decimal("30"),
+        max_cost=None,
+        currency=None,
+        resource_ceilings=(resource_ceiling(specifications),),
+        role_ceilings=(role_ceiling(specifications),),
+        stop_condition_ids=("budget_exhausted",),
+    )
+    legacy_approval_values = dict(
+        approval_id="legacy-approval-v1",
+        operation_kind="benchmark_run",
+        scope_kind=specifications.BudgetScopeKindV2.RUN,
+        scope_id="legacy-run",
+        runtime_binding_hash=HASH,
+        provider_runtime_profile_attestation_hash=None,
+        role_binding_ids=("embedding-binding",),
+        budget_hash=OTHER_HASH,
+        approved_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+        unmetered_cost_acknowledged=True,
+        stop_condition_ids=("budget_exhausted",),
+    )
+    legacy_approval = specifications.ExternalCallApprovalRecord(
+        approval_hash=specifications.external_call_approval_hash(legacy_approval_values),
+        **legacy_approval_values,
+    )
+    legacy_reservation = evidence.BudgetReservationRecord(
+        reservation_id=HASH,
+        budget_id=legacy_budget.budget_id,
+        scope_kind=specifications.BudgetScopeKindV2.RUN,
+        scope_id="legacy-run",
+        role_binding_id="embedding-binding",
+        attempt_id=OTHER_HASH,
+        reserved_attempts=1,
+        reserved_input_tokens=0,
+        reserved_output_tokens=0,
+        reserved_dispatch_wall_seconds=Decimal("30"),
+        reserved_cost=None,
+        currency=None,
+        reserved_resource_ceilings=(resource_ceiling(specifications),),
+        reserved_provider_units=Decimal("1"),
+        reserved_at=NOW,
+    )
+    legacy_intent = evidence.AttemptIntentRecord(
+        attempt_id=OTHER_HASH,
+        claim_id=HASH,
+        reservation_id=legacy_reservation.reservation_id,
+        parent_kind="case",
+        parent_id="legacy-case",
+        role_binding_id="embedding-binding",
+        stage="answer",
+        request_fingerprint=HASH,
+        reconciliation_capability="none",
+        idempotency_key_hash=None,
+        sealed_at=NOW,
+    )
+    legacy_attempt_v2 = evidence.AttemptRecordV2(
+        attempt_id=OTHER_HASH,
+        parent_kind="case",
+        parent_id="legacy-case",
+        stage="answer",
+        ordinal=1,
+        request_fingerprint=HASH,
+        started_at=NOW,
+        ended_at=NOW,
+        outcome=states.AttemptOutcome.SUCCEEDED,
+        retry_of_attempt_id=None,
+        idempotency_key_hash=None,
+        reconciliation_capability="none",
+        raw_response_ref=HASH,
+        raw_error_ref=None,
+        index_contribution=states.IndexContribution.NOT_APPLICABLE,
+        superseded_by_attempt_id=None,
+    )
+    legacy_usage_v3 = accounting.TokenUsageRecordV3(
+        usage_record_id=OTHER_HASH,
+        attempt_id=HASH,
+        parent_kind="case",
+        parent_id="legacy-case",
+        stage=accounting.TokenStageV2.ANSWER,
+        operation_kind="answer_completion",
+        token_domain=accounting.TokenDomain.EXTERNAL_LLM,
+        measurement_source=accounting.TokenMeasurementSource.SUPPLIER_RESPONSE,
+        input_tokens=None,
+        visible_output_tokens=None,
+        supplier_reported_total_tokens=None,
+        context_view_tokens=None,
+        cached_input_tokens=None,
+        reasoning_tokens=None,
+        configured_model="legacy-model",
+        runtime_model="legacy-model",
+        meter_schema_id="legacy-meter-v1",
+        raw_field_paths=(),
+        covered_dimensions=(),
+        unavailable_dimensions=(
+            "input_tokens",
+            "visible_output_tokens",
+            "supplier_reported_total_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+        ),
+        not_applicable_dimensions=(),
+        inclusion_relationships=(),
+        token_measurement_complete=False,
+        billing_complete=False,
+        proof_status=accounting.ProofStatus.UNAVAILABLE,
+        reason="legacy usage unavailable",
+        raw_response_ref=HASH,
+    )
+    legacy_report_spec_fields = dict(
+        report_kind="run",
+        audience="public",
+        preview_max_field_bytes=1024,
+        preview_total_bytes=4096,
+        display_field_ids=("summary",),
+        renderer_hash=HASH,
+        asset_hashes=(OTHER_HASH,),
+        browser_contract_hash=HASH,
+        performance_contract_hash=OTHER_HASH,
+        export_profile_selector_id="public-run-v1",
+        export_profile_selector_version=1,
+    )
+    legacy_report_spec = specifications.ReportSpec(
+        report_spec_id=specifications.report_spec_id(**legacy_report_spec_fields),
+        **legacy_report_spec_fields,
+    )
+    legacy_binding_fields = dict(
+        spec_kind="benchmark_report",
+        spec_schema_name="report_spec",
+        spec_schema_version=1,
+        spec_id=legacy_report_spec.report_spec_id,
+        spec_hash=canonical_sha256(legacy_report_spec),
+    )
+    legacy_binding = specifications.ReportIdentitySpecBinding(
+        binding_id=specifications.report_identity_spec_binding_id(**legacy_binding_fields),
+        **legacy_binding_fields,
+    )
+    legacy_source = specifications.SourceEvidenceBinding.model_validate_json(
+        json.dumps(source_binding)
+    )
+    ordered_source_root_hash = canonical_sha256(
+        ["oamb-ordered-source-roots-v1", (legacy_source.source_root_hash,)]
+    )
+    legacy_derivation_fields = dict(
+        derivation_kind="run_report",
+        ordered_source_bindings=(legacy_source,),
+        ordered_source_root_hash=ordered_source_root_hash,
+        evidence_validation_result_hash=HASH,
+        transform_spec_hash=OTHER_HASH,
+        report_identity_spec_binding=legacy_binding,
+        reducer_and_renderer_input_hashes=(HASH,),
+    )
+    legacy_derivation = specifications.DerivationSpecV2(
+        derivation_input_hash=specifications.derivation_spec_v2_input_hash(
+            **legacy_derivation_fields
+        ),
+        **legacy_derivation_fields,
+    )
+    legacy_artifact_fields = dict(
+        report_id=HASH,
+        report_kind="run",
+        report_identity_spec_binding=legacy_binding,
+        ordered_source_bindings=(legacy_source,),
+        ordered_evidence_validation_hashes=(HASH,),
+        report_model_hash=OTHER_HASH,
+        renderer_hash=HASH,
+        asset_hashes=(OTHER_HASH,),
+        browser_contract_hash=HASH,
+        performance_contract_hash=OTHER_HASH,
+        export_profile_selector_id="public-run-v1",
+        export_profile_selector_version=1,
+        audience="public",
+        schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
+        limitations=("legacy fixture",),
+    )
+    legacy_artifact = reporting.ReportArtifactManifestV2(
+        artifact_manifest_id=reporting.report_artifact_manifest_v2_id(**legacy_artifact_fields),
+        **legacy_artifact_fields,
+    )
+    from tests.unit.test_t8_human_review import _ai_record
+
+    legacy_ai_record = _ai_record()
+    signature_fields = dict(
+        key_binding_id=HASH,
+        trusted_key_fingerprint="legacy-key",
+        public_key_sha256=OTHER_HASH,
+        signed_payload_sha256=HASH,
+        signature_sha256=OTHER_HASH,
+        verified_at=NOW,
+    )
+    legacy_signature = reporting.SignatureVerificationRecord(
+        verification_id=reporting.signature_verification_record_id(**signature_fields),
+        **signature_fields,
+    )
+    legacy_human_fields = dict(
+        review_bundle_hash=legacy_ai_record.review_bundle_hash,
+        ai_review_record_hash=legacy_ai_record.ai_review_record_id,
+        decision_hash=HASH,
+        signature_verification=legacy_signature,
+        status="pass",
+        finding_codes=(),
+        evidence_references=(),
+        reviewer_label="legacy-reviewer",
+        decision_nonce="legacy-nonce",
+        trusted_key_fingerprint="legacy-key",
+        created_at=NOW,
+    )
+    legacy_human = reporting.HumanQualityReviewRecordV1(
+        human_review_record_id=reporting.human_quality_review_record_v1_id(**legacy_human_fields),
+        **legacy_human_fields,
+    )
+    legacy_history = (legacy_ai_record.ai_review_record_id,)
+    legacy_history_root = canonical_sha256(
+        ["oamb-review-history-v1", legacy_history, legacy_human.human_review_record_id]
+    )
+    legacy_gate_fields = dict(
+        phase_id="legacy-phase",
+        review_bundle_hash=legacy_ai_record.review_bundle_hash,
+        review_history_root_hash=legacy_history_root,
+        ordered_ai_review_record_hashes=legacy_history,
+        canonical_ai_review_record_hash=legacy_ai_record.ai_review_record_id,
+        human_review_record_hash=legacy_human.human_review_record_id,
+        passed_by_ai=True,
+        passed_by_human=True,
+        ai_record=legacy_ai_record,
+        human_record=legacy_human,
+    )
+    legacy_gate = reporting.EvaluationPhaseGateV1(
+        gate_id=reporting.evaluation_phase_gate_v1_id(
+            **{
+                key: value
+                for key, value in legacy_gate_fields.items()
+                if key not in {"ai_record", "human_record"}
+            }
+        ),
+        **legacy_gate_fields,
+    )
     fixtures = (
         *_external_legacy_fixtures(),
+        (legacy_approval.model_dump(mode="json"), specifications.ExternalCallApprovalRecord),
+        (legacy_budget.model_dump(mode="json"), specifications.BudgetSpecV2),
+        (legacy_reservation.model_dump(mode="json"), evidence.BudgetReservationRecord),
+        (legacy_intent.model_dump(mode="json"), evidence.AttemptIntentRecord),
+        (legacy_attempt_v2.model_dump(mode="json"), evidence.AttemptRecordV2),
+        (legacy_usage_v3.model_dump(mode="json"), accounting.TokenUsageRecordV3),
+        (legacy_report_spec.model_dump(mode="json"), specifications.ReportSpec),
+        (
+            legacy_binding.model_dump(mode="json"),
+            specifications.ReportIdentitySpecBinding,
+        ),
+        (legacy_derivation.model_dump(mode="json"), specifications.DerivationSpecV2),
+        (
+            legacy_artifact.model_dump(mode="json"),
+            reporting.ReportArtifactManifestV2,
+        ),
+        (
+            legacy_human.model_dump(mode="json"),
+            reporting.HumanQualityReviewRecordV1,
+        ),
+        (
+            legacy_gate.model_dump(mode="json"),
+            reporting.EvaluationPhaseGateV1,
+        ),
         (
             {
                 "schema_name": "case_record",
