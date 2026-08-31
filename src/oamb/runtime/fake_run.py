@@ -573,22 +573,26 @@ async def _run_fake_vertical_slice_impl(
         answer_raw_ref: str | None = None
         answer_value: AnswerValue | None = None
         retry_of: str | None = None
+        answer_thinking_effort = model.thinking_effort_for(
+            stage="answer",
+            role_binding_id="fake-answer-v1",
+        )
         for ordinal in range(1, FAKE_MAX_MODEL_ATTEMPTS + 1):
-            current_attempt_id = attempt_id(occurrence_id, "answer", ordinal, messages_hash)
+            model_request = ModelRequest.for_attempt(
+                ordinal=ordinal,
+                parent_kind="case",
+                parent_id=occurrence_id,
+                stage="answer",
+                role_binding_id="fake-answer-v1",
+                messages_sha256=messages_hash,
+                messages=messages,
+                thinking_effort=answer_thinking_effort,
+            )
+            current_attempt_id = model_request.attempt_id
             answer_attempt_ids.append(current_attempt_id)
             started = state.timestamp()
             try:
-                model_receipt = await model.complete(
-                    ModelRequest(
-                        attempt_id=current_attempt_id,
-                        parent_kind="case",
-                        parent_id=occurrence_id,
-                        stage="answer",
-                        role_binding_id="fake-answer-v1",
-                        messages_sha256=messages_hash,
-                        messages=messages,
-                    )
-                )
+                model_receipt = await model.complete(model_request)
             except ModelCallFailure as exc:
                 failed = AttemptRecord(
                     attempt_id=current_attempt_id,
@@ -596,7 +600,7 @@ async def _run_fake_vertical_slice_impl(
                     parent_id=occurrence_id,
                     stage="answer",
                     ordinal=ordinal,
-                    request_fingerprint=messages_hash,
+                    request_fingerprint=model_request.request_fingerprint,
                     started_at=started,
                     ended_at=state.timestamp(),
                     outcome=AttemptOutcome.FAILED,
@@ -619,7 +623,7 @@ async def _run_fake_vertical_slice_impl(
                 parent_id=occurrence_id,
                 stage="answer",
                 ordinal=ordinal,
-                request_fingerprint=messages_hash,
+                request_fingerprint=model_request.request_fingerprint,
                 started_at=started,
                 ended_at=state.timestamp(),
                 outcome=AttemptOutcome.SUCCEEDED,
@@ -650,21 +654,27 @@ async def _run_fake_vertical_slice_impl(
         if isinstance(evaluation, JudgeRequest):
             judge_messages = (("user", evaluation.prompt.canonical_bytes.decode("utf-8")),)
             judge_request_hash = canonical_sha256(judge_messages)
-            judge_attempt_id = attempt_id(occurrence_id, "judge", 1, judge_request_hash)
+            judge_role_binding_id = case_plan.judge_binding_id or "fake-judge-v1"
+            judge_request = ModelRequest.for_attempt(
+                ordinal=1,
+                parent_kind="case",
+                parent_id=occurrence_id,
+                stage="judge",
+                role_binding_id=judge_role_binding_id,
+                messages_sha256=judge_request_hash,
+                messages=judge_messages,
+                thinking_effort=model.thinking_effort_for(
+                    stage="judge",
+                    role_binding_id=judge_role_binding_id,
+                ),
+                output_contract_id=evaluation.output_contract_id,
+                max_output_tokens=evaluation.max_output_tokens,
+            )
+            judge_attempt_id = judge_request.attempt_id
             case_attempt_ids.append(judge_attempt_id)
             judge_started = state.timestamp()
             try:
-                await model.complete(
-                    ModelRequest(
-                        attempt_id=judge_attempt_id,
-                        parent_kind="case",
-                        parent_id=occurrence_id,
-                        stage="judge",
-                        role_binding_id=case_plan.judge_binding_id or "fake-judge-v1",
-                        messages_sha256=judge_request_hash,
-                        messages=judge_messages,
-                    )
-                )
+                await model.complete(judge_request)
             except ModelCallFailure as exc:
                 judge_attempt = AttemptRecord(
                     attempt_id=judge_attempt_id,
@@ -672,7 +682,7 @@ async def _run_fake_vertical_slice_impl(
                     parent_id=occurrence_id,
                     stage="judge",
                     ordinal=1,
-                    request_fingerprint=judge_request_hash,
+                    request_fingerprint=judge_request.request_fingerprint,
                     started_at=judge_started,
                     ended_at=state.timestamp(),
                     outcome=AttemptOutcome.FAILED,
@@ -919,7 +929,6 @@ def build_fake_budget(run_id: str) -> BudgetSpec:
         budget_id=f"{run_id}-zero-external",
         scope_kind=BudgetScopeKind.RUN,
         scope_id=run_id,
-        approval_id=None,
         max_attempts=0,
         max_input_tokens=0,
         max_output_tokens=0,
@@ -970,7 +979,6 @@ def resolve_fake_preflight(
         artifact_durability=selected_artifact_durability,
         runtime_binding=None,
         provider_runtime_attestation=None,
-        approval=None,
         cost_measurement_spec=None,
         price_snapshot=None,
     )
@@ -1116,7 +1124,7 @@ def _seal_fake_usage(
     state: _ExecutionState,
     *,
     attempt_id_value: str,
-    parent_kind: Literal["ingestion_plan", "case", "phase_review"],
+    parent_kind: Literal["ingestion_plan", "case"],
     parent_id: str,
     stage: TokenStage,
     operation_kind: str,

@@ -22,7 +22,6 @@ def _reporting() -> ModuleType:
         "RunReportModelV3",
         "ComparisonReportModel",
         "ReleaseReportModel",
-        "PhaseAcceptanceReport",
         "ReportArtifactManifestV2",
     )
     missing = tuple(name for name in required if not hasattr(module, name))
@@ -216,44 +215,3 @@ def test_incomparable_comparison_model_cannot_smuggle_delta_or_winner() -> None:
                 "comparison": {**payload["comparison"], "winner": "left"},
             }
         )
-
-
-def test_phase_acceptance_flags_fail_closed_when_review_is_stale() -> None:
-    _reporting()
-    public = importlib.import_module("oamb.reporting.public")
-    current = public.build_phase_acceptance_report(
-        acceptance_report_spec_hash=SHA_A,
-        phase_id="phase_1_smoke_acceptance",
-        evaluation_report_hash=SHA_B,
-        evaluation_export_validation_hash=SHA_C,
-        review_bundle_hash=SHA_D,
-        phase_gate_hash=SHA_A,
-        ai_review_record_hash=SHA_B,
-        human_review_record_hash=SHA_C,
-        gate_review_bundle_hash=SHA_D,
-        gate_passed_by_ai=True,
-        gate_passed_by_human=True,
-        finding_codes=(),
-        evidence_references=("review:fixture",),
-        limitations=("fixture only",),
-    )
-    stale = public.build_phase_acceptance_report(
-        acceptance_report_spec_hash=SHA_B,
-        phase_id=current.phase_id,
-        evaluation_report_hash=current.evaluation_report_hash,
-        evaluation_export_validation_hash=current.evaluation_export_validation_hash,
-        review_bundle_hash=SHA_A,
-        phase_gate_hash=current.phase_gate_hash,
-        ai_review_record_hash=current.ai_review_record_hash,
-        human_review_record_hash=current.human_review_record_hash,
-        gate_review_bundle_hash=SHA_D,
-        gate_passed_by_ai=True,
-        gate_passed_by_human=True,
-        finding_codes=(),
-        evidence_references=("review:fixture",),
-        limitations=("fixture only",),
-    )
-
-    assert current.review_current and current.passed_by_ai and current.passed_by_human
-    assert not stale.review_current
-    assert not stale.passed_by_ai and not stale.passed_by_human

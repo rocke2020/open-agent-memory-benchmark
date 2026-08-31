@@ -323,9 +323,12 @@ def test_attempt_pointer_clear_requires_the_current_in_process_lease_authority(
     owner.mark_attempt_dispatched(attempt_id="b" * 64, intent_record_hash="c" * 64)
 
     with pytest.raises(ResumeRejectedError, match="current operation authority"):
-        ProviderLifecycleBridge(runtime).clear_attempt_after_receipt("c" * 64)
+        ProviderLifecycleBridge(runtime).clear_attempt_after_receipt(
+            attempt_id="b" * 64,
+            expected_intent_record_hash="c" * 64,
+        )
 
-    assert (runtime / "active-provider-attempt").exists()
+    assert (runtime / "active-provider-attempts" / f"{'b' * 64}.json").exists()
 
 
 def test_lease_heartbeat_is_append_only_and_predecessor_bound(tmp_path: Path) -> None:

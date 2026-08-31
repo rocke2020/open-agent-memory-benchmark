@@ -408,7 +408,8 @@ def test_provider_attempt_guard_exists_only_from_dispatch_until_durable_receipt(
 
     coordinator.mark_dispatched(ATTEMPT_ID)
 
-    assert (provider_runtime / "active-provider-attempt").is_file()
+    pointer = provider_runtime / "active-provider-attempts" / f"{ATTEMPT_ID}.json"
+    assert pointer.is_file()
     raw = b'{"answer":"ok"}'
     raw_hash = hashlib.sha256(raw).hexdigest()
     coordinator.record_receipt(
@@ -426,4 +427,4 @@ def test_provider_attempt_guard_exists_only_from_dispatch_until_durable_receipt(
         observed=maximum(),
     )
 
-    assert not (provider_runtime / "active-provider-attempt").exists()
+    assert not pointer.exists()

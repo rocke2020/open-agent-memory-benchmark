@@ -7,20 +7,11 @@ import pytest
 from pydantic import ValidationError
 
 EXPECTED_VERSIONED_CONTRACT_NAMES = {
-    "acceptance_report_spec",
     "aggregate_metric_delta",
-    "ai_quality_review_record",
-    "ai_review_batch",
-    "ai_review_batch_result",
-    "ai_review_case_projection",
-    "ai_review_case_result",
-    "ai_review_finding",
-    "ai_review_integrity_projection",
-    "ai_review_integrity_result",
-    "ai_review_plan",
     "attempt_intent_record",
     "attempt_receipt_record",
     "attempt_record",
+    "budget_owner_allocation",
     "budget_reservation_record",
     "budget_spec",
     "capsule_manifest",
@@ -31,6 +22,8 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "checkpoint_manifest",
     "close_error_record",
     "comparison_control_binding",
+    "comparison_control_provenance_binding",
+    "comparison_control_source_reference",
     "comparison_control_snapshot",
     "comparison_cost_control",
     "comparison_cost_delta",
@@ -41,6 +34,7 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "comparison_spec",
     "comparison_winner_reducer",
     "completion_summary",
+    "controlled_embedding_comparison_projection",
     "cost_measurement_spec",
     "cost_record",
     "dataset_file",
@@ -49,12 +43,9 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "derivation_spec",
     "diagnostic_run_report_model",
     "display_preview",
-    "evaluation_phase_gate",
     "evaluation_report_model",
-    "evaluation_review_bundle",
     "exact_rational",
     "execution_environment_binding",
-    "external_call_approval_record",
     "external_compatibility_assessment",
     "external_historical_aggregate",
     "external_historical_case",
@@ -62,9 +53,6 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "external_historical_evidence",
     "external_historical_evidence_report",
     "external_transformation_record",
-    "human_quality_review_record",
-    "human_review_decision",
-    "human_review_key_binding",
     "ingestion_plan_manifest",
     "ingestion_plan_record",
     "interaction_spec",
@@ -79,7 +67,9 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "measurement_summary_line",
     "memory_system_runtime_binding",
     "memory_system_spec",
+    "memory_conformance_evidence_manifest",
     "memory_conformance_occurrence_record",
+    "memory_conformance_spec",
     "model_readiness_occurrence_record",
     "model_role_binding",
     "metric_spec",
@@ -88,8 +78,6 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "origin_record",
     "output_contract",
     "paired_metric_delta",
-    "phase_acceptance_report",
-    "phase_review_occurrence_record",
     "report_spec",
     "price_snapshot",
     "prompt_pack_manifest",
@@ -112,12 +100,13 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "run_lease_record",
     "run_record",
     "run_preflight_record",
+    "run_comparison_control_basis_record",
     "run_report_model",
     "run_spec",
     "run_summary",
+    "runtime_measurement_control_record",
     "source_evidence_binding",
     "dispatch_budget_route",
-    "signature_verification_record",
     "token_usage_record",
     "validation_issue",
     "validation_claim_boundary",
@@ -125,6 +114,7 @@ EXPECTED_VERSIONED_CONTRACT_NAMES = {
     "validation_result",
     "validation_rule_requirement",
     "workload_spec",
+    "workload_execution_control_record",
 }
 
 EXPECTED_V2_SCHEMAS = {
@@ -133,24 +123,26 @@ EXPECTED_V2_SCHEMAS = {
     "budget_reservation_record",
     "budget_spec",
     "case_record",
+    "comparison_control_snapshot",
+    "cost_record",
     "derivation_spec",
-    "external_call_approval_record",
-    "evaluation_phase_gate",
-    "human_quality_review_record",
     "ingestion_plan_record",
     "memory_system_runtime_binding",
     "model_role_binding",
-    "phase_review_occurrence_record",
     "report_artifact_manifest",
     "report_identity_spec_binding",
     "report_spec",
+    "resource_usage_record",
     "run_report_model",
+    "run_preflight_record",
     "run_summary",
     "token_usage_record",
 }
 
 EXPECTED_V3_SCHEMAS = {
+    "attempt_intent_record",
     "attempt_record",
+    "budget_reservation_record",
     "budget_spec",
     "case_record",
     "derivation_spec",
@@ -160,7 +152,9 @@ EXPECTED_V3_SCHEMAS = {
     "token_usage_record",
 }
 
-EXPECTED_V4_SCHEMAS = {"token_usage_record"}
+EXPECTED_V4_SCHEMAS = {"attempt_record", "budget_spec", "token_usage_record"}
+
+EXPECTED_V5_SCHEMAS = {"token_usage_record"}
 
 
 def require_schema() -> ModuleType:
@@ -182,6 +176,7 @@ def test_versioned_contract_inventory_is_explicit_and_unique() -> None:
         *((name, 2) for name in EXPECTED_V2_SCHEMAS),
         *((name, 3) for name in EXPECTED_V3_SCHEMAS),
         *((name, 4) for name in EXPECTED_V4_SCHEMAS),
+        *((name, 5) for name in EXPECTED_V5_SCHEMAS),
     }
 
 
@@ -209,7 +204,6 @@ def test_runtime_parser_rejects_noncanonical_decimal_json(maximum: object) -> No
         "budget_id": "budget-1",
         "scope_kind": "run",
         "scope_id": "run-1",
-        "approval_id": None,
         "max_attempts": 1,
         "max_input_tokens": 1,
         "max_output_tokens": 1,

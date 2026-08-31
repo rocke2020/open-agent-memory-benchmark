@@ -20,7 +20,7 @@ OAMB_MEM0_LLM_API_KEY=$(required_env_value OAMB_MEM0_LLM_API_KEY)
 OAMB_MEM0_LLM_MODEL=$(required_env_value OAMB_MEM0_LLM_MODEL)
 OAMB_MEM0_LLM_BASE_URL=$(required_env_value OAMB_MEM0_LLM_BASE_URL)
 OAMB_EMBEDDING_MODEL=$(env_value OAMB_EMBEDDING_MODEL || printf 'qwen3-embedding:0.6b')
-OAMB_OLLAMA_BASE_URL=$(env_value OAMB_OLLAMA_BASE_URL || printf 'http://host.docker.internal:11434/v1')
+OAMB_EMBEDDING_BASE_URL=$(env_value OAMB_EMBEDDING_BASE_URL || printf 'http://host.docker.internal:18000/v1')
 OAMB_MEM0_QDRANT_API_KEY=$(required_env_value OAMB_MEM0_QDRANT_API_KEY)
 OAMB_MEM0_ADMIN_API_KEY=$(required_env_value OAMB_MEM0_ADMIN_API_KEY)
 
@@ -41,7 +41,7 @@ jq -n \
   --arg llm_model "$OAMB_MEM0_LLM_MODEL" \
   --arg llm_base "$OAMB_MEM0_LLM_BASE_URL" \
   --arg embed_model "$OAMB_EMBEDDING_MODEL" \
-  --arg embed_base "$OAMB_OLLAMA_BASE_URL" \
+  --arg embed_base "$OAMB_EMBEDDING_BASE_URL" \
   --arg qdrant_key "$OAMB_MEM0_QDRANT_API_KEY" \
   '{
     version: "v1.1",
@@ -52,10 +52,11 @@ jq -n \
     }},
     llm: {provider: "openai", config: {
       api_key: $llm_key, model: $llm_model, openai_base_url: $llm_base,
-      temperature: 0.0, max_tokens: 2000
+      temperature: 0.0, max_tokens: 2000,
+      reasoning_effort: "low", is_reasoning_model: true
     }},
     embedder: {provider: "openai", config: {
-      api_key: "ollama-local", model: $embed_model,
+      api_key: "oamb-local-embedding", model: $embed_model,
       openai_base_url: $embed_base, embedding_dims: 1024
     }},
     history_db_path: "/app/history/history.db",

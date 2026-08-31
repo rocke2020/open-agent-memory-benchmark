@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -21,6 +22,7 @@ PROFILE_FILES = {
     "hindsight-rest-v1": (
         "hindsight-health.json",
         "hindsight-version.json",
+        "hindsight-model-config.json",
     ),
     "mem0-rest-v1": (
         "mem0-openapi.json",
@@ -31,8 +33,21 @@ PROFILE_FILES = {
         "openviking-health.json",
         "openviking-auth-identity.json",
         "openviking-storage.json",
+        "openviking-model-config.json",
     ),
 }
+
+
+def test_provider_and_runner_proof_inventories_match() -> None:
+    producer_path = (
+        Path(__file__).resolve().parents[2] / "provider-services" / "lib" / "service_receipt.py"
+    )
+    spec = importlib.util.spec_from_file_location("provider_service_receipt", producer_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.PROFILE_PROOF_FILES == PROFILE_FILES
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -49,6 +64,10 @@ def _proof_bytes(filename: str) -> bytes:
     documents: dict[str, object] = {
         "hindsight-health.json": {"database": "connected", "status": "healthy"},
         "hindsight-version.json": {"api_version": "0.9.2", "features": {}},
+        "hindsight-model-config.json": {
+            "model": "deepseek-v4-pro",
+            "reasoning_effort": "low",
+        },
         "mem0-openapi.json": {
             "components": {"schemas": {"Login": {"properties": {"password": {"type": "string"}}}}},
             "paths": {"/memories": {}, "/search": {}},
@@ -57,6 +76,12 @@ def _proof_bytes(filename: str) -> bytes:
         "mem0-config-redacted.json": {
             "api_key": "[redacted]",
             "embedder": {"config": {"embedding_dims": 1024}},
+            "llm": {
+                "config": {
+                    "is_reasoning_model": True,
+                    "reasoning_effort": "low",
+                }
+            },
             "reranker": None,
             "vector_store": {
                 "config": {"embedding_model_dims": 1024},
@@ -85,6 +110,11 @@ def _proof_bytes(filename: str) -> bytes:
             "mode": "read_only_storage",
             "openviking_version": "0.4.16",
             "status": "ok",
+        },
+        "openviking-model-config.json": {
+            "model": "deepseek-v4-pro",
+            "provider": "openai",
+            "reasoning_effort": "low",
         },
     }
     return _canonical_bytes(documents.get(filename, {"filename": filename, "status": "ok"}))

@@ -8,6 +8,7 @@ import re
 
 import httpx
 
+from oamb.config.provider_services import HINDSIGHT_RETAIN_BATCH_LIMIT
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.ports import (
     ArtifactStorePort,
@@ -33,6 +34,8 @@ from oamb.contracts.ports import (
     StateDigestReceipt,
 )
 from oamb.memory_systems.rest import (
+    DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
+    DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
     SealedRestResponse,
     bind_sealed_response_validation,
     link_preceding_before_dispatch_cancellation,
@@ -55,7 +58,6 @@ from .profiles import (
 from .projection import ProjectionSnapshot, build_projection
 
 _BANK_PAGE_LIMIT = 1000
-_RETAIN_BATCH_LIMIT = 20
 _RECALL_MAX_TOKENS = 32768
 
 
@@ -70,6 +72,8 @@ class HindsightAdapter:
         runtime_binding_hash: str,
         authorization: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
+        total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
     ) -> None:
         if not configured_extraction_model or not runtime_extraction_model:
             raise ValueError("Hindsight extraction model identities are required")
@@ -81,6 +85,7 @@ class HindsightAdapter:
         self._runtime_binding_hash = runtime_binding_hash
         self._resolved = False
         self._known_bank_ids: set[str] = set()
+        self._bank_inventory_baseline_initialized = False
         self._attempted_allocations: set[str] = set()
         self._allocation_lock = asyncio.Lock()
         self._allocated_occurrences: dict[str, str] = {}
@@ -94,6 +99,8 @@ class HindsightAdapter:
             base_url=base_url,
             authorization=authorization,
             transport=transport,
+            read_timeout_seconds=read_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
         )
 
     async def resolve(self) -> RuntimeResolution:
@@ -149,7 +156,10 @@ class HindsightAdapter:
                 message="Hindsight ingestion bank already exists",
                 supporting_raw_references=inventory_references[:-1],
             )
-        if visible_bank_ids != self._known_bank_ids:
+        if not self._bank_inventory_baseline_initialized:
+            self._known_bank_ids.update(visible_bank_ids)
+            self._bank_inventory_baseline_initialized = True
+        elif visible_bank_ids != self._known_bank_ids:
             raise sealed_response_validation_failure(
                 terminal_inventory_response,
                 message="Hindsight bank inventory contains an unexpected scope",
@@ -304,8 +314,14 @@ class HindsightAdapter:
         if request.scope.scope_id in self._planned_dispatches_by_scope:
             raise ValueError("Hindsight ingestion dispatches are already planned and frozen")
         dispatches: list[IngestionDispatch] = []
-        for start in range(0, len(request.ordered_source_units), _RETAIN_BATCH_LIMIT):
-            source_units = request.ordered_source_units[start : start + _RETAIN_BATCH_LIMIT]
+        for start in range(
+            0,
+            len(request.ordered_source_units),
+            HINDSIGHT_RETAIN_BATCH_LIMIT,
+        ):
+            source_units = request.ordered_source_units[
+                start : start + HINDSIGHT_RETAIN_BATCH_LIMIT
+            ]
             for source in source_units:
                 self._retain_item(source)
             ordinal = len(dispatches) + 1
@@ -341,7 +357,7 @@ class HindsightAdapter:
             dispatch.operation_kind != "retain_extraction"
             or dispatch.dispatch_ordinal_1_indexed < 1
             or not dispatch.ordered_source_units
-            or len(dispatch.ordered_source_units) > _RETAIN_BATCH_LIMIT
+            or len(dispatch.ordered_source_units) > HINDSIGHT_RETAIN_BATCH_LIMIT
         ):
             raise ValueError("Hindsight retain dispatch does not match the exact profile")
         expected_fingerprint = self._dispatch_fingerprint(
@@ -576,6 +592,7 @@ class HindsightAdapter:
         return NativeEvidenceBatch(
             raw_reference=response.raw_reference,
             candidates=candidates,
+            request_raw_reference=response.request_reference,
         )
 
     async def _snapshot(self, scope: ScopeReceipt) -> ProjectionSnapshot:

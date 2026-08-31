@@ -22,6 +22,8 @@ classifiers = [
 dependencies = [
   # Strict immutable runtime contracts and fail-closed version dispatch.
   "pydantic>=2.12,<3",
+  # Strict duplicate-aware loading of the benchmark's closed YAML shape.
+  "pyyaml>=6.0.3,<7",
   # The offline CLI composition root.
   "typer>=0.20,<1",
   # T6: original REST transports, including OpenAI-compatible model calls.

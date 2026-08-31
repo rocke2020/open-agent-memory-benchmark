@@ -44,6 +44,7 @@ FAKE_DATASET_REVISION = "generated-1"
 FAKE_DATASET_SPLIT = "offline"
 FAKE_WORKLOAD_ID = "oamb-fake-vertical-v1"
 FAKE_SOURCE_PATH = "generated/fake-cases.json"
+FAKE_JUDGE_MAX_OUTPUT_TOKENS = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +193,7 @@ class GeneratedFakeWorkload:
                     sha256=hashlib.sha256(prompt).hexdigest(),
                 ),
                 output_contract_id="fake-judge-json-v1",
+                max_output_tokens=FAKE_JUDGE_MAX_OUTPUT_TOKENS,
             )
         trace = canonical_json_bytes(
             {

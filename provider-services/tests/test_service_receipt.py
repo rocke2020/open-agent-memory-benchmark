@@ -16,6 +16,7 @@ PROFILE_FILES = {
     "hindsight-rest-v1": (
         "hindsight-health.json",
         "hindsight-version.json",
+        "hindsight-model-config.json",
     ),
     "mem0-rest-v1": (
         "mem0-openapi.json",
@@ -26,6 +27,7 @@ PROFILE_FILES = {
         "openviking-health.json",
         "openviking-auth-identity.json",
         "openviking-storage.json",
+        "openviking-model-config.json",
     ),
 }
 
@@ -117,6 +119,59 @@ class ServiceReceiptTests(unittest.TestCase):
                 blob = proof_store / "blobs" / entry["sha256"]
                 self.assertEqual(blob.read_bytes(), expected[filename])
                 self.assertEqual(entry["byte_count"], len(expected[filename]))
+
+    def test_profile_proof_seal_redacts_provider_authorities(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            attempt = root / "attempt"
+            attempt.mkdir()
+            write_proof_files(attempt, "mem0-rest-v1")
+            (attempt / "mem0-config-redacted.json").write_text(
+                json.dumps(
+                    {
+                        "vector_store": {
+                            "provider": "qdrant",
+                            "config": {"url": "http://mem0-qdrant:6333"},
+                        },
+                        "llm": {
+                            "provider": "openai",
+                            "config": {"openai_base_url": "https://models.example/v1"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest_hash = module.seal_profile_proof_manifest(
+                root / "receipts" / "proofs",
+                profile_id="mem0-rest-v1",
+                proof_directory=attempt,
+                trusted_root=root,
+            )
+
+            manifest = json.loads(
+                (
+                    root
+                    / "receipts"
+                    / "proofs"
+                    / "manifests"
+                    / f"{manifest_hash}.json"
+                ).read_bytes()
+            )
+            config_entry = next(
+                entry
+                for entry in manifest["files"]
+                if entry["relative_path"] == "mem0-config-redacted.json"
+            )
+            sealed = (
+                root / "receipts" / "proofs" / "blobs" / config_entry["sha256"]
+            ).read_bytes()
+            self.assertNotIn(b"://", sealed)
+            self.assertEqual(
+                json.loads(sealed)["vector_store"]["config"]["url"],
+                "[redacted]",
+            )
 
     def test_new_nested_proof_directories_fsync_each_parent_in_order(self) -> None:
         module = load_module()

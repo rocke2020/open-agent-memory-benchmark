@@ -198,7 +198,7 @@ def test_t6_freeze_gate_enumerates_prompt_output_and_metric_ids() -> None:
     )
     assert {key: value.max_output_tokens for key, value in OUTPUT_CONTRACTS.items()} == {
         "lme-answer-text-v1": 8192,
-        "lme-judge-yes-no-v1": 10,
+        "lme-judge-yes-no-v1": 1024,
         "mab-first-line-v1": 40,
         "mab-raw-or-first-line-max-v1": 2000,
         "mab-redial-ranked-movies-v1": 512,

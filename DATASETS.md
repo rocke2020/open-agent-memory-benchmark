@@ -4,6 +4,10 @@
 > Repository scripts fetch only the frozen LongMemEval S and MemoryAgentBench
 > inputs and reject bytes that do not match their pinned SHA-256 values.
 
+MemoryAgentBench remains downloadable, pinned research input but is deferred
+from v0.1.0. The active release comparison uses LongMemEval only; retaining MAB
+bytes and provenance does not create a MAB cell or support claim.
+
 OAMB does not treat benchmark data as project-owned source code. Every dataset
 binding must identify its authoritative source, exact revision, file hashes,
 license, redistribution policy, and any required local download procedure.

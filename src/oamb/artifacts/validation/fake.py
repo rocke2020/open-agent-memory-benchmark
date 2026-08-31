@@ -473,7 +473,6 @@ def _parentage_rule(snapshot: FakeCapsuleSnapshot) -> tuple[ValidationIssue, ...
         or budget.budget_id != run_spec.budget_id
         or budget.scope_id != run.run_id
         or budget.scope_kind != BudgetScopeKind.RUN
-        or budget.approval_id is not None
         or budget.max_attempts != 0
         or budget.max_input_tokens != 0
         or budget.max_output_tokens != 0
@@ -1328,9 +1327,29 @@ def _model_request_matches(
     if messages is None:
         return False
     message_content = messages[0][1]
+    messages_sha256 = canonical_sha256(messages)
+    expected_request_fingerprint = canonical_sha256(
+        [
+            "oamb-model-request-v1",
+            document.get("parent_kind"),
+            document.get("parent_id"),
+            document.get("stage"),
+            document.get("role_binding_id"),
+            messages_sha256,
+            messages,
+            document.get("thinking_effort"),
+            document.get("output_contract_id"),
+            document.get("max_output_tokens"),
+            document.get("candidate_count"),
+            document.get("temperature"),
+            document.get("top_p"),
+            document.get("stop"),
+        ]
+    )
     if (
-        canonical_sha256(messages) != attempt.request_fingerprint
-        or document.get("messages_sha256") != attempt.request_fingerprint
+        document.get("messages_sha256") != messages_sha256
+        or document.get("request_fingerprint") != expected_request_fingerprint
+        or attempt.request_fingerprint != expected_request_fingerprint
     ):
         return False
     query = retrieval_document.get("query")

@@ -18,7 +18,7 @@ from oamb.artifacts.validation.run_evidence import (
 )
 from oamb.contracts.evidence import CapsuleManifest
 from oamb.contracts.ids import canonical_sha256, ingestion_occurrence_id
-from oamb.contracts.ports import ArtifactStorePort, IngestionPlan, SourceUnit
+from oamb.contracts.ports import ArtifactStorePort, IngestionPlan, SourceUnit, ThinkingEffort
 from oamb.contracts.specifications import (
     BindingKind,
     DatasetFile,
@@ -30,7 +30,7 @@ from oamb.contracts.specifications import (
 )
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.hindsight import HindsightAdapter
-from oamb.memory_systems.openviking import OpenVikingRestAdapter
+from oamb.memory_systems.openviking import OpenVikingRestAdapter, OpenVikingSessionAdapter
 from oamb.model_clients.openai_compatible import OpenAICompatibleModelClient
 from oamb.reporting.native_reduce import reduce_native_run_report
 from oamb.reporting.offline_renderer import offline_asset_hashes, offline_renderer_hash
@@ -55,6 +55,7 @@ REAL_LME6_RUN_ID = "recorded-hindsight-lme6"
 ANSWER_ROLE_ID = "recorded-answer-v1"
 RUNTIME_BINDING_HASH = "f" * 64
 OPENVIKING_RUN_ID = "recorded-openviking-lme-fixture"
+OPENVIKING_SESSION_RUN_ID = "recorded-openviking-session-lme-fixture"
 OPENVIKING_USER = "oamb-admin"
 REAL_LME_SOURCE = (
     Path(__file__).resolve().parents[2]
@@ -62,6 +63,15 @@ REAL_LME_SOURCE = (
     / "longmemeval-cleaned"
     / "longmemeval_s_cleaned.json"
 )
+HINDSIGHT_FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "adapters" / "hindsight"
+
+
+def _hindsight_bank_config_bytes(bank_id: str) -> bytes:
+    return (
+        (HINDSIGHT_FIXTURE_ROOT / "bank-config-v0.9.2.json")
+        .read_bytes()
+        .replace(b"BANK_ID", bank_id.encode())
+    )
 
 
 def _workload() -> LongMemEvalWorkload:
@@ -176,18 +186,7 @@ class _RecordedHindsightService:
             return httpx.Response(200, json=_bank_response(bank_id))
         if path.endswith("/config"):
             assert bank_id is not None
-            return httpx.Response(
-                200,
-                json={
-                    "bank_id": bank_id,
-                    "config": {
-                        "enable_observations": False,
-                        "enable_reranking": False,
-                        "store_document_text": True,
-                    },
-                    "overrides": {"enable_observations": False},
-                },
-            )
+            return httpx.Response(200, content=_hindsight_bank_config_bytes(bank_id))
         if path.endswith("/profile"):
             assert bank_id is not None
             return httpx.Response(200, json=_bank_response(bank_id))
@@ -359,7 +358,12 @@ def _real_lme6_memory_factory(
     )
 
 
-def _model_binding(role: ModelRole, binding_id: str, model: str) -> ModelRoleBindingV2:
+def _model_binding(
+    role: ModelRole,
+    binding_id: str,
+    model: str,
+    thinking_effort: ThinkingEffort,
+) -> ModelRoleBindingV2:
     return ModelRoleBindingV2(
         binding_id=binding_id,
         role=role,
@@ -371,6 +375,7 @@ def _model_binding(role: ModelRole, binding_id: str, model: str) -> ModelRoleBin
         credential_variable_name="OAMB_FIXTURE_MODEL_API_KEY",
         configured_model=model,
         resolved_model=model,
+        thinking_effort=thinking_effort,
         parameters_fingerprint="1" * 64,
         retry_policy_id="no-retry-v1",
         configuration_fingerprint="2" * 64,
@@ -385,8 +390,10 @@ def _model_factory(
     binding_id: str,
     model: str,
     output: str,
+    thinking_effort: ThinkingEffort,
 ) -> OpenAICompatibleModelClient:
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["reasoning_effort"] == thinking_effort
         return httpx.Response(
             200,
             json={
@@ -407,9 +414,8 @@ def _model_factory(
         store=store,
         base_url="https://models.example/v1",
         api_key="fixture-secret",
-        role_binding=_model_binding(role, binding_id, model),
+        role_binding=_model_binding(role, binding_id, model, thinking_effort),
         runtime_model_policy="require_match",
-        reasoning_control=("reasoning_effort", "none"),
         transport=httpx.MockTransport(handler),
     )
 
@@ -429,6 +435,7 @@ def _run_recorded_hindsight(tmp_path: Path) -> NativeRunArtifacts:
             binding_id=ANSWER_ROLE_ID,
             model="fixture-answer-model",
             output="Alice prefers exact evidence.",
+            thinking_effort="low",
         ),
         answer_role_binding_id=ANSWER_ROLE_ID,
         judge_model_factory=lambda store: _model_factory(
@@ -437,6 +444,7 @@ def _run_recorded_hindsight(tmp_path: Path) -> NativeRunArtifacts:
             binding_id=LME_JUDGE_PROMPT_PACK_ID,
             model="fixture-judge-model",
             output="yes",
+            thinking_effort="high",
         ),
         judge_role_binding_id=LME_JUDGE_PROMPT_PACK_ID,
     )
@@ -460,6 +468,7 @@ def _run_recorded_hindsight_lme6(
             binding_id=ANSWER_ROLE_ID,
             model="fixture-answer-model",
             output="Recorded exact LME-6 answer.",
+            thinking_effort="low",
         ),
         answer_role_binding_id=ANSWER_ROLE_ID,
         judge_model_factory=lambda store: _model_factory(
@@ -468,9 +477,260 @@ def _run_recorded_hindsight_lme6(
             binding_id=LME_JUDGE_PROMPT_PACK_ID,
             model="fixture-judge-model",
             output="yes",
+            thinking_effort="high",
         ),
         judge_role_binding_id=LME_JUDGE_PROMPT_PACK_ID,
     )
+
+
+class _RecordedOpenVikingSessionService:
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/health":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "healthy": True,
+                    "version": "v0.4.16",
+                    "auth_mode": "api_key",
+                    "account_id": "oamb-benchmark",
+                    "user_id": OPENVIKING_USER,
+                    "role": "admin",
+                },
+            )
+        if path == "/api/v1/fs/stat":
+            resource = request.url.params["uri"]
+            return httpx.Response(
+                404,
+                json={
+                    "status": "error",
+                    "error": {
+                        "code": "NOT_FOUND",
+                        "message": f"File not found: {resource}",
+                        "details": {"resource": resource, "type": "file"},
+                    },
+                },
+            )
+        if path.startswith("/api/v1/sessions/") and path.count("/") == 4:
+            session_id = path.rsplit("/", 1)[-1]
+            return httpx.Response(
+                404,
+                json={
+                    "status": "error",
+                    "error": {
+                        "code": "NOT_FOUND",
+                        "message": f"Session {session_id} not found",
+                    },
+                },
+            )
+        if path == "/api/v1/sessions" and request.method == "POST":
+            session_id = json.loads(request.content)["session_id"]
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "result": {
+                        "session_id": session_id,
+                        "auto_commit_policy": None,
+                    },
+                    "error": None,
+                    "telemetry": None,
+                    "profile": None,
+                },
+            )
+        if path.endswith("/messages/batch"):
+            session_id = path.split("/")[4]
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "result": {"session_id": session_id},
+                    "error": None,
+                    "telemetry": None,
+                    "profile": None,
+                },
+            )
+        if path.endswith("/commit"):
+            session_id = path.split("/")[4]
+            archive_uri = f"viking://user/{OPENVIKING_USER}/sessions/{session_id}/archive/a1"
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "result": {
+                        "session_id": session_id,
+                        "status": "accepted",
+                        "task_id": f"task-{session_id}",
+                        "archive_uri": archive_uri,
+                        "archived": True,
+                    },
+                },
+            )
+        if path.startswith("/api/v1/tasks/"):
+            task_id = path.rsplit("/", 1)[-1]
+            session_id = task_id.removeprefix("task-")
+            archive_uri = f"viking://user/{OPENVIKING_USER}/sessions/{session_id}/archive/a1"
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "result": {
+                        "task_id": task_id,
+                        "task_type": "session_commit",
+                        "status": "completed",
+                        "resource_id": session_id,
+                        "result": {
+                            "session_id": session_id,
+                            "archive_uri": archive_uri,
+                            "token_usage": {"llm": {}, "embedding": {}, "total": {}},
+                        },
+                    },
+                    "error": None,
+                    "telemetry": None,
+                    "profile": None,
+                },
+            )
+        if "/archives/" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "result": {
+                        "archive_id": "a1",
+                        "abstract": "# Working Memory",
+                        "messages": [],
+                        "overview": "fixture archive",
+                    },
+                    "error": None,
+                    "telemetry": None,
+                    "profile": None,
+                },
+            )
+        if path == "/api/v1/fs/ls":
+            memory_root = request.url.params["uri"]
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "result": [f"{memory_root}/events/event-1.md"],
+                    "error": None,
+                    "telemetry": None,
+                    "profile": None,
+                },
+            )
+        if path == "/api/v1/search/find":
+            memory_root = json.loads(request.content)["target_uri"]
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "result": {
+                        "memories": [
+                            {
+                                "context_type": "memory",
+                                "uri": f"{memory_root}/events/event-1.md",
+                                "level": 2,
+                                "score": 0.9,
+                                "abstract": "Alice prefers exact evidence.",
+                                "tags": [],
+                            }
+                        ],
+                        "resources": [],
+                        "skills": [],
+                        "total": 1,
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected OpenViking session request: {request.method} {path}")
+
+
+def _run_recorded_openviking_session(tmp_path: Path) -> NativeRunArtifacts:
+    service = _RecordedOpenVikingSessionService()
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> OpenVikingSessionAdapter:
+        return OpenVikingSessionAdapter(
+            store=store,
+            base_url="https://openviking.example",
+            api_key="fixture-secret",
+            benchmark_account="oamb-benchmark",
+            benchmark_user=OPENVIKING_USER,
+            runtime_binding_hash=RUNTIME_BINDING_HASH,
+            transport=httpx.MockTransport(service),
+            task_poll_interval_seconds=0,
+            maximum_task_polls=1,
+        )
+
+    return run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id=OPENVIKING_SESSION_RUN_ID,
+        adapter_profile_id="openviking-session-rest-v1",
+        workload=_workload(),
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=memory_factory,
+        model_factory=lambda store: _model_factory(
+            store,
+            role=ModelRole.ANSWER,
+            binding_id=ANSWER_ROLE_ID,
+            model="fixture-answer-model",
+            output="Alice prefers exact evidence.",
+            thinking_effort="low",
+        ),
+        answer_role_binding_id=ANSWER_ROLE_ID,
+        judge_model_factory=lambda store: _model_factory(
+            store,
+            role=ModelRole.JUDGE,
+            binding_id=LME_JUDGE_PROMPT_PACK_ID,
+            model="fixture-judge-model",
+            output="yes",
+            thinking_effort="high",
+        ),
+        judge_role_binding_id=LME_JUDGE_PROMPT_PACK_ID,
+    )
+
+
+def test_openviking_session_profile_seals_a_fresh_validatable_native_capsule(
+    tmp_path: Path,
+) -> None:
+    completed = _run_recorded_openviking_session(tmp_path)
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+    assert completed.ingestion_plan_records[0].adapter_profile_id == ("openviking-session-rest-v1")
+    assert completed.case_records[0].retrieval_request_raw_ref is not None
+
+
+def test_openviking_session_capsule_rejects_a_resealed_generating_retrieval_request(
+    tmp_path: Path,
+) -> None:
+    completed = _run_recorded_openviking_session(tmp_path)
+    request_reference = completed.case_records[0].retrieval_request_raw_ref
+    assert request_reference is not None
+    manifest = CapsuleManifest.model_validate_json(
+        (completed.capsule_root / "capsule-manifest.json").read_bytes()
+    )
+    entry = next(
+        item
+        for item in manifest.source_entries
+        if item.record_kind == "raw_payload" and item.record_id == request_reference
+    )
+    proof = json.loads(gzip.decompress((completed.capsule_root / entry.relative_path).read_bytes()))
+    proof["json_payload"]["session_id"] = "forbidden-generative-session"
+    _replace_raw_payload(
+        completed.capsule_root,
+        request_reference,
+        json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    )
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "retrieval-request-proof-invalid" in {issue.code for issue in validation.issues}
 
 
 def test_real_lme_hindsight_and_model_clients_seal_one_root_validatable_capsule(
@@ -831,6 +1091,7 @@ def _run_recorded_openviking(tmp_path: Path) -> NativeRunArtifacts:
             binding_id=ANSWER_ROLE_ID,
             model="fixture-answer-model",
             output="Alice prefers exact evidence.",
+            thinking_effort="low",
         ),
         answer_role_binding_id=ANSWER_ROLE_ID,
         judge_model_factory=lambda store: _model_factory(
@@ -839,6 +1100,7 @@ def _run_recorded_openviking(tmp_path: Path) -> NativeRunArtifacts:
             binding_id=LME_JUDGE_PROMPT_PACK_ID,
             model="fixture-judge-model",
             output="yes",
+            thinking_effort="high",
         ),
         judge_role_binding_id=LME_JUDGE_PROMPT_PACK_ID,
     )

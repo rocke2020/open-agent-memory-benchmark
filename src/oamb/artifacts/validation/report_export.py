@@ -17,10 +17,6 @@ from oamb.artifacts.validation.native import (
     NATIVE_EVIDENCE_RULE_IDS,
     validate_native_capsule,
 )
-from oamb.artifacts.validation.phase import (
-    T10_PHASE_GATE_RULE_IDS,
-    PhaseGateValidationInput,
-)
 from oamb.artifacts.validation.profiles import (
     T8_REPORT_EXPORT_RULE_INVENTORY,
     exact_report_export_profile,
@@ -50,14 +46,12 @@ from oamb.contracts.reporting import (
     ComparisonReportModel,
     DiagnosticRunReportModel,
     EvaluationReportModel,
-    PhaseAcceptanceReport,
     ReleaseReportModel,
     ReportArtifactManifestV2,
     ReportArtifactManifestV3,
     RunReportModelV3,
 )
 from oamb.contracts.specifications import (
-    AcceptanceReportSpec,
     DerivationSpecV2,
     DerivationSpecV3,
     ReportSpec,
@@ -78,11 +72,11 @@ from oamb.reporting.offline_renderer import (
 )
 from oamb.reporting.public import build_evaluation_model_closure
 
-ReportIdentitySpec = ReportSpec | ReportSpecV2 | AcceptanceReportSpec
+ReportIdentitySpec = ReportSpec | ReportSpecV2
 
 _EXPORT_SELECTOR_BY_KIND_AND_AUDIENCE = {
     (report_kind, audience): (f"{audience}-{report_kind.replace('_', '-')}-v1", 1)
-    for report_kind in ("run", "comparison", "evaluation", "release", "phase_acceptance")
+    for report_kind in ("run", "comparison", "evaluation", "release")
     for audience in ("public", "local")
 }
 _REPORT_SCHEMA_INVENTORY_BY_KIND = {
@@ -90,7 +84,6 @@ _REPORT_SCHEMA_INVENTORY_BY_KIND = {
     "comparison": ("comparison_report_model@1", "report_artifact_manifest@2"),
     "evaluation": ("evaluation_report_model@1", "report_artifact_manifest@3"),
     "release": ("release_report_model@1", "report_artifact_manifest@2"),
-    "phase_acceptance": ("phase_acceptance_report@1", "report_artifact_manifest@2"),
 }
 
 
@@ -111,11 +104,7 @@ class ReportExportInput:
 def validate_report_export(
     target: ReportExportInput,
 ) -> ValidationResult:
-    report_kind = (
-        target.report_spec.report_kind
-        if isinstance(target.report_spec, (ReportSpec, ReportSpecV2))
-        else "phase_acceptance"
-    )
+    report_kind = target.report_spec.report_kind
     selected_profile = exact_report_export_profile(
         report_kind=report_kind,
         audience=target.report_spec.audience,
@@ -149,15 +138,10 @@ def _report_export_registry() -> RuleRegistry:
 
 def _payload_closure_rule(target: ReportExportInput) -> tuple[ValidationIssue, ...]:
     rule_id = "report.export.payload-closure.v1"
-    spec_name = (
-        "acceptance-report-spec.json"
-        if isinstance(target.report_spec, AcceptanceReportSpec)
-        else "report-spec.json"
-    )
     required = {
         "derivation-spec.json",
         "source-roots.json",
-        f"input-specs/{spec_name}",
+        "input-specs/report-spec.json",
         "evidence-validations.json",
         "outputs/report-model.json",
         "outputs/report.html",
@@ -189,11 +173,7 @@ def _payload_closure_rule(target: ReportExportInput) -> tuple[ValidationIssue, .
 
 def _canonical_bindings_rule(target: ReportExportInput) -> tuple[ValidationIssue, ...]:
     rule_id = "report.export.canonical-bindings.v1"
-    spec_path = (
-        "input-specs/acceptance-report-spec.json"
-        if isinstance(target.report_spec, AcceptanceReportSpec)
-        else "input-specs/report-spec.json"
-    )
+    spec_path = "input-specs/report-spec.json"
     expected_validation_hashes = tuple(
         canonical_sha256(item) for item in target.evidence_validations
     )
@@ -232,11 +212,7 @@ def _canonical_bindings_rule(target: ReportExportInput) -> tuple[ValidationIssue
     )
     model_sources = getattr(target.model, "ordered_source_bindings", None)
     spec_hash = canonical_sha256(target.report_spec)
-    model_spec_hash = getattr(
-        target.model,
-        "report_spec_hash",
-        getattr(target.model, "acceptance_report_spec_hash", None),
-    )
+    model_spec_hash = target.model.report_spec_hash
     artifact = target.artifact_manifest
     evaluation = isinstance(target.model, EvaluationReportModel)
     expected_evaluation_closure = None
@@ -254,16 +230,8 @@ def _canonical_bindings_rule(target: ReportExportInput) -> tuple[ValidationIssue
     expected_selector = _EXPORT_SELECTOR_BY_KIND_AND_AUDIENCE.get(
         (report_kind, target.report_spec.audience)
     )
-    expected_spec_kind = (
-        "acceptance_report"
-        if isinstance(target.report_spec, AcceptanceReportSpec)
-        else "benchmark_report"
-    )
-    expected_spec_id = (
-        target.report_spec.acceptance_report_spec_id
-        if isinstance(target.report_spec, AcceptanceReportSpec)
-        else target.report_spec.report_spec_id
-    )
+    expected_spec_kind = "benchmark_report"
+    expected_spec_id = target.report_spec.report_spec_id
     identity_binding = artifact.report_identity_spec_binding
     version_chain_closed = (
         isinstance(target.report_spec, ReportSpecV2)
@@ -553,12 +521,13 @@ def _model_validation_roots_close(
             ):
                 return False
         if model.origin_kind == "native":
-            exact_workload = model.workload_id in {
-                "lme30-native-smoke-plus-v1",
-                "mab65-v1",
-            }
+            composite_validation = (
+                validation.validation_profile_id == NATIVE_RUN_EVIDENCE_PROFILE_ID
+            )
             expected_profile_id = (
-                NATIVE_RUN_EVIDENCE_PROFILE_ID if exact_workload else NATIVE_EVIDENCE_PROFILE_ID
+                NATIVE_RUN_EVIDENCE_PROFILE_ID
+                if composite_validation
+                else NATIVE_EVIDENCE_PROFILE_ID
             )
             validation_target = validation_targets[0]
             capsule_root = (
@@ -577,7 +546,7 @@ def _model_validation_roots_close(
                     capsule_root,
                     validation,
                     report_spec=report_spec,
-                    validation_target=(validation_target if exact_workload else None),
+                    validation_target=(validation_target if composite_validation else None),
                 )
             except (OSError, TypeError, ValueError):
                 return False
@@ -606,44 +575,6 @@ def _model_validation_roots_close(
         )
     if isinstance(model, (ComparisonReportModel, ReleaseReportModel)):
         return False
-    if isinstance(model, PhaseAcceptanceReport):
-        if (
-            not isinstance(report_spec, AcceptanceReportSpec)
-            or len(validations) != 1
-            or len(validation_targets) != 1
-            or validations[0].validation_profile_id != "oamb-t8-t10-phase-gate-v1"
-            or validations[0].required_rule_ids != T10_PHASE_GATE_RULE_IDS
-            or not isinstance(validation_targets[0], PhaseGateValidationInput)
-        ):
-            return False
-        target = validation_targets[0]
-        gate = target.gate
-        bundle = target.bundle
-        human = gate.human_record
-        return bool(
-            human is not None
-            and model.evaluation_report_hash
-            == report_spec.evaluation_report_hash
-            == bundle.report_model_hash
-            and model.evaluation_export_validation_hash
-            == report_spec.evaluation_export_validation_hash
-            == bundle.export_validation_hash
-            and model.review_bundle_hash == report_spec.review_bundle_hash == bundle.bundle_id
-            and model.phase_gate_hash == report_spec.phase_gate_hash == gate.gate_id
-            and model.ai_review_record_hash
-            == report_spec.ai_review_record_hash
-            == gate.canonical_ai_review_record_hash
-            and model.human_review_record_hash
-            == report_spec.human_review_record_hash
-            == human.human_review_record_id
-            and model.phase_id == bundle.phase_id == gate.phase_id
-            and model.gate_review_bundle_hash == gate.review_bundle_hash
-            and model.review_current == (bundle.bundle_id == gate.review_bundle_hash)
-            and model.passed_by_ai == gate.passed_by_ai
-            and model.passed_by_human == gate.passed_by_human
-            and model.finding_codes == human.finding_codes
-            and model.evidence_references == human.evidence_references
-        )
     return True
 
 

@@ -45,6 +45,44 @@ class FailingRawStore(CapturingStore):
         raise OSError(f"fixture cannot seal {request.sha256}")
 
 
+class BarrierTransport(httpx.AsyncBaseTransport):
+    def __init__(self, *, expected_calls: int) -> None:
+        self._expected_calls = expected_calls
+        self.paths: list[str] = []
+        self.all_entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_count = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.paths.append(request.url.path)
+        if len(self.paths) == self._expected_calls:
+            self.all_entered.set()
+        await self.release.wait()
+        return httpx.Response(200, json={"status": "ok"})
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+        self.close_started.set()
+
+
+class FailFirstCloseTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.close_count = 0
+        self.first_close_started = asyncio.Event()
+        self.release_first_close = asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request while testing close: {request.url}")
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+        if self.close_count == 1:
+            self.first_close_started.set()
+            await self.release_first_close.wait()
+            raise RuntimeError("fixture close failure")
+
+
 def _rest_module() -> Any:
     try:
         return import_module("oamb.memory_systems.rest")
@@ -78,6 +116,7 @@ async def test_rest_transport_dispatches_once_and_seals_exact_raw_response() -> 
         "/v1/write",
         json_payload={"value": "exact"},
         write_intent=True,
+        request_evidence=True,
     )
 
     assert len(calls) == 1
@@ -86,13 +125,24 @@ async def test_rest_transport_dispatches_once_and_seals_exact_raw_response() -> 
     assert response.raw_bytes == b'{"status":"ok"}'
     assert response.status_code == 200
     assert response.raw_reference.sha256 == hashlib.sha256(response.raw_bytes).hexdigest()
+    assert response.request_reference is not None
     assert store.raw == [
+        RawPayloadSealRequest(
+            sha256=response.request_reference.sha256,
+            media_type="application/vnd.oamb.request+json",
+            compression="gzip",
+            payload_bytes=(
+                b'{"json_payload":{"value":"exact"},"method":"POST","params":{},'
+                b'"path":"/v1/write","request_header_names":[],"schema_name":'
+                b'"oamb_rest_request_proof","schema_version":1,"write_intent":true}'
+            ),
+        ),
         RawPayloadSealRequest(
             sha256=response.raw_reference.sha256,
             media_type="application/json",
             compression="gzip",
             payload_bytes=response.raw_bytes,
-        )
+        ),
     ]
     await client.close()
 
@@ -305,17 +355,36 @@ async def test_cancelled_read_retains_asyncio_semantics_without_unknown_write() 
 
 
 @pytest.mark.asyncio
-async def test_cancelled_queued_read_is_typed_without_dispatch() -> None:
+async def test_seven_requests_enter_transport_in_parallel_without_an_internal_limit() -> None:
     rest = _rest_module()
-    active_started = asyncio.Event()
-    release_active = asyncio.Event()
+    transport = BarrierTransport(expected_calls=7)
+    client = rest.SealedRestClient(
+        store=CapturingStore(),
+        base_url="https://memory.example",
+        headers={},
+        transport=transport,
+    )
+    tasks = [asyncio.create_task(client.request("GET", f"/call-{index}")) for index in range(7)]
+
+    try:
+        await asyncio.wait_for(transport.all_entered.wait(), timeout=1.0)
+        assert sorted(transport.paths) == [f"/call-{index}" for index in range(7)]
+    finally:
+        transport.release.set()
+        responses = await asyncio.gather(*tasks)
+
+    assert [response.status_code for response in responses] == [200] * 7
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_accepting_classifies_a_write_as_cancelled_before_dispatch() -> None:
+    rest = _rest_module()
     calls: list[str] = []
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        active_started.set()
-        await release_active.wait()
-        return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200)
 
     client = rest.SealedRestClient(
         store=CapturingStore(),
@@ -323,20 +392,30 @@ async def test_cancelled_queued_read_is_typed_without_dispatch() -> None:
         headers={},
         transport=httpx.MockTransport(handler),
     )
-    active = asyncio.create_task(client.request("GET", "/active"))
-    await active_started.wait()
-    queued = asyncio.create_task(client.request("GET", "/queued"))
-    await asyncio.sleep(0)
-    queued.cancel()
+
+    client.stop_accepting()
 
     with pytest.raises(asyncio.CancelledError) as cancelled:
-        await queued
-
-    assert isinstance(cancelled.value, MemorySystemReadCancelled)
-    assert calls == ["/active"]
-    release_active.set()
-    await active
+        await client.request("POST", "/late", json_payload={}, write_intent=True)
+    assert isinstance(cancelled.value, rest.MemorySystemCallCancelledBeforeDispatch)
+    assert calls == []
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_fully_closed_client_rejects_a_call_as_closed() -> None:
+    rest = _rest_module()
+    client = rest.SealedRestClient(
+        store=CapturingStore(),
+        base_url="https://memory.example",
+        headers={},
+        transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+    )
+
+    await client.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await client.request("GET", "/late")
 
 
 @pytest.mark.asyncio
@@ -362,8 +441,9 @@ async def test_close_rejects_new_calls_and_waits_for_the_active_call() -> None:
     await asyncio.sleep(0)
 
     assert not closing.done()
-    with pytest.raises(RuntimeError, match="closed"):
+    with pytest.raises(asyncio.CancelledError) as cancelled:
         await client.request("GET", "/late")
+    assert isinstance(cancelled.value, MemorySystemReadCancelled)
 
     release.set()
     assert (await active).status_code == 200
@@ -371,42 +451,79 @@ async def test_close_rejects_new_calls_and_waits_for_the_active_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_classifies_a_queued_write_as_cancelled_before_dispatch() -> None:
+async def test_close_drains_every_admitted_call_before_closing_transport() -> None:
     rest = _rest_module()
-    active_started = asyncio.Event()
-    release_active = asyncio.Event()
-    calls: list[str] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        if request.url.path == "/active":
-            active_started.set()
-            await release_active.wait()
-        return httpx.Response(200, json={"status": "ok"})
-
+    transport = BarrierTransport(expected_calls=3)
     client = rest.SealedRestClient(
         store=CapturingStore(),
         base_url="https://memory.example",
         headers={},
-        transport=httpx.MockTransport(handler),
+        transport=transport,
     )
-    active = asyncio.create_task(client.request("GET", "/active"))
-    await active_started.wait()
-    queued_write = asyncio.create_task(
-        client.request("POST", "/queued", json_payload={}, write_intent=True)
-    )
+    active = [asyncio.create_task(client.request("GET", f"/active-{index}")) for index in range(3)]
+    await asyncio.wait_for(transport.all_entered.wait(), timeout=1.0)
     await asyncio.sleep(0)
     closing = asyncio.create_task(client.close())
     await asyncio.sleep(0)
-    release_active.set()
 
-    assert (await active).status_code == 200
+    assert not closing.done()
+    assert not transport.close_started.is_set()
     with pytest.raises(asyncio.CancelledError) as cancelled:
-        await queued_write
+        await client.request("GET", "/late")
+    assert isinstance(cancelled.value, MemorySystemReadCancelled)
 
-    assert isinstance(cancelled.value, rest.MemorySystemCallCancelledBeforeDispatch)
-    assert calls == ["/active"]
+    transport.release.set()
+    assert [response.status_code for response in await asyncio.gather(*active)] == [200] * 3
     await closing
+    assert transport.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_admitted_read_releases_close_drain() -> None:
+    rest = _rest_module()
+    transport = BarrierTransport(expected_calls=1)
+    client = rest.SealedRestClient(
+        store=CapturingStore(),
+        base_url="https://memory.example",
+        headers={},
+        transport=transport,
+    )
+    active = asyncio.create_task(client.request("GET", "/active"))
+    await transport.all_entered.wait()
+
+    active.cancel()
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await active
+    assert isinstance(cancelled.value, MemorySystemReadCancelled)
+
+    await asyncio.wait_for(client.close(), timeout=1.0)
+    assert transport.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_propagates_first_error_and_allows_waiter_to_retry() -> None:
+    rest = _rest_module()
+    transport = FailFirstCloseTransport()
+    client = rest.SealedRestClient(
+        store=CapturingStore(),
+        base_url="https://memory.example",
+        headers={},
+        transport=transport,
+    )
+
+    first_close = asyncio.create_task(client.close())
+    await transport.first_close_started.wait()
+    waiting_close = asyncio.create_task(client.close())
+    await asyncio.sleep(0)
+    assert not waiting_close.done()
+
+    transport.release_first_close.set()
+    with pytest.raises(RuntimeError, match="fixture close failure"):
+        await first_close
+    await waiting_close
+    await client.close()
+
+    assert transport.close_count == 2
 
 
 def test_exact_json_object_rejects_duplicate_unknown_and_non_finite_fields() -> None:

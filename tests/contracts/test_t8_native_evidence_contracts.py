@@ -31,7 +31,6 @@ def _evidence() -> ModuleType:
             "IngestionPlanRecordV2",
             "IngestionPlanRecordV3",
             "CaseRecordV3",
-            "PhaseReviewOccurrenceRecord",
         )
         if not hasattr(module, name)
     )
@@ -85,6 +84,7 @@ def _case(evidence: ModuleType) -> CaseRecordV3:
             state=CaseState.COMPLETED,
             retrieval_raw_ref=SHA_A,
             retrieval_supporting_raw_refs=(SHA_B,),
+            retrieval_request_raw_ref=SHA_C,
             ordered_native_candidate_ids=("native-1", "native-2"),
             ordered_native_content_sha256=(SHA_C, SHA_D),
             native_candidate_source_unit_ids=(SHA_B, None),
@@ -235,27 +235,3 @@ def test_completed_native_case_closes_ordered_retrieval_context_and_metric() -> 
                 "prompt_raw_ref": None,
             }
         )
-
-
-def test_phase_review_occurrence_is_not_parented_by_a_benchmark_run() -> None:
-    evidence = _evidence()
-    occurrence_id = evidence.phase_review_occurrence_id(
-        phase_id="fixture_phase",
-        review_bundle_hash=SHA_B,
-        reviewer_role_binding_hash=SHA_C,
-        ordinal=1,
-    )
-    occurrence = evidence.PhaseReviewOccurrenceRecord(
-        phase_review_occurrence_id=occurrence_id,
-        phase_id="fixture_phase",
-        review_bundle_hash=SHA_B,
-        reviewer_role_binding_hash=SHA_C,
-        ordinal=1,
-        approval_record_id=SHA_D,
-        budget_id="phase-review-budget",
-        state="sealed",
-        started_at=NOW,
-        ended_at=NOW,
-    )
-
-    assert not hasattr(occurrence, "run_id")

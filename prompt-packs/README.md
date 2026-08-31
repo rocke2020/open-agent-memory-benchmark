@@ -14,6 +14,10 @@ revision `fe1735de8cf8b9908e1e3d3b5612afc815698062`. The source file SHA-256 is
 `148c40d48d19f155ae845482c4417ba59cfa7ae4e194019509e023bd3a8755dd`.
 Its complete MIT notice is in `LICENSE.MemoryAgentBench`.
 
+MemoryAgentBench is deferred from v0.1.0. These attributed templates remain
+preserved research assets and license evidence; they are not selected by the
+current LongMemEval-only release plan.
+
 The executable manifests and exact template bytes live with the corresponding
 workload modules so source and installed-wheel execution use one byte source of
 truth. Public evidence may include these attributed templates. A user-supplied

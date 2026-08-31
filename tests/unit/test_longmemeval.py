@@ -54,6 +54,50 @@ def _write_rows(path: Path, rows: list[dict[str, object]]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _dataset_manifest_for_test(source: Path) -> Any:
+    from oamb.contracts.specifications import DatasetFile, DatasetManifest
+
+    source_file = DatasetFile(
+        relative_path=source.name,
+        sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        byte_count=source.stat().st_size,
+        license_id="NOASSERTION",
+    )
+    return DatasetManifest(
+        dataset_id="chronology-fixture",
+        revision="chronology-v1",
+        split="test",
+        manifest_hash="a" * 64,
+        source_files=(source_file,),
+        payload_policy="generated-fixture",
+    )
+
+
+def _chronology_row() -> dict[str, object]:
+    row = _row()
+    row["answer_session_ids"] = ["z-tie-first"]
+    row["haystack_session_ids"] = ["late", "z-tie-first", "a-tie-second", "middle"]
+    row["haystack_dates"] = [
+        "2024/03/01 (Fri) 00:00",
+        "2024/02/27 (Tue) 08:00",
+        "2024/02/27 (Tue) 08:00",
+        "2024/02/28 (Wed) 01:02",
+    ]
+    row["haystack_sessions"] = [
+        [
+            {"role": "user", "content": "Late ☕."},
+            {"role": "assistant", "content": "Still kept."},
+        ],
+        [
+            {"role": "assistant", "content": "First tied assistant."},
+            {"role": "user", "content": "First tied user.", "has_answer": True},
+        ],
+        [{"role": "user", "content": "Second tied."}],
+        [{"role": "user", "content": "Middle."}],
+    ]
+    return row
+
+
 def test_timestamp_parser_checks_weekday_and_emits_utc_wall_time() -> None:
     lme = require_longmemeval()
 
@@ -101,6 +145,124 @@ def test_loader_preserves_both_answer_session_label_representations(tmp_path: Pa
     assert loaded[0].answer_session_ids == ("different-session",)
     assert loaded[0].message_has_answer_session_ids == ("session-1",)
     assert loaded[0].has_answer_label_mismatch is True
+
+
+def test_loader_stably_orders_session_occurrences_by_timestamp_then_source_ordinal(
+    tmp_path: Path,
+) -> None:
+    """Catches source-array order or session ID being used as chronology."""
+
+    lme = require_longmemeval()
+    source = tmp_path / "longmemeval.json"
+    expected_sha256 = _write_rows(source, [_chronology_row()])
+
+    loaded = lme.load_longmemeval_rows(source, expected_sha256=expected_sha256)
+
+    assert tuple(session.session_id for session in loaded[0].sessions) == (
+        "z-tie-first",
+        "a-tie-second",
+        "middle",
+        "late",
+    )
+    assert tuple(session.original_ordinal_1_indexed for session in loaded[0].sessions) == (
+        2,
+        3,
+        4,
+        1,
+    )
+
+
+def test_loader_keeps_turn_bytes_and_post_question_sessions_as_audit_facts(
+    tmp_path: Path,
+) -> None:
+    """Catches sorting turns or filtering supplied sessions at question_date."""
+
+    lme = require_longmemeval()
+    source = tmp_path / "longmemeval.json"
+    expected_sha256 = _write_rows(source, [_chronology_row()])
+
+    row = lme.load_longmemeval_rows(source, expected_sha256=expected_sha256)[0]
+    bundle = lme._build_bundle(
+        _dataset_manifest_for_test(source),
+        (row,),
+        workload_id="chronology-v1",
+    )
+    units = bundle.ingestion_plans[0].ordered_source_units
+
+    assert lme.render_lme_session_document(row.sessions[0].messages) == (
+        b'[{"role":"assistant","content":"First tied assistant."},'
+        b'{"role":"user","content":"First tied user."}]'
+    )
+    assert tuple(unit.source_reference for unit in units) == (
+        "z-tie-first",
+        "a-tie-second",
+        "middle",
+        "late",
+    )
+    late = units[-1]
+    assert late.payload_bytes == (
+        b'[{"role":"user","content":"Late \xe2\x98\x95."},'
+        b'{"role":"assistant","content":"Still kept."}]'
+    )
+    assert dict(late.source_metadata) == {
+        "question_id": "example-q",
+        "session_id": "late",
+        "original_ordinal_1_indexed": "1",
+        "after_question_date": "true",
+    }
+
+
+def test_workload_owns_the_high_thinking_judge_output_ceiling(tmp_path: Path) -> None:
+    lme = require_longmemeval()
+    from oamb.contracts.ports import AnswerValue, RawReferenceHandle
+
+    source = tmp_path / "longmemeval.json"
+    expected_sha256 = _write_rows(source, [_row()])
+    row = lme.load_longmemeval_rows(source, expected_sha256=expected_sha256)[0]
+    bundle = lme._build_bundle(
+        _dataset_manifest_for_test(source),
+        (row,),
+        workload_id="judge-ceiling-v1",
+    )
+    answer = AnswerValue(
+        raw_reference=RawReferenceHandle("d" * 64),
+        raw_answer=b"answer",
+        parsed_value=b"answer",
+        parsed_value_sha256=hashlib.sha256(b"answer").hexdigest(),
+    )
+
+    request = lme.LongMemEvalWorkload(bundle).evaluate(bundle.case_plans[0], answer)
+
+    assert request.max_output_tokens == 1024
+
+
+def test_bundle_derives_manifest_hashes_and_source_ids_after_chronology_sort(
+    tmp_path: Path,
+) -> None:
+    """Catches hashing or identity derivation before chronological canonicalization."""
+
+    lme = require_longmemeval()
+    raw = _chronology_row()
+    chronological_order = (1, 2, 3, 0)
+    canonical = dict(raw)
+    for key in ("haystack_session_ids", "haystack_dates", "haystack_sessions"):
+        values = cast(list[object], raw[key])
+        canonical[key] = [values[index] for index in chronological_order]
+    shuffled_path = tmp_path / "shuffled.json"
+    canonical_path = tmp_path / "canonical.json"
+    shuffled_hash = _write_rows(shuffled_path, [raw])
+    canonical_hash = _write_rows(canonical_path, [canonical])
+    shuffled_row = lme.load_longmemeval_rows(shuffled_path, expected_sha256=shuffled_hash)[0]
+    canonical_row = lme.load_longmemeval_rows(canonical_path, expected_sha256=canonical_hash)[0]
+    dataset = _dataset_manifest_for_test(shuffled_path)
+
+    shuffled = lme._build_bundle(dataset, (shuffled_row,), workload_id="chronology-v1")
+    ordered = lme._build_bundle(dataset, (canonical_row,), workload_id="chronology-v1")
+
+    assert shuffled.case_manifest == ordered.case_manifest
+    assert tuple(
+        unit.source_unit_id for unit in shuffled.ingestion_plans[0].ordered_source_units
+    ) == tuple(unit.source_unit_id for unit in ordered.ingestion_plans[0].ordered_source_units)
 
 
 def test_loader_rejects_non_finite_numeric_answers(tmp_path: Path) -> None:

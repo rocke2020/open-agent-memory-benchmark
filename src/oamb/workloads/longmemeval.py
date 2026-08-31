@@ -48,7 +48,10 @@ from oamb.contracts.specifications import (
     case_manifest_hash,
     prompt_pack_manifest_hash,
 )
-from oamb.workloads.metrics import LME_ANSWER_MAX_OUTPUT_TOKENS
+from oamb.workloads.metrics import (
+    LME_ANSWER_MAX_OUTPUT_TOKENS,
+    LME_JUDGE_MAX_OUTPUT_TOKENS,
+)
 from oamb.workloads.prompts import PromptPack, render_prompt
 from oamb.workloads.visible_evidence import (
     LME_VISIBLE_EVIDENCE_POLICY,
@@ -67,8 +70,8 @@ LME_SOURCE_LICENSE_ID = "NOASSERTION"
 LME_DATASET_SPLIT = "s-cleaned"
 LME_PAYLOAD_POLICY = "download-required-not-redistributed"
 LME_DATASET_MANIFEST_HASH = "098fd29291256d5e09dc82db146ee90fadc267e6061c33167bff0b54b98c2a85"
-LME30_CASE_MANIFEST_HASH = "b69702c5a643f054b98808ec463ab8babb23d513bdcdd77de79c687eb4d7326d"
-LME6_CASE_MANIFEST_HASH = "b5093e3f418eef9cc30eb2323f676be92cf6132f8116aee5a8da6e8a98851563"
+LME30_CASE_MANIFEST_HASH = "d7db55fb14b85ae6ae25ff83e7343e6a1a5a801257ce7c8f29c5f14729bd4ebf"
+LME6_CASE_MANIFEST_HASH = "3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4"
 LME_ANSWER_PROMPT_PACK_ID = "oamb-lme-answer-v1"
 LME_JUDGE_PROMPT_PACK_ID = "oamb-lme-judge-v1"
 LME_ANSWER_OUTPUT_CONTRACT_ID = "lme-answer-text-v1"
@@ -232,6 +235,8 @@ class LongMemEvalSession:
     raw_timestamp: str
     canonical_timestamp: str
     messages: tuple[LongMemEvalMessage, ...]
+    original_ordinal_1_indexed: int = 1
+    after_question_date: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,7 +491,11 @@ class LongMemEvalWorkload:
             model_response=answer.parsed_value.decode("utf-8", errors="strict"),
             unanswerable=row.question_id.endswith("_abs"),
         )
-        return JudgeRequest(prompt=prompt, output_contract_id=LME_JUDGE_OUTPUT_CONTRACT_ID)
+        return JudgeRequest(
+            prompt=prompt,
+            output_contract_id=LME_JUDGE_OUTPUT_CONTRACT_ID,
+            max_output_tokens=LME_JUDGE_MAX_OUTPUT_TOKENS,
+        )
 
     def finalize_judge(
         self,
@@ -557,6 +566,7 @@ def _parse_row(raw: object, ordinal: int) -> LongMemEvalRow:
     if isinstance(answer, float) and not math.isfinite(answer):
         raise ValueError("LongMemEval numeric answer must be finite")
     raw_question_timestamp = _required_string(raw["question_date"], "question_date")
+    canonical_question_timestamp = parse_lme_timestamp(raw_question_timestamp)
     answer_session_ids = _string_tuple(raw["answer_session_ids"], "answer_session_ids")
     raw_session_ids = _string_tuple(raw["haystack_session_ids"], "haystack_session_ids")
     raw_dates = raw["haystack_dates"]
@@ -569,25 +579,37 @@ def _parse_row(raw: object, ordinal: int) -> LongMemEvalRow:
         raise ValueError("LongMemEval row requires at least one session")
     sessions: list[LongMemEvalSession] = []
     message_has_answer_session_ids: list[str] = []
-    for session_id, raw_date, raw_session in zip(
-        raw_session_ids,
-        raw_dates,
-        raw_sessions,
-        strict=True,
+    for original_ordinal, (session_id, raw_date, raw_session) in enumerate(
+        zip(
+            raw_session_ids,
+            raw_dates,
+            raw_sessions,
+            strict=True,
+        ),
+        start=1,
     ):
         if not isinstance(raw_date, str):
             raise ValueError("LongMemEval session date must be text")
         messages = _parse_messages(raw_session)
+        canonical_timestamp = parse_lme_timestamp(raw_date)
         if any(message.has_answer is True for message in messages):
             message_has_answer_session_ids.append(session_id)
         sessions.append(
             LongMemEvalSession(
                 session_id=session_id,
                 raw_timestamp=raw_date,
-                canonical_timestamp=parse_lme_timestamp(raw_date),
+                canonical_timestamp=canonical_timestamp,
                 messages=messages,
+                original_ordinal_1_indexed=original_ordinal,
+                after_question_date=canonical_timestamp > canonical_question_timestamp,
             )
         )
+    sessions.sort(
+        key=lambda session: (
+            session.canonical_timestamp,
+            session.original_ordinal_1_indexed,
+        )
+    )
     return LongMemEvalRow(
         source_row_number_1_indexed=ordinal,
         question_id=question_id,
@@ -595,7 +617,7 @@ def _parse_row(raw: object, ordinal: int) -> LongMemEvalRow:
         question=question,
         answer=answer,
         raw_question_timestamp=raw_question_timestamp,
-        canonical_question_timestamp=parse_lme_timestamp(raw_question_timestamp),
+        canonical_question_timestamp=canonical_question_timestamp,
         answer_session_ids=answer_session_ids,
         message_has_answer_session_ids=tuple(message_has_answer_session_ids),
         sessions=tuple(sessions),
@@ -778,6 +800,14 @@ def _build_bundle(
                 source_metadata=(
                     ("question_id", row.question_id),
                     ("session_id", session.session_id),
+                    (
+                        "original_ordinal_1_indexed",
+                        str(session.original_ordinal_1_indexed),
+                    ),
+                    (
+                        "after_question_date",
+                        "true" if session.after_question_date else "false",
+                    ),
                 ),
             )
             for ordinal, (session, payload_sha256, payload) in enumerate(

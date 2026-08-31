@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,17 +48,6 @@ def _attestation_hash(document: dict[str, Any]) -> str:
     return provider_runtime_profile_attestation_hash(document)
 
 
-def _approval_hash(document: dict[str, Any]) -> str:
-    from oamb.contracts.specifications import external_call_approval_hash
-
-    payload = dict(document)
-    for field in ("approved_at", "expires_at"):
-        value = payload[field]
-        if isinstance(value, str):
-            payload[field] = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return external_call_approval_hash(payload)
-
-
 def _write_document(root: Path, relative_path: str, document: dict[str, Any]) -> None:
     target = root / relative_path
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +78,7 @@ def _valid_documents() -> dict[str, tuple[str, dict[str, Any] | bytes]]:
         "credential_variable_name": None,
         "configured_model": "qwen3-embedding:0.6b",
         "resolved_model": "qwen3-embedding:0.6b@sha256:manifest",
+        "thinking_effort": "not_applicable",
         "parameters_fingerprint": HASHES["1"],
         "retry_policy_id": "no-retry-v1",
         "configuration_fingerprint": HASHES["2"],
@@ -122,7 +111,6 @@ def _valid_documents() -> dict[str, tuple[str, dict[str, Any] | bytes]]:
         "budget_id": "readiness-budget",
         "scope_kind": "model_readiness",
         "scope_id": "readiness-occurrence",
-        "approval_id": "approval-1",
         "max_attempts": 2,
         "max_input_tokens": 0,
         "max_output_tokens": 0,
@@ -131,24 +119,6 @@ def _valid_documents() -> dict[str, tuple[str, dict[str, Any] | bytes]]:
         "currency": None,
         "resource_ceilings": [_resource_ceiling()],
         "role_ceilings": [role_ceiling],
-        "stop_condition_ids": ["identity_drift", "budget_exhausted"],
-    }
-    budget_hash = _sha256(_json_bytes(budget))
-    approval = {
-        "schema_name": "external_call_approval_record",
-        "schema_version": 1,
-        "approval_id": "approval-1",
-        "approval_hash": HASHES["4"],
-        "operation_kind": "model_readiness",
-        "scope_kind": "model_readiness",
-        "scope_id": "readiness-occurrence",
-        "runtime_binding_hash": None,
-        "provider_runtime_profile_attestation_hash": HASHES["5"],
-        "role_binding_ids": ["embedding-binding"],
-        "budget_hash": budget_hash,
-        "approved_at": "2026-08-27T12:00:00Z",
-        "expires_at": "2026-08-27T13:00:00Z",
-        "unmetered_cost_acknowledged": True,
         "stop_condition_ids": ["identity_drift", "budget_exhausted"],
     }
     attestation = {
@@ -176,8 +146,6 @@ def _valid_documents() -> dict[str, tuple[str, dict[str, Any] | bytes]]:
         "raw_proof_refs": [HASHES["b"]],
     }
     attestation["attestation_hash"] = _attestation_hash(attestation)
-    approval["provider_runtime_profile_attestation_hash"] = attestation["attestation_hash"]
-    approval["approval_hash"] = _approval_hash(approval)
     measurement = {
         "schema_name": "cost_measurement_spec",
         "schema_version": 1,
@@ -208,7 +176,6 @@ def _valid_documents() -> dict[str, tuple[str, dict[str, Any] | bytes]]:
         "provider_project_id": "provider-project-1",
         "provider_profile_id": "hindsight-rest-v0.9.2",
         "provider_runtime_profile_attestation_hash": attestation["attestation_hash"],
-        "approval_id": "approval-1",
         "budget_id": "readiness-budget",
         "state": "sealed",
         "role_binding_ids": ["embedding-binding"],
@@ -228,7 +195,6 @@ def _valid_documents() -> dict[str, tuple[str, dict[str, Any] | bytes]]:
             "model_role_binding",
             role,
         ),
-        "source/specs/approval.json": ("external_call_approval_record", approval),
         "source/specs/budget.json": ("budget_spec", budget),
         "source/specs/cost-measurement-spec.json": ("cost_measurement_spec", measurement),
         "source/occurrence.json": ("model_readiness_occurrence_record", occurrence),
@@ -365,7 +331,6 @@ def _record_id(record_kind: str, document: dict[str, Any] | bytes, path: str) ->
     fields = {
         "provider_runtime_profile_attestation": "attestation_hash",
         "model_role_binding": "binding_id",
-        "external_call_approval_record": "approval_id",
         "budget_spec": "budget_id",
         "cost_measurement_spec": "measurement_spec_id",
         "model_readiness_occurrence_record": "occurrence_id",
@@ -375,6 +340,7 @@ def _record_id(record_kind: str, document: dict[str, Any] | bytes, path: str) ->
         "attempt_receipt_record": "attempt_id",
         "attempt_record": "attempt_id",
         "token_usage_record": "usage_record_id",
+        "cost_record": "cost_record_id",
         "run_spec": "run_id",
     }
     return str(document[fields[record_kind]])
@@ -451,15 +417,6 @@ def _rewrite(
     _refresh_manifest(root)
 
 
-def _rewrite_approval(root: Path, mutate: Any) -> None:
-    path = root / "source/specs/approval.json"
-    document = json.loads(path.read_text(encoding="utf-8"))
-    mutate(document)
-    document["approval_hash"] = _approval_hash(document)
-    path.write_bytes(_json_bytes(document))
-    _refresh_manifest(root)
-
-
 def _rewrite_attestation(root: Path, mutate: Any) -> None:
     attestation_path = root / "source/specs/provider-runtime-profile-attestation.json"
     attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
@@ -472,12 +429,6 @@ def _rewrite_attestation(root: Path, mutate: Any) -> None:
     occurrence["provider_runtime_profile_attestation_hash"] = attestation["attestation_hash"]
     occurrence_path.write_bytes(_json_bytes(occurrence))
 
-    _rewrite_approval(
-        root,
-        lambda approval: approval.update(
-            {"provider_runtime_profile_attestation_hash": attestation["attestation_hash"]}
-        ),
-    )
     manifest_path = root / MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry = next(
@@ -678,6 +629,81 @@ def test_valid_provider_root_executes_every_closed_rule(tmp_path: Path) -> None:
     assert result.missing_rule_ids == ()
 
 
+def test_unavailable_cost_record_is_closed_by_occurrence_inventory_not_parent_fields(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "provider-root"
+    value = _write_valid_root(root)
+    cost_record_id = HASHES["d"]
+    _add_indexed_document(
+        root,
+        f"source/cost/{cost_record_id}.json",
+        "cost_record",
+        {
+            "schema_name": "cost_record",
+            "schema_version": 1,
+            "cost_record_id": cost_record_id,
+            "parent_kind": "model_readiness",
+            "parent_id": "readiness-occurrence",
+            "basis": "actual_supplier_charge",
+            "indexing_view": "not_applicable",
+            "amount": None,
+            "currency": None,
+            "price_snapshot_id": None,
+            "source_usage_record_ids": [HASHES["3"]],
+            "source_resource_record_ids": [],
+            "proof_status": "unavailable",
+            "reason": "supplier_billing_receipt_is_unavailable",
+        },
+    )
+    _rewrite(
+        root,
+        "source/occurrence.json",
+        lambda document: document.update({"cost_record_ids": [cost_record_id]}),
+    )
+
+    result = _validate(value)
+
+    assert result.disposition.value == "validated", result.issues
+
+
+def test_cost_record_sources_must_belong_to_the_occurrence_inventory(tmp_path: Path) -> None:
+    root = tmp_path / "provider-root"
+    value = _write_valid_root(root)
+    cost_record_id = HASHES["d"]
+    _add_indexed_document(
+        root,
+        f"source/cost/{cost_record_id}.json",
+        "cost_record",
+        {
+            "schema_name": "cost_record",
+            "schema_version": 1,
+            "cost_record_id": cost_record_id,
+            "parent_kind": "model_readiness",
+            "parent_id": "readiness-occurrence",
+            "basis": "actual_supplier_charge",
+            "indexing_view": "not_applicable",
+            "amount": None,
+            "currency": None,
+            "price_snapshot_id": None,
+            "source_usage_record_ids": [HASHES["e"]],
+            "source_resource_record_ids": [],
+            "proof_status": "unavailable",
+            "reason": "supplier_billing_receipt_is_unavailable",
+        },
+    )
+    _rewrite(
+        root,
+        "source/occurrence.json",
+        lambda document: document.update({"cost_record_ids": [cost_record_id]}),
+    )
+
+    result = _validate(value)
+
+    assert result.disposition.value == "invalid"
+    assert result.failed_rule_ids == ("t4-provider-parent-isolation",)
+
+
 def test_unknown_outcome_without_provider_receipt_is_valid_and_not_replayed(
     tmp_path: Path,
 ) -> None:
@@ -764,11 +790,6 @@ def test_budget_closure_rejects_reservation_currency_drift(tmp_path: Path) -> No
             document["role_ceilings"][0].update({"max_cost": "1", "currency": "USD"}),
         ),
     )
-    budget_hash = _sha256((root / budget_path).read_bytes())
-    _rewrite_approval(
-        root,
-        lambda document: document.update({"budget_hash": budget_hash}),
-    )
     _rewrite(
         root,
         f"source/budget-reservations/{HASHES['5']}.json",
@@ -799,11 +820,6 @@ def test_runtime_binding_rejects_resealed_exact_release_identity_drift(
             {"provider_runtime_profile_attestation_hash": attestation["attestation_hash"]}
         ),
     )
-    approval_path = "source/specs/approval.json"
-    approval = json.loads((root / approval_path).read_text(encoding="utf-8"))
-    approval["provider_runtime_profile_attestation_hash"] = attestation["attestation_hash"]
-    approval["approval_hash"] = _approval_hash(approval)
-    (root / approval_path).write_bytes(_json_bytes(approval))
     manifest_path = root / MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     attestation_entry = next(
@@ -931,12 +947,6 @@ def test_budget_closure_rejects_provider_cap_for_a_different_provider(tmp_path: 
             {"provider": "different-provider"}
         ),
     )
-    budget_hash = _sha256((root / "source/specs/budget.json").read_bytes())
-    _rewrite_approval(
-        root,
-        lambda document: document.update({"budget_hash": budget_hash}),
-    )
-
     result = _validate(value)
 
     assert result.failed_rule_ids == ("t4-provider-budget-closure",)

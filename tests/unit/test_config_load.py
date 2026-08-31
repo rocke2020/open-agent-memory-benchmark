@@ -65,7 +65,7 @@ def test_selected_environment_validation_does_not_read_unselected_roles() -> Non
     environment = RecordingEnvironment(
         {
             "OAMB_ANSWER_API_KEY": "answer-secret",
-            "OAMB_QUALITY_REVIEW_API_KEY": "must-not-be-read",
+            "OAMB_JUDGE_API_KEY": "must-not-be-read",
         }
     )
     roles = (
@@ -75,9 +75,9 @@ def test_selected_environment_validation_does_not_read_unselected_roles() -> Non
             credential_reference=EnvironmentReference("OAMB_ANSWER_API_KEY"),
         ),
         RoleSelection(
-            role="quality_review",
+            role="judge",
             selected=False,
-            credential_reference=EnvironmentReference("OAMB_QUALITY_REVIEW_API_KEY"),
+            credential_reference=EnvironmentReference("OAMB_JUDGE_API_KEY"),
         ),
     )
 

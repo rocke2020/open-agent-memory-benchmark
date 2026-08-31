@@ -42,7 +42,6 @@ from oamb.contracts.schema import parse_contract
 from oamb.contracts.specifications import (
     BudgetScopeKindV2,
     BudgetSpecV2,
-    ExternalCallApprovalRecord,
     ModelRoleBindingV2,
     ProviderGateStatus,
     ProviderRuntimeProfileAttestation,
@@ -941,7 +940,6 @@ MANIFEST_PATH = "provider-service-evidence-manifest.json"
 _PROVIDER_RECORD_ID_FIELDS = {
     "provider_runtime_profile_attestation": "attestation_hash",
     "model_role_binding": "binding_id",
-    "external_call_approval_record": "approval_id",
     "budget_spec": "budget_id",
     "cost_measurement_spec": "measurement_spec_id",
     "model_readiness_occurrence_record": "occurrence_id",
@@ -1165,6 +1163,18 @@ def _provider_parent_isolation_rule(
             or getattr(record, "parent_id", None) != occurrence_id
         ):
             return _provider_issue(rule_id, "provider-parent-cross-reference", pointer="/parent_id")
+    usage_record_ids = set(occurrences[0].usage_record_ids)
+    resource_record_ids = set(occurrences[0].resource_record_ids)
+    for cost in _provider_documents(snapshot, CostRecord):
+        if (
+            not set(cost.source_usage_record_ids) <= usage_record_ids
+            or not set(cost.source_resource_record_ids) <= resource_record_ids
+        ):
+            return _provider_issue(
+                rule_id,
+                "provider-cost-source-cross-reference",
+                pointer="/source_usage_record_ids",
+            )
     for reservation in _provider_documents(snapshot, BudgetReservationRecord):
         if reservation.scope_kind != BudgetScopeKindV2.MODEL_READINESS:
             return _provider_issue(rule_id, "provider-budget-parent-kind", pointer="/scope_kind")
@@ -1182,33 +1192,21 @@ def _provider_budget_closure_rule(
 ) -> tuple[ValidationIssue, ...]:
     rule_id = "t4-provider-budget-closure"
     budgets = _provider_documents(snapshot, BudgetSpecV2)
-    approvals = _provider_documents(snapshot, ExternalCallApprovalRecord)
     occurrences = _provider_documents(snapshot, ModelReadinessOccurrenceRecord)
     roles = _provider_documents(snapshot, ModelRoleBindingV2)
     reservations = _provider_documents(snapshot, BudgetReservationRecord)
-    if not (len(budgets) == len(approvals) == len(occurrences) == 1):
+    if not (len(budgets) == len(occurrences) == 1):
         return _provider_issue(rule_id, "provider-budget-cardinality")
     budget = budgets[0]
-    approval = approvals[0]
     occurrence = occurrences[0]
     selected_role_ids = tuple(
         role.binding_id for role in roles if role.role_status == RoleBindingStatus.SELECTED
     )
     role_ceilings = {ceiling.role_binding_id: ceiling for ceiling in budget.role_ceilings}
     roles_by_id = {role.binding_id: role for role in roles}
-    budget_paths = _provider_paths(snapshot, BudgetSpecV2)
-    budget_bytes_hash = (
-        hashlib.sha256(snapshot.actual_files[budget_paths[0]]).hexdigest()
-        if len(budget_paths) == 1
-        else None
-    )
     closed = (
         budget.scope_kind == BudgetScopeKindV2.MODEL_READINESS
         and budget.scope_id == occurrence.occurrence_id
-        and budget.approval_id == occurrence.approval_id == approval.approval_id
-        and approval.scope_kind == BudgetScopeKindV2.MODEL_READINESS
-        and approval.scope_id == occurrence.occurrence_id
-        and approval.budget_hash == budget_bytes_hash
         and tuple(role_ceilings) == selected_role_ids == tuple(occurrence.role_binding_ids)
     )
     if not closed:
@@ -1463,14 +1461,12 @@ def _provider_runtime_binding_rule(
 ) -> tuple[ValidationIssue, ...]:
     rule_id = "t4-provider-runtime-binding"
     attestations = _provider_documents(snapshot, ProviderRuntimeProfileAttestation)
-    approvals = _provider_documents(snapshot, ExternalCallApprovalRecord)
     occurrences = _provider_documents(snapshot, ModelReadinessOccurrenceRecord)
     roles = _provider_documents(snapshot, ModelRoleBindingV2)
     measurements = _provider_documents(snapshot, CostMeasurementSpec)
-    if not (len(attestations) == len(approvals) == len(occurrences) == len(measurements) == 1):
+    if not (len(attestations) == len(occurrences) == len(measurements) == 1):
         return _provider_issue(rule_id, "provider-runtime-edge-missing")
     attestation = attestations[0]
-    approval = approvals[0]
     occurrence = occurrences[0]
     role_ids = tuple(role.binding_id for role in roles)
     if (
@@ -1482,9 +1478,7 @@ def _provider_runtime_binding_rule(
         or attestation.provider_project_id != occurrence.provider_project_id
         or attestation.provider_profile_id != occurrence.provider_profile_id
         or attestation.attestation_hash != occurrence.provider_runtime_profile_attestation_hash
-        or approval.provider_runtime_profile_attestation_hash != attestation.attestation_hash
         or role_ids != tuple(attestation.model_role_binding_ids)
-        or role_ids != tuple(approval.role_binding_ids)
         or role_ids != tuple(occurrence.role_binding_ids)
     ):
         return _provider_issue(rule_id, "provider-runtime-binding-mismatch")

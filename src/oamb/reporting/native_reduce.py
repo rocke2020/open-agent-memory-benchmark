@@ -686,7 +686,6 @@ def _accounting_owner(value: str) -> AccountingOwner:
     if value not in {
         "ingestion_plan",
         "case",
-        "phase_review",
         "model_readiness",
         "run",
     }:

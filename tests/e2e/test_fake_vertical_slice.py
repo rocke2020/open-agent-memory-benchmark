@@ -17,6 +17,7 @@ from oamb.contracts.ports import (
     ModelReceipt,
     ModelRequest,
     RuntimeResolution,
+    ThinkingEffort,
 )
 from oamb.contracts.states import (
     AttemptOutcome,
@@ -112,6 +113,12 @@ def test_fake_runtime_sends_the_rendered_visible_evidence_prompt_to_the_model(
         def __init__(self, store: ArtifactStorePort) -> None:
             self._delegate = ScriptedFakeModelClient(store)
 
+        def thinking_effort_for(self, *, stage: str, role_binding_id: str) -> ThinkingEffort:
+            return self._delegate.thinking_effort_for(
+                stage=stage,
+                role_binding_id=role_binding_id,
+            )
+
         async def complete(self, request: ModelRequest) -> ModelReceipt:
             captured_requests.append(request)
             return await self._delegate.complete(request)
@@ -129,7 +136,7 @@ def test_fake_runtime_sends_the_rendered_visible_evidence_prompt_to_the_model(
             partial_ingestion_plan_ids=(plans[1].ingestion_plan_id,),
         )
 
-    run_fake_vertical_slice(
+    completed = run_fake_vertical_slice(
         output_root=tmp_path / "capsules",
         run_id="fake-rendered-prompt",
         workload=workload,
@@ -139,8 +146,20 @@ def test_fake_runtime_sends_the_rendered_visible_evidence_prompt_to_the_model(
     )
 
     answer_requests = [request for request in captured_requests if request.stage == "answer"]
+    judge_requests = [request for request in captured_requests if request.stage == "judge"]
     assert answer_requests
     assert all('"visible_evidence"' in request.messages[0][1] for request in answer_requests)
+    assert all(request.thinking_effort == "low" for request in answer_requests)
+    assert judge_requests and all(request.thinking_effort == "high" for request in judge_requests)
+    attempts = {
+        document["attempt_id"]: document
+        for path in (completed.capsule_root / "source" / "attempts").glob("*.json")
+        if (document := json.loads(path.read_bytes()))["stage"] in {"answer", "judge"}
+    }
+    assert all(
+        attempts[request.attempt_id]["request_fingerprint"] == request.request_fingerprint
+        for request in captured_requests
+    )
 
 
 def test_fake_runtime_closes_both_ports_when_case_execution_raises(tmp_path: Path) -> None:
@@ -153,6 +172,9 @@ def test_fake_runtime_closes_both_ports_when_case_execution_raises(tmp_path: Pat
             await super().close()
 
     class FailingModelClient:
+        def thinking_effort_for(self, *, stage: str, role_binding_id: str) -> ThinkingEffort:
+            return "high" if stage == "judge" else "low"
+
         async def complete(self, request: ModelRequest) -> ModelReceipt:
             raise RuntimeError(f"planted model failure at {request.stage}")
 

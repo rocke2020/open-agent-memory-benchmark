@@ -1,11 +1,24 @@
 # OAMB provider API services
 
-This bundle starts the default, transport-matched OAMB comparison boundary:
-Hindsight, Mem0, and OpenViking are all called through local REST APIs. Mem0's
-Python SDK is an optional, separately identified profile; it is not part of
-this Compose project and its evidence must never be mixed with REST evidence.
+> **TL;DR:** This bundle prepares exact-pinned local REST services for the Open
+> Agent Memory Benchmark (OAMB). It does not run LongMemEval, prove provider
+> workload support, or prove generation-free retrieval; those require the
+> benchmark runner, runtime evidence, and capsule validation.
+
+The default transport-matched boundary calls Hindsight, Mem0, and OpenViking
+through local REST APIs. Mem0's Python SDK is an optional, separately identified
+profile; it is not part of this Compose project and its evidence must never be
+mixed with REST evidence.
+
+This bundle prepares exact-pinned services; it does not establish benchmark
+profile support. v0.1 targets LongMemEval only for all three providers.
+OpenViking requires a separately verified session/message/commit adapter, while
+MemoryAgentBench remains deferred.
 
 ## Fixed releases
+
+**All service identities are immutable and fail closed before reuse; a version
+label alone is insufficient.**
 
 | Provider | Release | Immutable runtime |
 |---|---|---|
@@ -33,18 +46,23 @@ database. Only four HTTP API ports bind to `127.0.0.1`; PostgreSQL and Qdrant
 remain private. `stop` preserves containers, volumes, and data and refuses to
 run or memory-conformance lifecycle while `.runtime/active-operation` exists.
 
-The commands in this directory do not run memory ingestion, retrieval, LME, or
-MAB. `verify --services` may provision Mem0 configuration and an OpenViking
+The commands in this directory do not run benchmark memory ingestion,
+retrieval, LongMemEval, or deferred MAB research workloads. `verify --services`
+may provision Mem0 configuration and an OpenViking
 account/key, then proves restart persistence, non-ROOT auth, and OpenViking's
 storage layout with a network-disabled read-only one-shot probe. Memory
-conformance and paid model evaluation remain separately approved work.
+conformance and paid model evaluation remain separate benchmark work.
 
 ## Prepare
 
+**Preparation fails closed before service startup and keeps every real secret
+in the local protected environment file.**
+
 Requirements: Docker Engine with Compose, Git, Python 3, `curl`, `jq`, and
-`shasum`. Ollama must expose `qwen3-embedding:0.6b` on the configured
-OpenAI-compatible endpoint. Real LLM/VLM credentials are needed only for the
-separately approved model-readiness mode and later memory evaluation. A
+`shasum`. vLLM-metal must expose `qwen3-embedding:0.6b` on the configured
+OpenAI-compatible endpoint, accept the native `dimensions: 1024` request, and
+support at least an 8,192-token model and scheduler batch limit. Real LLM/VLM
+credentials are needed only for the model-readiness mode and later memory evaluation. A
 service-only acceptance may use clearly named nonfunctional values and a
 `.invalid` base URL; such a run must remain `model_readiness=NOT_RUN`. Never
 reuse another provider's tracked or local config.
@@ -60,7 +78,7 @@ chmod 600 .env
 ./bin/provider-services up
 ./bin/provider-services verify --services
 ./bin/provider-services verify --model-readiness \
-  --approval /path/to/approval.json --budget /path/to/budget.json
+  --budget /path/to/budget.json
 ./bin/provider-services status
 ```
 
@@ -81,18 +99,18 @@ Mem0 image is reused only when its full build-input fingerprint also matches.
 `up` reports only container liveness. `verify --services` additionally proves
 exact API versions/routes, storage reachability, Mem0 configuration persistence
 across a normal restart, and an OpenViking user-bound key without benchmark-
-memory writes. `verify --model-readiness` is a separately approved,
-potentially billable probe: it checks the common 1,024-dimension embedding
-response, every configured LLM/VLM role, and OpenViking `/ready`. It must not
-run concurrently with a benchmark.
+memory writes. `verify --model-readiness` is a potentially billable probe: it
+checks the common 1,024-dimension embedding
+response, every configured indexing/extraction/semantic-understanding, answer,
+and judge role, and OpenViking `/ready`. v0.1 has no retrieval-generation role.
+The readiness command must not run concurrently with a benchmark.
 
-Model-readiness billing is explicitly `unavailable`, never zero. Its approval
-must set `allow_unmetered_cost=true`; its bound budget must reserve at least
-five calls and 240 seconds, set `cost_metering="unavailable"`, and set
-`max_total_cost_usd=null`. Before the first dispatch the command atomically
-consumes that project-bound approval and records each dispatch before sending
-it. A failure cannot reuse the approval or project; the operator preserves the
-attempt ledger and starts a new project. The final receipt keeps
+Model-readiness billing is explicitly `unavailable`, never zero. Its budget
+must reserve at least five calls and 240 seconds, set
+`cost_metering="unavailable"`, and set `max_total_cost_usd=null`. Before the
+first dispatch the command creates one project-bound attempt and records each
+dispatch before sending it. A failure cannot reuse the project; the operator
+preserves the attempt ledger and starts a new project. The final receipt keeps
 `billing_complete=false` and `cost_usd=null`.
 
 The runner and lifecycle commands share one atomic local protocol. Before
@@ -102,6 +120,10 @@ create its lease, and release the lifecycle lock. `up`, `stop`, and both
 `verify` modes hold the same lifecycle lock and refuse an active run. The
 project attestation binds its name plus Compose/version hashes before any
 mutation.
+
+Service attestation, model readiness, and lifecycle ownership do not prove the
+LongMemEval adapter or zero retrieval-generation dispatch; those require the
+resolved cell, runtime outbound trace, and fresh capsule validation.
 
 ## Controlled embedding, native storage
 
@@ -115,12 +137,21 @@ behavior and would no longer be the default provider comparison. A future
 common-vector-store experiment must be a separately named ablation and may run
 only when all selected releases officially support the same backend.
 
+Query embedding is allowed non-generative retrieval infrastructure and remains
+separate from prohibited generation paths. The v0.1 profiles select Hindsight
+`recall` without `reflect`, Mem0 `/search` with effective native reranking
+proven disabled, and OpenViking `/api/v1/search/find` with
+`enable_intent=false`. Provider service health or source defaults alone cannot
+prove these runtime settings.
+
 OpenViking `/ready` performs a real embedding request and is intentionally not
 a periodic healthcheck; model-readiness verification invokes it only under a
-project/budget-bound, unexpired approval and records that boundary separately
-from service health and memory conformance.
+project-bound budget and records that boundary separately from service health.
 
 ## API endpoints
+
+**Only provider REST APIs and the narrow read-only Mem0 projection inspector
+are exposed on the host.**
 
 Default host endpoints are:
 
@@ -136,6 +167,9 @@ vectors, and never accepts arbitrary Qdrant methods, paths, bodies, filters, or
 collections. The runner gets the inspector key, never the Qdrant backend key.
 
 ## Offline verification
+
+**Credential-free contract checks validate the service tooling without making
+provider or database writes.**
 
 The contract suite is credential-free and performs no provider or database
 writes:

@@ -19,7 +19,6 @@ from oamb.contracts.reporting import ExactRational, MeasurementSummaryLine
 AccountingOwner = Literal[
     "ingestion_plan",
     "case",
-    "phase_review",
     "model_readiness",
     "run",
 ]

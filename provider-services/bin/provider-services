@@ -159,7 +159,7 @@ doctor_full() {
     doctor_build
     for name in \
         OAMB_PROVIDER_PROJECT \
-        OAMB_OLLAMA_BASE_URL OAMB_EMBEDDING_MODEL \
+        OAMB_EMBEDDING_BASE_URL OAMB_EMBEDDING_MODEL \
         OAMB_HINDSIGHT_LLM_PROVIDER OAMB_HINDSIGHT_LLM_MODEL \
         OAMB_HINDSIGHT_LLM_BASE_URL OAMB_HINDSIGHT_LLM_API_KEY \
         OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_BASE_URL OAMB_MEM0_LLM_API_KEY \
@@ -344,6 +344,11 @@ verify_services() {
         "http://127.0.0.1:$hindsight_port/version" > "$proof_dir/hindsight-version.json"
     jq -e '.api_version == "0.9.2" and (.features | type == "object")' \
         "$proof_dir/hindsight-version.json" >/dev/null
+    compose exec -T hindsight python -c \
+        'import json,os; print(json.dumps({"model":os.environ["HINDSIGHT_API_LLM_MODEL"],"reasoning_effort":os.environ["HINDSIGHT_API_LLM_REASONING_EFFORT"]},sort_keys=True,separators=(",",":")))' \
+        > "$proof_dir/hindsight-model-config.json"
+    jq -e '.reasoning_effort == "low" and (.model | type == "string" and length > 0)' \
+        "$proof_dir/hindsight-model-config.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
         "http://127.0.0.1:$mem0_port/openapi.json" > "$proof_dir/mem0-openapi.json"
     jq -e '.paths["/memories"] and .paths["/search"]' \
@@ -365,8 +370,17 @@ verify_services() {
     jq -e '.count == 0 and .points == [] and .next_cursor == null' \
         "$proof_dir/mem0-empty-projection.json" >/dev/null
     cp "$RUNTIME_DIR/mem0-config-redacted.json" "$proof_dir/mem0-config-redacted.json"
+    jq -e '.llm.config.reasoning_effort == "low" and
+           .llm.config.is_reasoning_model == true' \
+        "$proof_dir/mem0-config-redacted.json" >/dev/null
     "$ROOT/openviking/bootstrap.sh" "$ROOT" "$ENV_FILE" \
         "$proof_dir/openviking-auth-identity.json"
+    compose exec -T openviking python -c \
+        'import json; from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton; c=OpenVikingConfigSingleton.get_instance().vlm; print(json.dumps({"model":c.model,"provider":c.provider,"reasoning_effort":c.extra_request_body.get("reasoning_effort")},sort_keys=True,separators=(",",":")))' \
+        > "$proof_dir/openviking-model-config.json"
+    jq -e '.reasoning_effort == "low" and .provider == "openai" and
+           (.model | type == "string" and length > 0)' \
+        "$proof_dir/openviking-model-config.json" >/dev/null
     trap 'restore_openviking_on_exit $?' 0
     OPENVIKING_QUIESCED=true
     compose stop openviking
@@ -402,7 +416,8 @@ probe_openai_chat() {
     printf 'Authorization: Bearer %s\n' "$api_key" > "$header_file"
     chmod 600 "$header_file"
     jq -n --arg model "$model" \
-        '{model: $model, messages: [{role: "user", content: "Reply with OK."}], temperature: 0, max_tokens: 1}' \
+        '{model: $model, messages: [{role: "user", content: "Reply with OK."}],
+          temperature: 0, max_tokens: 1, reasoning_effort: "low"}' \
         > "$request_file"
     record_model_dispatch "$label"
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 60 \
@@ -415,20 +430,18 @@ probe_openai_chat() {
 
 create_model_readiness_attempt() {
     project=$1
-    approval_hash=$2
-    budget_hash=$3
+    budget_hash=$2
     READINESS_ATTEMPT_FILE="$RUNTIME_DIR/model-readiness-attempt.json"
     claim="$RUNTIME_DIR/model-readiness-attempt.claim"
     mkdir "$claim" 2>/dev/null || \
-        die "model-readiness approval was already consumed; use a new provider project"
+        die "model-readiness attempt already exists; use a new provider project"
     temporary="$READINESS_ATTEMPT_FILE.partial.$$"
-    jq -n --arg project "$project" --arg approval "$approval_hash" \
-        --arg budget "$budget_hash" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    jq -n --arg project "$project" --arg budget "$budget_hash" \
+        --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --argjson calls "$MODEL_READINESS_RESERVED_CALLS" \
         --argjson wall "$MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS" \
         '{schema_version: "oamb-provider-model-readiness-attempt-v1",
-          provider_project: $project, approval_sha256: $approval,
-          budget_sha256: $budget, started_at_utc: $started,
+          provider_project: $project, budget_sha256: $budget, started_at_utc: $started,
           calls_reserved: $calls, calls_dispatched: 0,
           max_dispatch_wall_seconds: $wall, attempts: [],
           billing_complete: false, cost_usd: null, memory_state_created: false}' \
@@ -468,34 +481,15 @@ record_model_terminal() {
 }
 
 verify_model_readiness() {
-    [ "${1:-}" = "--approval" ] && [ -n "${2:-}" ] && \
-        [ "${3:-}" = "--budget" ] && [ -n "${4:-}" ] && [ "$#" -eq 4 ] || \
-        die "verify --model-readiness requires --approval FILE --budget FILE"
-    approval_file=$2
-    budget_file=$4
-    [ -f "$approval_file" ] || die "model-readiness approval file is absent"
+    [ "${1:-}" = "--budget" ] && [ -n "${2:-}" ] && [ "$#" -eq 2 ] || \
+        die "verify --model-readiness requires --budget FILE"
+    budget_file=$2
     [ -f "$budget_file" ] || die "model-readiness budget file is absent"
     doctor_full
     acquire_lifecycle_lock
     verify_project_attestation
     project=$(env_value OAMB_PROVIDER_PROJECT)
     budget_hash=$(shasum -a 256 "$budget_file" | awk '{print $1}')
-    jq -e --arg project "$project" --arg budget_hash "$budget_hash" \
-        '.schema_version == "oamb-provider-model-readiness-approval-v1" and
-         .approved == true and .provider_project == $project and
-         .budget_sha256 == $budget_hash and .allow_unmetered_cost == true and
-         (.expires_at_utc | type == "string")' \
-        "$approval_file" >/dev/null || die "model-readiness approval does not bind this project and budget"
-    python3 - "$approval_file" <<'PY' || die "model-readiness approval is expired or malformed"
-import datetime as dt
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as approval_file:
-    expires = json.load(approval_file)["expires_at_utc"]
-deadline = dt.datetime.fromisoformat(expires.replace("Z", "+00:00"))
-raise SystemExit(0 if deadline > dt.datetime.now(dt.timezone.utc) else 1)
-PY
     jq -e --argjson calls "$MODEL_READINESS_RESERVED_CALLS" \
         --argjson wall "$MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS" \
         '.schema_version == "oamb-provider-model-readiness-budget-v1" and
@@ -508,19 +502,18 @@ PY
     done
     mkdir -p "$RUNTIME_DIR"
     umask 077
-    approval_hash=$(shasum -a 256 "$approval_file" | awk '{print $1}')
-    create_model_readiness_attempt "$project" "$approval_hash" "$budget_hash"
+    create_model_readiness_attempt "$project" "$budget_hash"
     embedding_request="$RUNTIME_DIR/embedding-ready-request.json"
     embedding_response="$RUNTIME_DIR/embedding-ready-response.json"
     jq -n --arg model "$(env_value OAMB_EMBEDDING_MODEL)" \
-        '{model: $model, input: ["OAMB readiness probe"]}' > "$embedding_request"
-    embedding_base=$(env_value OAMB_OLLAMA_BASE_URL)
+        '{model: $model, input: ["OAMB readiness probe"], dimensions: 1024}' > "$embedding_request"
+    embedding_base=$(env_value OAMB_EMBEDDING_BASE_URL)
     case "$embedding_base" in
         http://host.docker.internal:*) embedding_base="http://127.0.0.1:${embedding_base#http://host.docker.internal:}" ;;
     esac
     record_model_dispatch controlled-embedding
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 30 \
-        -H 'Authorization: Bearer ollama-local' -H 'Content-Type: application/json' \
+        -H 'Authorization: Bearer oamb-local-embedding' -H 'Content-Type: application/json' \
         --data-binary "@$embedding_request" "${embedding_base%/}/embeddings" > "$embedding_response"
     jq -e '.data[0].embedding | type == "array" and length == 1024' "$embedding_response" >/dev/null
     record_model_terminal controlled-embedding
@@ -544,12 +537,11 @@ PY
     receipt="$RUNTIME_DIR/model-readiness-receipt.json"
     [ ! -e "$receipt" ] || die "model-readiness receipt already exists; use a new provider project"
     attempt_hash=$(shasum -a 256 "$READINESS_ATTEMPT_FILE" | awk '{print $1}')
-    jq -n --arg project "$project" --arg approval "$approval_hash" --arg budget "$budget_hash" \
+    jq -n --arg project "$project" --arg budget "$budget_hash" \
         --arg attempt "$attempt_hash" \
         --arg completed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{schema_version: "oamb-provider-model-readiness-receipt-v1",
-          provider_project: $project, approval_sha256: $approval,
-          budget_sha256: $budget, attempt_sha256: $attempt,
+          provider_project: $project, budget_sha256: $budget, attempt_sha256: $attempt,
           completed_at_utc: $completed, model_calls_dispatched: 5,
           billing_complete: false, cost_usd: null,
           memory_state_created: false}' > "$receipt"
@@ -567,7 +559,7 @@ stop_services() {
 }
 
 usage() {
-    printf 'usage: %s {doctor|build|up|verify --services|verify --model-readiness --approval FILE --budget FILE|status|stop}\n' "$0" >&2
+    printf 'usage: %s {doctor|build|up|verify --services|verify --model-readiness --budget FILE|status|stop}\n' "$0" >&2
     exit 2
 }
 

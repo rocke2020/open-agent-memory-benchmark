@@ -31,14 +31,12 @@ from oamb.contracts.reporting import (
     ComparisonReportModel,
     DiagnosticRunReportModel,
     EvaluationReportModel,
-    PhaseAcceptanceReport,
     ReleaseReportModel,
     ReportArtifactManifestV2,
     ReportArtifactManifestV3,
     RunReportModelV3,
 )
 from oamb.contracts.specifications import (
-    AcceptanceReportSpec,
     DerivationSpecV2,
     DerivationSpecV3,
     ReportSpec,
@@ -65,8 +63,8 @@ from oamb.reporting.roots import (
 )
 
 DERIVATION_MARKER = "derived-manifest.json"
-ReportIdentitySpec = ReportSpec | ReportSpecV2 | AcceptanceReportSpec
-ReportKind = Literal["run", "comparison", "evaluation", "release", "phase_acceptance"]
+ReportIdentitySpec = ReportSpec | ReportSpecV2
+ReportKind = Literal["run", "comparison", "evaluation", "release"]
 
 
 class ReportExportError(ValueError):
@@ -197,15 +195,10 @@ def build_report_derivation(
             report_identity_spec_binding=binding,
             reducer_and_renderer_input_hashes=reducer_and_renderer_inputs,
         )
-    spec_name = (
-        "acceptance-report-spec.json"
-        if isinstance(report_spec, AcceptanceReportSpec)
-        else "report-spec.json"
-    )
     payloads: dict[str, bytes] = {
         "derivation-spec.json": canonical_json_bytes(derivation),
         "source-roots.json": canonical_json_bytes(ordered_source_bindings),
-        f"input-specs/{spec_name}": canonical_json_bytes(report_spec),
+        "input-specs/report-spec.json": canonical_json_bytes(report_spec),
         "evidence-validations.json": canonical_json_bytes(evidence_validations),
         "outputs/report-model.json": report_model_bytes,
         "outputs/report.html": report_html,
@@ -372,15 +365,10 @@ def _report_kind(
         expected = "evaluation"
     elif isinstance(model, ReleaseReportModel):
         expected = "release"
-    elif isinstance(model, PhaseAcceptanceReport):
-        expected = "phase_acceptance"
     else:
         raise TypeError("unsupported offline report model")
-    if isinstance(report_spec, (ReportSpec, ReportSpecV2)):
-        if report_spec.report_kind != expected:
-            raise ValueError("report model and ReportSpec kind do not match")
-    elif expected != "phase_acceptance":
-        raise ValueError("AcceptanceReportSpec requires a phase-acceptance model")
+    if report_spec.report_kind != expected:
+        raise ValueError("report model and ReportSpec kind do not match")
     return expected
 
 
@@ -390,7 +378,6 @@ def _derivation_kind(report_kind: ReportKind) -> str:
         "comparison": "comparison_report",
         "evaluation": "evaluation_report",
         "release": "release_report",
-        "phase_acceptance": "phase_acceptance_report",
     }[report_kind]
 
 

@@ -1,12 +1,12 @@
-"""Strict report, comparison, and quality-review contracts."""
+"""Strict report and comparison contracts."""
 
 from __future__ import annotations
 
-from enum import StrEnum
+from collections.abc import Mapping
 from fractions import Fraction
 from math import gcd
 from pathlib import PurePosixPath
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -17,22 +17,19 @@ from .base import (
     PositiveInt,
     Sha256,
     StrictContract,
-    UtcDateTime,
 )
 from .ids import canonical_sha256
 from .specifications import (
     ComparisonCostView,
     EvaluationModelClosure,
+    ExecutionEnvironmentBinding,
+    MetricSpec,
+    OutputContract,
+    PromptPackManifest,
     ReportIdentitySpecBinding,
     ReportIdentitySpecBindingV2,
     SourceEvidenceBinding,
 )
-
-
-class QualityReviewStatus(StrEnum):
-    PASS = "pass"
-    FAIL = "fail"
-    INCONCLUSIVE = "inconclusive"
 
 
 class ComparisonControlBinding(StrictContract):
@@ -40,6 +37,364 @@ class ComparisonControlBinding(StrictContract):
     schema_version: Literal[1] = 1
     control_id: NonEmptyStr
     value_hash: Sha256
+
+
+COMPARISON_CONTROL_IDS_V1: tuple[str, ...] = (
+    "comparison.protocol-version.v1",
+    "comparison.workload-version.v1",
+    "comparison.dataset-revision.v1",
+    "comparison.ordered-case-manifest.v1",
+    "comparison.prompt-packs.v1",
+    "comparison.output-contracts.v1",
+    "comparison.metric-evaluation-policy.v1",
+    "comparison.answer-role-binding.v1",
+    "comparison.judge-role-binding.v1",
+    "comparison.controlled-embedding.v1",
+    "comparison.native-reranking-disabled.v1",
+    "comparison.visible-context-policy.v1",
+    "comparison.token-measurement-contract.v1",
+    "comparison.resource-measurement-contract.v1",
+    "comparison.cost-measurement-contract.v1",
+    "comparison.query-effect-policy.v1",
+    "comparison.retry-policy.v1",
+    "comparison.failure-denominator-policy.v1",
+)
+
+DETERMINISTIC_METRIC_NOT_APPLICABLE_PROMPT_PACK_ID = "oamb-deterministic-metric-not-applicable-v1"
+
+
+def comparison_control_value_hash(control_id: str, normalized_payload: Any) -> str:
+    return canonical_sha256(["oamb-comparison-control-value-v1", control_id, normalized_payload])
+
+
+def provider_native_profile_hash(
+    *,
+    provider_project_id: str,
+    provider_profile_id: str,
+    adapter_profile_hash: str,
+    memory_system_id: str,
+    release_version: str,
+    source_revision: str,
+    artifact_sha256: str,
+    deployment_configuration_sha256: str,
+    storage_engine: str,
+    storage_engine_version: str,
+    schema_revision: str,
+    vector_index_type: str,
+    distance_metric: str,
+    index_configuration_sha256: str,
+    native_feature_flags_fingerprint: str,
+    native_reranking_status: str,
+) -> str:
+    return canonical_sha256(
+        [
+            "oamb-provider-native-profile-v1",
+            provider_project_id,
+            provider_profile_id,
+            adapter_profile_hash,
+            memory_system_id,
+            release_version,
+            source_revision,
+            artifact_sha256,
+            deployment_configuration_sha256,
+            storage_engine,
+            storage_engine_version,
+            schema_revision,
+            vector_index_type,
+            distance_metric,
+            index_configuration_sha256,
+            native_feature_flags_fingerprint,
+            native_reranking_status,
+        ]
+    )
+
+
+class ComparisonControlSourceReference(StrictContract):
+    schema_name: Literal["comparison_control_source_reference"] = (
+        "comparison_control_source_reference"
+    )
+    schema_version: Literal[1] = 1
+    record_kind: NonEmptyStr
+    referenced_schema_name: NonEmptyStr
+    referenced_schema_version: PositiveInt
+    record_id: NonEmptyStr
+    record_sha256: Sha256
+    json_pointers: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def pointers_are_canonical_and_unique(self) -> Self:
+        if not self.json_pointers:
+            raise ValueError("comparison source reference requires a JSON pointer")
+        if len(set(self.json_pointers)) != len(self.json_pointers):
+            raise ValueError("comparison source reference contains duplicate JSON pointers")
+        if any(not _is_rfc6901_json_pointer(pointer) for pointer in self.json_pointers):
+            raise ValueError("comparison source reference contains an invalid JSON pointer")
+        return self
+
+
+def _is_rfc6901_json_pointer(pointer: str) -> bool:
+    if pointer == "":
+        return True
+    if not pointer.startswith("/"):
+        return False
+    index = 0
+    while index < len(pointer):
+        if pointer[index] == "~":
+            if index + 1 >= len(pointer) or pointer[index + 1] not in {"0", "1"}:
+                return False
+            index += 2
+        else:
+            index += 1
+    return True
+
+
+class ComparisonControlProvenanceBinding(StrictContract):
+    schema_name: Literal["comparison_control_provenance_binding"] = (
+        "comparison_control_provenance_binding"
+    )
+    schema_version: Literal[1] = 1
+    control_id: NonEmptyStr
+    value_hash: Sha256
+    ordered_source_references: tuple[ComparisonControlSourceReference, ...]
+
+    @model_validator(mode="after")
+    def sources_are_nonempty_and_unique(self) -> Self:
+        if not self.ordered_source_references:
+            raise ValueError("comparison control provenance requires a source reference")
+        identities = tuple(
+            canonical_sha256(reference.model_dump(mode="python"))
+            for reference in self.ordered_source_references
+        )
+        if len(set(identities)) != len(identities):
+            raise ValueError("comparison control provenance contains duplicate sources")
+        return self
+
+
+class WorkloadExecutionControlRecord(StrictContract):
+    schema_name: Literal["workload_execution_control_record"] = "workload_execution_control_record"
+    schema_version: Literal[1] = 1
+    workload_control_id: Sha256
+    workload_control_hash: Sha256
+    run_id: NonEmptyStr
+    workload_id: NonEmptyStr
+    dataset_manifest_hash: Sha256
+    case_manifest_hash: Sha256
+    workload_policy_version: NonEmptyStr
+    ordered_prompt_pack_manifests: tuple[PromptPackManifest, ...]
+    ordered_case_ids: tuple[Sha256, ...]
+    answer_prompt_pack_ids: tuple[NonEmptyStr, ...]
+    judge_prompt_pack_ids: tuple[NonEmptyStr, ...]
+    output_contract_ids: tuple[NonEmptyStr, ...]
+    answer_request_binding_ids: tuple[NonEmptyStr, ...]
+    judge_request_binding_ids: tuple[NonEmptyStr, ...]
+    output_contracts: tuple[OutputContract, ...]
+    metric_specs: tuple[MetricSpec, ...]
+    visible_evidence_max_items: PositiveInt
+    visible_evidence_max_characters: PositiveInt
+    visible_evidence_max_tokens: PositiveInt
+    tokenizer_id: NonEmptyStr
+    tokenizer_version: NonEmptyStr
+    tokenizer_fingerprint: Sha256
+    provider_order_rule: NonEmptyStr
+    deduplication_algorithm_version: NonEmptyStr
+    truncation_algorithm_version: NonEmptyStr
+    query_effect_policy_hash: Sha256
+    failure_denominator_policy_hash: Sha256
+    workload_implementation_hash: Sha256
+    evaluator_implementation_hash: Sha256
+    reducer_implementation_hash: Sha256
+
+    @model_validator(mode="after")
+    def closure_and_identity_are_exact(self) -> Self:
+        aligned = (
+            self.ordered_case_ids,
+            self.answer_prompt_pack_ids,
+            self.judge_prompt_pack_ids,
+            self.output_contract_ids,
+            self.answer_request_binding_ids,
+            self.judge_request_binding_ids,
+        )
+        if not self.ordered_case_ids or any(
+            len(items) != len(self.ordered_case_ids) for items in aligned
+        ):
+            raise ValueError("workload control per-case inventories must be non-empty and aligned")
+        inventories = (
+            self.ordered_case_ids,
+            tuple(item.prompt_pack_id for item in self.ordered_prompt_pack_manifests),
+            tuple(item.output_contract_id for item in self.output_contracts),
+            tuple(item.metric_id for item in self.metric_specs),
+        )
+        if any(not items or len(set(items)) != len(items) for items in inventories):
+            raise ValueError("workload control inventories must be non-empty and unique")
+        prompt_ids = set(inventories[1])
+        output_ids = set(inventories[2])
+        allowed_judge_prompt_ids = prompt_ids | {DETERMINISTIC_METRIC_NOT_APPLICABLE_PROMPT_PACK_ID}
+        if (
+            not set(self.answer_prompt_pack_ids) <= prompt_ids
+            or not set(self.judge_prompt_pack_ids) <= allowed_judge_prompt_ids
+        ):
+            raise ValueError("workload control references an unknown prompt pack")
+        if not set(self.output_contract_ids) <= output_ids:
+            raise ValueError("workload control references an unknown output contract")
+        if any(item.output_contract_id not in output_ids for item in self.metric_specs):
+            raise ValueError("workload metric references an unknown output contract")
+        expected_id = workload_execution_control_id(
+            run_id=self.run_id,
+            workload_id=self.workload_id,
+            dataset_manifest_hash=self.dataset_manifest_hash,
+            case_manifest_hash=self.case_manifest_hash,
+        )
+        if self.workload_control_id != expected_id:
+            raise ValueError("workload control identity does not match its canonical inputs")
+        expected_hash = workload_execution_control_hash(
+            self.model_dump(mode="python", exclude={"workload_control_hash"})
+        )
+        if self.workload_control_hash != expected_hash:
+            raise ValueError("workload control hash does not match its canonical fields")
+        return self
+
+
+def workload_execution_control_id(
+    *, run_id: str, workload_id: str, dataset_manifest_hash: str, case_manifest_hash: str
+) -> str:
+    return canonical_sha256(
+        [
+            "oamb-workload-execution-control-id-v1",
+            run_id,
+            workload_id,
+            dataset_manifest_hash,
+            case_manifest_hash,
+        ]
+    )
+
+
+def workload_execution_control_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "workload_execution_control_record")
+    payload.setdefault("schema_version", 1)
+    payload.pop("workload_control_hash", None)
+    return canonical_sha256(payload)
+
+
+class ControlledEmbeddingComparisonProjection(StrictContract):
+    schema_name: Literal["controlled_embedding_comparison_projection"] = (
+        "controlled_embedding_comparison_projection"
+    )
+    schema_version: Literal[1] = 1
+    endpoint_fingerprint: Sha256
+    configured_model: NonEmptyStr
+    resolved_model: NonEmptyStr
+    artifact_fingerprint: Sha256
+    dimension: PositiveInt
+    input_adaptation_fingerprint: Sha256
+    score_affecting_request_settings: tuple[tuple[NonEmptyStr, NonEmptyStr], ...]
+
+    @model_validator(mode="after")
+    def request_settings_are_nonempty_and_unique(self) -> Self:
+        keys = tuple(item[0] for item in self.score_affecting_request_settings)
+        if not keys or len(set(keys)) != len(keys):
+            raise ValueError("controlled embedding settings must be non-empty and unique")
+        return self
+
+
+class RuntimeMeasurementControlRecord(StrictContract):
+    schema_name: Literal["runtime_measurement_control_record"] = (
+        "runtime_measurement_control_record"
+    )
+    schema_version: Literal[1] = 1
+    runtime_control_id: Sha256
+    runtime_control_hash: Sha256
+    run_id: NonEmptyStr
+    runtime_binding_hash: Sha256
+    controlled_embedding: ControlledEmbeddingComparisonProjection
+    attestation_version: NonEmptyStr
+    native_reranking_disabled: Literal[True]
+    oamb_reranker_configured: Literal[False]
+    token_measurement_contract_hash: Sha256
+    resource_measurement_contract_hash: Sha256
+    cost_measurement_contract_hash: Sha256
+    retry_policy_hash: Sha256
+    idempotency_policy_hash: Sha256
+    reconciliation_policy_hash: Sha256
+    unknown_outcome_policy_hash: Sha256
+    live_accounting_schema_inventory: tuple[NonEmptyStr, ...]
+    execution_environment: ExecutionEnvironmentBinding
+
+    @model_validator(mode="after")
+    def inventory_and_identity_are_exact(self) -> Self:
+        inventory = self.live_accounting_schema_inventory
+        if not inventory or len(set(inventory)) != len(inventory):
+            raise ValueError("runtime accounting inventory must be non-empty and unique")
+        expected_id = runtime_measurement_control_id(
+            run_id=self.run_id, runtime_binding_hash=self.runtime_binding_hash
+        )
+        if self.runtime_control_id != expected_id:
+            raise ValueError("runtime control identity does not match its canonical inputs")
+        expected_hash = runtime_measurement_control_hash(
+            self.model_dump(mode="python", exclude={"runtime_control_hash"})
+        )
+        if self.runtime_control_hash != expected_hash:
+            raise ValueError("runtime control hash does not match its canonical fields")
+        return self
+
+
+def runtime_measurement_control_id(*, run_id: str, runtime_binding_hash: str) -> str:
+    return canonical_sha256(
+        ["oamb-runtime-measurement-control-id-v1", run_id, runtime_binding_hash]
+    )
+
+
+def runtime_measurement_control_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "runtime_measurement_control_record")
+    payload.setdefault("schema_version", 1)
+    payload.pop("runtime_control_hash", None)
+    return canonical_sha256(payload)
+
+
+class RunComparisonControlBasisRecord(StrictContract):
+    schema_name: Literal["run_comparison_control_basis_record"] = (
+        "run_comparison_control_basis_record"
+    )
+    schema_version: Literal[1] = 1
+    basis_record_id: Sha256
+    basis_record_hash: Sha256
+    run_id: NonEmptyStr
+    run_spec_hash: Sha256
+    workload_control_hash: Sha256
+    runtime_measurement_control_hash: Sha256
+    runtime_binding_hash: Sha256
+    provider_native_profile_hash: Sha256
+    ordered_provenance_bindings: tuple[ComparisonControlProvenanceBinding, ...]
+
+    @model_validator(mode="after")
+    def inventory_and_identity_are_exact(self) -> Self:
+        control_ids = tuple(item.control_id for item in self.ordered_provenance_bindings)
+        if control_ids != COMPARISON_CONTROL_IDS_V1:
+            raise ValueError("basis record requires the ordered 18-control inventory")
+        expected_id = run_comparison_control_basis_id(
+            run_id=self.run_id, run_spec_hash=self.run_spec_hash
+        )
+        if self.basis_record_id != expected_id:
+            raise ValueError("basis record identity does not match its canonical inputs")
+        expected_hash = run_comparison_control_basis_hash(
+            self.model_dump(mode="python", exclude={"basis_record_hash"})
+        )
+        if self.basis_record_hash != expected_hash:
+            raise ValueError("basis record hash does not match its canonical fields")
+        return self
+
+
+def run_comparison_control_basis_id(*, run_id: str, run_spec_hash: str) -> str:
+    return canonical_sha256(["oamb-run-comparison-control-basis-id-v1", run_id, run_spec_hash])
+
+
+def run_comparison_control_basis_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "run_comparison_control_basis_record")
+    payload.setdefault("schema_version", 1)
+    payload.pop("basis_record_hash", None)
+    return canonical_sha256(payload)
 
 
 class ComparisonControlSnapshot(StrictContract):
@@ -50,6 +405,26 @@ class ComparisonControlSnapshot(StrictContract):
     memory_system_id: NonEmptyStr
     provider_native_profile_hash: Sha256
     controls: tuple[ComparisonControlBinding, ...]
+
+    @model_validator(mode="after")
+    def control_ids_are_unique(self) -> Self:
+        control_ids = tuple(item.control_id for item in self.controls)
+        if not control_ids or len(set(control_ids)) != len(control_ids):
+            raise ValueError("comparison control snapshot requires a unique closed inventory")
+        return self
+
+
+class ComparisonControlSnapshotV2(StrictContract):
+    schema_name: Literal["comparison_control_snapshot"] = "comparison_control_snapshot"
+    schema_version: Literal[2] = 2
+    run_id: NonEmptyStr
+    source_root_hash: Sha256
+    memory_system_id: NonEmptyStr
+    provider_native_profile_hash: Sha256
+    controls: tuple[ComparisonControlBinding, ...]
+    basis_record_id: Sha256
+    basis_record_hash: Sha256
+    native_validation_result_hash: Sha256
 
     @model_validator(mode="after")
     def control_ids_are_unique(self) -> Self:
@@ -345,656 +720,6 @@ def _require_exact_delta(
         raise ValueError(f"{label} arithmetic does not close")
 
 
-class EvaluationReviewBundle(StrictContract):
-    schema_name: Literal["evaluation_review_bundle"] = "evaluation_review_bundle"
-    schema_version: Literal[1] = 1
-    bundle_id: Sha256
-    phase_id: NonEmptyStr
-    ordered_capsule_hashes: tuple[Sha256, ...]
-    ordered_validation_hashes: tuple[Sha256, ...]
-    ordered_case_occurrence_ids: tuple[Sha256, ...]
-    unique_case_manifest_entry_ids: tuple[Sha256, ...]
-    ordinary_derivation_hashes: tuple[Sha256, ...]
-    report_model_hash: Sha256
-    report_html_hash: Sha256
-    export_validation_hash: Sha256
-    ordered_review_input_hash: Sha256
-    limitations: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def generic_coverage_is_internally_closed(self) -> Self:
-        if not self.ordered_capsule_hashes or len(self.ordered_capsule_hashes) != len(
-            self.ordered_validation_hashes
-        ):
-            raise ValueError("review bundle capsule and validation roots must align")
-        if not self.ordered_case_occurrence_ids or not self.unique_case_manifest_entry_ids:
-            raise ValueError("review bundle requires case occurrence and manifest coverage")
-        for label, values in (
-            ("capsule", self.ordered_capsule_hashes),
-            ("validation", self.ordered_validation_hashes),
-            ("case occurrence", self.ordered_case_occurrence_ids),
-            ("case manifest", self.unique_case_manifest_entry_ids),
-        ):
-            if len(set(values)) != len(values):
-                raise ValueError(f"review bundle contains duplicate {label} identities")
-        if not self.ordinary_derivation_hashes:
-            raise ValueError("review bundle requires ordinary derived artifacts")
-        expected_input_hash = evaluation_review_input_hash(
-            phase_id=self.phase_id,
-            ordered_capsule_hashes=self.ordered_capsule_hashes,
-            ordered_validation_hashes=self.ordered_validation_hashes,
-            ordered_case_occurrence_ids=self.ordered_case_occurrence_ids,
-            unique_case_manifest_entry_ids=self.unique_case_manifest_entry_ids,
-            ordinary_derivation_hashes=self.ordinary_derivation_hashes,
-            report_model_hash=self.report_model_hash,
-            report_html_hash=self.report_html_hash,
-            export_validation_hash=self.export_validation_hash,
-            limitations=self.limitations,
-        )
-        if self.ordered_review_input_hash != expected_input_hash:
-            raise ValueError("review bundle ordered review input hash does not match its payload")
-        expected_bundle_id = evaluation_review_bundle_id(
-            ordered_review_input_hash=self.ordered_review_input_hash
-        )
-        if self.bundle_id != expected_bundle_id:
-            raise ValueError("review bundle identity does not match its ordered review input")
-        return self
-
-
-def evaluation_review_input_hash(**fields: object) -> str:
-    return canonical_sha256(["oamb-evaluation-review-input-v1", fields])
-
-
-def evaluation_review_bundle_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-evaluation-review-bundle-v1", fields])
-
-
-class ReviewFindingSeverity(StrEnum):
-    FAIL = "fail"
-    INCONCLUSIVE = "inconclusive"
-    ADVISORY = "advisory"
-
-
-class AIReviewCaseProjection(StrictContract):
-    schema_name: Literal["ai_review_case_projection"] = "ai_review_case_projection"
-    schema_version: Literal[1] = 1
-    projection_id: Sha256
-    case_occurrence_id: Sha256
-    case_manifest_entry_id: Sha256
-    memory_system_id: NonEmptyStr
-    workload_id: NonEmptyStr
-    stratum: NonEmptyStr
-    manifest_ordinal: PositiveInt
-    completion_state: NonEmptyStr
-    question: DisplayPreview
-    accepted_answers: tuple[DisplayPreview, ...]
-    retrieved_evidence: tuple[DisplayPreview, ...]
-    metric_or_judge_hash: Sha256
-    usage_proof_statuses: tuple[NonEmptyStr, ...]
-    limitations: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def projection_identity_and_required_evidence_close(self) -> Self:
-        if not self.accepted_answers:
-            raise ValueError("AI review case projection requires accepted answer evidence")
-        if not self.usage_proof_statuses:
-            raise ValueError("AI review case projection requires usage proof statuses")
-        expected = ai_review_case_projection_id(
-            case_occurrence_id=self.case_occurrence_id,
-            case_manifest_entry_id=self.case_manifest_entry_id,
-            memory_system_id=self.memory_system_id,
-            workload_id=self.workload_id,
-            stratum=self.stratum,
-            manifest_ordinal=self.manifest_ordinal,
-            completion_state=self.completion_state,
-            question=self.question,
-            accepted_answers=self.accepted_answers,
-            retrieved_evidence=self.retrieved_evidence,
-            metric_or_judge_hash=self.metric_or_judge_hash,
-            usage_proof_statuses=self.usage_proof_statuses,
-            limitations=self.limitations,
-        )
-        if self.projection_id != expected:
-            raise ValueError("AI review case projection identity does not match its payload")
-        return self
-
-
-class AIReviewIntegrityProjection(StrictContract):
-    schema_name: Literal["ai_review_integrity_projection"] = "ai_review_integrity_projection"
-    schema_version: Literal[1] = 1
-    integrity_id: Sha256
-    phase_id: NonEmptyStr
-    ordered_manifest_hashes: tuple[Sha256, ...]
-    validation_inventory_hashes: tuple[Sha256, ...]
-    reducer_hashes: tuple[Sha256, ...]
-    comparison_hashes: tuple[Sha256, ...]
-    accounting_hash: Sha256
-    report_model_hash: Sha256
-    report_html_hash: Sha256
-    export_validation_hash: Sha256
-    limitations: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def integrity_identity_and_roots_close(self) -> Self:
-        if not self.ordered_manifest_hashes or len(self.ordered_manifest_hashes) != len(
-            self.validation_inventory_hashes
-        ):
-            raise ValueError("AI review integrity manifests and validations must align")
-        expected = ai_review_integrity_projection_id(
-            phase_id=self.phase_id,
-            ordered_manifest_hashes=self.ordered_manifest_hashes,
-            validation_inventory_hashes=self.validation_inventory_hashes,
-            reducer_hashes=self.reducer_hashes,
-            comparison_hashes=self.comparison_hashes,
-            accounting_hash=self.accounting_hash,
-            report_model_hash=self.report_model_hash,
-            report_html_hash=self.report_html_hash,
-            export_validation_hash=self.export_validation_hash,
-            limitations=self.limitations,
-        )
-        if self.integrity_id != expected:
-            raise ValueError("AI review integrity projection identity does not match its payload")
-        return self
-
-
-class AIReviewFinding(StrictContract):
-    schema_name: Literal["ai_review_finding"] = "ai_review_finding"
-    schema_version: Literal[1] = 1
-    code: NonEmptyStr
-    severity: ReviewFindingSeverity
-    explanation: NonEmptyStr
-    evidence_references: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def finding_is_bounded(self) -> Self:
-        from oamb.constants import (
-            AI_REVIEW_MAX_EVIDENCE_REFERENCES_PER_ITEM,
-            AI_REVIEW_MAX_EXPLANATION_BYTES,
-        )
-
-        if len(self.explanation.encode("utf-8")) > AI_REVIEW_MAX_EXPLANATION_BYTES:
-            raise ValueError("AI review finding explanation exceeds its byte limit")
-        if len(self.evidence_references) > AI_REVIEW_MAX_EVIDENCE_REFERENCES_PER_ITEM:
-            raise ValueError("AI review finding has too many evidence references")
-        return self
-
-
-def _require_bounded_review_findings(
-    findings: tuple[AIReviewFinding, ...],
-    *,
-    result_kind: str,
-) -> None:
-    from oamb.constants import (
-        AI_REVIEW_MAX_EVIDENCE_REFERENCES_PER_ITEM,
-        AI_REVIEW_MAX_EXPLANATION_BYTES,
-        AI_REVIEW_MAX_FINDINGS_PER_ITEM,
-    )
-
-    if len(findings) > AI_REVIEW_MAX_FINDINGS_PER_ITEM:
-        raise ValueError(f"AI review {result_kind} result has too many findings")
-    codes = tuple(item.code for item in findings)
-    if len(set(codes)) != len(codes):
-        raise ValueError(f"AI review {result_kind} result contains duplicate finding codes")
-    if (
-        sum(len(item.explanation.encode("utf-8")) for item in findings)
-        > AI_REVIEW_MAX_EXPLANATION_BYTES
-    ):
-        raise ValueError(f"AI review {result_kind} explanation budget is exceeded")
-    if (
-        sum(len(item.evidence_references) for item in findings)
-        > AI_REVIEW_MAX_EVIDENCE_REFERENCES_PER_ITEM
-    ):
-        raise ValueError(f"AI review {result_kind} evidence-reference budget is exceeded")
-
-
-class AIReviewCaseResult(StrictContract):
-    schema_name: Literal["ai_review_case_result"] = "ai_review_case_result"
-    schema_version: Literal[1] = 1
-    case_occurrence_id: Sha256
-    status: QualityReviewStatus
-    findings: tuple[AIReviewFinding, ...]
-
-    @model_validator(mode="after")
-    def result_findings_are_bounded_and_unique(self) -> Self:
-        _require_bounded_review_findings(self.findings, result_kind="case")
-        return self
-
-
-class AIReviewBatchResult(StrictContract):
-    schema_name: Literal["ai_review_batch_result"] = "ai_review_batch_result"
-    schema_version: Literal[1] = 1
-    batch_id: Sha256
-    results: tuple[AIReviewCaseResult, ...]
-    status: QualityReviewStatus
-
-    @model_validator(mode="after")
-    def result_ids_are_nonempty_and_unique(self) -> Self:
-        result_ids = tuple(item.case_occurrence_id for item in self.results)
-        if not result_ids or len(set(result_ids)) != len(result_ids):
-            raise ValueError("AI review batch result coverage must be nonempty and unique")
-        return self
-
-
-class AIReviewIntegrityResult(StrictContract):
-    schema_name: Literal["ai_review_integrity_result"] = "ai_review_integrity_result"
-    schema_version: Literal[1] = 1
-    integrity_id: Sha256
-    status: QualityReviewStatus
-    findings: tuple[AIReviewFinding, ...]
-
-    @model_validator(mode="after")
-    def integrity_findings_are_bounded_and_unique(self) -> Self:
-        _require_bounded_review_findings(self.findings, result_kind="integrity")
-        return self
-
-
-class AIQualityReviewRecord(StrictContract):
-    schema_name: Literal["ai_quality_review_record"] = "ai_quality_review_record"
-    schema_version: Literal[1] = 1
-    ai_review_record_id: Sha256
-    review_bundle_hash: Sha256
-    review_plan_hash: Sha256
-    projection_spec_hash: Sha256
-    finding_registry_hash: Sha256
-    prompt_pack_hash: Sha256
-    output_contract_hash: Sha256
-    parser_hash: Sha256
-    aggregate_version: NonEmptyStr
-    reviewer_role_binding_hash: Sha256
-    reviewer_model_hash: Sha256
-    reviewer_runtime_hash: Sha256
-    reviewer_configuration_hash: Sha256
-    occurrence_id: Sha256
-    ordinal: PositiveInt
-    previous_ai_review_record_hash: Sha256 | None
-    previous_history_root_hash: Sha256 | None
-    history_root_hash: Sha256
-    case_coverage_hash: Sha256
-    batch_result_hashes: tuple[Sha256, ...]
-    integrity_result_hash: Sha256
-    status: QualityReviewStatus
-    review_outcome_kind: Literal[
-        "complete",
-        "semantic_failure",
-        "operational_inconclusive",
-        "evidence_inconclusive",
-    ]
-    finding_codes: tuple[NonEmptyStr, ...]
-    attempt_ids: tuple[Sha256, ...]
-    usage_record_ids: tuple[Sha256, ...]
-    resource_record_ids: tuple[Sha256, ...]
-    cost_record_ids: tuple[Sha256, ...]
-    accounting_closed: bool
-    created_at: UtcDateTime
-
-    @model_validator(mode="after")
-    def review_record_is_coherent(self) -> Self:
-        if self.ordinal == 1 and self.previous_ai_review_record_hash is not None:
-            raise ValueError("first AI review cannot name a predecessor")
-        if self.ordinal == 1 and self.previous_history_root_hash is not None:
-            raise ValueError("first AI review cannot name a predecessor history")
-        if self.ordinal > 1 and (
-            self.previous_ai_review_record_hash is None or self.previous_history_root_hash is None
-        ):
-            raise ValueError("superseding AI review requires a predecessor")
-        if self.status == QualityReviewStatus.PASS and not self.accounting_closed:
-            raise ValueError("AI PASS requires closed review accounting")
-        expected_kind = {
-            QualityReviewStatus.PASS: "complete",
-            QualityReviewStatus.FAIL: "semantic_failure",
-        }.get(self.status)
-        if expected_kind is not None and self.review_outcome_kind != expected_kind:
-            raise ValueError("AI review outcome kind does not match its terminal status")
-        if self.status == QualityReviewStatus.INCONCLUSIVE and self.review_outcome_kind not in {
-            "operational_inconclusive",
-            "evidence_inconclusive",
-        }:
-            raise ValueError("AI INCONCLUSIVE requires an explicit inconclusive kind")
-        if len(set(self.finding_codes)) != len(self.finding_codes):
-            raise ValueError("AI review contains duplicate finding codes")
-        if not self.attempt_ids or len(set(self.attempt_ids)) != len(self.attempt_ids):
-            raise ValueError("AI review record requires attempt evidence")
-        for label, values in (
-            ("usage", self.usage_record_ids),
-            ("resource", self.resource_record_ids),
-            ("cost", self.cost_record_ids),
-        ):
-            if len(set(values)) != len(values):
-                raise ValueError(f"AI review contains duplicate {label} record references")
-        expected_record_id = ai_quality_review_record_id(self)
-        if self.ai_review_record_id != expected_record_id:
-            raise ValueError("AI quality review record identity does not match its payload")
-        expected_history_root = canonical_sha256(
-            [
-                "oamb-ai-review-history-v1",
-                self.previous_history_root_hash,
-                self.ai_review_record_id,
-            ]
-        )
-        if self.history_root_hash != expected_history_root:
-            raise ValueError("AI review history root does not match its predecessor chain")
-        return self
-
-
-def ai_review_case_projection_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-ai-review-case-projection-v1", fields])
-
-
-def ai_review_integrity_projection_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-ai-review-integrity-projection-v1", fields])
-
-
-def ai_quality_review_record_id(record: AIQualityReviewRecord) -> str:
-    fields = record.model_dump(
-        mode="python",
-        exclude={
-            "schema_name",
-            "schema_version",
-            "ai_review_record_id",
-            "history_root_hash",
-        },
-    )
-    return ai_quality_review_record_identity(fields)
-
-
-def ai_quality_review_record_identity(fields: object) -> str:
-    return canonical_sha256(["oamb-ai-quality-review-record-v1", fields])
-
-
-class HumanReviewDecision(StrictContract):
-    schema_name: Literal["human_review_decision"] = "human_review_decision"
-    schema_version: Literal[1] = 1
-    decision_id: Sha256
-    review_bundle_hash: Sha256
-    ai_review_record_hash: Sha256
-    status: Literal["pass", "fail"]
-    decided_at: UtcDateTime
-    nonce: NonEmptyStr
-    reviewer_label: NonEmptyStr
-    finding_codes: tuple[NonEmptyStr, ...]
-    evidence_references: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def decision_identity_and_findings_are_canonical(self) -> Self:
-        if len(set(self.finding_codes)) != len(self.finding_codes):
-            raise ValueError("human review decision contains duplicate finding codes")
-        expected = human_review_decision_id(
-            review_bundle_hash=self.review_bundle_hash,
-            ai_review_record_hash=self.ai_review_record_hash,
-            status=self.status,
-            decided_at=self.decided_at,
-            nonce=self.nonce,
-            reviewer_label=self.reviewer_label,
-            finding_codes=self.finding_codes,
-            evidence_references=self.evidence_references,
-        )
-        if self.decision_id != expected:
-            raise ValueError("human review decision identity does not match its payload")
-        return self
-
-
-class SignatureVerificationRecord(StrictContract):
-    schema_name: Literal["signature_verification_record"] = "signature_verification_record"
-    schema_version: Literal[1] = 1
-    verification_id: Sha256
-    algorithm: Literal["ed25519"] = "ed25519"
-    key_binding_id: Sha256
-    trusted_key_fingerprint: NonEmptyStr
-    public_key_sha256: Sha256
-    signed_payload_sha256: Sha256
-    signature_sha256: Sha256
-    verified_at: UtcDateTime
-
-    @model_validator(mode="after")
-    def verification_identity_is_canonical(self) -> Self:
-        expected = signature_verification_record_id(
-            key_binding_id=self.key_binding_id,
-            trusted_key_fingerprint=self.trusted_key_fingerprint,
-            public_key_sha256=self.public_key_sha256,
-            signed_payload_sha256=self.signed_payload_sha256,
-            signature_sha256=self.signature_sha256,
-            verified_at=self.verified_at,
-        )
-        if self.verification_id != expected:
-            raise ValueError("signature verification identity does not match its payload")
-        return self
-
-
-class HumanQualityReviewRecordV1(StrictContract):
-    schema_name: Literal["human_quality_review_record"] = "human_quality_review_record"
-    schema_version: Literal[1] = 1
-    human_review_record_id: Sha256
-    review_bundle_hash: Sha256
-    ai_review_record_hash: Sha256
-    decision_hash: Sha256
-    signature_verification: SignatureVerificationRecord
-    status: Literal["pass", "fail"]
-    finding_codes: tuple[NonEmptyStr, ...]
-    evidence_references: tuple[NonEmptyStr, ...]
-    reviewer_label: NonEmptyStr
-    decision_nonce: NonEmptyStr
-    trusted_key_fingerprint: NonEmptyStr
-    created_at: UtcDateTime
-
-    @model_validator(mode="after")
-    def human_record_identity_and_signature_bind(self) -> Self:
-        if self.trusted_key_fingerprint != self.signature_verification.trusted_key_fingerprint:
-            raise ValueError("human review record does not bind its trusted key")
-        expected = human_quality_review_record_v1_id(
-            review_bundle_hash=self.review_bundle_hash,
-            ai_review_record_hash=self.ai_review_record_hash,
-            decision_hash=self.decision_hash,
-            signature_verification=self.signature_verification,
-            status=self.status,
-            finding_codes=self.finding_codes,
-            evidence_references=self.evidence_references,
-            reviewer_label=self.reviewer_label,
-            decision_nonce=self.decision_nonce,
-            trusted_key_fingerprint=self.trusted_key_fingerprint,
-            created_at=self.created_at,
-        )
-        if self.human_review_record_id != expected:
-            raise ValueError("human review record identity does not match its payload")
-        return self
-
-
-class EvaluationPhaseGateV1(StrictContract):
-    schema_name: Literal["evaluation_phase_gate"] = "evaluation_phase_gate"
-    schema_version: Literal[1] = 1
-    gate_id: Sha256
-    phase_id: NonEmptyStr
-    review_bundle_hash: Sha256
-    review_history_root_hash: Sha256
-    ordered_ai_review_record_hashes: tuple[Sha256, ...]
-    canonical_ai_review_record_hash: Sha256
-    human_review_record_hash: Sha256 | None
-    passed_by_ai: bool
-    passed_by_human: bool
-    ai_record: AIQualityReviewRecord
-    human_record: HumanQualityReviewRecordV1 | None
-
-    @model_validator(mode="after")
-    def acceptance_flags_are_derived_from_current_records(self) -> Self:
-        if (
-            not self.ordered_ai_review_record_hashes
-            or self.ordered_ai_review_record_hashes[-1] != self.canonical_ai_review_record_hash
-            or len(set(self.ordered_ai_review_record_hashes))
-            != len(self.ordered_ai_review_record_hashes)
-        ):
-            raise ValueError(
-                "phase gate AI review history is empty, duplicated, or selects a non-head"
-            )
-        if self.ai_record.review_bundle_hash != self.review_bundle_hash:
-            raise ValueError("AI record must bind the same review bundle")
-        if self.canonical_ai_review_record_hash != self.ai_record.ai_review_record_id:
-            raise ValueError("phase gate must bind the canonical AI record")
-        expected_history_root = canonical_sha256(
-            [
-                "oamb-review-history-v1",
-                self.ordered_ai_review_record_hashes,
-                self.human_review_record_hash,
-            ]
-        )
-        if self.review_history_root_hash != expected_history_root:
-            raise ValueError("phase gate must bind the complete AI and human review history")
-        expected_ai = self.ai_record.status == QualityReviewStatus.PASS
-        if self.passed_by_ai != expected_ai:
-            raise ValueError("passed_by_ai must derive from the current AI record")
-        if self.human_record is None:
-            if self.human_review_record_hash is not None or self.passed_by_human:
-                raise ValueError("human acceptance requires a human review record")
-        else:
-            if not expected_ai:
-                raise ValueError("human review requires the canonical AI PASS head")
-            if (
-                self.human_record.review_bundle_hash != self.review_bundle_hash
-                or self.human_record.ai_review_record_hash != self.canonical_ai_review_record_hash
-            ):
-                raise ValueError(
-                    "human record must bind the same review bundle and canonical AI record"
-                )
-            if self.human_review_record_hash != self.human_record.human_review_record_id:
-                raise ValueError("phase gate must bind the human review record")
-            expected_human = self.human_record.status == "pass"
-            if self.passed_by_human != expected_human:
-                raise ValueError("passed_by_human must derive after current AI PASS")
-        expected_gate_id = evaluation_phase_gate_v1_id(
-            phase_id=self.phase_id,
-            review_bundle_hash=self.review_bundle_hash,
-            review_history_root_hash=self.review_history_root_hash,
-            ordered_ai_review_record_hashes=self.ordered_ai_review_record_hashes,
-            canonical_ai_review_record_hash=self.canonical_ai_review_record_hash,
-            human_review_record_hash=self.human_review_record_hash,
-            passed_by_ai=self.passed_by_ai,
-            passed_by_human=self.passed_by_human,
-        )
-        if self.gate_id != expected_gate_id:
-            raise ValueError("evaluation phase gate identity does not match its payload")
-        return self
-
-
-class HumanQualityReviewRecord(StrictContract):
-    schema_name: Literal["human_quality_review_record"] = "human_quality_review_record"
-    schema_version: Literal[2] = 2
-    human_review_record_id: Sha256
-    review_bundle_hash: Sha256
-    ai_review_record_hash: Sha256
-    status: Literal["pass", "fail"]
-    operator_id: NonEmptyStr
-    confirmation_method: Literal["interactive_exact_hash_phrase_v1"] = (
-        "interactive_exact_hash_phrase_v1"
-    )
-    confirmation_nonce: NonEmptyStr
-    finding_codes: tuple[NonEmptyStr, ...]
-    evidence_references: tuple[NonEmptyStr, ...]
-    created_at: UtcDateTime
-
-    @model_validator(mode="after")
-    def human_confirmation_identity_is_canonical(self) -> Self:
-        if len(set(self.finding_codes)) != len(self.finding_codes):
-            raise ValueError("human review record contains duplicate finding codes")
-        fields = self.model_dump(
-            mode="python",
-            exclude={"schema_name", "schema_version", "human_review_record_id"},
-        )
-        if self.human_review_record_id != human_quality_review_record_id(**fields):
-            raise ValueError("human review record identity does not match its payload")
-        return self
-
-
-class EvaluationPhaseGate(StrictContract):
-    schema_name: Literal["evaluation_phase_gate"] = "evaluation_phase_gate"
-    schema_version: Literal[2] = 2
-    gate_id: Sha256
-    phase_id: NonEmptyStr
-    review_bundle_hash: Sha256
-    review_history_root_hash: Sha256
-    ordered_ai_review_record_hashes: tuple[Sha256, ...]
-    canonical_ai_review_record_hash: Sha256
-    human_review_record_hash: Sha256 | None
-    passed_by_ai: bool
-    passed_by_human: bool
-    ai_record: AIQualityReviewRecord
-    human_record: HumanQualityReviewRecord | None
-
-    @model_validator(mode="after")
-    def acceptance_flags_are_derived_from_v2_records(self) -> Self:
-        if (
-            not self.ordered_ai_review_record_hashes
-            or self.ordered_ai_review_record_hashes[-1] != self.canonical_ai_review_record_hash
-            or len(set(self.ordered_ai_review_record_hashes))
-            != len(self.ordered_ai_review_record_hashes)
-        ):
-            raise ValueError(
-                "phase gate AI review history is empty, duplicated, or selects a non-head"
-            )
-        if self.ai_record.review_bundle_hash != self.review_bundle_hash:
-            raise ValueError("AI record must bind the same review bundle")
-        if self.canonical_ai_review_record_hash != self.ai_record.ai_review_record_id:
-            raise ValueError("phase gate must bind the canonical AI record")
-        expected_history_root = canonical_sha256(
-            [
-                "oamb-review-history-v2",
-                self.ordered_ai_review_record_hashes,
-                self.human_review_record_hash,
-            ]
-        )
-        if self.review_history_root_hash != expected_history_root:
-            raise ValueError("phase gate must bind the complete AI and human review history")
-        expected_ai = self.ai_record.status == QualityReviewStatus.PASS
-        if self.passed_by_ai != expected_ai:
-            raise ValueError("passed_by_ai must derive from the current AI record")
-        if self.human_record is None:
-            if self.human_review_record_hash is not None or self.passed_by_human:
-                raise ValueError("human acceptance requires a human review record")
-        else:
-            if not expected_ai:
-                raise ValueError("human review requires the canonical AI PASS head")
-            if (
-                self.human_record.review_bundle_hash != self.review_bundle_hash
-                or self.human_record.ai_review_record_hash != self.canonical_ai_review_record_hash
-            ):
-                raise ValueError(
-                    "human record must bind the same review bundle and canonical AI record"
-                )
-            if self.human_review_record_hash != self.human_record.human_review_record_id:
-                raise ValueError("phase gate must bind the human review record")
-            expected_human = self.human_record.status == "pass"
-            if self.passed_by_human != expected_human:
-                raise ValueError("passed_by_human must derive after current AI PASS")
-        fields = self.model_dump(
-            mode="python",
-            exclude={"schema_name", "schema_version", "gate_id", "ai_record", "human_record"},
-        )
-        if self.gate_id != evaluation_phase_gate_id(**fields):
-            raise ValueError("evaluation phase gate identity does not match its payload")
-        return self
-
-
-def human_review_decision_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-human-review-decision-v1", fields])
-
-
-def signature_verification_record_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-signature-verification-record-v1", fields])
-
-
-def human_quality_review_record_v1_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-human-quality-review-record-v1", fields])
-
-
-def evaluation_phase_gate_v1_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-evaluation-phase-gate-v1", fields])
-
-
-def human_quality_review_record_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-human-quality-review-record-v2", fields])
-
-
-def evaluation_phase_gate_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-evaluation-phase-gate-v2", fields])
-
-
 class RunSummary(StrictContract):
     schema_name: Literal["run_summary"] = "run_summary"
     schema_version: Literal[1] = 1
@@ -1193,7 +918,6 @@ class MeasurementSummaryLine(StrictContract):
     owner_kind: Literal[
         "ingestion_plan",
         "case",
-        "phase_review",
         "model_readiness",
         "run",
     ]
@@ -1743,51 +1467,12 @@ class ReleaseReportModel(StrictContract):
         return self
 
 
-class PhaseAcceptanceReport(StrictContract):
-    schema_name: Literal["phase_acceptance_report"] = "phase_acceptance_report"
-    schema_version: Literal[1] = 1
-    report_id: Sha256
-    acceptance_report_spec_hash: Sha256
-    phase_id: NonEmptyStr
-    evaluation_report_hash: Sha256
-    evaluation_export_validation_hash: Sha256
-    review_bundle_hash: Sha256
-    phase_gate_hash: Sha256
-    ai_review_record_hash: Sha256
-    human_review_record_hash: Sha256
-    gate_review_bundle_hash: Sha256
-    review_current: bool
-    passed_by_ai: bool
-    passed_by_human: bool
-    finding_codes: tuple[NonEmptyStr, ...]
-    evidence_references: tuple[NonEmptyStr, ...]
-    limitations: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def acceptance_is_derived_and_identity_is_canonical(self) -> Self:
-        expected_current = self.review_bundle_hash == self.gate_review_bundle_hash
-        if self.review_current != expected_current:
-            raise ValueError("acceptance report review currency does not match its bundle roots")
-        if not self.review_current and (self.passed_by_ai or self.passed_by_human):
-            raise ValueError("stale acceptance report cannot carry passing flags")
-        if self.passed_by_human and not self.passed_by_ai:
-            raise ValueError("human acceptance requires current AI acceptance")
-        if len(set(self.finding_codes)) != len(self.finding_codes):
-            raise ValueError("acceptance report contains duplicate finding codes")
-        fields = self.model_dump(
-            mode="python", exclude={"schema_name", "schema_version", "report_id"}
-        )
-        if self.report_id != phase_acceptance_report_id(**fields):
-            raise ValueError("phase acceptance report identity does not match its payload")
-        return self
-
-
 class ReportArtifactManifestV2(StrictContract):
     schema_name: Literal["report_artifact_manifest"] = "report_artifact_manifest"
     schema_version: Literal[2] = 2
     artifact_manifest_id: Sha256
     report_id: Sha256
-    report_kind: Literal["run", "comparison", "release", "phase_acceptance"]
+    report_kind: Literal["run", "comparison", "release"]
     report_identity_spec_binding: ReportIdentitySpecBinding
     ordered_source_bindings: tuple[SourceEvidenceBinding, ...]
     ordered_evidence_validation_hashes: tuple[Sha256, ...]
@@ -1903,10 +1588,6 @@ def evaluation_report_model_id(**fields: object) -> str:
 
 def release_report_model_id(**fields: object) -> str:
     return canonical_sha256(["oamb-release-report-model-v1", fields])
-
-
-def phase_acceptance_report_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-phase-acceptance-report-v1", fields])
 
 
 def report_artifact_manifest_v2_id(**fields: object) -> str:

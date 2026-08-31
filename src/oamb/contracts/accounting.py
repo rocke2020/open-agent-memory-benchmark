@@ -15,6 +15,7 @@ from .base import (
     StrictContract,
     UtcDateTime,
 )
+from .specifications import DispatchBudgetOwnerKind
 
 
 def count_whitespace_tokens(text: str) -> int:
@@ -40,7 +41,6 @@ class TokenStage(StrEnum):
     CONTEXT_VIEW = "context_view"
     ANSWER = "answer"
     JUDGE = "judge"
-    QUALITY_REVIEW = "quality_review"
 
 
 class TokenStageV2(StrEnum):
@@ -49,7 +49,6 @@ class TokenStageV2(StrEnum):
     CONTEXT_VIEW = "context_view"
     ANSWER = "answer"
     JUDGE = "judge"
-    QUALITY_REVIEW = "quality_review"
     MODEL_READINESS = "model_readiness"
 
 
@@ -59,7 +58,6 @@ class TokenStageV3(StrEnum):
     CONTEXT_VIEW = "context_view"
     ANSWER = "answer"
     JUDGE = "judge"
-    QUALITY_REVIEW = "quality_review"
     MODEL_READINESS = "model_readiness"
     MEMORY_CONFORMANCE = "memory_conformance"
 
@@ -139,7 +137,7 @@ class TokenUsageRecord(StrictContract):
     schema_version: Literal[1] = 1
     usage_record_id: Sha256
     attempt_id: Sha256
-    parent_kind: Literal["ingestion_plan", "case", "phase_review"]
+    parent_kind: Literal["ingestion_plan", "case"]
     parent_id: NonEmptyStr
     stage: TokenStage
     operation_kind: NonEmptyStr
@@ -196,7 +194,7 @@ class TokenUsageRecordV2(StrictContract):
     schema_version: Literal[2] = 2
     usage_record_id: Sha256
     attempt_id: Sha256
-    parent_kind: Literal["ingestion_plan", "case", "phase_review", "model_readiness"]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness"]
     parent_id: NonEmptyStr
     stage: TokenStageV2
     operation_kind: NonEmptyStr
@@ -270,7 +268,7 @@ class TokenUsageRecordV3(StrictContract):
     schema_version: Literal[3] = 3
     usage_record_id: Sha256
     attempt_id: Sha256
-    parent_kind: Literal["ingestion_plan", "case", "phase_review", "model_readiness"]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness"]
     parent_id: NonEmptyStr
     stage: TokenStageV2
     operation_kind: NonEmptyStr
@@ -386,9 +384,7 @@ class TokenUsageRecordV3(StrictContract):
 
 class TokenUsageRecordV4(TokenUsageRecordV3):
     schema_version: Literal[4] = 4  # type: ignore[assignment]
-    parent_kind: Literal[
-        "ingestion_plan", "case", "phase_review", "model_readiness", "memory_conformance"
-    ]  # type: ignore[assignment]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness", "memory_conformance"]  # type: ignore[assignment]
     stage: TokenStageV3  # type: ignore[assignment]
     usage_owner_role_binding_id: NonEmptyStr | None
 
@@ -404,6 +400,17 @@ class TokenUsageRecordV4(TokenUsageRecordV3):
         elif self.usage_owner_role_binding_id is not None:
             raise ValueError("only memory-conformance usage carries a role owner")
         return self
+
+
+class TokenUsageRecordV5(TokenUsageRecordV3):
+    schema_version: Literal[5] = 5  # type: ignore[assignment]
+    attempt_id: Sha256
+    dispatch_route_id: NonEmptyStr
+    dispatch_route_hash: Sha256
+    budget_owner_kind: DispatchBudgetOwnerKind
+    budget_owner_id: NonEmptyStr
+    parent_kind: Literal["ingestion_plan", "case"]
+    stage: TokenStage  # type: ignore[assignment]
 
 
 class ResourceUsageRecord(StrictContract):
@@ -442,6 +449,16 @@ class ResourceUsageRecord(StrictContract):
         return self
 
 
+class ResourceUsageRecordV2(ResourceUsageRecord):
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    attempt_id: Sha256
+    dispatch_route_id: NonEmptyStr
+    dispatch_route_hash: Sha256
+    budget_owner_kind: DispatchBudgetOwnerKind
+    budget_owner_id: NonEmptyStr
+    parent_kind: Literal["ingestion_plan", "case"]
+
+
 class CostRecord(StrictContract):
     schema_name: Literal["cost_record"] = "cost_record"
     schema_version: Literal[1] = 1
@@ -474,4 +491,23 @@ class CostRecord(StrictContract):
                 raise ValueError("measured cost requires amount and currency")
             if len(self.currency) != 3:
                 raise ValueError("currency must be an ISO 4217 code")
+        return self
+
+
+class CostRecordV2(CostRecord):
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    attempt_id: Sha256
+    dispatch_route_id: NonEmptyStr
+    dispatch_route_hash: Sha256
+    budget_owner_kind: DispatchBudgetOwnerKind
+    budget_owner_id: NonEmptyStr
+    parent_kind: Literal["ingestion_plan", "case"]
+
+    @model_validator(mode="after")
+    def measured_cost_has_a_source(self) -> Self:
+        if self.proof_status in {
+            ProofStatus.MEASURED_COMPLETE,
+            ProofStatus.MEASURED_PARTIAL,
+        } and not (self.source_usage_record_ids or self.source_resource_record_ids):
+            raise ValueError("measured cost requires a usage or resource source")
         return self

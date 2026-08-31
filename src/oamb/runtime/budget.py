@@ -1,4 +1,4 @@
-"""Atomic reservation and accounting for approved runtime ceilings."""
+"""Atomic reservation and accounting for bounded runtime ceilings."""
 
 from __future__ import annotations
 
@@ -198,14 +198,43 @@ class BudgetLedger:
                 _require_fits(owner, owner_candidate, owner_ceiling.maximum)
                 owner_candidates.append((owner, owner_candidate))
             self._reserved = self._reserved.add(request.maximum)
-            for owner, candidate in owner_candidates:
-                self._owner_reserved[owner] = candidate.subtract(self._owner_committed[owner])
+            for allocation, (owner, _candidate) in zip(
+                request.allocations, owner_candidates, strict=True
+            ):
+                self._owner_reserved[owner] = self._owner_reserved[owner].add(allocation.maximum)
             self._reservations[request.reservation_id] = _Reservation(request, "reserved")
 
-    def commit(self, reservation_id: str, *, observed: BudgetAmount) -> None:
+    def commit(
+        self,
+        reservation_id: str,
+        *,
+        observed: BudgetAmount,
+        owner_observed: tuple[BudgetOwnerAllocation, ...] | None = None,
+    ) -> None:
         with self._lock:
             reservation = self._active(reservation_id)
             _require_fits("observed", observed, reservation.request.maximum)
+            observed_by_owner: dict[str, BudgetAmount] | None = None
+            if owner_observed is not None:
+                if not reservation.request.owner_allocations:
+                    raise ReservationStateError(
+                        "owner observations require a multi-owner reservation"
+                    )
+                observed_by_owner = {
+                    allocation.owner_id: allocation.maximum for allocation in owner_observed
+                }
+                reserved_by_owner = {
+                    allocation.owner_id: allocation.maximum
+                    for allocation in reservation.request.owner_allocations
+                }
+                if len(observed_by_owner) != len(owner_observed) or set(observed_by_owner) != set(
+                    reserved_by_owner
+                ):
+                    raise ReservationStateError(
+                        "observed owner inventory must exactly match the reservation owner inventory"
+                    )
+                for owner, owner_amount in observed_by_owner.items():
+                    _require_fits(owner, owner_amount, reserved_by_owner[owner])
             self._reserved = self._reserved.subtract(reservation.request.maximum)
             self._committed = self._committed.add(observed)
             for allocation in reservation.request.allocations:
@@ -213,9 +242,12 @@ class BudgetLedger:
                 self._owner_reserved[owner] = self._owner_reserved[owner].subtract(
                     allocation.maximum
                 )
-                self._owner_committed[owner] = self._owner_committed[owner].add(
-                    allocation.maximum if reservation.request.owner_allocations else observed
+                owner_commit = (
+                    observed_by_owner[owner]
+                    if observed_by_owner is not None
+                    else (allocation.maximum if reservation.request.owner_allocations else observed)
                 )
+                self._owner_committed[owner] = self._owner_committed[owner].add(owner_commit)
             self._reservations[reservation_id] = _Reservation(reservation.request, "committed")
 
     def cancel_before_dispatch(self, reservation_id: str) -> None:

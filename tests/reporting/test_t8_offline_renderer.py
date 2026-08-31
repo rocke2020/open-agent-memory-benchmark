@@ -24,12 +24,10 @@ from oamb.contracts.reporting import (
     MabPlanEvidenceBinding,
     MeasurementSummaryLine,
     PairedMetricDelta,
-    PhaseAcceptanceReport,
     ReportRecordProjection,
     RunReportModelV3,
     ValidationClaimBoundary,
     comparison_report_model_id,
-    phase_acceptance_report_id,
     run_report_model_v3_id,
 )
 from oamb.contracts.specifications import (
@@ -459,29 +457,6 @@ def build_external_report_fixture() -> RunReportModelV3:
     )
 
 
-def _acceptance_report() -> PhaseAcceptanceReport:
-    fields = {
-        "acceptance_report_spec_hash": SHA_A,
-        "phase_id": "fixture-phase",
-        "evaluation_report_hash": SHA_B,
-        "evaluation_export_validation_hash": SHA_C,
-        "review_bundle_hash": SHA_D,
-        "phase_gate_hash": SHA_A,
-        "ai_review_record_hash": SHA_B,
-        "human_review_record_hash": SHA_C,
-        "gate_review_bundle_hash": SHA_D,
-        "review_current": True,
-        "passed_by_ai": True,
-        "passed_by_human": True,
-        "finding_codes": (),
-        "evidence_references": ("review:fixture",),
-        "limitations": ("fixture acceptance",),
-    }
-    return PhaseAcceptanceReport.model_validate(
-        {"report_id": phase_acceptance_report_id(**fields), **fields}
-    )
-
-
 def build_mab65_report_fixture(*, available: bool = True) -> RunReportModelV3:
     case_count_vectors = {
         "ar": (3, 3, 3, 3, 3),
@@ -790,17 +765,6 @@ def test_incomparable_html_source_contains_no_winner_or_delta_claims() -> None:
     assert "winner" not in html.lower()
     assert "delta" not in html.lower()
     assert "dataset revisions differ" in html
-
-
-def test_acceptance_report_embeds_only_precomputed_gate_values() -> None:
-    html = _renderer().render_offline_report(_acceptance_report()).decode("utf-8")
-    script = _inline_asset(html, "script", "oamb-report-script")
-
-    assert '"passed_by_ai":true' in html
-    assert '"passed_by_human":true' in html
-    assert "passed_by_ai" not in script
-    assert "passed_by_human" not in script
-    assert "fixture acceptance" in html
 
 
 def test_native_external_and_comparison_report_snapshots_are_distinct_and_stable() -> None:

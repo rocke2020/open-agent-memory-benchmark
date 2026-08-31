@@ -57,7 +57,7 @@ def test_fake_cli_runs_manifest_through_committed_offline_report(tmp_path: Path)
     assert durability["directory_fsync_supported"] is True
     assert durability["no_replace_supported"] is True
 
-    run_result = runner.invoke(app, ["run", "--resolved-plan", str(resolved_plan)])
+    run_result = runner.invoke(app, ["run", str(resolved_plan)])
     assert run_result.exit_code == 0, run_result.output
     capsule_root = capsules / run_id
     assert (capsule_root / "capsule-manifest.json").is_file()

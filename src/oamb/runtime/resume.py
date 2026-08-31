@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -10,8 +11,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
+from oamb.artifacts.atomic import ArtifactCollisionError, read_regular_file
 from oamb.contracts.evidence import (
+    MemoryConformanceEvidenceManifest,
+    MemoryConformanceOccurrenceRecord,
+    MemoryConformanceOccurrenceState,
     RecoveryDecisionRecord,
     RecoveryDisposition,
     RunLeaseHeartbeatRecord,
@@ -19,6 +25,7 @@ from oamb.contracts.evidence import (
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import ArtifactReadRequest, ArtifactStorePort
+from oamb.contracts.specifications import MemoryConformanceSpec
 from oamb.contracts.states import AttemptOutcome
 
 from .source_records import seal_source_contract
@@ -212,15 +219,23 @@ def classify_attempt_recovery(state: AttemptEvidenceState) -> RecoveryAction:
 
 
 class ProviderLifecycleBridge:
-    """Shares the provider-services lifecycle lock and active ownership pointers."""
+    """Shares run ownership and per-attempt crash pointers with provider services."""
 
     _LIFECYCLE_LOCK_NAME = "provider-lifecycle.lock"
     _LEGACY_ACTIVE_RUN_NAME = "active-run-lease"
+    _LEGACY_ACTIVE_ATTEMPT_NAME = "active-provider-attempt"
     _ACTIVE_OPERATION_NAME = "active-operation"
-    _ACTIVE_ATTEMPT_NAME = "active-provider-attempt"
+    _ACTIVE_ATTEMPTS_DIRECTORY_NAME = "active-provider-attempts"
+    _CONFORMANCE_SPEC_PATH = Path("source/specs/memory-conformance-spec.json")
 
-    def __init__(self, provider_runtime_directory: Path) -> None:
+    def __init__(
+        self,
+        provider_runtime_directory: Path,
+        *,
+        coordination_directory: Path | None = None,
+    ) -> None:
         self._runtime_directory = provider_runtime_directory
+        self._coordination_directory = coordination_directory or provider_runtime_directory
         self._active_authority: _RunLeaseAuthority | _MemoryConformanceAuthority | None = None
 
     def acquire_run(
@@ -262,23 +277,52 @@ class ProviderLifecycleBridge:
     def acquire_memory_conformance(
         self,
         *,
-        occurrence_id: str,
-        conformance_spec_hash: str,
-        provider_project: str,
-        profile_id: str,
+        evidence_root: Path,
         owner: str,
     ) -> _MemoryConformanceAuthority:
-        del occurrence_id, conformance_spec_hash, provider_project, profile_id, owner
-        raise ResumeRejectedError(
-            "memory conformance requires the closed composition root with a registered "
-            "specification and internally verified terminal manifest"
+        if not owner:
+            raise ResumeRejectedError("memory conformance owner must not be empty")
+        evidence_root = Path(evidence_root)
+        with self._lifecycle_lock():
+            self._require_operation_slot_available()
+            spec = _read_registered_conformance_spec(
+                evidence_root / self._CONFORMANCE_SPEC_PATH,
+                evidence_root=evidence_root,
+            )
+            document = {
+                "schema_name": "oamb_provider_active_operation_pointer",
+                "schema_version": 1,
+                "kind": "memory_conformance",
+                "owner": owner,
+                "occurrence_id": spec.occurrence_id,
+                "conformance_spec_sha256": spec.conformance_spec_hash,
+                "provider_project": spec.provider_project_id,
+                "profile_id": spec.provider_profile_id,
+            }
+            self._write_create_only(
+                self._runtime_directory / self._ACTIVE_OPERATION_NAME,
+                canonical_json_bytes(document),
+            )
+        authority = _MemoryConformanceAuthority(
+            conformance_spec_hash=spec.conformance_spec_hash,
+            occurrence_id=spec.occurrence_id,
+            provider_project=spec.provider_project_id,
+            profile_id=spec.provider_profile_id,
+            evidence_root=evidence_root,
         )
+        self._active_authority = authority
+        return authority
 
-    def release_run(self, authority: _RunLeaseAuthority) -> None:
+    def release_run(
+        self,
+        authority: _RunLeaseAuthority,
+        *,
+        seal_and_verify_terminal_manifest: Callable[[], None] | None = None,
+    ) -> None:
         if authority is not self._active_authority:
             raise ResumeRejectedError("run release requires the current lease authority")
         with self._lifecycle_lock():
-            if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
+            if self._active_attempts_present():
                 raise ResumeRejectedError("active provider attempt blocks run release")
             path = self._runtime_directory / self._ACTIVE_OPERATION_NAME
             document = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
@@ -286,6 +330,8 @@ class ProviderLifecycleBridge:
                 raise ResumeRejectedError("active operation is not a benchmark run")
             if document.get("lease_record_sha256") != authority.lease_record_hash:
                 raise ResumeRejectedError("active run lease hash does not match")
+            if seal_and_verify_terminal_manifest is not None:
+                seal_and_verify_terminal_manifest()
             path.unlink()
             _fsync_directory(self._runtime_directory)
         self._active_authority = None
@@ -294,18 +340,34 @@ class ProviderLifecycleBridge:
         self,
         authority: _MemoryConformanceAuthority,
     ) -> None:
-        del authority
-        raise ResumeRejectedError(
-            "memory conformance requires the closed composition root with an internally "
-            "verified terminal manifest"
-        )
+        if authority is not self._active_authority:
+            raise ResumeRejectedError(
+                "memory conformance release requires the current operation authority"
+            )
+        with self._lifecycle_lock():
+            if self._active_attempts_present():
+                raise ResumeRejectedError(
+                    "active provider attempt blocks memory conformance release"
+                )
+            pointer = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
+            _operation_authority_fields(pointer, authority)
+            if (
+                pointer.get("provider_project") != authority.provider_project
+                or pointer.get("profile_id") != authority.profile_id
+            ):
+                raise ResumeRejectedError("memory conformance pointer identity does not match")
+            _validate_terminal_conformance_evidence(authority)
+            path = self._runtime_directory / self._ACTIVE_OPERATION_NAME
+            path.unlink()
+            _fsync_directory(self._runtime_directory)
+        self._active_authority = None
 
     def _require_operation_slot_available(self) -> None:
         if (self._runtime_directory / self._LEGACY_ACTIVE_RUN_NAME).exists():
             raise ResumeRejectedError("a legacy active run lease already exists")
         if (self._runtime_directory / self._ACTIVE_OPERATION_NAME).exists():
             raise ResumeRejectedError("an active provider operation already exists")
-        if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
+        if self._active_attempts_present():
             raise ResumeRejectedError("an active provider attempt already exists")
 
     def recover_stale_run(
@@ -334,7 +396,7 @@ class ProviderLifecycleBridge:
             "lease_record_sha256": successor.lease_record_hash,
         }
         with self._lifecycle_lock():
-            if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
+            if self._active_attempts_present():
                 raise ResumeRejectedError("active provider attempt blocks stale-lease recovery")
             current = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
             if current.get("kind") != "benchmark_run":
@@ -403,14 +465,13 @@ class ProviderLifecycleBridge:
             operation_kind, operation_id, operation_hash = _operation_authority_fields(
                 operation, authority
             )
-            if (self._runtime_directory / self._ACTIVE_ATTEMPT_NAME).exists():
-                raise ResumeRejectedError("an active provider attempt already exists")
+            attempts_directory = self._ensure_active_attempts_directory()
             self._write_create_only(
-                self._runtime_directory / self._ACTIVE_ATTEMPT_NAME,
+                attempts_directory / f"{attempt_id}.json",
                 canonical_json_bytes(
                     {
                         "schema_name": "oamb_provider_active_attempt_pointer",
-                        "schema_version": 2,
+                        "schema_version": 1,
                         "attempt_id": attempt_id,
                         "intent_record_sha256": intent_record_hash,
                         "operation_kind": operation_kind,
@@ -420,7 +481,13 @@ class ProviderLifecycleBridge:
                 ),
             )
 
-    def clear_attempt_after_receipt(self, expected_intent_record_hash: str) -> None:
+    def clear_attempt_after_receipt(
+        self,
+        *,
+        attempt_id: str,
+        expected_intent_record_hash: str,
+    ) -> None:
+        _require_sha256(attempt_id)
         _require_sha256(expected_intent_record_hash)
         authority = self._active_authority
         if authority is None:
@@ -428,15 +495,77 @@ class ProviderLifecycleBridge:
         with self._lifecycle_lock():
             operation = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
             _, _, operation_hash = _operation_authority_fields(operation, authority)
-            document = self._read_pointer(self._ACTIVE_ATTEMPT_NAME, "active provider attempt")
+            path = (
+                self._runtime_directory
+                / self._ACTIVE_ATTEMPTS_DIRECTORY_NAME
+                / f"{attempt_id}.json"
+            )
+            document = self._read_attempt_pointer(path)
             if (
-                document.get("intent_record_sha256") != expected_intent_record_hash
+                document.get("attempt_id") != attempt_id
+                or document.get("intent_record_sha256") != expected_intent_record_hash
                 or document.get("operation_record_sha256") != operation_hash
             ):
                 raise ResumeRejectedError("active provider attempt intent hash does not match")
-            path = self._runtime_directory / self._ACTIVE_ATTEMPT_NAME
             path.unlink()
-            _fsync_directory(self._runtime_directory)
+            _fsync_directory(path.parent)
+
+    def _active_attempts_present(self) -> bool:
+        if (self._runtime_directory / self._LEGACY_ACTIVE_ATTEMPT_NAME).exists():
+            return True
+        directory = self._runtime_directory / self._ACTIVE_ATTEMPTS_DIRECTORY_NAME
+        if not directory.exists():
+            return False
+        if directory.is_symlink() or not directory.is_dir():
+            raise ResumeRejectedError("active provider attempts path is unsafe")
+        try:
+            return next(directory.iterdir(), None) is not None
+        except OSError as exc:
+            raise ResumeRejectedError("active provider attempts cannot be inspected") from exc
+
+    def _ensure_active_attempts_directory(self) -> Path:
+        directory = self._runtime_directory / self._ACTIVE_ATTEMPTS_DIRECTORY_NAME
+        try:
+            directory.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise ResumeRejectedError("active provider attempts directory is unavailable") from exc
+        if directory.is_symlink() or not directory.is_dir():
+            raise ResumeRejectedError("active provider attempts path is unsafe")
+        return directory
+
+    def _read_attempt_pointer(self, path: Path) -> dict[str, object]:
+        if path.is_symlink():
+            raise ResumeRejectedError("active provider attempt pointer is symbolic")
+        try:
+            document = json.loads(path.read_bytes())
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            raise ResumeRejectedError(
+                "active provider attempt pointer is absent or malformed"
+            ) from exc
+        expected_keys = {
+            "schema_name",
+            "schema_version",
+            "attempt_id",
+            "intent_record_sha256",
+            "operation_kind",
+            "operation_id",
+            "operation_record_sha256",
+        }
+        valid = (
+            isinstance(document, dict)
+            and set(document) == expected_keys
+            and document.get("schema_name") == "oamb_provider_active_attempt_pointer"
+            and document.get("schema_version") == 1
+            and document.get("operation_kind") in {"benchmark_run", "memory_conformance"}
+            and isinstance(document.get("operation_id"), str)
+            and bool(document.get("operation_id"))
+            and _is_sha256(document.get("attempt_id"))
+            and _is_sha256(document.get("intent_record_sha256"))
+            and _is_sha256(document.get("operation_record_sha256"))
+        )
+        if not valid:
+            raise ResumeRejectedError("active provider attempt pointer is malformed")
+        return cast(dict[str, object], document)
 
     def _read_pointer(self, name: str, label: str) -> dict[str, object]:
         path = self._runtime_directory / name
@@ -500,34 +629,55 @@ class ProviderLifecycleBridge:
             else:
                 valid = False
         else:
-            expected_keys = {
-                "schema_name",
-                "schema_version",
-                "attempt_id",
-                "intent_record_sha256",
-                "operation_kind",
-                "operation_id",
-                "operation_record_sha256",
-            }
-            valid = (
-                set(document) == expected_keys
-                and document.get("schema_name") == "oamb_provider_active_attempt_pointer"
-                and document.get("schema_version") == 2
-                and document.get("operation_kind") in {"benchmark_run", "memory_conformance"}
-                and isinstance(document.get("operation_id"), str)
-                and bool(document.get("operation_id"))
-                and _is_sha256(document.get("attempt_id"))
-                and _is_sha256(document.get("intent_record_sha256"))
-                and _is_sha256(document.get("operation_record_sha256"))
-            )
+            valid = False
         if not valid:
             raise ResumeRejectedError(f"{label} pointer is malformed")
         return document
 
     @contextmanager
     def _lifecycle_lock(self) -> Iterator[None]:
-        self._runtime_directory.mkdir(parents=True, exist_ok=True)
-        lock_path = self._runtime_directory / self._LIFECYCLE_LOCK_NAME
+        self._require_safe_lifecycle_paths()
+        if self._coordination_directory == self._runtime_directory:
+            with self._directory_lifecycle_lock(self._runtime_directory):
+                yield
+            return
+        self._require_coordination_gate_available()
+        with self._directory_lifecycle_lock(self._runtime_directory):
+            self._require_coordination_gate_available()
+            yield
+
+    def _require_safe_lifecycle_paths(self) -> None:
+        coordination = self._coordination_directory
+        domain = self._runtime_directory
+        if coordination.is_symlink():
+            raise ResumeRejectedError("provider lifecycle coordination path is symbolic and unsafe")
+        if coordination == domain:
+            return
+        try:
+            relative_domain = domain.relative_to(coordination)
+        except ValueError as exc:
+            raise ResumeRejectedError(
+                "provider lifecycle domain is outside its coordination directory"
+            ) from exc
+        if (
+            len(relative_domain.parts) != 2
+            or relative_domain.parts[0] != "lifecycle-domains"
+            or not relative_domain.parts[1]
+        ):
+            raise ResumeRejectedError("provider lifecycle domain layout is invalid")
+        domains_parent = coordination / relative_domain.parts[0]
+        if domains_parent.is_symlink() or domain.is_symlink():
+            raise ResumeRejectedError("provider lifecycle domain path is symbolic and unsafe")
+
+    def _require_coordination_gate_available(self) -> None:
+        lock_path = self._coordination_directory / self._LIFECYCLE_LOCK_NAME
+        if lock_path.exists() or lock_path.is_symlink():
+            raise ResumeRejectedError("provider lifecycle operation is active")
+
+    @contextmanager
+    def _directory_lifecycle_lock(self, directory: Path) -> Iterator[None]:
+        directory.mkdir(parents=True, exist_ok=True)
+        lock_path = directory / self._LIFECYCLE_LOCK_NAME
         try:
             lock_path.mkdir()
         except FileExistsError as exc:
@@ -538,7 +688,7 @@ class ProviderLifecycleBridge:
             try:
                 lock_path.rmdir()
             finally:
-                _fsync_directory(self._runtime_directory)
+                _fsync_directory(directory)
 
     @staticmethod
     def _write_create_only(path: Path, content: bytes) -> None:
@@ -586,6 +736,146 @@ class _RunLeaseAuthority:
 @dataclass(frozen=True, slots=True)
 class _MemoryConformanceAuthority:
     conformance_spec_hash: str
+    occurrence_id: str
+    provider_project: str
+    profile_id: str
+    evidence_root: Path
+
+
+def _read_registered_conformance_spec(
+    path: Path,
+    *,
+    evidence_root: Path,
+) -> MemoryConformanceSpec:
+    if evidence_root.is_symlink() or any(
+        component.is_symlink()
+        for component in (
+            evidence_root / "source",
+            evidence_root / "source/specs",
+            path,
+        )
+    ):
+        raise ResumeRejectedError("registered specification path is symbolic")
+    try:
+        content = read_regular_file(path)
+    except (FileNotFoundError, ArtifactCollisionError, OSError) as exc:
+        raise ResumeRejectedError("registered specification is absent or unsafe") from exc
+    try:
+        spec = MemoryConformanceSpec.model_validate_json(content)
+    except ValueError as exc:
+        raise ResumeRejectedError("registered specification is invalid") from exc
+    if content != canonical_json_bytes(spec):
+        raise ResumeRejectedError("registered specification bytes are not canonical")
+    return spec
+
+
+def _validate_terminal_conformance_evidence(
+    authority: _MemoryConformanceAuthority,
+) -> None:
+    root = authority.evidence_root
+    manifest_path = root / "memory-conformance-manifest.json"
+    manifest_bytes = _read_conformance_evidence_file(
+        root,
+        manifest_path,
+        label="terminal manifest",
+    )
+    try:
+        manifest = MemoryConformanceEvidenceManifest.model_validate_json(manifest_bytes)
+    except ValueError as exc:
+        raise ResumeRejectedError("terminal manifest is invalid") from exc
+    if manifest_bytes != canonical_json_bytes(manifest):
+        raise ResumeRejectedError("terminal manifest bytes are not canonical")
+    if (
+        manifest.conformance_spec_hash != authority.conformance_spec_hash
+        or manifest.occurrence_id != authority.occurrence_id
+    ):
+        raise ResumeRejectedError("terminal manifest does not match operation authority")
+    if manifest.terminal_state == MemoryConformanceOccurrenceState.INTERRUPTED_UNKNOWN_OUTCOME:
+        raise ResumeRejectedError("memory conformance unknown outcome retains pointers")
+
+    source_entries = tuple(manifest.source_entries)
+    occurrence_entries = tuple(
+        entry
+        for entry in source_entries
+        if entry.record_kind == "memory_conformance_occurrence_record"
+    )
+    spec_entries = tuple(
+        entry for entry in source_entries if entry.record_kind == "memory_conformance_spec"
+    )
+    if len(occurrence_entries) != 1 or len(spec_entries) != 1:
+        raise ResumeRejectedError(
+            "terminal manifest requires one occurrence and one registered specification"
+        )
+    spec_entry = spec_entries[0]
+    if spec_entry.relative_path != ProviderLifecycleBridge._CONFORMANCE_SPEC_PATH.as_posix():
+        raise ResumeRejectedError("terminal manifest names a different registered specification")
+
+    for entry in (*source_entries, *manifest.raw_entries):
+        content = _read_conformance_evidence_file(
+            root,
+            root / entry.relative_path,
+            label=f"terminal manifest entry {entry.relative_path}",
+        )
+        if hashlib.sha256(content).hexdigest() != entry.sha256:
+            raise ResumeRejectedError("terminal manifest entry hash does not match")
+
+    spec = _read_registered_conformance_spec(
+        root / ProviderLifecycleBridge._CONFORMANCE_SPEC_PATH,
+        evidence_root=root,
+    )
+    if (
+        spec.conformance_spec_id != manifest.conformance_spec_id
+        or spec.conformance_spec_hash != authority.conformance_spec_hash
+        or spec.occurrence_id != authority.occurrence_id
+        or spec.provider_project_id != authority.provider_project
+        or spec.provider_profile_id != authority.profile_id
+    ):
+        raise ResumeRejectedError("terminal manifest specification closure does not match")
+
+    occurrence_entry = occurrence_entries[0]
+    occurrence_bytes = _read_conformance_evidence_file(
+        root,
+        root / occurrence_entry.relative_path,
+        label="terminal occurrence",
+    )
+    try:
+        occurrence = MemoryConformanceOccurrenceRecord.model_validate_json(occurrence_bytes)
+    except ValueError as exc:
+        raise ResumeRejectedError("terminal occurrence is invalid") from exc
+    if occurrence_bytes != canonical_json_bytes(occurrence):
+        raise ResumeRejectedError("terminal occurrence bytes are not canonical")
+    occurrence_hash = hashlib.sha256(occurrence_bytes).hexdigest()
+    if (
+        occurrence_hash != manifest.terminal_occurrence_hash
+        or occurrence_entry.sha256 != occurrence_hash
+        or occurrence.occurrence_id != spec.occurrence_id
+        or occurrence.provider != spec.provider
+        or occurrence.provider_project_id != spec.provider_project_id
+        or occurrence.provider_profile_id != spec.provider_profile_id
+        or occurrence.runtime_binding_hash != spec.runtime_binding_hash
+        or occurrence.budget_id != spec.budget_id
+        or occurrence.dispatch_route_ids != tuple(route.route_id for route in spec.dispatch_routes)
+        or occurrence.state != manifest.terminal_state
+    ):
+        raise ResumeRejectedError("terminal occurrence closure does not match its specification")
+
+
+def _read_conformance_evidence_file(root: Path, path: Path, *, label: str) -> bytes:
+    if root.is_symlink():
+        raise ResumeRejectedError(f"{label} root is symbolic")
+    try:
+        relative_path = path.relative_to(root)
+    except ValueError as exc:
+        raise ResumeRejectedError(f"{label} escapes the evidence root") from exc
+    current = root
+    for component in relative_path.parts:
+        current = current / component
+        if current.is_symlink():
+            raise ResumeRejectedError(f"{label} path is symbolic")
+    try:
+        return read_regular_file(path)
+    except (FileNotFoundError, ArtifactCollisionError, OSError) as exc:
+        raise ResumeRejectedError(f"{label} is absent or unsafe") from exc
 
 
 def _operation_authority_fields(

@@ -7,7 +7,6 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -71,7 +70,7 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertNotIn('"5432:', compose)
         self.assertNotIn('"6333:', compose)
         for port in ("18888", "18889", "16333", "19330"):
-            self.assertIn(f"127.0.0.1:${{OAMB_", compose)
+            self.assertIn("127.0.0.1:${OAMB_", compose)
             self.assertIn(port, compose)
 
     def test_runner_never_receives_qdrant_backend_key(self) -> None:
@@ -153,15 +152,14 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn('/v1/projection?run_id=', command)
         self.assertIn('/chat/completions', command)
         self.assertIn('/embeddings', command)
+        self.assertIn('dimensions: 1024', command)
         self.assertIn('/ready', command)
         self.assertIn('.version == "v0.4.16"', command)
         self.assertIn('openviking-storage-probe', command)
         self.assertIn('compose stop openviking', command)
         self.assertIn('compose start openviking', command)
-        self.assertIn('oamb-provider-model-readiness-approval-v1', command)
         self.assertIn('oamb-provider-model-readiness-budget-v1', command)
         self.assertIn('model-readiness-attempt.json', command)
-        self.assertIn('allow_unmetered_cost', command)
         self.assertIn('billing_complete: false', command)
         self.assertIn('record_model_dispatch', command)
         self.assertIn('record_model_terminal', command)
@@ -190,10 +188,24 @@ class ServiceBundleContractTests(unittest.TestCase):
         config = self.read("openviking/ov.conf")
         self.assertIn('OPENVIKING_WITH_BOT: "0"', compose)
         self.assertIn('"workspace": "/var/lib/openviking"', config)
-        self.assertIn('"provider": "ollama"', config)
+        self.assertIn('"provider": "openai"', config)
         self.assertIn('"model": "${OAMB_EMBEDDING_MODEL}"', config)
         self.assertNotIn('"rerank"', config)
         self.assertNotIn("~/.openviking", compose)
+
+    def test_all_provider_internal_model_calls_pin_low_reasoning_effort(self) -> None:
+        compose = self.read("compose.yaml")
+        mem0_bootstrap = self.read("mem0/bootstrap.sh")
+        openviking_config = self.read("openviking/ov.conf")
+        operator = self.read("bin/provider-services")
+
+        self.assertIn('HINDSIGHT_API_LLM_REASONING_EFFORT: "low"', compose)
+        self.assertIn('reasoning_effort: "low"', mem0_bootstrap)
+        self.assertIn('is_reasoning_model: true', mem0_bootstrap)
+        self.assertIn('"extra_request_body": {"reasoning_effort": "low"}', openviking_config)
+        self.assertIn('reasoning_effort: "low"', operator)
+        self.assertIn("hindsight-model-config.json", operator)
+        self.assertIn("openviking-model-config.json", operator)
 
     def test_bootstrap_treats_dotenv_as_data(self) -> None:
         for script_name in ("mem0/bootstrap.sh", "openviking/bootstrap.sh"):

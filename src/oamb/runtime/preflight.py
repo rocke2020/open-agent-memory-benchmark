@@ -14,12 +14,11 @@ from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.ports import ArtifactStorePort
 from oamb.contracts.specifications import (
     BindingKind,
-    BudgetScopeKindV2,
     BudgetSpecV2,
+    BudgetSpecV4,
     DispatchBudgetRoute,
     ExecutionEnvironmentBinding,
     ExecutionOwner,
-    ExternalCallApprovalRecord,
     MemorySystemRuntimeBindingV2,
     ModelRole,
     ModelRoleBindingV2,
@@ -27,13 +26,14 @@ from oamb.contracts.specifications import (
     ProviderRuntimeProfileAttestation,
     RoleBindingStatus,
     RunPreflightRecord,
+    RunPreflightRecordV2,
     RuntimeAttestationStatus,
     SourceEvidenceBinding,
     TransportProfile,
-    external_call_approval_hash,
     memory_system_runtime_binding_hash,
     provider_runtime_profile_attestation_hash,
     run_preflight_record_hash,
+    run_preflight_record_v2_hash,
 )
 
 from .source_records import seal_source_contract
@@ -50,7 +50,6 @@ class OperationKind(StrEnum):
     FAKE_RUN = "fake_run"
     BENCHMARK_RUN = "benchmark_run"
     MODEL_READINESS = "model_readiness"
-    PHASE_REVIEW = "phase_review"
 
 
 class TransportKind(StrEnum):
@@ -72,7 +71,6 @@ class RoleSlotName(StrEnum):
     EMBEDDING = "embedding"
     ANSWER = "answer"
     JUDGE = "judge"
-    QUALITY_REVIEW = "quality_review"
 
 
 class GateStatus(StrEnum):
@@ -137,6 +135,23 @@ class ArtifactDurabilityPreflight:
     no_replace_supported: bool
 
 
+def artifact_durability_capability_proof_hash(
+    value: ArtifactDurabilityPreflight,
+) -> str:
+    """Bind stable root identity and atomic-publication capabilities, not free space."""
+
+    return canonical_sha256(
+        [
+            "oamb-artifact-durability-capability-proof-v1",
+            value.artifact_root_fingerprint,
+            value.lease_supported,
+            value.file_fsync_supported,
+            value.directory_fsync_supported,
+            value.no_replace_supported,
+        ]
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RunPreflightRequest:
     operation_kind: OperationKind
@@ -147,7 +162,6 @@ class RunPreflightRequest:
     artifact_durability: ArtifactDurabilityPreflight
     runtime_binding: object | None
     provider_runtime_attestation: object | None
-    approval: object | None
     cost_measurement_spec: object | None
     price_snapshot: object | None
     environment: Mapping[str, str] | None = None
@@ -165,7 +179,6 @@ class ResolvedRunPlan:
     artifact_durability: ArtifactDurabilityPreflight
     runtime_binding: object | None
     provider_runtime_attestation: object | None
-    approval: object | None
     cost_measurement_spec: object | None
     price_snapshot: object | None
     execution_environment_binding: object | None
@@ -253,7 +266,6 @@ def _budget_has_zero_external_allowance(budget: object) -> bool:
         and getattr(budget, "max_output_tokens", None) == 0
         and getattr(budget, "max_wall_seconds", None) == 0
         and getattr(budget, "max_cost", None) is None
-        and getattr(budget, "approval_id", None) is None
     )
 
 
@@ -329,7 +341,6 @@ def _plan_hash_payload(
         ],
         _contract_value(request.runtime_binding),
         _contract_value(request.provider_runtime_attestation),
-        _contract_value(request.approval),
         _contract_value(request.cost_measurement_spec),
         _contract_value(request.price_snapshot),
         _contract_value(request.execution_environment_binding),
@@ -349,7 +360,6 @@ _MODEL_ROLE_BY_SLOT = {
     RoleSlotName.EMBEDDING: ModelRole.EMBEDDING,
     RoleSlotName.ANSWER: ModelRole.ANSWER,
     RoleSlotName.JUDGE: ModelRole.JUDGE,
-    RoleSlotName.QUALITY_REVIEW: ModelRole.QUALITY_REVIEW,
 }
 
 _SELECTED_ROLE_OWNERSHIP = {
@@ -360,7 +370,6 @@ _SELECTED_ROLE_OWNERSHIP = {
     ModelRole.EMBEDDING: {(ExecutionOwner.MEMORY_SYSTEM, BindingKind.NATIVE)},
     ModelRole.ANSWER: {(ExecutionOwner.HARNESS, BindingKind.MODEL_CLIENT)},
     ModelRole.JUDGE: {(ExecutionOwner.HARNESS, BindingKind.MODEL_CLIENT)},
-    ModelRole.QUALITY_REVIEW: {(ExecutionOwner.HARNESS, BindingKind.MODEL_CLIENT)},
 }
 
 
@@ -432,7 +441,8 @@ def _validate_external_roles(
 
 
 def _validate_budget_role_closure(
-    budget: BudgetSpecV2, selected_roles: tuple[ModelRoleBindingV2, ...]
+    budget: BudgetSpecV2 | BudgetSpecV4,
+    selected_roles: tuple[ModelRoleBindingV2, ...],
 ) -> None:
     selected_ids = tuple(role.binding_id for role in selected_roles)
     ceiling_ids = tuple(ceiling.role_binding_id for ceiling in budget.role_ceilings)
@@ -462,7 +472,10 @@ def _validate_controlled_embedding_binding(
         raise PreflightRejected("controlled embedding endpoint fingerprint does not match its role")
 
 
-def _validate_price_closure(budget: BudgetSpecV2, price_snapshot: object | None) -> None:
+def _validate_price_closure(
+    budget: BudgetSpecV2 | BudgetSpecV4,
+    price_snapshot: object | None,
+) -> None:
     price_ids = {
         ceiling.price_snapshot_id
         for ceiling in budget.role_ceilings
@@ -476,52 +489,6 @@ def _validate_price_closure(budget: BudgetSpecV2, price_snapshot: object | None)
         raise PreflightRejected("priced roles require one matching price snapshot")
     if getattr(price_snapshot, "price_snapshot_id", None) not in price_ids:
         raise PreflightRejected("price snapshot does not match the role budget ceiling")
-
-
-def _require_active_approval(
-    request: RunPreflightRequest,
-    approval: ExternalCallApprovalRecord,
-) -> None:
-    expected_hash = external_call_approval_hash(
-        approval.model_dump(mode="python", exclude={"approval_hash"})
-    )
-    if approval.approval_hash != expected_hash:
-        raise PreflightRejected("external-call approval hash does not match its fields")
-    if (
-        request.observed_at is None
-        or request.observed_at < approval.approved_at
-        or request.observed_at >= approval.expires_at
-    ):
-        raise PreflightRejected("external-call approval is outside its active interval")
-
-
-def _validate_benchmark_approval(
-    request: RunPreflightRequest,
-    budget: BudgetSpecV2,
-    runtime: MemorySystemRuntimeBindingV2,
-    selected_roles: tuple[ModelRoleBindingV2, ...],
-) -> ExternalCallApprovalRecord:
-    approval = request.approval
-    if not isinstance(approval, ExternalCallApprovalRecord):
-        raise PreflightRejected("external benchmark requires an approval record")
-    _require_active_approval(request, approval)
-    if approval.operation_kind != OperationKind.BENCHMARK_RUN.value:
-        raise PreflightRejected("approval operation does not match benchmark_run")
-    if approval.scope_kind != BudgetScopeKindV2.RUN or budget.scope_kind != BudgetScopeKindV2.RUN:
-        raise PreflightRejected("benchmark run requires run-scoped approval and budget")
-    if approval.scope_id != budget.scope_id or approval.approval_id != budget.approval_id:
-        raise PreflightRejected("approval and budget scope do not match")
-    if approval.runtime_binding_hash != runtime.runtime_binding_hash:
-        raise PreflightRejected("approval does not bind the selected runtime")
-    selected_ids = tuple(role.binding_id for role in selected_roles)
-    if approval.role_binding_ids != selected_ids:
-        raise PreflightRejected("approval does not bind the selected role set")
-    if approval.stop_condition_ids != budget.stop_condition_ids:
-        raise PreflightRejected("approval and budget stop conditions do not match")
-    expected_budget_hash = canonical_sha256(budget.model_dump(mode="python"))
-    if approval.budget_hash != expected_budget_hash:
-        raise PreflightRejected("approval does not bind the exact budget bytes")
-    return approval
 
 
 def _validate_benchmark_runtime(
@@ -627,76 +594,12 @@ def _validate_model_readiness_attestation(
     return attestation
 
 
-def _validate_model_readiness_approval(
-    request: RunPreflightRequest,
-    budget: BudgetSpecV2,
-    attestation: ProviderRuntimeProfileAttestation,
-    selected_roles: tuple[ModelRoleBindingV2, ...],
-) -> ExternalCallApprovalRecord:
-    approval = request.approval
-    if not isinstance(approval, ExternalCallApprovalRecord):
-        raise PreflightRejected("model readiness requires an approval record")
-    _require_active_approval(request, approval)
-    if approval.operation_kind != OperationKind.MODEL_READINESS.value:
-        raise PreflightRejected("approval operation does not match model_readiness")
-    if (
-        approval.scope_kind != BudgetScopeKindV2.MODEL_READINESS
-        or budget.scope_kind != BudgetScopeKindV2.MODEL_READINESS
-    ):
-        raise PreflightRejected("model readiness requires its own occurrence-scoped budget")
-    if approval.scope_id != budget.scope_id or approval.approval_id != budget.approval_id:
-        raise PreflightRejected("approval and budget scope do not match")
-    if approval.provider_runtime_profile_attestation_hash != attestation.attestation_hash:
-        raise PreflightRejected("approval does not bind the pre-readiness attestation")
-    selected_ids = tuple(role.binding_id for role in selected_roles)
-    if approval.role_binding_ids != selected_ids:
-        raise PreflightRejected("approval does not bind the selected readiness roles")
-    if approval.stop_condition_ids != budget.stop_condition_ids:
-        raise PreflightRejected("approval and budget stop conditions do not match")
-    expected_budget_hash = canonical_sha256(budget.model_dump(mode="python"))
-    if approval.budget_hash != expected_budget_hash:
-        raise PreflightRejected("approval does not bind the exact budget bytes")
-    if not approval.unmetered_cost_acknowledged:
-        raise PreflightRejected("model-readiness approval must acknowledge unavailable billing")
-    return approval
-
-
-def _validate_phase_review_approval(
-    request: RunPreflightRequest,
-    budget: BudgetSpecV2,
-    selected_roles: tuple[ModelRoleBindingV2, ...],
-) -> ExternalCallApprovalRecord:
-    approval = request.approval
-    if not isinstance(approval, ExternalCallApprovalRecord):
-        raise PreflightRejected("phase review requires an approval record")
-    _require_active_approval(request, approval)
-    if approval.operation_kind != OperationKind.PHASE_REVIEW.value:
-        raise PreflightRejected("approval operation does not match phase_review")
-    if (
-        approval.scope_kind != BudgetScopeKindV2.PHASE_REVIEW
-        or budget.scope_kind != BudgetScopeKindV2.PHASE_REVIEW
-    ):
-        raise PreflightRejected("phase review requires its own occurrence-scoped budget")
-    if approval.scope_id != budget.scope_id or approval.approval_id != budget.approval_id:
-        raise PreflightRejected("approval and budget scope do not match")
-    selected_ids = tuple(role.binding_id for role in selected_roles)
-    if approval.role_binding_ids != selected_ids:
-        raise PreflightRejected("approval does not bind the selected phase-review role")
-    if approval.stop_condition_ids != budget.stop_condition_ids:
-        raise PreflightRejected("approval and budget stop conditions do not match")
-    expected_budget_hash = canonical_sha256(budget.model_dump(mode="python"))
-    if approval.budget_hash != expected_budget_hash:
-        raise PreflightRejected("approval does not bind the exact budget bytes")
-    return approval
-
-
 def _schema_versions(request: RunPreflightRequest) -> tuple[int, ...]:
     records = (
         request.budget_spec,
         *(slot.binding for slot in request.role_slots if isinstance(slot, RoleSlot)),
         request.runtime_binding,
         request.provider_runtime_attestation,
-        request.approval,
         request.cost_measurement_spec,
         request.price_snapshot,
         request.execution_environment_binding,
@@ -716,15 +619,12 @@ def resolve_run_plan(request: RunPreflightRequest) -> ResolvedRunPlan:
     slots = _validated_role_slots(request.role_slots)
     profile: AdapterProfileDescriptor | None = None
     gates: ProviderGateClosure | None = None
-    if request.operation_kind != OperationKind.PHASE_REVIEW:
-        if not isinstance(request.adapter_profile, AdapterProfileDescriptor):
-            raise PreflightRejected("run preflight requires an adapter profile descriptor")
-        profile = validate_adapter_profile(request.adapter_profile)
-        if not isinstance(request.provider_gates, ProviderGateClosure):
-            raise PreflightRejected("run preflight requires provider gate closure")
-        gates = request.provider_gates
-    elif request.adapter_profile is not None or request.provider_gates is not None:
-        raise PreflightRejected("phase review has no memory adapter profile or provider gates")
+    if not isinstance(request.adapter_profile, AdapterProfileDescriptor):
+        raise PreflightRejected("run preflight requires an adapter profile descriptor")
+    profile = validate_adapter_profile(request.adapter_profile)
+    if not isinstance(request.provider_gates, ProviderGateClosure):
+        raise PreflightRejected("run preflight requires provider gate closure")
+    gates = request.provider_gates
 
     budget_version = getattr(request.budget_spec, "schema_version", None)
     if request.operation_kind == OperationKind.FAKE_RUN:
@@ -744,19 +644,16 @@ def resolve_run_plan(request: RunPreflightRequest) -> ResolvedRunPlan:
             raise PreflightRejected("fake run provider gates must be not_applicable")
     elif request.operation_kind == OperationKind.BENCHMARK_RUN:
         assert profile is not None and gates is not None
-        if not isinstance(request.budget_spec, BudgetSpecV2):
-            raise PreflightRejected("external operations require BudgetSpec version 2")
+        if not isinstance(request.budget_spec, BudgetSpecV4):
+            raise PreflightRejected("live benchmark runs require BudgetSpec version 4")
         selected_roles = _validate_external_roles(slots, request.environment)
         _validate_controlled_embedding_binding(profile, selected_roles)
-        if slots[-1].status != ResolutionStatus.UNSELECTED:
-            raise PreflightRejected("benchmark quality-review role must remain unselected")
         _validate_budget_role_closure(request.budget_spec, selected_roles)
-        runtime = _validate_benchmark_runtime(
+        _validate_benchmark_runtime(
             request.runtime_binding,
             profile,
             selected_roles,
         )
-        _validate_benchmark_approval(request, request.budget_spec, runtime, selected_roles)
         if request.provider_runtime_attestation is not None:
             raise PreflightRejected(
                 "benchmark run consumes a runtime binding, not pre-readiness attestation"
@@ -778,35 +675,14 @@ def resolve_run_plan(request: RunPreflightRequest) -> ResolvedRunPlan:
             raise PreflightRejected(
                 "model readiness uses pre-readiness attestation, not runtime binding"
             )
-        attestation = _validate_model_readiness_attestation(
+        _validate_model_readiness_attestation(
             request.provider_runtime_attestation,
             profile,
             selected_roles,
             gates,
         )
-        _validate_model_readiness_approval(
-            request,
-            request.budget_spec,
-            attestation,
-            selected_roles,
-        )
         if request.cost_measurement_spec is None:
             raise PreflightRejected("model readiness requires a cost measurement specification")
-        _validate_price_closure(request.budget_spec, request.price_snapshot)
-    elif request.operation_kind == OperationKind.PHASE_REVIEW:
-        if not isinstance(request.budget_spec, BudgetSpecV2):
-            raise PreflightRejected("external operations require BudgetSpec version 2")
-        selected_roles = _validate_external_roles(slots, request.environment)
-        if tuple(role.role for role in selected_roles) != (ModelRole.QUALITY_REVIEW,):
-            raise PreflightRejected("phase review selects only the quality-review role")
-        _validate_budget_role_closure(request.budget_spec, selected_roles)
-        if request.runtime_binding is not None or request.provider_runtime_attestation is not None:
-            raise PreflightRejected("phase review has no memory-system runtime binding")
-        _validate_phase_review_approval(request, request.budget_spec, selected_roles)
-        if request.cost_measurement_spec is None:
-            raise PreflightRejected("phase review requires a cost measurement specification")
-        if not isinstance(request.execution_environment_binding, ExecutionEnvironmentBinding):
-            raise PreflightRejected("phase review requires an execution environment binding")
         _validate_price_closure(request.budget_spec, request.price_snapshot)
     else:
         raise PreflightRejected("external operations require version 2 control contracts")
@@ -820,7 +696,6 @@ def resolve_run_plan(request: RunPreflightRequest) -> ResolvedRunPlan:
         artifact_durability=request.artifact_durability,
         runtime_binding=request.runtime_binding,
         provider_runtime_attestation=request.provider_runtime_attestation,
-        approval=request.approval,
         cost_measurement_spec=request.cost_measurement_spec,
         price_snapshot=request.price_snapshot,
         execution_environment_binding=request.execution_environment_binding,
@@ -839,24 +714,26 @@ def build_run_preflight_record(
     subset_manifest_hash: str,
     adapter_profile_hash: str,
     provider_service_evidence: SourceEvidenceBinding,
-    memory_conformance_evidence: SourceEvidenceBinding,
+    provider_profile_evidence: SourceEvidenceBinding,
     dispatch_routes: tuple[DispatchBudgetRoute, ...],
     redacted_endpoint_fingerprints: tuple[str, ...],
     credential_reference_fingerprints: tuple[str, ...],
-) -> RunPreflightRecord:
+    comparison_control_basis_hash: str | None = None,
+) -> RunPreflightRecord | RunPreflightRecordV2:
     """Build the public durable closure from one already-resolved live plan."""
 
     if plan.operation_kind != OperationKind.BENCHMARK_RUN:
         raise PreflightRejected("run preflight record requires a benchmark-run plan")
-    if plan.adapter_profile is None or plan.runtime_binding is None or plan.approval is None:
-        raise PreflightRejected("run preflight record requires live profile/runtime/approval")
+    if plan.adapter_profile is None or plan.runtime_binding is None:
+        raise PreflightRejected("run preflight record requires live profile and runtime")
+    if not isinstance(plan.budget_spec, BudgetSpecV4):
+        raise PreflightRejected("run preflight record requires BudgetSpec version 4")
     profile = plan.adapter_profile
     if profile.provider_project_id is None:
         raise PreflightRejected("run preflight record requires a provider project")
     runtime_binding_hash = getattr(plan.runtime_binding, "runtime_binding_hash", None)
-    approval_hash = getattr(plan.approval, "approval_hash", None)
-    if not isinstance(runtime_binding_hash, str) or not isinstance(approval_hash, str):
-        raise PreflightRejected("run preflight record requires hashed runtime and approval")
+    if not isinstance(runtime_binding_hash, str):
+        raise PreflightRejected("run preflight record requires a hashed runtime")
     role_binding_ids_list: list[str] = []
     for slot in plan.role_slots:
         if slot.status != ResolutionStatus.RESOLVED:
@@ -869,18 +746,10 @@ def build_run_preflight_record(
             raise PreflightRejected("resolved run role requires a binding identity")
         role_binding_ids_list.append(binding_id)
     role_binding_ids = tuple(role_binding_ids_list)
+    if dispatch_routes != plan.budget_spec.dispatch_routes:
+        raise PreflightRejected("run preflight routes differ from the exact version 4 budget")
     budget_hash = canonical_sha256(_contract_value(plan.budget_spec))
-    durability_proof_hash = canonical_sha256(
-        [
-            "oamb-artifact-durability-proof-v1",
-            plan.artifact_durability.artifact_root_fingerprint,
-            plan.artifact_durability.available_bytes,
-            plan.artifact_durability.lease_supported,
-            plan.artifact_durability.file_fsync_supported,
-            plan.artifact_durability.directory_fsync_supported,
-            plan.artifact_durability.no_replace_supported,
-        ]
-    )
+    durability_proof_hash = artifact_durability_capability_proof_hash(plan.artifact_durability)
     fields = {
         "run_id": run_id,
         "observed_at": observed_at,
@@ -894,27 +763,37 @@ def build_run_preflight_record(
         "provider_profile_id": profile.profile_id,
         "runtime_binding_hash": runtime_binding_hash,
         "provider_service_evidence": provider_service_evidence,
-        "memory_conformance_evidence": memory_conformance_evidence,
+        "provider_profile_evidence": provider_profile_evidence,
         "role_binding_ids": role_binding_ids,
         "dispatch_routes": dispatch_routes,
-        "approval_hash": approval_hash,
         "budget_hash": budget_hash,
         "redacted_endpoint_fingerprints": redacted_endpoint_fingerprints,
         "credential_reference_fingerprints": credential_reference_fingerprints,
         "artifact_repository_fingerprint": (plan.artifact_durability.artifact_root_fingerprint),
         "artifact_durability_proof_hash": durability_proof_hash,
     }
-    return RunPreflightRecord.model_validate(
+    if comparison_control_basis_hash is None:
+        return RunPreflightRecord.model_validate(
+            {
+                "preflight_record_hash": run_preflight_record_hash(fields),
+                **fields,
+            }
+        )
+    version_two_fields = {
+        **fields,
+        "comparison_control_basis_hash": comparison_control_basis_hash,
+    }
+    return RunPreflightRecordV2.model_validate(
         {
-            "preflight_record_hash": run_preflight_record_hash(fields),
-            **fields,
+            "preflight_record_hash": run_preflight_record_v2_hash(version_two_fields),
+            **version_two_fields,
         }
     )
 
 
 def seal_run_preflight_record(
     store: ArtifactStorePort,
-    record: RunPreflightRecord,
+    record: RunPreflightRecord | RunPreflightRecordV2,
 ) -> None:
     seal_source_contract(
         store,

@@ -16,10 +16,6 @@ from oamb.artifacts.validation.adapter import (
     mem0_adapter_validation_input,
 )
 from oamb.artifacts.validation.catalog import validate_catalog_profile
-from oamb.artifacts.validation.phase import (
-    PhaseGateValidationInput,
-    validate_t10_phase_gate,
-)
 from oamb.artifacts.validation.reduction import comparison_validation_input
 from oamb.contracts.evidence import ValidationResult
 from oamb.contracts.ids import canonical_sha256
@@ -53,15 +49,12 @@ from oamb.reporting.public import (
     build_comparison_report_model,
     build_diagnostic_run_report_model,
     build_evaluation_report_model,
-    build_phase_acceptance_report,
     build_run_report_model,
 )
 from oamb.reporting.roots import (
-    build_acceptance_report_spec,
     build_evaluation_report_spec,
     build_report_spec,
 )
-from tests.contracts.test_t8_phase_validation import _accepted_gate_with_evidence
 from tests.reporting.test_t8_offline_renderer import (
     _run_report,
     build_claim_boundary,
@@ -547,52 +540,6 @@ def test_evaluation_export_rejects_duplicate_system_case_display_coverage(
     assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
 
 
-def _phase_model_spec_and_validation() -> tuple[Any, Any, Any, tuple[Any, Any]]:
-    bundle, gate, evidence = _accepted_gate_with_evidence()
-    target = PhaseGateValidationInput(bundle=bundle, gate=gate, review_evidence=evidence)
-    validation = validate_t10_phase_gate(bundle, gate, review_evidence=evidence)
-    validation_hash = canonical_sha256(validation)
-    source = SourceEvidenceBinding(
-        binding_id=SHA_A,
-        source_kind=SourceEvidenceKind.DERIVATION,
-        source_identity="phase-acceptance-fixture",
-        source_root_hash=validation.target_hash,
-        validation_result_hash=validation_hash,
-        source_schema_versions=("evaluation_phase_gate@1",),
-    )
-    assert gate.human_record is not None
-    spec = build_acceptance_report_spec(
-        audience="public",
-        evaluation_report_hash=bundle.report_model_hash,
-        evaluation_export_validation_hash=bundle.export_validation_hash,
-        review_bundle_hash=bundle.bundle_id,
-        ai_review_record_hash=gate.canonical_ai_review_record_hash,
-        human_review_record_hash=gate.human_record.human_review_record_id,
-        phase_gate_hash=gate.gate_id,
-        renderer_hash=_renderer().offline_renderer_hash(),
-        asset_hashes=_renderer().offline_asset_hashes(),
-        export_profile_selector_id="public-phase-acceptance-v1",
-        export_profile_selector_version=1,
-    )
-    model = build_phase_acceptance_report(
-        acceptance_report_spec_hash=canonical_sha256(spec),
-        phase_id=bundle.phase_id,
-        evaluation_report_hash=spec.evaluation_report_hash,
-        evaluation_export_validation_hash=spec.evaluation_export_validation_hash,
-        review_bundle_hash=bundle.bundle_id,
-        phase_gate_hash=gate.gate_id,
-        ai_review_record_hash=gate.canonical_ai_review_record_hash,
-        human_review_record_hash=gate.human_record.human_review_record_id,
-        gate_review_bundle_hash=gate.review_bundle_hash,
-        gate_passed_by_ai=gate.passed_by_ai,
-        gate_passed_by_human=gate.passed_by_human,
-        finding_codes=gate.human_record.finding_codes,
-        evidence_references=gate.human_record.evidence_references,
-        limitations=("fixture-only",),
-    )
-    return model, spec, source, (validation, target)
-
-
 def test_external_run_publication_fails_closed_until_the_t9_importer(
     tmp_path: Path,
 ) -> None:
@@ -614,87 +561,6 @@ def test_external_run_publication_fails_closed_until_the_t9_importer(
 
     assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
     assert not (tmp_path / "derivations").exists()
-
-
-def test_phase_acceptance_publication_closes_the_fresh_gate_and_spec_roots(
-    tmp_path: Path,
-) -> None:
-    publication = _publication()
-    model, spec, source, (validation, target) = _phase_model_spec_and_validation()
-
-    built = publication.build_report_derivation(
-        model=model,
-        report_spec=spec,
-        ordered_source_bindings=(source,),
-        evidence_validations=(validation,),
-        evidence_validation_targets=(target,),
-        transform_spec_hash=SHA_A,
-        schema_versions=("phase_acceptance_report@1", "report_artifact_manifest@2"),
-        output_root=tmp_path,
-        committed_at=COMMITTED_AT,
-    )
-
-    assert built.export_validation.disposition == ValidationDisposition.VALIDATED
-
-
-def test_phase_acceptance_export_rejects_forged_model_or_unrelated_validation(
-    tmp_path: Path,
-) -> None:
-    publication = _publication()
-    model, spec, source, (validation, target) = _phase_model_spec_and_validation()
-    forged_model = build_phase_acceptance_report(
-        acceptance_report_spec_hash=canonical_sha256(spec),
-        phase_id="different-phase",
-        evaluation_report_hash=model.evaluation_report_hash,
-        evaluation_export_validation_hash=model.evaluation_export_validation_hash,
-        review_bundle_hash=model.review_bundle_hash,
-        phase_gate_hash=model.phase_gate_hash,
-        ai_review_record_hash=model.ai_review_record_hash,
-        human_review_record_hash=model.human_review_record_hash,
-        gate_review_bundle_hash=model.gate_review_bundle_hash,
-        gate_passed_by_ai=model.passed_by_ai,
-        gate_passed_by_human=model.passed_by_human,
-        finding_codes=model.finding_codes,
-        evidence_references=model.evidence_references,
-        limitations=model.limitations,
-    )
-
-    with pytest.raises(publication.ReportExportError) as forged:
-        publication.build_report_derivation(
-            model=forged_model,
-            report_spec=spec,
-            ordered_source_bindings=(source,),
-            evidence_validations=(validation,),
-            evidence_validation_targets=(target,),
-            transform_spec_hash=SHA_A,
-            schema_versions=("phase_acceptance_report@1", "report_artifact_manifest@2"),
-            output_root=tmp_path / "forged",
-            committed_at=COMMITTED_AT,
-        )
-
-    unrelated_validation = _validation()
-    unrelated_target = _validation_target()
-    unrelated_source = source.model_copy(
-        update={
-            "source_root_hash": unrelated_validation.target_hash,
-            "validation_result_hash": canonical_sha256(unrelated_validation),
-        }
-    )
-    with pytest.raises(publication.ReportExportError) as unrelated:
-        publication.build_report_derivation(
-            model=model,
-            report_spec=spec,
-            ordered_source_bindings=(unrelated_source,),
-            evidence_validations=(unrelated_validation,),
-            evidence_validation_targets=(unrelated_target,),
-            transform_spec_hash=SHA_A,
-            schema_versions=("phase_acceptance_report@1", "report_artifact_manifest@2"),
-            output_root=tmp_path / "unrelated",
-            committed_at=COMMITTED_AT,
-        )
-
-    assert "report-binding-mismatch" in {issue.code for issue in forged.value.result.issues}
-    assert "report-binding-mismatch" in {issue.code for issue in unrelated.value.result.issues}
 
 
 def test_public_export_failure_is_retained_only_as_an_attempt(tmp_path: Path) -> None:

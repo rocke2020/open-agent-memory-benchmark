@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 PROBE_PATH = Path(__file__).resolve().parents[1] / "openviking" / "storage_probe.py"
 
 

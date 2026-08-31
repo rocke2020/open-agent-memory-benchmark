@@ -76,7 +76,6 @@ def production_catalog_registry(profile_id: str) -> RuleRegistry:
     """Build the closed registry from repository-owned semantic implementations."""
 
     from oamb.artifacts.validation.adapter import ADAPTER_RULES
-    from oamb.artifacts.validation.phase import PHASE_GATE_RULES
     from oamb.artifacts.validation.reduction import REDUCTION_RULES
     from oamb.artifacts.validation.report_export import REPORT_EXPORT_RULES
     from oamb.artifacts.validation.workload import WORKLOAD_RULES
@@ -89,7 +88,6 @@ def production_catalog_registry(profile_id: str) -> RuleRegistry:
             *WORKLOAD_RULES,
             *ADAPTER_RULES,
             *REDUCTION_RULES,
-            *PHASE_GATE_RULES,
             *REPORT_EXPORT_RULES,
             *EXTERNAL_HISTORICAL_RULES,
         )
@@ -104,10 +102,6 @@ def production_catalog_registry(profile_id: str) -> RuleRegistry:
 
 def _production_target_hash(target: Any) -> str:
     from oamb.artifacts.validation.adapter import Mem0AdapterValidationInput
-    from oamb.artifacts.validation.phase import (
-        PhaseGateValidationInput,
-        _phase_gate_target_hash,
-    )
     from oamb.artifacts.validation.reduction import (
         AccountingValidationInput,
         ComparisonValidationInput,
@@ -192,8 +186,6 @@ def _production_target_hash(target: Any) -> str:
                 target.report,
             ]
         )
-    if isinstance(target, PhaseGateValidationInput):
-        return _phase_gate_target_hash(target)
     if isinstance(target, ReportExportInput):
         return canonical_sha256(
             [

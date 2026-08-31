@@ -22,7 +22,13 @@ from oamb.contracts.ports import (
     ModelRequest,
     RawPayloadSealRequest,
     RawReferenceHandle,
+    ThinkingEffort,
 )
+
+_THINKING_EFFORT_BY_ROLE: dict[str, ThinkingEffort] = {
+    "fake-answer-v1": "low",
+    "fake-judge-v1": "high",
+}
 
 
 class ScriptedFakeModelClient:
@@ -33,9 +39,25 @@ class ScriptedFakeModelClient:
         self._failed_message_hashes: set[str] = set()
         self._closed = False
 
+    def thinking_effort_for(self, *, stage: str, role_binding_id: str) -> ThinkingEffort:
+        expected_stage = "judge" if role_binding_id == "fake-judge-v1" else "answer"
+        try:
+            effort = _THINKING_EFFORT_BY_ROLE[role_binding_id]
+        except KeyError as exc:
+            raise ValueError("fake model request names an unknown role binding") from exc
+        if stage != expected_stage:
+            raise ValueError("fake model request stage differs from its role binding")
+        return effort
+
     async def complete(self, request: ModelRequest) -> ModelReceipt:
         if self._closed:
             raise RuntimeError("fake model client is closed")
+        expected_effort = self.thinking_effort_for(
+            stage=request.stage,
+            role_binding_id=request.role_binding_id,
+        )
+        if request.thinking_effort != expected_effort:
+            raise ValueError("fake model request thinking effort differs from its role binding")
         text = "\n".join(content for _role, content in request.messages)
         if request.stage == "judge":
             raw_reference, usage_ids = self._seal_call(
@@ -95,9 +117,20 @@ class ScriptedFakeModelClient:
             {
                 "attempt_id": request.attempt_id,
                 "outcome": outcome,
+                "parent_kind": request.parent_kind,
+                "parent_id": request.parent_id,
+                "stage": request.stage,
                 "role_binding_id": request.role_binding_id,
                 "messages_sha256": request.messages_sha256,
                 "messages": request.messages,
+                "thinking_effort": request.thinking_effort,
+                "output_contract_id": request.output_contract_id,
+                "max_output_tokens": request.max_output_tokens,
+                "candidate_count": request.candidate_count,
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+                "stop": request.stop,
+                "request_fingerprint": request.request_fingerprint,
                 "output_text": output_text,
                 "usage": {
                     "input_tokens": input_tokens,

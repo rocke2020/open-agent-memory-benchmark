@@ -21,6 +21,10 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 | LongMemEval prompt excerpts | Attributed judge PromptPack templates | MIT | Embedded runtime PromptPack data |
 | MemoryAgentBench prompt excerpts | Attributed MAB-65 answer PromptPack templates | MIT | Embedded runtime PromptPack data |
 
+MemoryAgentBench inputs and prompt excerpts are preserved for deferred research
+and license compliance. v0.1.0 selects LongMemEval only; distribution of these
+assets does not imply an active MAB profile, result, or release claim.
+
 The packaged AMB historical view contains only factual identifiers,
 categories, verdicts, measurements, aggregates, and immutable producer/source
 provenance. OAMB distributes no AMB code, prompt, question, answer, context,

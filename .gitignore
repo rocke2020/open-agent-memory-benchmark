@@ -223,7 +223,12 @@ __marimo__/
 # Provider-service local credentials, state, and prepared source archives
 provider-services/.env
 provider-services/.runtime/
+provider-services/.runtime-*/
+provider-services/.runtime-archives/
 provider-services/.build/
 
 # Downloaded benchmark datasets
 /datasets
+
+# Local operator reports and manual-review notes
+/personal/

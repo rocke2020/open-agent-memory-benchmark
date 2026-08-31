@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Final
 
 from oamb.contracts.ids import canonical_json_bytes
@@ -26,6 +28,7 @@ from .client import HindsightClient
 from .profiles import PROFILE_ID
 
 PAGE_LIMIT: Final = 1000
+ENTITY_JOIN_MATCH_STATE_LIMIT: Final = 4096
 PAGE_FIELDS: Final = frozenset({"items", "total", "limit", "offset"})
 DOCUMENT_ITEM_FIELDS: Final = frozenset(
     {
@@ -354,13 +357,53 @@ def _memory_detail(
         if detail[detail_field] != list_item[list_field]:
             raise ValueError(f"Hindsight memory detail {detail_field} disagrees with its page")
     entities = detail["entities"]
-    if not isinstance(entities, list) or any(not isinstance(name, str) for name in entities):
+    if not isinstance(entities, list) or any(
+        not isinstance(name, str) or not name for name in entities
+    ):
         raise ValueError("Hindsight memory detail entities must be strings")
-    if ", ".join(entities) != list_item["entities"]:
+    if not _unordered_entity_join_matches(tuple(entities), list_item["entities"]):
         raise ValueError("Hindsight memory detail entities disagree with its page")
     if detail["observation_scopes"] is not None:
         raise ValueError("Hindsight observations-disabled memory has observation scopes")
     return detail
+
+
+def _unordered_entity_join_matches(entities: tuple[str, ...], serialized: str) -> bool:
+    """Match the page's ambiguous comma join against the detail's unordered entities."""
+
+    if not entities:
+        return serialized == ""
+    counts = Counter(entities)
+    names = tuple(sorted(counts, key=lambda name: (-len(name), name)))
+    initial_counts = tuple(counts[name] for name in names)
+    visited_states = 0
+
+    @lru_cache(maxsize=ENTITY_JOIN_MATCH_STATE_LIMIT)
+    def match(remaining: str, remaining_counts: tuple[int, ...]) -> bool:
+        nonlocal visited_states
+        visited_states += 1
+        if visited_states > ENTITY_JOIN_MATCH_STATE_LIMIT:
+            return False
+        remaining_total = sum(remaining_counts)
+        if remaining_total == 0:
+            return remaining == ""
+        for index, (name, count) in enumerate(zip(names, remaining_counts, strict=True)):
+            if count == 0:
+                continue
+            if remaining_total == 1:
+                suffix = "" if remaining == name else None
+            else:
+                prefix = f"{name}, "
+                suffix = remaining[len(prefix) :] if remaining.startswith(prefix) else None
+            if suffix is None:
+                continue
+            next_counts = list(remaining_counts)
+            next_counts[index] -= 1
+            if match(suffix, tuple(next_counts)):
+                return True
+        return False
+
+    return match(serialized, initial_counts)
 
 
 async def build_projection(

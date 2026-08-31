@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from oamb.contracts.ports import (
 )
 
 _RECEIPT_SEAL_ERROR = "receipt_seal_error"
+DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS = 120.0
+DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS = 180.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,10 +34,11 @@ class SealedRestResponse:
     status_code: int
     raw_bytes: bytes
     raw_reference: RawReferenceHandle
+    request_reference: RawReferenceHandle | None = None
 
 
 class SealedRestClient:
-    """Serialize requests, dispatch once, and seal every received response."""
+    """Dispatch admitted requests once within one event loop and seal responses."""
 
     def __init__(
         self,
@@ -44,10 +48,10 @@ class SealedRestClient:
         headers: Mapping[str, str],
         transport: httpx.AsyncBaseTransport | None = None,
         connect_timeout_seconds: float = 10.0,
-        read_timeout_seconds: float = 120.0,
+        read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
         write_timeout_seconds: float = 30.0,
         pool_timeout_seconds: float = 10.0,
-        total_timeout_seconds: float = 180.0,
+        total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
     ) -> None:
         if not base_url:
             raise ValueError("memory-system base URL is required")
@@ -80,7 +84,10 @@ class SealedRestClient:
         )
         self._accepting_operations = True
         self._closed = False
-        self._operation_lock = asyncio.Lock()
+        self._active_operation_count = 0
+        self._active_operations_drained = asyncio.Event()
+        self._active_operations_drained.set()
+        self._close_lock = asyncio.Lock()
 
     async def request(
         self,
@@ -91,19 +98,18 @@ class SealedRestClient:
         json_payload: object | None = None,
         request_headers: Mapping[str, str] | None = None,
         write_intent: bool = False,
+        request_evidence: bool = False,
+        total_timeout_seconds: float | None = None,
     ) -> SealedRestResponse:
         request_headers = request_headers or {}
+        if total_timeout_seconds is not None and (
+            not math.isfinite(total_timeout_seconds) or total_timeout_seconds <= 0
+        ):
+            raise ValueError("request total timeout must be finite positive")
         if self._base_header_names.intersection(name.lower() for name in request_headers):
             raise ValueError("request headers cannot override client authority")
-        if not self._accepting_operations:
-            raise RuntimeError("memory-system REST client is closed")
+        self._admit_operation(write_intent=write_intent)
         try:
-            await self._operation_lock.acquire()
-        except asyncio.CancelledError as exc:
-            self._raise_before_dispatch(write_intent=write_intent, cause=exc)
-        try:
-            if not self._accepting_operations:
-                self._raise_before_dispatch(write_intent=write_intent)
             return await self._request_once(
                 method,
                 path,
@@ -111,9 +117,11 @@ class SealedRestClient:
                 json_payload=json_payload,
                 request_headers=request_headers,
                 write_intent=write_intent,
+                request_evidence=request_evidence,
+                total_timeout_seconds=total_timeout_seconds,
             )
         finally:
-            self._operation_lock.release()
+            self._release_operation()
 
     async def _request_once(
         self,
@@ -124,10 +132,42 @@ class SealedRestClient:
         json_payload: object | None,
         request_headers: Mapping[str, str],
         write_intent: bool,
+        request_evidence: bool,
+        total_timeout_seconds: float | None,
     ) -> SealedRestResponse:
         url = f"{self._base_url}/{path.lstrip('/')}"
+        request_reference: RawReferenceHandle | None = None
+        if request_evidence:
+            request_bytes = json.dumps(
+                {
+                    "schema_name": "oamb_rest_request_proof",
+                    "schema_version": 1,
+                    "method": method.upper(),
+                    "path": path,
+                    "params": dict(params or {}),
+                    "json_payload": json_payload,
+                    "request_header_names": sorted(name.lower() for name in request_headers),
+                    "write_intent": write_intent,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            request_reference = self._store.seal_raw(
+                RawPayloadSealRequest(
+                    sha256=hashlib.sha256(request_bytes).hexdigest(),
+                    media_type="application/vnd.oamb.request+json",
+                    compression="gzip",
+                    payload_bytes=request_bytes,
+                )
+            )
         try:
-            async with asyncio.timeout(self._total_timeout_seconds):
+            async with asyncio.timeout(
+                self._total_timeout_seconds
+                if total_timeout_seconds is None
+                else total_timeout_seconds
+            ):
                 response = await self._client.request(
                     method,
                     url,
@@ -178,6 +218,7 @@ class SealedRestClient:
             status_code=response.status_code,
             raw_bytes=response.content,
             raw_reference=raw_reference,
+            request_reference=request_reference,
         )
         if not 200 <= response.status_code < 300:
             raise MemorySystemCallFailure(
@@ -191,7 +232,8 @@ class SealedRestClient:
 
     async def close(self) -> None:
         self.stop_accepting()
-        async with self._operation_lock:
+        await self._active_operations_drained.wait()
+        async with self._close_lock:
             if not self._closed:
                 if self._client.is_closed:
                     await self._transport.aclose()
@@ -204,19 +246,27 @@ class SealedRestClient:
 
         self._accepting_operations = False
 
+    def _admit_operation(self, *, write_intent: bool) -> None:
+        if self._closed:
+            raise RuntimeError("memory-system REST client is closed")
+        if not self._accepting_operations:
+            self._raise_before_dispatch(write_intent=write_intent)
+        self._active_operation_count += 1
+        if self._active_operation_count == 1:
+            self._active_operations_drained.clear()
+
+    def _release_operation(self) -> None:
+        self._active_operation_count -= 1
+        if self._active_operation_count == 0:
+            self._active_operations_drained.set()
+
     @staticmethod
-    def _raise_before_dispatch(
-        *,
-        write_intent: bool,
-        cause: BaseException | None = None,
-    ) -> Never:
+    def _raise_before_dispatch(*, write_intent: bool) -> Never:
         if write_intent:
-            failure: BaseException = MemorySystemCallCancelledBeforeDispatch(
+            raise MemorySystemCallCancelledBeforeDispatch(
                 "memory-system write was cancelled before dispatch"
             )
-        else:
-            failure = MemorySystemReadCancelled("memory-system read was cancelled before dispatch")
-        raise failure from cause
+        raise MemorySystemReadCancelled("memory-system read was cancelled before dispatch")
 
     def _seal_raw(self, raw_bytes: bytes) -> RawReferenceHandle:
         sha256 = hashlib.sha256(raw_bytes).hexdigest()
@@ -357,6 +407,8 @@ def bind_sealed_response_validation(
 
 
 __all__ = [
+    "DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS",
+    "DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS",
     "MemorySystemCallCancelledBeforeDispatch",
     "MemorySystemCallCancelledUnknownOutcome",
     "MemorySystemCallFailure",

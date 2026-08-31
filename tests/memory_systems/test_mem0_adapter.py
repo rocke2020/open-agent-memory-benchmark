@@ -570,6 +570,53 @@ def test_projection_parser_accepts_exact_two_page_inspector_envelope() -> None:
     assert projection.points[0].metadata.source_unit_id == SOURCE_ID
 
 
+def test_projection_source_validation_ignores_native_point_order() -> None:
+    from oamb.memory_systems.mem0.adapter import Mem0RestAdapter, _ScopeBinding
+    from oamb.memory_systems.mem0.projection import Mem0Projection, Mem0ProjectionPoint
+    from oamb.memory_systems.mem0.wire import Mem0SourceMetadata
+
+    first_source_id = "c" * 64
+    second_source_id = "d" * 64
+
+    def point(native_id: str, source_id: str, ordinal: int) -> Mem0ProjectionPoint:
+        return Mem0ProjectionPoint(
+            native_id=native_id,
+            memory=f"memory-{ordinal}",
+            text_lemmatized=f"memory-{ordinal}",
+            memory_hash=str(ordinal) * 32,
+            created_at="2026-08-31T00:00:00+00:00",
+            updated_at="2026-08-31T00:00:00+00:00",
+            run_id=RUN_ID,
+            metadata=Mem0SourceMetadata(
+                ingestion_occurrence_id=RUN_ID,
+                ingestion_plan_id=PLAN_ID,
+                source_unit_id=source_id,
+                source_ordinal=ordinal,
+            ),
+            attributed_to="user",
+        )
+
+    projection = Mem0Projection(
+        collection="oamb_memories",
+        run_id=RUN_ID,
+        declared_count=2,
+        points=(
+            point("22222222-2222-4222-8222-222222222222", second_source_id, 2),
+            point("11111111-1111-4111-8111-111111111111", first_source_id, 1),
+        ),
+        page_count=1,
+    )
+
+    Mem0RestAdapter._validate_projection_sources(
+        binding=_ScopeBinding(
+            ingestion_occurrence_id=RUN_ID,
+            ingestion_plan_id=PLAN_ID,
+        ),
+        projection=projection,
+        completed_source_ids=(first_source_id, second_source_id),
+    )
+
+
 def test_projection_parser_hashes_unattributed_visible_memory() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
     raw = json.dumps(

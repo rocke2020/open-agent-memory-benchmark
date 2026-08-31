@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Literal, Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, runtime_checkable
 
 from .accounting import TokenUsageRecordV3
 from .evidence import CaseRecord, IngestionPlanRecord, LogicalContextRecord
-from .ids import canonical_sha256
-from .specifications import CaseManifest, DatasetManifest
+from .ids import attempt_id, canonical_sha256
+from .specifications import CaseManifest, DatasetManifest, GenerativeThinkingEffort
+
+ThinkingEffort = GenerativeThinkingEffort
+_SUPPORTED_THINKING_EFFORTS: Final[frozenset[str]] = frozenset({"low", "high", "max"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +81,7 @@ class NativeEvidenceBatch:
     raw_reference: RawReferenceHandle
     candidates: tuple[NativeEvidenceCandidate, ...]
     supporting_raw_references: tuple[RawReferenceHandle, ...] = ()
+    request_raw_reference: RawReferenceHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +149,7 @@ class DeterministicEvaluation:
 class JudgeRequest:
     prompt: RenderedPrompt
     output_contract_id: str
+    max_output_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,19 +282,65 @@ class RetrievalRequest:
 @dataclass(frozen=True, slots=True)
 class ModelRequest:
     attempt_id: str
-    parent_kind: Literal["ingestion_plan", "case", "phase_review", "model_readiness"]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness"]
     parent_id: str
     stage: str
     role_binding_id: str
     messages_sha256: str
     messages: tuple[tuple[str, str], ...]
+    thinking_effort: ThinkingEffort
     output_contract_id: str = "fake-output-v1"
     max_output_tokens: int = 1
     candidate_count: int = 1
     temperature: str = "0"
     top_p: str = "1"
-    reasoning_disabled: bool = True
     stop: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.thinking_effort not in _SUPPORTED_THINKING_EFFORTS:
+            raise ValueError("model request thinking effort must be low, high, or max")
+
+    @classmethod
+    def for_attempt(
+        cls,
+        *,
+        ordinal: int,
+        parent_kind: Literal["ingestion_plan", "case", "model_readiness"],
+        parent_id: str,
+        stage: str,
+        role_binding_id: str,
+        messages_sha256: str,
+        messages: tuple[tuple[str, str], ...],
+        thinking_effort: ThinkingEffort,
+        output_contract_id: str = "fake-output-v1",
+        max_output_tokens: int = 1,
+        candidate_count: int = 1,
+        temperature: str = "0",
+        top_p: str = "1",
+        stop: tuple[str, ...] | None = None,
+    ) -> ModelRequest:
+        if ordinal < 1:
+            raise ValueError("model request attempt ordinal must be positive")
+        unbound = cls(
+            attempt_id="0" * 64,
+            parent_kind=parent_kind,
+            parent_id=parent_id,
+            stage=stage,
+            role_binding_id=role_binding_id,
+            messages_sha256=messages_sha256,
+            messages=messages,
+            thinking_effort=thinking_effort,
+            output_contract_id=output_contract_id,
+            max_output_tokens=max_output_tokens,
+            candidate_count=candidate_count,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+        )
+        return replace(
+            unbound,
+            attempt_id=attempt_id(parent_id, stage, ordinal, unbound.request_fingerprint),
+        )
 
     @property
     def request_fingerprint(self) -> str:
@@ -302,12 +353,12 @@ class ModelRequest:
                 self.role_binding_id,
                 self.messages_sha256,
                 self.messages,
+                self.thinking_effort,
                 self.output_contract_id,
                 self.max_output_tokens,
                 self.candidate_count,
                 self.temperature,
                 self.top_p,
-                self.reasoning_disabled,
                 self.stop,
             ]
         )
@@ -602,6 +653,8 @@ class MemorySystemPort(Protocol):
 
 @runtime_checkable
 class ModelClientPort(Protocol):
+    def thinking_effort_for(self, *, stage: str, role_binding_id: str) -> ThinkingEffort: ...
+
     async def complete(self, request: ModelRequest) -> ModelReceipt: ...
 
     async def close(self) -> None: ...

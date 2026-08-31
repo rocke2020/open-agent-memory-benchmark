@@ -8,7 +8,12 @@ from urllib.parse import quote
 import httpx
 
 from oamb.contracts.ports import ArtifactStorePort
-from oamb.memory_systems.rest import SealedRestClient, SealedRestResponse
+from oamb.memory_systems.rest import (
+    DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
+    DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
+    SealedRestClient,
+    SealedRestResponse,
+)
 
 
 class HindsightClient:
@@ -19,6 +24,8 @@ class HindsightClient:
         base_url: str,
         authorization: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
+        total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
     ) -> None:
         headers: Mapping[str, str] = (
             {"Authorization": authorization} if authorization is not None else {}
@@ -28,6 +35,8 @@ class HindsightClient:
             base_url=base_url,
             headers=headers,
             transport=transport,
+            read_timeout_seconds=read_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
         )
 
     async def get_version(self) -> SealedRestResponse:
@@ -122,6 +131,7 @@ class HindsightClient:
             "POST",
             f"/v1/default/banks/{bank_id}/memories/recall",
             json_payload=payload,
+            request_evidence=True,
         )
 
     async def close(self) -> None:

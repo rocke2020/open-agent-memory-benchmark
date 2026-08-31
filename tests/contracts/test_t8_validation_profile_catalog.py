@@ -35,7 +35,6 @@ EXPECTED_PROFILE_IDS = (
     "oamb-t8-adapter-openviking-rest-v1",
     "oamb-t8-accounting-native-v1",
     "oamb-t8-comparison-paired-native-v1",
-    "oamb-t8-t10-phase-gate-v1",
     "oamb-t8-export-run-public-v1",
     "oamb-t8-export-run-local-v1",
     "oamb-t8-export-comparison-public-v1",
@@ -44,8 +43,6 @@ EXPECTED_PROFILE_IDS = (
     "oamb-t8-export-evaluation-local-v1",
     "oamb-t8-export-release-public-v1",
     "oamb-t8-export-release-local-v1",
-    "oamb-t8-export-phase-acceptance-public-v1",
-    "oamb-t8-export-phase-acceptance-local-v1",
 )
 
 LME_COMMON_RULE_IDS = (
@@ -122,14 +119,6 @@ EXPECTED_RULE_IDS_BY_PROFILE = {
         "comparison.metric-pairing.v1",
         "comparison.cost-basis.v1",
         "comparison.claim-suppression.v1",
-    ),
-    "oamb-t8-t10-phase-gate-v1": (
-        "phase.schema-identity.v1",
-        "phase.root-coverage.v1",
-        "phase.case-coverage.v1",
-        "phase.derivation-export.v1",
-        "phase.review-order.v1",
-        "phase.human-approval.v1",
     ),
     **{
         profile_id: EXPORT_RULE_IDS
@@ -267,10 +256,10 @@ def test_post_render_export_profiles_are_exact_per_kind_and_audience() -> None:
         ("run", "local"): "oamb-t8-export-run-local-v1",
         ("comparison", "public"): "oamb-t8-export-comparison-public-v1",
         ("comparison", "local"): "oamb-t8-export-comparison-local-v1",
+        ("evaluation", "public"): "oamb-t8-export-evaluation-public-v1",
+        ("evaluation", "local"): "oamb-t8-export-evaluation-local-v1",
         ("release", "public"): "oamb-t8-export-release-public-v1",
         ("release", "local"): "oamb-t8-export-release-local-v1",
-        ("phase_acceptance", "public"): ("oamb-t8-export-phase-acceptance-public-v1"),
-        ("phase_acceptance", "local"): "oamb-t8-export-phase-acceptance-local-v1",
     }
 
     for (report_kind, audience), profile_id in expected.items():

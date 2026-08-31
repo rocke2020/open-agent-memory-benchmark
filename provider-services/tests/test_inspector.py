@@ -9,7 +9,6 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-
 INSPECTOR_PATH = Path(__file__).resolve().parents[1] / "mem0" / "inspector.py"
 
 

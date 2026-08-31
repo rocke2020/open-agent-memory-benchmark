@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -31,18 +31,34 @@ from oamb.artifacts.validation.openviking_evidence import (
     reconstruct_openviking_projection,
     reconstruct_openviking_runtime_identity,
 )
+from oamb.artifacts.validation.openviking_session_evidence import (
+    OpenVikingSessionPlanEvidence,
+    reconstruct_openviking_session_candidates,
+    reconstruct_openviking_session_plan,
+    reconstruct_openviking_session_projection,
+)
+from oamb.artifacts.validation.retrieval_request import (
+    GENERATION_FREE_PROOF_PROFILES,
+    retrieval_request_proves_generation_free,
+)
 from oamb.contracts.accounting import (
     CostRecord,
+    CostRecordV2,
     ResourceUsageRecord,
+    ResourceUsageRecordV2,
     TokenUsageRecord,
     TokenUsageRecordV2,
     TokenUsageRecordV3,
+    TokenUsageRecordV5,
 )
 from oamb.contracts.evidence import (
     AttemptIntentRecord,
+    AttemptIntentRecordV3,
     AttemptReceiptRecord,
     AttemptRecordV2,
+    AttemptRecordV4,
     BudgetReservationRecord,
+    BudgetReservationRecordV3,
     CapsuleManifest,
     CaseEvaluationDisposition,
     CaseRecordV3,
@@ -64,9 +80,9 @@ from oamb.contracts.ids import (
 from oamb.contracts.ports import NativeEvidenceCandidate
 from oamb.contracts.specifications import (
     BudgetSpecV2,
+    BudgetSpecV4,
     CaseManifest,
     DatasetManifest,
-    ExternalCallApprovalRecord,
     ModelRoleBindingV2,
     RunPreflightRecord,
     RunSpec,
@@ -87,6 +103,7 @@ from oamb.memory_systems.hindsight.profiles import (
     parse_bank_profile,
     parse_retain_response,
 )
+from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
 
 NATIVE_EVIDENCE_PROFILE_ID = "oamb-t8-native-evidence-v1"
 NATIVE_EVIDENCE_RULE_IDS = (
@@ -97,9 +114,18 @@ NATIVE_EVIDENCE_RULE_IDS = (
     "native.visible-context.v1",
     "native.query-state.v1",
     "native.metric-fraction.v1",
+    "native.retrieval-request.v1",
 )
 
 NativePlanRecord = IngestionPlanRecordV2 | IngestionPlanRecordV3
+NativeAttemptRecord = AttemptRecordV2 | AttemptRecordV4
+NativeIntentRecord = AttemptIntentRecord | AttemptIntentRecordV3
+NativeReservationRecord = BudgetReservationRecord | BudgetReservationRecordV3
+NativeTokenUsageRecord = (
+    TokenUsageRecord | TokenUsageRecordV2 | TokenUsageRecordV3 | TokenUsageRecordV5
+)
+NativeResourceUsageRecord = ResourceUsageRecord | ResourceUsageRecordV2
+NativeCostRecord = CostRecord | CostRecordV2
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +157,7 @@ def validate_native_capsule(capsule_root: Path) -> ValidationResult:
         (NATIVE_EVIDENCE_RULE_IDS[4], _visible_context_rule),
         (NATIVE_EVIDENCE_RULE_IDS[5], _query_state_rule),
         (NATIVE_EVIDENCE_RULE_IDS[6], _metric_fraction_rule),
+        (NATIVE_EVIDENCE_RULE_IDS[7], _retrieval_request_rule),
     )
     passed: list[str] = []
     failed: list[str] = []
@@ -208,12 +235,12 @@ def _load_native_capsule(root: Path) -> _NativeCapsuleSnapshot:
                     contracts.append(contract)
                 if (
                     document.get("schema_name") != entry.record_kind
-                    or _source_record_id(document) != entry.record_id
+                    or not _source_record_identity_matches(document, entry.record_id)
                     or not _source_path_identity_matches(
                         entry.relative_path,
                         path.stem,
                         entry.record_id,
-                        document.get("schema_name"),
+                        document,
                     )
                 ):
                     raise ValueError("source contract identity does not match its manifest entry")
@@ -235,12 +262,18 @@ def _parse_native_contract(document: dict[str, Any], content: bytes) -> BaseMode
     identity = (document.get("schema_name"), document.get("schema_version"))
     if identity == ("attempt_intent_record", 1):
         return AttemptIntentRecord.model_validate_json(content)
+    if identity == ("attempt_intent_record", 3):
+        return AttemptIntentRecordV3.model_validate_json(content)
     if identity == ("attempt_receipt_record", 1):
         return AttemptReceiptRecord.model_validate_json(content)
     if identity == ("attempt_record", 2):
         return AttemptRecordV2.model_validate_json(content)
+    if identity == ("attempt_record", 4):
+        return AttemptRecordV4.model_validate_json(content)
     if identity == ("budget_reservation_record", 1):
         return BudgetReservationRecord.model_validate_json(content)
+    if identity == ("budget_reservation_record", 3):
+        return BudgetReservationRecordV3.model_validate_json(content)
     if identity == ("case_record", 3):
         return CaseRecordV3.model_validate_json(content)
     if identity == ("close_error_record", 1):
@@ -265,18 +298,24 @@ def _parse_native_contract(document: dict[str, Any], content: bytes) -> BaseMode
         return TokenUsageRecordV2.model_validate_json(content)
     if identity == ("token_usage_record", 3):
         return TokenUsageRecordV3.model_validate_json(content)
+    if identity == ("token_usage_record", 5):
+        return TokenUsageRecordV5.model_validate_json(content)
     if identity == ("resource_usage_record", 1):
         return ResourceUsageRecord.model_validate_json(content)
+    if identity == ("resource_usage_record", 2):
+        return ResourceUsageRecordV2.model_validate_json(content)
     if identity == ("cost_record", 1):
         return CostRecord.model_validate_json(content)
+    if identity == ("cost_record", 2):
+        return CostRecordV2.model_validate_json(content)
     if identity == ("run_spec", 1):
         return RunSpec.model_validate_json(content)
     if identity == ("run_preflight_record", 1):
         return RunPreflightRecord.model_validate_json(content)
-    if identity == ("external_call_approval_record", 1):
-        return ExternalCallApprovalRecord.model_validate_json(content)
     if identity == ("budget_spec", 2):
         return BudgetSpecV2.model_validate_json(content)
+    if identity == ("budget_spec", 4):
+        return BudgetSpecV4.model_validate_json(content)
     if identity == ("model_role_binding", 2):
         return ModelRoleBindingV2.model_validate_json(content)
     if not isinstance(identity[0], str) or not isinstance(identity[1], int):
@@ -306,7 +345,6 @@ def _source_record_id(document: dict[str, Any]) -> str | None:
         "dataset_manifest": "dataset-manifest",
         "run_spec": "run-spec",
         "run_preflight_record": "run-preflight",
-        "external_call_approval_record": "external-call-approval",
         "budget_spec": "budget",
     }
     schema_name = document.get("schema_name")
@@ -317,18 +355,29 @@ def _source_record_id(document: dict[str, Any]) -> str | None:
     return fixed_ids.get(schema_name) if isinstance(schema_name, str) else None
 
 
+def _source_record_identity_matches(document: dict[str, Any], record_id: str) -> bool:
+    if _source_record_id(document) == record_id:
+        return True
+    lease_epoch = document.get("lease_epoch")
+    return (
+        document.get("schema_name") == "run_lease_record"
+        and isinstance(lease_epoch, int)
+        and str(lease_epoch) == record_id
+    )
+
+
 def _source_path_identity_matches(
     relative_path: str,
     path_stem: str,
     record_id: str,
-    schema_name: object,
+    document: dict[str, Any],
 ) -> bool:
     if path_stem == record_id:
         return True
+    schema_name = document.get("schema_name")
     fixed_paths = {
         "run_spec": "source/specs/run-spec.json",
         "run_preflight_record": "source/specs/run-preflight.json",
-        "external_call_approval_record": "source/specs/external-call-approval.json",
         "budget_spec": "source/specs/budget.json",
     }
     return isinstance(schema_name, str) and fixed_paths.get(schema_name) == relative_path
@@ -413,14 +462,43 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         ):
             issues.append(_issue(rule_id, manifest.capsule_id, "runtime-binding-drift"))
         if run_specs or run_preflights:
-            issues.append(
-                _issue(
-                    rule_id,
-                    manifest.capsule_id,
-                    "live-control-composition-unavailable",
+            budgets = _contracts(snapshot, BudgetSpecV4)
+            role_bindings = _contracts(snapshot, ModelRoleBindingV2)
+            if len(run_specs) != 1 or len(run_preflights) != 1 or len(budgets) != 1:
+                issues.append(
+                    _issue(rule_id, manifest.capsule_id, "live-control-inventory-mismatch")
                 )
-            )
-            expected_run_spec_hash = ""
+                expected_run_spec_hash = ""
+            else:
+                run_spec = run_specs[0]
+                preflight = run_preflights[0]
+                budget = budgets[0]
+                expected_run_spec_hash = canonical_sha256(run_spec)
+                role_ids = tuple(item.binding_id for item in role_bindings)
+                live_control_closes = bool(
+                    run_spec.run_id == manifest.run_id
+                    and run_spec.dataset_manifest_hash == datasets[0].manifest_hash
+                    and run_spec.case_manifest_hash == case_manifests[0].manifest_hash
+                    and run_spec.workload_id == case_manifests[0].workload_id
+                    and run_spec.memory_system_id == first.memory_system_id
+                    and run_spec.runtime_binding_hash == first.runtime_binding_hash
+                    and run_spec.budget_id == budget.budget_id
+                    and run_spec.model_role_binding_ids == role_ids
+                    and preflight.run_id == manifest.run_id
+                    and preflight.run_spec_hash == expected_run_spec_hash
+                    and preflight.dataset_manifest_hash == datasets[0].manifest_hash
+                    and preflight.subset_manifest_hash == case_manifests[0].manifest_hash
+                    and preflight.adapter_profile_id == first.adapter_profile_id
+                    and preflight.runtime_binding_hash == first.runtime_binding_hash
+                    and preflight.role_binding_ids == role_ids
+                    and preflight.budget_hash == canonical_sha256(budget)
+                    and preflight.dispatch_routes == budget.dispatch_routes
+                    and budget.scope_id == manifest.run_id
+                )
+                if not live_control_closes:
+                    issues.append(
+                        _issue(rule_id, manifest.capsule_id, "live-control-binding-mismatch")
+                    )
         else:
             expected_run_spec_hash = canonical_sha256(
                 [
@@ -506,13 +584,13 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         ):
             issues.append(_issue(rule_id, manifest.capsule_id, "native-run-terminal-mismatch"))
     leases = _contracts(snapshot, RunLeaseRecord)
-    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
-    intent_records = _contracts(snapshot, AttemptIntentRecord)
+    attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
+    intent_records = _attempt_intent_records(snapshot)
     intents = {item.attempt_id: item for item in intent_records}
     receipts = {item.attempt_id: item for item in _contracts(snapshot, AttemptReceiptRecord)}
     claim_records = _contracts(snapshot, OccurrenceClaimRecord)
     claims = {item.claim_id: item for item in claim_records}
-    reservation_records = _contracts(snapshot, BudgetReservationRecord)
+    reservation_records = _budget_reservation_records(snapshot)
     reservations = {item.reservation_id: item for item in reservation_records}
     for lease in leases:
         expected_lease_hash = canonical_sha256(
@@ -520,6 +598,9 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         )
         if lease.lease_record_hash != expected_lease_hash:
             issues.append(_issue(rule_id, lease.lease_record_hash, "run-lease-identity-mismatch"))
+    leases_by_hash = _strict_run_lease_chain(leases)
+    if leases and leases_by_hash is None:
+        issues.append(_issue(rule_id, manifest.capsule_id, "run-lease-chain-mismatch"))
     for claim in claim_records:
         claim_fields = claim.model_dump(
             mode="python",
@@ -528,19 +609,21 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         expected_claim_id = canonical_sha256(["oamb-native-occurrence-claim-v1", claim_fields])
         if claim.claim_id != expected_claim_id:
             issues.append(_issue(rule_id, claim.claim_id, "attempt-claim-identity-mismatch"))
-    for reservation in reservation_records:
-        reservation_fields = reservation.model_dump(
+    for reservation_record in reservation_records:
+        if isinstance(reservation_record, BudgetReservationRecordV3):
+            continue
+        reservation_fields = reservation_record.model_dump(
             mode="python",
             exclude={"schema_name", "schema_version", "reservation_id"},
         )
         expected_reservation_id = canonical_sha256(
             ["oamb-native-budget-reservation-v1", reservation_fields]
         )
-        if reservation.reservation_id != expected_reservation_id:
+        if reservation_record.reservation_id != expected_reservation_id:
             issues.append(
                 _issue(
                     rule_id,
-                    reservation.reservation_id,
+                    reservation_record.reservation_id,
                     "attempt-reservation-identity-mismatch",
                 )
             )
@@ -556,17 +639,23 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         issues.append(
             _issue(rule_id, manifest.capsule_id, "attempt-reservation-inventory-mismatch")
         )
-    if len(leases) != 1 or set(attempts) != set(intents) or set(attempts) != set(receipts):
+    if (
+        not leases
+        or leases_by_hash is None
+        or set(attempts) != set(intents)
+        or set(attempts) != set(receipts)
+    ):
         issues.append(_issue(rule_id, manifest.capsule_id, "attempt-evidence-incomplete"))
     else:
-        lease = leases[0]
         for attempt_id, attempt in attempts.items():
             intent = intents[attempt_id]
             receipt = receipts[attempt_id]
             claim = claims.get(intent.claim_id)
+            lease = leases_by_hash.get(claim.lease_record_hash) if claim is not None else None
             reservation = reservations.get(intent.reservation_id)
-            aligned = bool(
+            common_aligned = bool(
                 claim is not None
+                and lease is not None
                 and reservation is not None
                 and claim.lease_record_hash == lease.lease_record_hash
                 and claim.lease_epoch == lease.lease_epoch
@@ -577,17 +666,101 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
                 == attempt.request_fingerprint
                 == intent.request_fingerprint
                 and reservation.attempt_id == attempt_id
-                and reservation.scope_id == (manifest.run_id if run_specs else attempt.parent_id)
-                and reservation.role_binding_id == intent.role_binding_id
                 and intent.sealed_at <= attempt.started_at
                 and receipt.dispatch_started_at == attempt.started_at
                 and receipt.receipt_observed_at == attempt.ended_at
                 and receipt.raw_response_ref == attempt.raw_response_ref
                 and receipt.raw_error_ref == attempt.raw_error_ref
             )
+            if (
+                isinstance(attempt, AttemptRecordV4)
+                and isinstance(intent, AttemptIntentRecordV3)
+                and isinstance(reservation, BudgetReservationRecordV3)
+            ):
+                attempt_preflight = run_preflights[0] if len(run_preflights) == 1 else None
+                budgets = _contracts(snapshot, BudgetSpecV4)
+                budget = budgets[0] if len(budgets) == 1 else None
+                route = (
+                    next(
+                        (
+                            item
+                            for item in budget.dispatch_routes
+                            if item.route_id == attempt.dispatch_route_id
+                        ),
+                        None,
+                    )
+                    if budget is not None
+                    else None
+                )
+                aligned = bool(
+                    common_aligned
+                    and attempt_preflight is not None
+                    and budget is not None
+                    and route is not None
+                    and attempt.run_id == manifest.run_id
+                    and attempt.intent_hash == intent.intent_hash
+                    and attempt.receipt_record_hash == canonical_sha256(receipt)
+                    and intent.reservation_hash == reservation.reservation_hash
+                    and intent.scope_id == reservation.scope_id == manifest.run_id
+                    and intent.preflight_record_hash == attempt_preflight.preflight_record_hash
+                    and intent.budget_id == reservation.budget_id == budget.budget_id
+                    and intent.budget_hash == reservation.budget_hash == budget.budget_hash
+                    and attempt.dispatch_route_id
+                    == intent.dispatch_route_id
+                    == reservation.dispatch_route_id
+                    == route.route_id
+                    and attempt.dispatch_route_hash
+                    == intent.dispatch_route_hash
+                    == reservation.dispatch_route_hash
+                    == route.route_hash
+                )
+            elif (
+                isinstance(attempt, AttemptRecordV2)
+                and isinstance(intent, AttemptIntentRecord)
+                and isinstance(reservation, BudgetReservationRecord)
+            ):
+                aligned = bool(
+                    common_aligned
+                    and reservation.scope_id == attempt.parent_id
+                    and reservation.role_binding_id == intent.role_binding_id
+                )
+            else:
+                aligned = False
             if not aligned:
                 issues.append(_issue(rule_id, attempt_id, "attempt-evidence-mismatch"))
     return tuple(issues)
+
+
+def _strict_run_lease_chain(
+    leases: tuple[RunLeaseRecord, ...],
+) -> dict[str, RunLeaseRecord] | None:
+    if not leases:
+        return {}
+    hashes = tuple(lease.lease_record_hash for lease in leases)
+    epochs = tuple(lease.lease_epoch for lease in leases)
+    if len(set(hashes)) != len(hashes) or len(set(epochs)) != len(epochs):
+        return None
+    ordered = tuple(sorted(leases, key=lambda lease: lease.lease_epoch))
+    if tuple(lease.lease_epoch for lease in ordered) != tuple(range(1, len(ordered) + 1)):
+        return None
+    first = ordered[0]
+    stable_binding = (
+        first.run_id,
+        first.provider_project_id,
+        first.provider_profile_id,
+    )
+    for predecessor, successor in zip(ordered, ordered[1:], strict=False):
+        if (
+            successor.predecessor_lease_record_hash != predecessor.lease_record_hash
+            or (
+                successor.run_id,
+                successor.provider_project_id,
+                successor.provider_profile_id,
+            )
+            != stable_binding
+        ):
+            return None
+    return {lease.lease_record_hash: lease for lease in ordered}
 
 
 def _raw_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
@@ -604,12 +777,10 @@ def _raw_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
 
 def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
     rule_id = "native.plan-closure.v1"
-    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+    attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
     usage_records = {item.usage_record_id: item for item in _token_usage_records(snapshot)}
-    resource_records = {
-        item.resource_record_id: item for item in _contracts(snapshot, ResourceUsageRecord)
-    }
-    cost_records = {item.cost_record_id: item for item in _contracts(snapshot, CostRecord)}
+    resource_records = {item.resource_record_id: item for item in _resource_usage_records(snapshot)}
+    cost_records = {item.cost_record_id: item for item in _cost_records(snapshot)}
     issues: list[ValidationIssue] = []
     for plan in _ingestion_plans(snapshot):
         if plan.state != IngestionPlanState.SEALED or plan.scope_id is None:
@@ -682,6 +853,35 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                     )
                 )
             continue
+        if plan.adapter_profile_id == OPENVIKING_SESSION_PROFILE_ID:
+            if not isinstance(plan, IngestionPlanRecordV2):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        plan.ingestion_occurrence_id,
+                        "openviking-session-plan-version-mismatch",
+                    )
+                )
+                continue
+            try:
+                _openviking_session_native_plan_evidence(snapshot, plan, attempts)
+            except ValueError:
+                issues.append(
+                    _issue(
+                        rule_id,
+                        plan.ingestion_occurrence_id,
+                        "openviking-session-plan-evidence-mismatch",
+                    )
+                )
+            if not _plan_usage_closes(plan, attempts, usage_records):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        plan.ingestion_occurrence_id,
+                        "ingestion-usage-ledger-mismatch",
+                    )
+                )
+            continue
         if plan.adapter_profile_id == MEM0_PROFILE_ID:
             try:
                 if not isinstance(plan, IngestionPlanRecordV3):
@@ -689,7 +889,7 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                 reconstruct_mem0_plan(
                     raw_payloads=snapshot.raw_payloads,
                     plan=plan,
-                    attempts=attempts,
+                    attempts=cast(dict[str, AttemptRecordV2], attempts),
                 )
             except ValueError:
                 issues.append(
@@ -842,28 +1042,37 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
 
 def _plan_usage_closes(
     plan: NativePlanRecord,
-    attempts: dict[str, AttemptRecordV2],
-    usage_records: dict[str, TokenUsageRecord | TokenUsageRecordV2 | TokenUsageRecordV3],
+    attempts: dict[str, NativeAttemptRecord],
+    usage_records: dict[str, NativeTokenUsageRecord],
 ) -> bool:
-    if len(plan.usage_record_ids) != len(plan.ordered_dispatch_attempt_ids):
-        return False
-    for usage_record_id, attempt_id in zip(
-        plan.usage_record_ids,
-        plan.ordered_dispatch_attempt_ids,
-        strict=True,
+    if not plan.ordered_dispatch_attempt_ids or len(plan.usage_record_ids) != len(
+        set(plan.usage_record_ids)
     ):
+        return False
+    dispatch_attempt_ids = set(plan.ordered_dispatch_attempt_ids)
+    expected_usage_ids = {
+        usage.usage_record_id
+        for usage in usage_records.values()
+        if usage.attempt_id in dispatch_attempt_ids
+    }
+    if set(plan.usage_record_ids) != expected_usage_ids:
+        return False
+    covered_attempt_ids: set[str] = set()
+    for usage_record_id in plan.usage_record_ids:
         usage = usage_records.get(usage_record_id)
-        attempt = attempts.get(attempt_id)
+        attempt = attempts.get(usage.attempt_id) if usage is not None else None
         if (
             usage is None
             or attempt is None
+            or usage.attempt_id not in dispatch_attempt_ids
             or usage.parent_kind != "ingestion_plan"
             or usage.parent_id != plan.ingestion_occurrence_id
-            or usage.attempt_id != attempt_id
+            or usage.stage.value != "memory_ingest"
             or usage.raw_response_ref != attempt.raw_response_ref
         ):
             return False
-    return True
+        covered_attempt_ids.add(usage.attempt_id)
+    return covered_attempt_ids == dispatch_attempt_ids
 
 
 def _accounting_ledger_closes(
@@ -874,27 +1083,61 @@ def _accounting_ledger_closes(
     usage_record_ids: tuple[str, ...],
     resource_record_ids: tuple[str, ...],
     cost_record_ids: tuple[str, ...],
-    attempts: dict[str, AttemptRecordV2],
-    usage_records: dict[str, TokenUsageRecord | TokenUsageRecordV2 | TokenUsageRecordV3],
-    resource_records: dict[str, ResourceUsageRecord],
-    cost_records: dict[str, CostRecord],
+    attempts: dict[str, NativeAttemptRecord],
+    usage_records: dict[str, NativeTokenUsageRecord],
+    resource_records: dict[str, NativeResourceUsageRecord],
+    cost_records: dict[str, NativeCostRecord],
 ) -> bool:
-    if not attempt_ids or not (
+    if not attempt_ids:
+        return False
+    live_accounting = any(
+        isinstance(attempts.get(attempt_id), AttemptRecordV4) for attempt_id in attempt_ids
+    )
+    if live_accounting:
+        if not (
+            len(attempt_ids) == len(resource_record_ids) == len(cost_record_ids)
+            and len(usage_record_ids) == len(set(usage_record_ids))
+        ):
+            return False
+        expected_usage_ids = tuple(
+            usage.usage_record_id
+            for attempt_id in attempt_ids
+            for usage in usage_records.values()
+            if usage.attempt_id == attempt_id
+        )
+        if len(usage_record_ids) != len(expected_usage_ids) or set(usage_record_ids) != set(
+            expected_usage_ids
+        ):
+            return False
+    elif not (
         len(attempt_ids)
         == len(usage_record_ids)
         == len(resource_record_ids)
         == len(cost_record_ids)
     ):
         return False
-    for attempt_id, usage_id, resource_id, cost_id in zip(
-        attempt_ids,
-        usage_record_ids,
-        resource_record_ids,
-        cost_record_ids,
-        strict=True,
+    for ordinal, (attempt_id, resource_id, cost_id) in enumerate(
+        zip(
+            attempt_ids,
+            resource_record_ids,
+            cost_record_ids,
+            strict=True,
+        )
     ):
         attempt = attempts.get(attempt_id)
-        usage = usage_records.get(usage_id)
+        attempt_usage_ids = tuple(
+            usage.usage_record_id
+            for usage in usage_records.values()
+            if usage.attempt_id == attempt_id
+        )
+        usage_id = (
+            attempt_usage_ids[0]
+            if live_accounting and len(attempt_usage_ids) == 1
+            else usage_record_ids[ordinal]
+            if not live_accounting
+            else None
+        )
+        usage = usage_records.get(usage_id) if usage_id is not None else None
         resource = resource_records.get(resource_id)
         cost = cost_records.get(cost_id)
         expected_indexing_view = (
@@ -904,16 +1147,10 @@ def _accounting_ledger_closes(
         )
         if (
             attempt is None
-            or usage is None
             or resource is None
             or cost is None
             or attempt.parent_kind != parent_kind
             or attempt.parent_id != parent_id
-            or usage.attempt_id != attempt_id
-            or usage.parent_kind != parent_kind
-            or usage.parent_id != parent_id
-            or usage.stage.value != attempt.stage
-            or usage.raw_response_ref != attempt.raw_response_ref
             or resource.parent_kind != parent_kind
             or resource.parent_id != parent_id
             or resource.stage != attempt.stage
@@ -921,8 +1158,52 @@ def _accounting_ledger_closes(
             or cost.parent_kind != parent_kind
             or cost.parent_id != parent_id
             or cost.indexing_view.value != expected_indexing_view
-            or cost.source_usage_record_ids != (usage_id,)
             or cost.source_resource_record_ids != (resource_id,)
+        ):
+            return False
+        if live_accounting:
+            if (
+                len(cost.source_usage_record_ids) != len(attempt_usage_ids)
+                or set(cost.source_usage_record_ids) != set(attempt_usage_ids)
+                or not isinstance(resource, ResourceUsageRecordV2)
+                or not isinstance(cost, CostRecordV2)
+                or resource.attempt_id != attempt_id
+                or cost.attempt_id != attempt_id
+                or not isinstance(attempt, AttemptRecordV4)
+                or not (
+                    resource.dispatch_route_id
+                    == cost.dispatch_route_id
+                    == attempt.dispatch_route_id
+                )
+                or not (
+                    resource.dispatch_route_hash
+                    == cost.dispatch_route_hash
+                    == attempt.dispatch_route_hash
+                )
+                or resource.budget_owner_kind != cost.budget_owner_kind
+                or resource.budget_owner_id != cost.budget_owner_id
+            ):
+                return False
+            for attempt_usage_id in attempt_usage_ids:
+                attempt_usage = usage_records.get(attempt_usage_id)
+                if (
+                    not isinstance(attempt_usage, TokenUsageRecordV5)
+                    or attempt_usage.parent_kind != parent_kind
+                    or attempt_usage.parent_id != parent_id
+                    or attempt_usage.stage.value != attempt.stage
+                    or attempt_usage.raw_response_ref != attempt.raw_response_ref
+                    or attempt_usage.dispatch_route_id != attempt.dispatch_route_id
+                    or attempt_usage.dispatch_route_hash != attempt.dispatch_route_hash
+                ):
+                    return False
+        elif (
+            usage is None
+            or usage.attempt_id != attempt_id
+            or usage.parent_kind != parent_kind
+            or usage.parent_id != parent_id
+            or usage.stage.value != attempt.stage
+            or usage.raw_response_ref != attempt.raw_response_ref
+            or cost.source_usage_record_ids != (usage_id,)
         ):
             return False
     return True
@@ -931,7 +1212,7 @@ def _accounting_ledger_closes(
 def _openviking_native_plan_evidence(
     snapshot: _NativeCapsuleSnapshot,
     plan: IngestionPlanRecordV2,
-    attempts: dict[str, AttemptRecordV2],
+    attempts: dict[str, NativeAttemptRecord],
 ) -> OpenVikingPlanEvidence:
     manifests = _contracts(snapshot, CaseManifest)
     if len(manifests) != 1:
@@ -950,15 +1231,29 @@ def _openviking_native_plan_evidence(
         raw_payloads=snapshot.raw_payloads,
         plan=plan,
         manifest_plan=manifest_plan,
-        attempts=attempts,
+        attempts=cast(dict[str, AttemptRecordV2], attempts),
         runtime_identity=reconstruct_openviking_runtime_identity(snapshot.raw_payloads),
+    )
+
+
+def _openviking_session_native_plan_evidence(
+    snapshot: _NativeCapsuleSnapshot,
+    plan: IngestionPlanRecordV2,
+    attempts: dict[str, NativeAttemptRecord],
+) -> OpenVikingSessionPlanEvidence:
+    runtime_identity = reconstruct_openviking_runtime_identity(snapshot.raw_payloads)
+    return reconstruct_openviking_session_plan(
+        raw_payloads=snapshot.raw_payloads,
+        plan=plan,
+        attempts=attempts,
+        runtime_user_id=runtime_identity.user_id,
     )
 
 
 def _hindsight_plan_closure(
     snapshot: _NativeCapsuleSnapshot,
     plan: IngestionPlanRecordV2,
-    attempts: dict[str, AttemptRecordV2],
+    attempts: dict[str, NativeAttemptRecord],
 ) -> tuple[ValidationIssue, ...]:
     rule_id = "native.plan-closure.v1"
     issues: list[ValidationIssue] = []
@@ -1055,12 +1350,10 @@ def _hindsight_plan_closure(
 
 def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
     rule_id = "native.retrieval-closure.v1"
-    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+    attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
     usage_records = {item.usage_record_id: item for item in _token_usage_records(snapshot)}
-    resource_records = {
-        item.resource_record_id: item for item in _contracts(snapshot, ResourceUsageRecord)
-    }
-    cost_records = {item.cost_record_id: item for item in _contracts(snapshot, CostRecord)}
+    resource_records = {item.resource_record_id: item for item in _resource_usage_records(snapshot)}
+    cost_records = {item.cost_record_id: item for item in _cost_records(snapshot)}
     plans = {item.ingestion_occurrence_id: item for item in _ingestion_plans(snapshot)}
     issues: list[ValidationIssue] = []
     for case in _contracts(snapshot, CaseRecordV3):
@@ -1130,8 +1423,24 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
         judge_attempts = [
             item for item in case_attempts if item is not None and item.stage == "judge"
         ]
+        pre_query_attempts = [
+            item
+            for item in case_attempts
+            if item is not None and item.stage == "pre_query_projection"
+        ]
+        post_query_attempts = [
+            item
+            for item in case_attempts
+            if item is not None and item.stage == "post_query_projection"
+        ]
         expected_judge_count = (
             1 if case.evaluation_disposition == CaseEvaluationDisposition.JUDGED else 0
+        )
+        live_case = any(isinstance(item, AttemptRecordV4) for item in case_attempts)
+        projection_attempts_close = (
+            len(pre_query_attempts) == len(post_query_attempts) == 1
+            and pre_query_attempts[0].raw_response_ref in case.pre_query_projection_raw_refs
+            and post_query_attempts[0].raw_response_ref in case.post_query_projection_raw_refs
         )
         if (
             len(query_attempts) != 1
@@ -1140,7 +1449,13 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
             or answer_attempts[0].raw_response_ref != case.answer_raw_ref
             or len(judge_attempts) != expected_judge_count
             or any(item.raw_response_ref is None for item in judge_attempts)
-            or len(case_attempts) != 2 + expected_judge_count
+            or (
+                live_case
+                and (
+                    not projection_attempts_close or len(case_attempts) != 4 + expected_judge_count
+                )
+            )
+            or (not live_case and len(case_attempts) != 2 + expected_judge_count)
         ):
             issues.append(_issue(rule_id, case.case_occurrence_id, "case-attempt-ledger-mismatch"))
         if not _accounting_ledger_closes(
@@ -1165,29 +1480,51 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
         answer = _raw_object(snapshot, case.answer_raw_ref)
         prompt = snapshot.raw_payloads.get(case.prompt_raw_ref or "")
         output = _model_output_text(answer)
-        answer_fingerprint = _single_user_message_fingerprint(prompt)
+        answer_messages_sha256 = _single_user_message_fingerprint(prompt)
         judge_prompt = snapshot.raw_payloads.get(case.judge_prompt_raw_ref or "")
-        judge_fingerprint = _single_user_message_fingerprint(judge_prompt)
+        judge_messages_sha256 = _single_user_message_fingerprint(judge_prompt)
         if (
             prompt is None
             or not isinstance(output, str)
             or hashlib.sha256(prompt).hexdigest() != case.prompt_sha256
-            or answer_fingerprint is None
+            or answer_messages_sha256 is None
             or len(answer_attempts) != 1
-            or answer_attempts[0].request_fingerprint != answer_fingerprint
+            or answer_attempts[0].request_messages_sha256 != answer_messages_sha256
             or hashlib.sha256(output.encode("utf-8")).hexdigest() != case.parsed_answer_sha256
         ):
             issues.append(_issue(rule_id, case.case_occurrence_id, "prompt-answer-mismatch"))
         if case.evaluation_disposition == CaseEvaluationDisposition.JUDGED:
             if (
                 case.judge_prompt_raw_ref is None
-                or judge_fingerprint is None
+                or judge_messages_sha256 is None
                 or len(judge_attempts) != 1
-                or judge_attempts[0].request_fingerprint != judge_fingerprint
+                or judge_attempts[0].request_messages_sha256 != judge_messages_sha256
             ):
                 issues.append(_issue(rule_id, case.case_occurrence_id, "judge-prompt-mismatch"))
         elif case.judge_prompt_raw_ref is not None:
             issues.append(_issue(rule_id, case.case_occurrence_id, "judge-prompt-mismatch"))
+    return tuple(issues)
+
+
+def _retrieval_request_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
+    rule_id = "native.retrieval-request.v1"
+    live_capsule = any(isinstance(item, AttemptRecordV4) for item in _attempt_records(snapshot))
+    issues: list[ValidationIssue] = []
+    for case in _contracts(snapshot, CaseRecordV3):
+        reference = case.retrieval_request_raw_ref
+        required = live_capsule and case.adapter_profile_id in GENERATION_FREE_PROOF_PROFILES
+        if reference is None:
+            if required:
+                issues.append(
+                    _issue(rule_id, case.case_occurrence_id, "retrieval-request-proof-missing")
+                )
+            continue
+        payload = snapshot.raw_payloads.get(reference)
+        if payload is None or not retrieval_request_proves_generation_free(
+            case.adapter_profile_id,
+            payload,
+        ):
+            issues.append(_issue(rule_id, reference, "retrieval-request-proof-invalid"))
     return tuple(issues)
 
 
@@ -1242,7 +1579,7 @@ def _visible_context_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
 def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
     rule_id = "native.query-state.v1"
     issues: list[ValidationIssue] = []
-    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+    attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
     plans = {item.ingestion_occurrence_id: item for item in _ingestion_plans(snapshot)}
     for case in _contracts(snapshot, CaseRecordV3):
         if case.adapter_profile_id == HINDSIGHT_PROFILE_ID:
@@ -1308,6 +1645,52 @@ def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
             ):
                 issues.append(_issue(rule_id, case.case_occurrence_id, "query-state-mismatch"))
             continue
+        if case.adapter_profile_id == OPENVIKING_SESSION_PROFILE_ID:
+            plan = plans.get(case.ingestion_occurrence_id)
+            try:
+                if not isinstance(plan, IngestionPlanRecordV2):
+                    raise ValueError("OpenViking session case has no plan evidence")
+                session_evidence = _openviking_session_native_plan_evidence(
+                    snapshot, plan, attempts
+                )
+                before_uris = reconstruct_openviking_session_projection(
+                    raw_payloads=snapshot.raw_payloads,
+                    references=case.pre_query_projection_raw_refs,
+                    memory_root=session_evidence.memory_root,
+                )
+                after_uris = reconstruct_openviking_session_projection(
+                    raw_payloads=snapshot.raw_payloads,
+                    references=case.post_query_projection_raw_refs,
+                    memory_root=session_evidence.memory_root,
+                )
+                session_before_state = canonical_sha256(
+                    [
+                        "oamb-openviking-session-projection-v1",
+                        plan.ingestion_occurrence_id,
+                        plan.projected_source_unit_ids,
+                        before_uris,
+                    ]
+                )
+                session_after_state = canonical_sha256(
+                    [
+                        "oamb-openviking-session-projection-v1",
+                        plan.ingestion_occurrence_id,
+                        plan.projected_source_unit_ids,
+                        after_uris,
+                    ]
+                )
+            except ValueError:
+                issues.append(_issue(rule_id, case.case_occurrence_id, "query-state-mismatch"))
+                continue
+            if (
+                session_before_state != case.pre_query_state_sha256
+                or session_after_state != case.post_query_state_sha256
+                or session_before_state != session_after_state
+                or session_before_state != session_evidence.state_sha256
+                or case.query_mutation_status != "unchanged"
+            ):
+                issues.append(_issue(rule_id, case.case_occurrence_id, "query-state-mismatch"))
+            continue
         if case.adapter_profile_id == MEM0_PROFILE_ID:
             plan = plans.get(case.ingestion_occurrence_id)
             try:
@@ -1316,7 +1699,7 @@ def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
                 mem0_plan = reconstruct_mem0_plan(
                     raw_payloads=snapshot.raw_payloads,
                     plan=plan,
-                    attempts=attempts,
+                    attempts=cast(dict[str, AttemptRecordV2], attempts),
                 )
                 mem0_before = reconstruct_mem0_projection(
                     raw_payloads=snapshot.raw_payloads,
@@ -1348,12 +1731,16 @@ def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
         after_document = _operation_document(
             snapshot, case.post_query_projection_raw_refs, "state_digest"
         )
-        before_state = before_document.get("state_sha256") if before_document is not None else None
-        after_state = after_document.get("state_sha256") if after_document is not None else None
+        generic_before_state = (
+            before_document.get("state_sha256") if before_document is not None else None
+        )
+        generic_after_state = (
+            after_document.get("state_sha256") if after_document is not None else None
+        )
         if (
-            before_state != case.pre_query_state_sha256
-            or after_state != case.post_query_state_sha256
-            or before_state != after_state
+            generic_before_state != case.pre_query_state_sha256
+            or generic_after_state != case.post_query_state_sha256
+            or generic_before_state != generic_after_state
             or case.query_mutation_status != "unchanged"
         ):
             issues.append(_issue(rule_id, case.case_occurrence_id, "query-state-mismatch"))
@@ -1362,7 +1749,7 @@ def _query_state_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue
 
 def _metric_fraction_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
     rule_id = "native.metric-fraction.v1"
-    attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+    attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
     issues: list[ValidationIssue] = []
     for case in _contracts(snapshot, CaseRecordV3):
         evaluation = _raw_object(snapshot, case.evaluation_raw_ref)
@@ -1502,25 +1889,38 @@ def _normalized_native_candidates(
     if case.adapter_profile_id == OPENVIKING_PROFILE_ID:
         if not isinstance(plan, IngestionPlanRecordV2):
             return None
-        attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+        attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
         try:
-            evidence = _openviking_native_plan_evidence(snapshot, plan, attempts)
+            openviking_evidence = _openviking_native_plan_evidence(snapshot, plan, attempts)
             return reconstruct_openviking_candidates(
                 raw_payloads=snapshot.raw_payloads,
                 case=case,
-                plan=evidence,
+                plan=openviking_evidence,
+            )
+        except ValueError:
+            return None
+    if case.adapter_profile_id == OPENVIKING_SESSION_PROFILE_ID:
+        if not isinstance(plan, IngestionPlanRecordV2):
+            return None
+        attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
+        try:
+            session_evidence = _openviking_session_native_plan_evidence(snapshot, plan, attempts)
+            return reconstruct_openviking_session_candidates(
+                raw_payloads=snapshot.raw_payloads,
+                case=case,
+                memory_root=session_evidence.memory_root,
             )
         except ValueError:
             return None
     if case.adapter_profile_id == MEM0_PROFILE_ID:
         if not isinstance(plan, IngestionPlanRecordV3):
             return None
-        attempts = {item.attempt_id: item for item in _contracts(snapshot, AttemptRecordV2)}
+        attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
         try:
             mem0_evidence = reconstruct_mem0_plan(
                 raw_payloads=snapshot.raw_payloads,
                 plan=plan,
-                attempts=attempts,
+                attempts=cast(dict[str, AttemptRecordV2], attempts),
             )
             return reconstruct_mem0_candidates(
                 raw_payloads=snapshot.raw_payloads,
@@ -1668,6 +2068,7 @@ def _all_raw_references(snapshot: _NativeCapsuleSnapshot) -> tuple[str, ...]:
     for case in _contracts(snapshot, CaseRecordV3):
         for reference in (
             case.retrieval_raw_ref,
+            case.retrieval_request_raw_ref,
             case.visible_evidence_raw_ref,
             case.visible_decision_ledger_raw_ref,
             case.prompt_raw_ref,
@@ -1680,7 +2081,7 @@ def _all_raw_references(snapshot: _NativeCapsuleSnapshot) -> tuple[str, ...]:
         references.extend(case.retrieval_supporting_raw_refs)
         references.extend(case.pre_query_projection_raw_refs)
         references.extend(case.post_query_projection_raw_refs)
-    for attempt in _contracts(snapshot, AttemptRecordV2):
+    for attempt in _attempt_records(snapshot):
         if attempt.raw_response_ref is not None:
             references.append(attempt.raw_response_ref)
         if attempt.raw_error_ref is not None:
@@ -1693,11 +2094,60 @@ def _all_raw_references(snapshot: _NativeCapsuleSnapshot) -> tuple[str, ...]:
 
 def _token_usage_records(
     snapshot: _NativeCapsuleSnapshot,
-) -> tuple[TokenUsageRecord | TokenUsageRecordV2 | TokenUsageRecordV3, ...]:
+) -> tuple[NativeTokenUsageRecord, ...]:
+    return tuple(
+        cast(NativeTokenUsageRecord, item)
+        for item in snapshot.contracts
+        if type(item)
+        in {
+            TokenUsageRecord,
+            TokenUsageRecordV2,
+            TokenUsageRecordV3,
+            TokenUsageRecordV5,
+        }
+    )
+
+
+def _attempt_records(snapshot: _NativeCapsuleSnapshot) -> tuple[NativeAttemptRecord, ...]:
     return (
-        *_contracts(snapshot, TokenUsageRecord),
-        *_contracts(snapshot, TokenUsageRecordV2),
-        *_contracts(snapshot, TokenUsageRecordV3),
+        *_contracts(snapshot, AttemptRecordV2),
+        *_contracts(snapshot, AttemptRecordV4),
+    )
+
+
+def _attempt_intent_records(
+    snapshot: _NativeCapsuleSnapshot,
+) -> tuple[NativeIntentRecord, ...]:
+    return (
+        *_contracts(snapshot, AttemptIntentRecord),
+        *_contracts(snapshot, AttemptIntentRecordV3),
+    )
+
+
+def _budget_reservation_records(
+    snapshot: _NativeCapsuleSnapshot,
+) -> tuple[NativeReservationRecord, ...]:
+    return (
+        *_contracts(snapshot, BudgetReservationRecord),
+        *_contracts(snapshot, BudgetReservationRecordV3),
+    )
+
+
+def _resource_usage_records(
+    snapshot: _NativeCapsuleSnapshot,
+) -> tuple[NativeResourceUsageRecord, ...]:
+    return tuple(
+        cast(NativeResourceUsageRecord, item)
+        for item in snapshot.contracts
+        if type(item) in {ResourceUsageRecord, ResourceUsageRecordV2}
+    )
+
+
+def _cost_records(snapshot: _NativeCapsuleSnapshot) -> tuple[NativeCostRecord, ...]:
+    return tuple(
+        cast(NativeCostRecord, item)
+        for item in snapshot.contracts
+        if type(item) in {CostRecord, CostRecordV2}
     )
 
 

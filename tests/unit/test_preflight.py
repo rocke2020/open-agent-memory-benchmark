@@ -10,9 +10,9 @@ import pytest
 from oamb.contracts.specifications import (
     BudgetSpec,
     BudgetSpecV2,
+    BudgetSpecV4,
     ExecutionEnvironmentBinding,
     ExecutionOwner,
-    ExternalCallApprovalRecord,
     MemorySystemRuntimeBindingV2,
     ModelRole,
     ModelRoleBindingV2,
@@ -39,7 +39,6 @@ def _zero_fake_budget() -> BudgetSpec:
         budget_id="fake-zero-budget",
         scope_kind=BudgetScopeKind.RUN,
         scope_id="fake-run",
-        approval_id=None,
         max_attempts=0,
         max_input_tokens=0,
         max_output_tokens=0,
@@ -60,17 +59,28 @@ def _durable_artifact_preflight() -> ArtifactDurabilityPreflight:
     )
 
 
+def test_durability_capability_proof_is_stable_when_free_space_drifts() -> None:
+    from oamb.runtime.preflight import artifact_durability_capability_proof_hash
+
+    initial = _durable_artifact_preflight()
+
+    assert artifact_durability_capability_proof_hash(initial) == (
+        artifact_durability_capability_proof_hash(
+            replace(initial, available_bytes=initial.available_bytes - 1)
+        )
+    )
+    assert artifact_durability_capability_proof_hash(initial) != (
+        artifact_durability_capability_proof_hash(replace(initial, no_replace_supported=False))
+    )
+
+
 def _fake_role_slots() -> tuple[object, ...]:
     from oamb.runtime.preflight import ResolutionStatus, RoleSlot, RoleSlotName
 
     return tuple(
         RoleSlot(
             role=role,
-            status=(
-                ResolutionStatus.UNSELECTED
-                if role == RoleSlotName.QUALITY_REVIEW
-                else ResolutionStatus.NOT_APPLICABLE
-            ),
+            status=ResolutionStatus.NOT_APPLICABLE,
             binding=None,
             credential_reference=None,
             evidence_reference="fake-local-role",
@@ -117,7 +127,6 @@ def test_v1_zero_external_fake_resolves_to_an_immutable_plan() -> None:
             artifact_durability=_durable_artifact_preflight(),
             runtime_binding=None,
             provider_runtime_attestation=None,
-            approval=None,
             cost_measurement_spec=None,
             price_snapshot=None,
         )
@@ -125,14 +134,14 @@ def test_v1_zero_external_fake_resolves_to_an_immutable_plan() -> None:
 
     assert plan.operation_kind == OperationKind.FAKE_RUN
     assert plan.schema_versions == (1,)
-    assert len(plan.role_slots) == 5
-    assert plan.role_slots[-1].status.value == "unselected"
+    assert len(plan.role_slots) == 4
+    assert plan.role_slots[-1].status.value == "not_applicable"
     assert len(plan.plan_hash) == 64
     with pytest.raises(FrozenInstanceError):
         plan.plan_hash = "b" * 64  # type: ignore[misc]
 
 
-def test_v1_budget_cannot_authorize_nonzero_external_allowance() -> None:
+def test_v1_budget_cannot_allow_nonzero_external_allowance() -> None:
     from oamb.runtime.preflight import (
         OperationKind,
         PreflightRejected,
@@ -153,47 +162,6 @@ def test_v1_budget_cannot_authorize_nonzero_external_allowance() -> None:
                 artifact_durability=_durable_artifact_preflight(),
                 runtime_binding=None,
                 provider_runtime_attestation=None,
-                approval=None,
-                cost_measurement_spec=None,
-                price_snapshot=None,
-            )
-        )
-
-
-def test_fake_plan_rejects_a_quality_review_credential_reference() -> None:
-    from oamb.config.load import EnvironmentReference
-    from oamb.runtime.preflight import (
-        OperationKind,
-        PreflightRejected,
-        ResolutionStatus,
-        RoleSlot,
-        RoleSlotName,
-        RunPreflightRequest,
-        resolve_run_plan,
-    )
-
-    role_slots = _fake_role_slots()[:-1] + (
-        RoleSlot(
-            role=RoleSlotName.QUALITY_REVIEW,
-            status=ResolutionStatus.UNSELECTED,
-            binding=None,
-            credential_reference=EnvironmentReference("OAMB_QUALITY_REVIEW_API_KEY"),
-            evidence_reference="must-remain-unread",
-        ),
-    )
-
-    with pytest.raises(PreflightRejected, match="unselected.*credential"):
-        resolve_run_plan(
-            RunPreflightRequest(
-                operation_kind=OperationKind.FAKE_RUN,
-                budget_spec=_zero_fake_budget(),
-                role_slots=role_slots,
-                adapter_profile=_fake_profile(),
-                provider_gates=_not_applicable_gates(),
-                artifact_durability=_durable_artifact_preflight(),
-                runtime_binding=None,
-                provider_runtime_attestation=None,
-                approval=None,
                 cost_measurement_spec=None,
                 price_snapshot=None,
             )
@@ -317,6 +285,13 @@ def _selected_role(
         credential_variable_name=credential_variable_name,
         configured_model=("qwen3-embedding:0.6b" if str(role) == "embedding" else "fixture-model"),
         resolved_model="fixture-model@sha256:resolved",
+        thinking_effort=(
+            "not_applicable"
+            if role == ModelRole.EMBEDDING
+            else "low"
+            if role == ModelRole.ANSWER
+            else "high"
+        ),
         parameters_fingerprint=HASH_A,
         retry_policy_id="no-retry-v1",
         configuration_fingerprint=HASH_B,
@@ -451,13 +426,6 @@ def _external_role_slots() -> tuple[RoleSlot, ...]:
             credential_reference=None,
             evidence_reference="deterministic-metric",
         ),
-        RoleSlot(
-            role=RoleSlotName.QUALITY_REVIEW,
-            status=ResolutionStatus.UNSELECTED,
-            binding=None,
-            credential_reference=None,
-            evidence_reference="post-export-only",
-        ),
     )
 
 
@@ -492,11 +460,17 @@ def _role_ceiling(binding_id: str, *, provider: str = "fixture-provider") -> Rol
     )
 
 
-def _external_budget(*, role_ids: tuple[str, ...] | None = None) -> BudgetSpecV2:
+def _external_budget(*, role_ids: tuple[str, ...] | None = None) -> BudgetSpecV4:
     from oamb.contracts.specifications import (
-        BudgetScopeKindV2,
-        BudgetSpecV2,
+        BudgetScopeKindV3,
+        BudgetSpecV4,
+        DispatchBudgetOwnerKind,
+        DispatchBudgetRoute,
+        ProviderOperationBudgetCeiling,
         ResourceBudgetCeiling,
+        budget_spec_v4_hash,
+        dispatch_budget_route_hash,
+        provider_operation_budget_ceiling_hash,
     )
 
     selected_role_ids = role_ids or (
@@ -504,27 +478,85 @@ def _external_budget(*, role_ids: tuple[str, ...] | None = None) -> BudgetSpecV2
         "embedding-binding",
         "answer-binding",
     )
-    return BudgetSpecV2(
+    resource = ResourceBudgetCeiling(
+        dimension_id="provider_request_wall_seconds_v1",
+        maximum=Decimal("90"),
+        unit="seconds",
+    )
+    provider_fields = dict(
+        provider_operation_ceiling_id="hindsight-memory-ingest",
+        adapter_profile_id="hindsight-rest-v0.9.2",
+        operation_kind="memory_ingest",
+        billing_unit="request",
+        maximum_accepted_units=Decimal("1"),
+        max_attempts=1,
+        max_dispatch_wall_seconds=Decimal("30"),
+        resource_ceilings=(resource,),
+    )
+    provider_ceiling = ProviderOperationBudgetCeiling.model_validate(
+        {
+            "provider_operation_ceiling_hash": provider_operation_budget_ceiling_hash(
+                provider_fields
+            ),
+            **provider_fields,
+        }
+    )
+    provider_route_fields = dict(
+        route_id="memory-ingest",
+        stage="memory_ingest",
+        dispatch_owner_kind=DispatchBudgetOwnerKind.PROVIDER_OPERATION,
+        dispatch_model_role_binding_id=None,
+        provider_operation_ceiling_id=provider_ceiling.provider_operation_ceiling_id,
+        adapter_profile_id=provider_ceiling.adapter_profile_id,
+        operation_kind=provider_ceiling.operation_kind,
+        billing_unit=provider_ceiling.billing_unit,
+        internal_usage_role_binding_ids=tuple(
+            role_id
+            for role_id in ("extraction-binding", "embedding-binding")
+            if role_id in selected_role_ids
+        ),
+    )
+    answer_route_fields = dict(
+        route_id="answer",
+        stage="answer",
+        dispatch_owner_kind=DispatchBudgetOwnerKind.MODEL_ROLE,
+        dispatch_model_role_binding_id="answer-binding",
+        provider_operation_ceiling_id=None,
+        adapter_profile_id=None,
+        operation_kind="answer-binding-operation",
+        billing_unit="request",
+        internal_usage_role_binding_ids=(),
+    )
+    fields = dict(
         budget_id="external-budget",
-        scope_kind=BudgetScopeKindV2.RUN,
+        scope_kind=BudgetScopeKindV3.RUN,
         scope_id="run-1",
-        approval_id="approval-1",
         max_attempts=3,
         max_input_tokens=300,
         max_output_tokens=300,
         max_dispatch_wall_seconds=Decimal("90"),
         max_cost=None,
         currency=None,
-        resource_ceilings=(
-            ResourceBudgetCeiling(
-                dimension_id="provider_request_wall_seconds_v1",
-                maximum=Decimal("90"),
-                unit="seconds",
+        resource_ceilings=(resource,),
+        role_ceilings=tuple(_role_ceiling(role_id) for role_id in selected_role_ids),
+        provider_operation_ceilings=(provider_ceiling,),
+        dispatch_routes=(
+            DispatchBudgetRoute.model_validate(
+                {
+                    "route_hash": dispatch_budget_route_hash(provider_route_fields),
+                    **provider_route_fields,
+                }
+            ),
+            DispatchBudgetRoute.model_validate(
+                {
+                    "route_hash": dispatch_budget_route_hash(answer_route_fields),
+                    **answer_route_fields,
+                }
             ),
         ),
-        role_ceilings=tuple(_role_ceiling(role_id) for role_id in selected_role_ids),
         stop_condition_ids=("identity_drift", "budget_exhausted"),
     )
+    return BudgetSpecV4.model_validate({"budget_hash": budget_spec_v4_hash(fields), **fields})
 
 
 def _runtime_binding() -> MemorySystemRuntimeBindingV2:
@@ -618,36 +650,6 @@ def _passing_external_gates() -> ProviderGateClosure:
     )
 
 
-def _external_approval(
-    budget: BudgetSpecV2, runtime: MemorySystemRuntimeBindingV2
-) -> ExternalCallApprovalRecord:
-    from oamb.contracts.ids import canonical_sha256
-    from oamb.contracts.specifications import (
-        BudgetScopeKindV2,
-        ExternalCallApprovalRecord,
-        external_call_approval_hash,
-    )
-
-    values: dict[str, Any] = dict(
-        approval_id="approval-1",
-        operation_kind="benchmark_run",
-        scope_kind=BudgetScopeKindV2.RUN,
-        scope_id="run-1",
-        runtime_binding_hash=runtime.runtime_binding_hash,
-        provider_runtime_profile_attestation_hash=None,
-        role_binding_ids=("extraction-binding", "embedding-binding", "answer-binding"),
-        budget_hash=canonical_sha256(budget.model_dump(mode="python")),
-        approved_at=NOW,
-        expires_at=NOW + timedelta(hours=1),
-        unmetered_cost_acknowledged=True,
-        stop_condition_ids=("identity_drift", "budget_exhausted"),
-    )
-    return ExternalCallApprovalRecord(
-        approval_hash=external_call_approval_hash(values),
-        **values,
-    )
-
-
 def _execution_environment() -> ExecutionEnvironmentBinding:
     from oamb.contracts.specifications import ComparabilityStatus, ExecutionEnvironmentBinding
 
@@ -662,13 +664,12 @@ def _execution_environment() -> ExecutionEnvironmentBinding:
     )
 
 
-def test_external_benchmark_v2_closes_roles_budget_runtime_approval_meter_and_gates() -> None:
+def test_external_benchmark_v4_closes_routes_roles_runtime_meter_and_gates() -> None:
     from oamb.contracts.accounting import CostMeasurementSpec
     from oamb.runtime.preflight import OperationKind, RunPreflightRequest, resolve_run_plan
 
     budget = _external_budget()
     runtime = _runtime_binding()
-    approval = _external_approval(budget, runtime)
 
     plan = resolve_run_plan(
         RunPreflightRequest(
@@ -680,7 +681,6 @@ def test_external_benchmark_v2_closes_roles_budget_runtime_approval_meter_and_ga
             artifact_durability=_durable_artifact_preflight(),
             runtime_binding=runtime,
             provider_runtime_attestation=None,
-            approval=approval,
             cost_measurement_spec=CostMeasurementSpec(
                 measurement_spec_id="measurement-v1",
                 measurement_spec_version="1",
@@ -693,10 +693,9 @@ def test_external_benchmark_v2_closes_roles_budget_runtime_approval_meter_and_ga
         )
     )
 
-    assert plan.schema_versions == (1, 2)
+    assert plan.schema_versions == (1, 2, 4)
     assert plan.runtime_binding is runtime
-    assert plan.approval is approval
-    assert plan.role_slots[-1].status.value == "unselected"
+    assert plan.role_slots[-1].status.value == "not_applicable"
     assert "must-not-enter-plan" not in repr(plan)
 
 
@@ -735,7 +734,6 @@ def test_external_benchmark_rejects_self_consistent_runtime_release_drift() -> N
                 artifact_durability=_durable_artifact_preflight(),
                 runtime_binding=drifted_runtime,
                 provider_runtime_attestation=None,
-                approval=_external_approval(budget, drifted_runtime),
                 cost_measurement_spec=CostMeasurementSpec(
                     measurement_spec_id="measurement-v1",
                     measurement_spec_version="1",
@@ -758,9 +756,9 @@ def test_external_benchmark_rejects_missing_role_ceiling_before_provider_constru
         resolve_run_plan,
     )
 
-    budget = _external_budget(role_ids=("extraction-binding", "embedding-binding"))
+    complete_budget = _external_budget()
+    budget = complete_budget.model_copy(update={"role_ceilings": complete_budget.role_ceilings[:2]})
     runtime = _runtime_binding()
-    approval = _external_approval(budget, runtime)
 
     with pytest.raises(PreflightRejected, match="exactly one.*selected external role"):
         resolve_run_plan(
@@ -773,7 +771,6 @@ def test_external_benchmark_rejects_missing_role_ceiling_before_provider_constru
                 artifact_durability=_durable_artifact_preflight(),
                 runtime_binding=runtime,
                 provider_runtime_attestation=None,
-                approval=approval,
                 cost_measurement_spec=CostMeasurementSpec(
                     measurement_spec_id="measurement-v1",
                     measurement_spec_version="1",
@@ -798,7 +795,6 @@ def test_external_benchmark_rejects_missing_execution_environment_binding() -> N
 
     budget = _external_budget()
     runtime = _runtime_binding()
-    approval = _external_approval(budget, runtime)
 
     with pytest.raises(PreflightRejected, match="execution environment"):
         resolve_run_plan(
@@ -811,7 +807,6 @@ def test_external_benchmark_rejects_missing_execution_environment_binding() -> N
                 artifact_durability=_durable_artifact_preflight(),
                 runtime_binding=runtime,
                 provider_runtime_attestation=None,
-                approval=approval,
                 cost_measurement_spec=CostMeasurementSpec(
                     measurement_spec_id="measurement-v1",
                     measurement_spec_version="1",
@@ -836,7 +831,6 @@ def test_external_benchmark_rejects_controlled_endpoint_runtime_drift() -> None:
 
     budget = _external_budget()
     runtime = _runtime_binding()
-    approval = _external_approval(budget, runtime)
     slots = list(_external_role_slots())
     embedding_slot = slots[1]
     assert isinstance(embedding_slot.binding, ModelRoleBindingV2)
@@ -856,7 +850,6 @@ def test_external_benchmark_rejects_controlled_endpoint_runtime_drift() -> None:
                 artifact_durability=_durable_artifact_preflight(),
                 runtime_binding=runtime,
                 provider_runtime_attestation=None,
-                approval=approval,
                 cost_measurement_spec=CostMeasurementSpec(
                     measurement_spec_id="measurement-v1",
                     measurement_spec_version="1",
@@ -911,7 +904,6 @@ def _model_readiness_budget() -> BudgetSpecV2:
         budget_id="readiness-budget",
         scope_kind=BudgetScopeKindV2.MODEL_READINESS,
         scope_id="readiness-occurrence",
-        approval_id="readiness-approval",
         max_attempts=2,
         max_input_tokens=0,
         max_output_tokens=0,
@@ -968,36 +960,6 @@ def _provider_runtime_attestation() -> ProviderRuntimeProfileAttestation:
     )
 
 
-def _model_readiness_approval(
-    budget: BudgetSpecV2, attestation: ProviderRuntimeProfileAttestation
-) -> ExternalCallApprovalRecord:
-    from oamb.contracts.ids import canonical_sha256
-    from oamb.contracts.specifications import (
-        BudgetScopeKindV2,
-        ExternalCallApprovalRecord,
-        external_call_approval_hash,
-    )
-
-    values: dict[str, Any] = dict(
-        approval_id="readiness-approval",
-        operation_kind="model_readiness",
-        scope_kind=BudgetScopeKindV2.MODEL_READINESS,
-        scope_id="readiness-occurrence",
-        runtime_binding_hash=None,
-        provider_runtime_profile_attestation_hash=attestation.attestation_hash,
-        role_binding_ids=("extraction-binding", "embedding-binding"),
-        budget_hash=canonical_sha256(budget.model_dump(mode="python")),
-        approved_at=NOW,
-        expires_at=NOW + timedelta(hours=1),
-        unmetered_cost_acknowledged=True,
-        stop_condition_ids=("identity_drift", "budget_exhausted"),
-    )
-    return ExternalCallApprovalRecord(
-        approval_hash=external_call_approval_hash(values),
-        **values,
-    )
-
-
 def _pre_readiness_gates() -> ProviderGateClosure:
     from oamb.runtime.preflight import GateStatus, ProviderGateClosure
 
@@ -1016,7 +978,6 @@ def test_model_readiness_uses_attestation_and_keeps_readiness_and_conformance_no
 
     budget = _model_readiness_budget()
     attestation = _provider_runtime_attestation()
-    approval = _model_readiness_approval(budget, attestation)
 
     plan = resolve_run_plan(
         RunPreflightRequest(
@@ -1028,7 +989,6 @@ def test_model_readiness_uses_attestation_and_keeps_readiness_and_conformance_no
             artifact_durability=_durable_artifact_preflight(),
             runtime_binding=None,
             provider_runtime_attestation=attestation,
-            approval=approval,
             cost_measurement_spec=CostMeasurementSpec(
                 measurement_spec_id="model-readiness-measurement-v1",
                 measurement_spec_version="1",
@@ -1046,7 +1006,7 @@ def test_model_readiness_uses_attestation_and_keeps_readiness_and_conformance_no
     assert plan.provider_gates.memory_conformance.value == "not_run"
 
 
-def test_model_readiness_rejects_exact_release_drift_and_preapproval_observation() -> None:
+def test_model_readiness_rejects_exact_release_drift() -> None:
     from oamb.contracts.accounting import CostMeasurementSpec
     from oamb.contracts.specifications import (
         ProviderRuntimeProfileAttestation,
@@ -1084,28 +1044,9 @@ def test_model_readiness_rejects_exact_release_drift_and_preapproval_observation
                 artifact_durability=_durable_artifact_preflight(),
                 runtime_binding=None,
                 provider_runtime_attestation=drifted_attestation,
-                approval=_model_readiness_approval(budget, drifted_attestation),
                 cost_measurement_spec=measurement,
                 price_snapshot=None,
                 observed_at=NOW + timedelta(minutes=1),
-            )
-        )
-
-    with pytest.raises(PreflightRejected, match="active interval"):
-        resolve_run_plan(
-            RunPreflightRequest(
-                operation_kind=OperationKind.MODEL_READINESS,
-                budget_spec=budget,
-                role_slots=_model_readiness_role_slots(),
-                adapter_profile=_external_profile(),
-                provider_gates=_pre_readiness_gates(),
-                artifact_durability=_durable_artifact_preflight(),
-                runtime_binding=None,
-                provider_runtime_attestation=attestation,
-                approval=_model_readiness_approval(budget, attestation),
-                cost_measurement_spec=measurement,
-                price_snapshot=None,
-                observed_at=NOW - timedelta(minutes=1),
             )
         )
 
@@ -1123,7 +1064,6 @@ def test_model_readiness_rejects_a_promoted_memory_conformance_gate() -> None:
 
     budget = _model_readiness_budget()
     attestation = _provider_runtime_attestation()
-    approval = _model_readiness_approval(budget, attestation)
     promoted = ProviderGateClosure(
         liveness=GateStatus.PASS,
         storage_configuration=GateStatus.PASS,
@@ -1143,7 +1083,6 @@ def test_model_readiness_rejects_a_promoted_memory_conformance_gate() -> None:
                 artifact_durability=_durable_artifact_preflight(),
                 runtime_binding=None,
                 provider_runtime_attestation=attestation,
-                approval=approval,
                 cost_measurement_spec=CostMeasurementSpec(
                     measurement_spec_id="model-readiness-measurement-v1",
                     measurement_spec_version="1",
@@ -1153,152 +1092,3 @@ def test_model_readiness_rejects_a_promoted_memory_conformance_gate() -> None:
                 observed_at=NOW + timedelta(minutes=1),
             )
         )
-
-
-def _phase_review_role_slots() -> tuple[RoleSlot, ...]:
-    from oamb.config.load import EnvironmentReference
-    from oamb.contracts.specifications import (
-        BindingKind,
-        ExecutionOwner,
-        ModelRole,
-        ModelRoleBindingV2,
-        RoleBindingStatus,
-    )
-    from oamb.runtime.preflight import ResolutionStatus, RoleSlotName
-
-    quality = ModelRoleBindingV2(
-        binding_id="quality-review-binding",
-        role=ModelRole.QUALITY_REVIEW,
-        role_status=RoleBindingStatus.SELECTED,
-        execution_owner=ExecutionOwner.HARNESS,
-        binding_kind=BindingKind.MODEL_CLIENT,
-        provider="review-provider",
-        endpoint_reference="review-endpoint",
-        credential_variable_name="OAMB_QUALITY_REVIEW_API_KEY",
-        configured_model="review-model",
-        resolved_model="review-model@sha256:resolved",
-        parameters_fingerprint=HASH_A,
-        retry_policy_id="no-retry-v1",
-        configuration_fingerprint=HASH_B,
-        redacted_endpoint_fingerprint=HASH_C,
-    )
-    return tuple(
-        RoleSlot(
-            role=role,
-            status=(
-                ResolutionStatus.RESOLVED
-                if role == RoleSlotName.QUALITY_REVIEW
-                else ResolutionStatus.UNSELECTED
-            ),
-            binding=quality if role == RoleSlotName.QUALITY_REVIEW else None,
-            credential_reference=(
-                EnvironmentReference("OAMB_QUALITY_REVIEW_API_KEY")
-                if role == RoleSlotName.QUALITY_REVIEW
-                else None
-            ),
-            evidence_reference=(
-                "phase-review-role" if role == RoleSlotName.QUALITY_REVIEW else "unselected"
-            ),
-        )
-        for role in RoleSlotName
-    )
-
-
-def _phase_review_budget() -> BudgetSpecV2:
-    from oamb.contracts.specifications import (
-        BudgetScopeKindV2,
-        BudgetSpecV2,
-        ResourceBudgetCeiling,
-    )
-
-    return BudgetSpecV2(
-        budget_id="phase-review-budget",
-        scope_kind=BudgetScopeKindV2.PHASE_REVIEW,
-        scope_id="phase-review-occurrence",
-        approval_id="phase-review-approval",
-        max_attempts=1,
-        max_input_tokens=100,
-        max_output_tokens=100,
-        max_dispatch_wall_seconds=Decimal("30"),
-        max_cost=None,
-        currency=None,
-        resource_ceilings=(
-            ResourceBudgetCeiling(
-                dimension_id="provider_request_wall_seconds_v1",
-                maximum=Decimal("30"),
-                unit="seconds",
-            ),
-        ),
-        role_ceilings=(_role_ceiling("quality-review-binding", provider="review-provider"),),
-        stop_condition_ids=("budget_exhausted",),
-    )
-
-
-def _phase_review_approval(budget: BudgetSpecV2) -> ExternalCallApprovalRecord:
-    from oamb.contracts.ids import canonical_sha256
-    from oamb.contracts.specifications import (
-        BudgetScopeKindV2,
-        ExternalCallApprovalRecord,
-        external_call_approval_hash,
-    )
-
-    values: dict[str, Any] = dict(
-        approval_id="phase-review-approval",
-        operation_kind="phase_review",
-        scope_kind=BudgetScopeKindV2.PHASE_REVIEW,
-        scope_id="phase-review-occurrence",
-        runtime_binding_hash=None,
-        provider_runtime_profile_attestation_hash=None,
-        role_binding_ids=("quality-review-binding",),
-        budget_hash=canonical_sha256(budget.model_dump(mode="python")),
-        approved_at=NOW,
-        expires_at=NOW + timedelta(hours=1),
-        unmetered_cost_acknowledged=False,
-        stop_condition_ids=("budget_exhausted",),
-    )
-    return ExternalCallApprovalRecord(
-        approval_hash=external_call_approval_hash(values),
-        **values,
-    )
-
-
-def test_phase_review_selects_only_quality_role_and_has_no_memory_runtime_binding() -> None:
-    from oamb.contracts.accounting import CostMeasurementSpec
-    from oamb.runtime.preflight import OperationKind, RunPreflightRequest, resolve_run_plan
-
-    budget = _phase_review_budget()
-    approval = _phase_review_approval(budget)
-    plan = resolve_run_plan(
-        RunPreflightRequest(
-            operation_kind=OperationKind.PHASE_REVIEW,
-            budget_spec=budget,
-            role_slots=_phase_review_role_slots(),
-            adapter_profile=None,
-            provider_gates=None,
-            artifact_durability=_durable_artifact_preflight(),
-            runtime_binding=None,
-            provider_runtime_attestation=None,
-            approval=approval,
-            cost_measurement_spec=CostMeasurementSpec(
-                measurement_spec_id="phase-review-measurement-v1",
-                measurement_spec_version="1",
-                dimensions=(),
-            ),
-            price_snapshot=None,
-            environment={"OAMB_QUALITY_REVIEW_API_KEY": "must-not-enter-plan"},
-            observed_at=NOW + timedelta(minutes=1),
-            execution_environment_binding=_execution_environment(),
-        )
-    )
-
-    assert plan.adapter_profile is None
-    assert plan.provider_gates is None
-    assert plan.runtime_binding is None
-    assert [slot.status.value for slot in plan.role_slots] == [
-        "unselected",
-        "unselected",
-        "unselected",
-        "unselected",
-        "resolved",
-    ]
-    assert "must-not-enter-plan" not in repr(plan)

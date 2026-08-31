@@ -20,6 +20,7 @@ PROFILE_PROOF_FILES = {
     "hindsight-rest-v1": (
         "hindsight-health.json",
         "hindsight-version.json",
+        "hindsight-model-config.json",
     ),
     "mem0-rest-v1": (
         "mem0-openapi.json",
@@ -30,8 +31,11 @@ PROFILE_PROOF_FILES = {
         "openviking-health.json",
         "openviking-auth-identity.json",
         "openviking-storage.json",
+        "openviking-model-config.json",
     ),
 }
+PRIVATE_PATH_PREFIXES = ("/Users/", "/home/", "/private/var/", "C:\\Users\\")
+REDACTED_VALUE = "[redacted]"
 
 
 def build_service_verification_receipt(
@@ -83,7 +87,7 @@ def seal_profile_proof_manifest(
     _require_real_directory_path(proof_directory, trusted_root=trusted_root)
     entries: list[dict[str, object]] = []
     for filename in filenames:
-        content = _read_regular_leaf(proof_directory / filename)
+        content = _public_proof_bytes(_read_regular_leaf(proof_directory / filename))
         content_hash = hashlib.sha256(content).hexdigest()
         _seal_content_addressed_bytes(
             proof_store / "blobs",
@@ -111,6 +115,27 @@ def seal_profile_proof_manifest(
         trusted_root=trusted_root,
     )
     return manifest_path.stem
+
+
+def _public_proof_bytes(content: bytes) -> bytes:
+    document = json.loads(content)
+    redacted = _redact_control_authorities(document)
+    if redacted == document:
+        return content
+    return _canonical_json_bytes(redacted)
+
+
+def _redact_control_authorities(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _redact_control_authorities(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_control_authorities(item) for item in value]
+    if isinstance(value, str) and (
+        "://" in value
+        or value.startswith(("localhost:", "127.0.0.1:", *PRIVATE_PATH_PREFIXES))
+    ):
+        return REDACTED_VALUE
+    return value
 
 
 def seal_service_verification_receipt(

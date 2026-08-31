@@ -1,0 +1,181 @@
+# One complete T10 comparison. Secrets are referenced by environment-variable
+# name only; this file never contains credential or endpoint values.
+comparison: t10-lme6
+
+dataset:
+  dataset_id: longmemeval-s-cleaned
+  workload_id: lme30-native-smoke-plus-v1
+  selection: lme6
+  path: datasets/longmemeval-cleaned/longmemeval_s_cleaned.json
+  revision: 98d7416c24c778c2fee6e6f3006e7a073259d48f
+  source_sha256: d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442
+  case_manifest_hash: 3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4
+
+cells:
+  - cell_id: hindsight-lme6
+    provider_id: hindsight
+    adapter_profile_id: hindsight-rest-v1
+    endpoint_variable: OAMB_HINDSIGHT_BASE_URL
+    credential_variable: not_applicable
+    recipient: local-hindsight-service
+    producer_role: hindsight_extraction
+    embedding_role: embedding
+    answer_role: answer
+    judge_role: judge
+    retrieval_binding: hindsight
+  - cell_id: mem0-lme6
+    provider_id: mem0
+    adapter_profile_id: mem0-rest-v1
+    endpoint_variable: OAMB_MEM0_BASE_URL
+    credential_variable: OAMB_MEM0_ADMIN_API_KEY
+    recipient: local-mem0-service
+    producer_role: mem0_extraction
+    embedding_role: embedding
+    answer_role: answer
+    judge_role: judge
+    retrieval_binding: mem0
+  - cell_id: openviking-lme6
+    provider_id: openviking
+    adapter_profile_id: openviking-session-rest-v1
+    endpoint_variable: OAMB_OPENVIKING_BASE_URL
+    credential_variable: OAMB_OPENVIKING_USER_API_KEY
+    recipient: local-openviking-service
+    producer_role: openviking_semantic_understanding
+    embedding_role: embedding
+    answer_role: answer
+    judge_role: judge
+    retrieval_binding: openviking
+
+models:
+  # DeepSeek scale is low < high < max. Low is enabled thinking at rank 1/3.
+  # Real-agent roles use low to reduce latency and tokens.
+  hindsight_extraction:
+    model: deepseek-v4-pro
+    runtime_model: deepseek-v4-pro
+    thinking_effort: low
+    endpoint_variable: OAMB_HINDSIGHT_LLM_BASE_URL
+    credential_variable: OAMB_HINDSIGHT_LLM_API_KEY
+    recipient: deepseek-api
+    execution_owner: provider_internal
+    proof_kind: effective_config_and_outbound_request
+    proof_reference: reasoning_effort=low
+    usage_coverage: classified
+  mem0_extraction:
+    model: deepseek-v4-pro
+    runtime_model: deepseek-v4-pro
+    thinking_effort: low
+    endpoint_variable: OAMB_MEM0_LLM_BASE_URL
+    credential_variable: OAMB_MEM0_LLM_API_KEY
+    recipient: deepseek-api
+    execution_owner: provider_internal
+    proof_kind: effective_config_and_outbound_request
+    proof_reference: reasoning_effort=low
+    usage_coverage: classified
+  openviking_semantic_understanding:
+    model: deepseek-v4-pro
+    runtime_model: deepseek-v4-pro
+    thinking_effort: low
+    endpoint_variable: OAMB_OPENVIKING_VLM_BASE_URL
+    credential_variable: OAMB_OPENVIKING_VLM_API_KEY
+    recipient: deepseek-api
+    execution_owner: provider_internal
+    proof_kind: effective_config_and_outbound_request
+    proof_reference: reasoning_effort=low
+    usage_coverage: classified
+  answer:
+    model: deepseek-v4-pro
+    runtime_model: deepseek-v4-pro
+    thinking_effort: low
+    endpoint_variable: OAMB_DEEPSEEK_BASE_URL
+    credential_variable: OAMB_DEEPSEEK_API_KEY
+    recipient: deepseek-api
+    execution_owner: harness
+    proof_kind: sealed_outbound_request_and_response
+    proof_reference: reasoning_effort=low
+    usage_coverage: classified
+  # High is the middle rank 2/3, not maximum. It is reserved for offline judging.
+  judge:
+    model: deepseek-v4-flash
+    runtime_model: deepseek-v4-flash
+    thinking_effort: high
+    endpoint_variable: OAMB_DEEPSEEK_BASE_URL
+    credential_variable: OAMB_DEEPSEEK_API_KEY
+    recipient: deepseek-api
+    execution_owner: harness
+    proof_kind: sealed_outbound_request_and_response
+    proof_reference: reasoning_effort=high
+    usage_coverage: classified
+  # Embedding is non-generative; thinking and credentials do not apply.
+  embedding:
+    model: qwen3-embedding:0.6b
+    runtime_model: qwen3-embedding:0.6b
+    thinking_effort: not_applicable
+    endpoint_variable: OAMB_EMBEDDING_BASE_URL
+    credential_variable: not_applicable
+    recipient: local-vllm-metal
+    execution_owner: provider_internal
+    proof_kind: model_dimension_probe
+    proof_reference: not_applicable
+    usage_coverage: classified
+
+retrieval:
+  generation: disabled
+  bindings:
+    - binding_id: hindsight
+      provider_id: hindsight
+      route: recall
+      query_embedding_role: embedding
+      disabled_feature: reflect
+      disabled_value: absent
+      request_constraint: omit_reflect
+      proof_kind: complete_outbound_trace
+    - binding_id: mem0
+      provider_id: mem0
+      route: /search
+      query_embedding_role: embedding
+      disabled_feature: native_reranking
+      disabled_value: disabled
+      request_constraint: rerank_field_absent_by_schema
+      proof_kind: effective_config_and_complete_outbound_trace
+    - binding_id: openviking
+      provider_id: openviking
+      route: /api/v1/search/find
+      query_embedding_role: embedding
+      disabled_feature: session_intent
+      disabled_value: not_applicable
+      request_constraint: no_session_id_on_find
+      proof_kind: source_verified_endpoint_and_complete_outbound_trace
+
+limits:
+  # These ceilings apply independently to each provider cell.
+  max_attempts_per_case: 2
+  # Budgeted attempts are owner-allocation units, not raw provider HTTP calls.
+  max_budgeted_attempts: 1000
+  # Memory operations may include native extraction and asynchronous indexing.
+  # The same 900-second ceiling covers REST read/total time and OpenViking task polling.
+  memory_operation_timeout_seconds: 900
+  # Answer and judge remain bounded separately from slower memory indexing work.
+  model_call_timeout_seconds: 600
+  # Enforced as the whole-cell deadline; reports show observed route wall time.
+  # LME-6 reserves 337 memory routes at 900 seconds and 12 model routes at
+  # 600 seconds, for an exact aggregate ceiling of 310,500 seconds.
+  total_wall_time_seconds: 310500
+  max_input_tokens: 5000000
+  max_output_tokens: 1200000
+  # Keep a provider-neutral 32K recall ceiling; this is unrelated to embedding context.
+  max_recall_context_tokens_per_case: 32768
+  max_storage_bytes: 10737418240
+  max_peak_memory_bytes: 8589934592
+  max_cost: "100.00"
+  currency: CNY
+
+execution:
+  max_parallel_datasets: 1
+  # Three isolated provider cells share one preflight and completion barrier.
+  max_parallel_providers_per_dataset: 3
+  # Keep one history active per provider because extraction shares a bounded
+  # upstream model route. Sources inside the history remain chronological.
+  max_parallel_history_ingestions_per_provider: 2
+  # A ready history releases its questions immediately. This permit covers
+  # retrieval, answer, judge, evaluation, and terminal question evidence.
+  max_parallel_questions_per_provider: 2

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from decimal import Decimal
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import model_validator
 
@@ -18,6 +20,7 @@ from .base import (
 )
 from .ids import canonical_sha256
 from .specifications import (
+    MEMORY_CONFORMANCE_ROUTE_STAGES,
     BudgetScopeKindV2,
     BudgetScopeKindV3,
     DispatchBudgetOwnerKind,
@@ -122,7 +125,7 @@ class AttemptRecord(StrictContract):
     schema_name: Literal["attempt_record"] = "attempt_record"
     schema_version: Literal[1] = 1
     attempt_id: Sha256
-    parent_kind: Literal["ingestion_plan", "case", "phase_review"]
+    parent_kind: Literal["ingestion_plan", "case"]
     parent_id: NonEmptyStr
     stage: NonEmptyStr
     ordinal: PositiveInt
@@ -154,11 +157,12 @@ class AttemptRecordV2(StrictContract):
     schema_name: Literal["attempt_record"] = "attempt_record"
     schema_version: Literal[2] = 2
     attempt_id: Sha256
-    parent_kind: Literal["ingestion_plan", "case", "phase_review", "model_readiness"]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness"]
     parent_id: NonEmptyStr
     stage: NonEmptyStr
     ordinal: PositiveInt
     request_fingerprint: Sha256
+    request_messages_sha256: Sha256 | None = None
     started_at: UtcDateTime
     ended_at: UtcDateTime
     outcome: AttemptOutcome
@@ -186,9 +190,7 @@ class AttemptRecordV3(StrictContract):
     schema_name: Literal["attempt_record"] = "attempt_record"
     schema_version: Literal[3] = 3
     attempt_id: Sha256
-    parent_kind: Literal[
-        "ingestion_plan", "case", "phase_review", "model_readiness", "memory_conformance"
-    ]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness", "memory_conformance"]
     parent_id: NonEmptyStr
     stage: NonEmptyStr
     ordinal: PositiveInt
@@ -208,13 +210,10 @@ class AttemptRecordV3(StrictContract):
     def coherent_times_and_contribution(self) -> Self:
         if self.ended_at < self.started_at:
             raise ValueError("attempt end precedes start")
-        if self.parent_kind == "memory_conformance" and self.stage not in {
-            "scope_allocate",
-            "memory_ingest",
-            "memory_readiness",
-            "memory_projection",
-            "memory_query",
-        }:
+        if (
+            self.parent_kind == "memory_conformance"
+            and self.stage not in MEMORY_CONFORMANCE_ROUTE_STAGES
+        ):
             raise ValueError("memory-conformance attempt uses an unsupported stage")
         if self.index_contribution == IndexContribution.SUPERSEDED:
             if self.superseded_by_attempt_id is None:
@@ -222,6 +221,63 @@ class AttemptRecordV3(StrictContract):
         elif self.superseded_by_attempt_id is not None:
             raise ValueError("only superseded contribution names a successor")
         return self
+
+
+class AttemptRecordV4(StrictContract):
+    schema_name: Literal["attempt_record"] = "attempt_record"
+    schema_version: Literal[4] = 4
+    attempt_id: Sha256
+    attempt_record_hash: Sha256
+    intent_hash: Sha256
+    dispatch_route_id: NonEmptyStr
+    dispatch_route_hash: Sha256
+    receipt_record_hash: Sha256
+    run_id: NonEmptyStr
+    parent_kind: Literal["ingestion_plan", "case"]
+    parent_id: NonEmptyStr
+    stage: NonEmptyStr
+    ordinal: PositiveInt
+    request_fingerprint: Sha256
+    request_messages_sha256: Sha256 | None = None
+    started_at: UtcDateTime
+    ended_at: UtcDateTime
+    outcome: AttemptOutcome
+    retry_of_attempt_id: Sha256 | None
+    idempotency_key_hash: Sha256 | None
+    reconciliation_capability: Literal["none", "idempotency_key", "receipt_lookup"]
+    raw_response_ref: Sha256 | None
+    raw_error_ref: Sha256 | None
+    index_contribution: IndexContribution
+    superseded_by_attempt_id: Sha256 | None
+
+    @model_validator(mode="after")
+    def live_run_attempt_closes(self) -> Self:
+        expected_hash = attempt_record_v4_hash(
+            self.model_dump(mode="python", exclude={"attempt_record_hash"})
+        )
+        if self.attempt_record_hash != expected_hash:
+            raise ValueError("attempt record hash does not match its canonical fields")
+        if self.ended_at < self.started_at:
+            raise ValueError("attempt end precedes start")
+        if self.reconciliation_capability == "idempotency_key":
+            if self.idempotency_key_hash is None:
+                raise ValueError("idempotency-key reconciliation requires its hash")
+        elif self.idempotency_key_hash is not None:
+            raise ValueError("only idempotency-key reconciliation names its hash")
+        if self.index_contribution == IndexContribution.SUPERSEDED:
+            if self.superseded_by_attempt_id is None:
+                raise ValueError("superseded contribution requires successor attempt")
+        elif self.superseded_by_attempt_id is not None:
+            raise ValueError("only superseded contribution names a successor")
+        return self
+
+
+def attempt_record_v4_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "attempt_record")
+    payload.setdefault("schema_version", 4)
+    payload.pop("attempt_record_hash", None)
+    return canonical_sha256(payload)
 
 
 class RunLeaseRecord(StrictContract):
@@ -287,7 +343,6 @@ class ModelReadinessOccurrenceRecord(StrictContract):
     provider_project_id: NonEmptyStr
     provider_profile_id: NonEmptyStr
     provider_runtime_profile_attestation_hash: Sha256
-    approval_id: NonEmptyStr
     budget_id: NonEmptyStr
     state: ModelReadinessOccurrenceState
     role_binding_ids: tuple[NonEmptyStr, ...]
@@ -339,7 +394,6 @@ class MemoryConformanceOccurrenceRecord(StrictContract):
     provider_profile_id: NonEmptyStr
     provider_scope_id: NonEmptyStr
     runtime_binding_hash: Sha256
-    approval_id: NonEmptyStr
     budget_id: NonEmptyStr
     state: MemoryConformanceOccurrenceState
     operation_claim_ids: tuple[Sha256, ...]
@@ -470,13 +524,189 @@ class BudgetReservationRecordV2(StrictContract):
         return self
 
 
+class BudgetOwnerAllocation(StrictContract):
+    schema_name: Literal["budget_owner_allocation"] = "budget_owner_allocation"
+    schema_version: Literal[1] = 1
+    allocation_hash: Sha256
+    owner_kind: DispatchBudgetOwnerKind
+    owner_id: NonEmptyStr
+    allocated_attempts: PositiveInt
+    allocated_input_tokens: NonNegativeInt
+    allocated_output_tokens: NonNegativeInt
+    allocated_dispatch_wall_seconds: NonNegativeDecimal
+    allocated_provider_units: NonNegativeDecimal
+    allocated_resource_ceilings: tuple[ResourceBudgetCeiling, ...]
+    allocated_cost: NonNegativeDecimal | None
+    currency: str | None
+
+    @model_validator(mode="after")
+    def identity_currency_and_resources_close(self) -> Self:
+        expected_hash = budget_owner_allocation_hash(
+            self.model_dump(mode="python", exclude={"allocation_hash"})
+        )
+        if self.allocation_hash != expected_hash:
+            raise ValueError("budget-owner allocation hash does not match its canonical fields")
+        if (self.allocated_cost is None) != (self.currency is None):
+            raise ValueError("allocated cost and currency must be present together")
+        if self.currency is not None and len(self.currency) != 3:
+            raise ValueError("currency must be an ISO 4217 code")
+        dimensions = tuple(item.dimension_id for item in self.allocated_resource_ceilings)
+        if len(set(dimensions)) != len(dimensions):
+            raise ValueError("allocation contains duplicate resource dimensions")
+        return self
+
+
+def budget_owner_allocation_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "budget_owner_allocation")
+    payload.setdefault("schema_version", 1)
+    payload.pop("allocation_hash", None)
+    return canonical_sha256(payload)
+
+
+class BudgetReservationRecordV3(StrictContract):
+    schema_name: Literal["budget_reservation_record"] = "budget_reservation_record"
+    schema_version: Literal[3] = 3
+    reservation_id: Sha256
+    reservation_hash: Sha256
+    budget_id: NonEmptyStr
+    budget_hash: Sha256
+    scope_kind: Literal[BudgetScopeKindV3.RUN, BudgetScopeKindV3.MEMORY_CONFORMANCE]
+    scope_id: NonEmptyStr
+    attempt_id: Sha256
+    dispatch_route_id: NonEmptyStr
+    dispatch_route_hash: Sha256
+    owner_allocations: tuple[BudgetOwnerAllocation, ...]
+    reserved_attempts: PositiveInt
+    reserved_input_tokens: NonNegativeInt
+    reserved_output_tokens: NonNegativeInt
+    reserved_dispatch_wall_seconds: NonNegativeDecimal
+    reserved_provider_units: NonNegativeDecimal
+    reserved_resource_ceilings: tuple[ResourceBudgetCeiling, ...]
+    reserved_cost: NonNegativeDecimal | None
+    currency: str | None
+    reserved_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def identity_owner_order_and_aggregate_close(self) -> Self:
+        identity_fields = self.model_dump(
+            mode="python", exclude={"reservation_id", "reservation_hash"}
+        )
+        if self.reservation_id != budget_reservation_v3_id(identity_fields):
+            raise ValueError("budget reservation identity does not match its canonical fields")
+        expected_hash = budget_reservation_v3_hash(
+            self.model_dump(mode="python", exclude={"reservation_hash"})
+        )
+        if self.reservation_hash != expected_hash:
+            raise ValueError("budget reservation hash does not match its canonical fields")
+        if not self.owner_allocations:
+            raise ValueError("version 3 reservation requires owner allocations")
+        owner_ids = tuple(item.owner_id for item in self.owner_allocations)
+        if len(set(owner_ids)) != len(owner_ids):
+            raise ValueError("reservation contains duplicate budget owners")
+        first_kind = self.owner_allocations[0].owner_kind
+        if first_kind == DispatchBudgetOwnerKind.MODEL_ROLE:
+            if len(self.owner_allocations) != 1:
+                raise ValueError("direct model reservation requires exactly one allocation")
+        elif any(
+            item.owner_kind != DispatchBudgetOwnerKind.MODEL_ROLE
+            for item in self.owner_allocations[1:]
+        ):
+            raise ValueError("provider-operation allocation first, then model-role allocations")
+        if (self.reserved_cost is None) != (self.currency is None):
+            raise ValueError("reserved cost and currency must be present together")
+        if self.currency is not None and len(self.currency) != 3:
+            raise ValueError("currency must be an ISO 4217 code")
+        if any(item.currency != self.currency for item in self.owner_allocations):
+            raise ValueError("allocation currency must match the reservation currency")
+        dimensions = tuple(item.dimension_id for item in self.reserved_resource_ceilings)
+        if len(set(dimensions)) != len(dimensions):
+            raise ValueError("reservation aggregate contains duplicate resource dimensions")
+
+        expected_resources = _sum_allocation_resources(self.owner_allocations)
+        expected_cost = (
+            None
+            if self.currency is None
+            else sum(
+                (item.allocated_cost or Decimal("0") for item in self.owner_allocations),
+                Decimal("0"),
+            )
+        )
+        aggregate_matches = (
+            self.reserved_attempts
+            == sum(item.allocated_attempts for item in self.owner_allocations)
+            and self.reserved_input_tokens
+            == sum(item.allocated_input_tokens for item in self.owner_allocations)
+            and self.reserved_output_tokens
+            == sum(item.allocated_output_tokens for item in self.owner_allocations)
+            and self.reserved_dispatch_wall_seconds
+            == sum(
+                (item.allocated_dispatch_wall_seconds for item in self.owner_allocations),
+                Decimal("0"),
+            )
+            and self.reserved_provider_units
+            == sum(
+                (item.allocated_provider_units for item in self.owner_allocations),
+                Decimal("0"),
+            )
+            and self.reserved_resource_ceilings == expected_resources
+            and self.reserved_cost == expected_cost
+        )
+        if not aggregate_matches:
+            raise ValueError("reservation aggregate does not equal its owner allocation sum")
+        return self
+
+
+def _sum_allocation_resources(
+    allocations: tuple[BudgetOwnerAllocation, ...],
+) -> tuple[ResourceBudgetCeiling, ...]:
+    amounts: dict[str, Decimal] = {}
+    units: dict[str, str] = {}
+    order: list[str] = []
+    for allocation in allocations:
+        for resource in allocation.allocated_resource_ceilings:
+            dimension = resource.dimension_id
+            if dimension in units and units[dimension] != resource.unit:
+                raise ValueError("allocation resource units disagree")
+            if dimension not in amounts:
+                order.append(dimension)
+                amounts[dimension] = Decimal("0")
+                units[dimension] = resource.unit
+            amounts[dimension] += resource.maximum
+    return tuple(
+        ResourceBudgetCeiling(
+            dimension_id=dimension,
+            maximum=amounts[dimension],
+            unit=units[dimension],
+        )
+        for dimension in order
+    )
+
+
+def budget_reservation_v3_id(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "budget_reservation_record")
+    payload.setdefault("schema_version", 3)
+    payload.pop("reservation_id", None)
+    payload.pop("reservation_hash", None)
+    return canonical_sha256(["oamb-budget-reservation-v3", payload])
+
+
+def budget_reservation_v3_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "budget_reservation_record")
+    payload.setdefault("schema_version", 3)
+    payload.pop("reservation_hash", None)
+    return canonical_sha256(payload)
+
+
 class AttemptIntentRecord(StrictContract):
     schema_name: Literal["attempt_intent_record"] = "attempt_intent_record"
     schema_version: Literal[1] = 1
     attempt_id: Sha256
     claim_id: Sha256
     reservation_id: Sha256
-    parent_kind: Literal["ingestion_plan", "case", "phase_review", "model_readiness"]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness"]
     parent_id: NonEmptyStr
     role_binding_id: NonEmptyStr
     stage: NonEmptyStr
@@ -501,9 +731,7 @@ class AttemptIntentRecordV2(StrictContract):
     attempt_id: Sha256
     claim_id: Sha256
     reservation_id: Sha256
-    parent_kind: Literal[
-        "ingestion_plan", "case", "phase_review", "model_readiness", "memory_conformance"
-    ]
+    parent_kind: Literal["ingestion_plan", "case", "model_readiness", "memory_conformance"]
     parent_id: NonEmptyStr
     dispatch_route_id: NonEmptyStr
     dispatch_owner_kind: DispatchBudgetOwnerKind
@@ -538,6 +766,62 @@ class AttemptIntentRecordV2(StrictContract):
         elif self.idempotency_key_hash is not None:
             raise ValueError("only idempotency-key reconciliation names its hash")
         return self
+
+
+class AttemptIntentRecordV3(StrictContract):
+    schema_name: Literal["attempt_intent_record"] = "attempt_intent_record"
+    schema_version: Literal[3] = 3
+    attempt_id: Sha256
+    intent_hash: Sha256
+    claim_id: Sha256
+    reservation_id: Sha256
+    reservation_hash: Sha256
+    scope_kind: Literal[BudgetScopeKindV3.RUN, BudgetScopeKindV3.MEMORY_CONFORMANCE]
+    scope_id: NonEmptyStr
+    parent_kind: Literal["ingestion_plan", "case", "memory_conformance"]
+    parent_id: NonEmptyStr
+    stage: NonEmptyStr
+    preflight_record_hash: Sha256 | None
+    budget_id: NonEmptyStr
+    budget_hash: Sha256
+    dispatch_route_id: NonEmptyStr
+    dispatch_route_hash: Sha256
+    request_fingerprint: Sha256
+    reconciliation_capability: Literal["none", "idempotency_key", "receipt_lookup"]
+    idempotency_key_hash: Sha256 | None
+    sealed_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def scope_identity_and_reconciliation_close(self) -> Self:
+        expected_hash = attempt_intent_v3_hash(
+            self.model_dump(mode="python", exclude={"intent_hash"})
+        )
+        if self.intent_hash != expected_hash:
+            raise ValueError("attempt intent hash does not match its canonical fields")
+        if self.scope_kind == BudgetScopeKindV3.RUN:
+            if self.parent_kind not in {"ingestion_plan", "case"}:
+                raise ValueError("run intent requires an ingestion-plan or case parent")
+            if self.preflight_record_hash is None:
+                raise ValueError("run intent requires its preflight record hash")
+        else:
+            if self.parent_kind != "memory_conformance" or self.parent_id != self.scope_id:
+                raise ValueError("memory-conformance intent requires its occurrence parent")
+            if self.preflight_record_hash is not None:
+                raise ValueError("memory-conformance intent has no run preflight record")
+        if self.reconciliation_capability == "idempotency_key":
+            if self.idempotency_key_hash is None:
+                raise ValueError("idempotency-key reconciliation requires its hash")
+        elif self.idempotency_key_hash is not None:
+            raise ValueError("only idempotency-key reconciliation names its hash")
+        return self
+
+
+def attempt_intent_v3_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "attempt_intent_record")
+    payload.setdefault("schema_version", 3)
+    payload.pop("intent_hash", None)
+    return canonical_sha256(payload)
 
 
 class AttemptReceiptRecord(StrictContract):
@@ -802,6 +1086,7 @@ class CaseRecordV3(StrictContract):
     state: CaseState
     retrieval_raw_ref: Sha256 | None
     retrieval_supporting_raw_refs: tuple[Sha256, ...]
+    retrieval_request_raw_ref: Sha256 | None = None
     ordered_native_candidate_ids: tuple[NonEmptyStr, ...]
     ordered_native_content_sha256: tuple[Sha256, ...]
     native_candidate_source_unit_ids: tuple[Sha256 | None, ...]
@@ -915,129 +1200,6 @@ class CaseRecordV3(StrictContract):
         return self
 
 
-class PhaseReviewOccurrenceRecord(StrictContract):
-    schema_name: Literal["phase_review_occurrence_record"] = "phase_review_occurrence_record"
-    schema_version: Literal[1] = 1
-    phase_review_occurrence_id: Sha256
-    phase_id: NonEmptyStr
-    review_bundle_hash: Sha256
-    reviewer_role_binding_hash: Sha256
-    ordinal: PositiveInt
-    approval_record_id: Sha256
-    budget_id: NonEmptyStr
-    state: Literal[
-        "planned",
-        "budget_reserved",
-        "running",
-        "sealed",
-        "error",
-        "cancelled",
-        "budget_exceeded",
-        "interrupted_unknown_outcome",
-    ]
-    started_at: UtcDateTime | None
-    ended_at: UtcDateTime | None
-
-    @model_validator(mode="after")
-    def occurrence_identity_and_times_are_canonical(self) -> Self:
-        expected = phase_review_occurrence_id(
-            phase_id=self.phase_id,
-            review_bundle_hash=self.review_bundle_hash,
-            reviewer_role_binding_hash=self.reviewer_role_binding_hash,
-            ordinal=self.ordinal,
-        )
-        if self.phase_review_occurrence_id != expected:
-            raise ValueError("phase-review occurrence identity does not match its payload")
-        if (self.started_at is None) != (self.ended_at is None):
-            raise ValueError("phase-review occurrence timing requires both endpoints")
-        if self.started_at is not None and self.ended_at is not None:
-            if self.ended_at < self.started_at:
-                raise ValueError("phase-review occurrence ends before it starts")
-        return self
-
-
-def phase_review_occurrence_id(
-    *,
-    phase_id: str,
-    review_bundle_hash: str,
-    reviewer_role_binding_hash: str,
-    ordinal: int,
-) -> str:
-    return canonical_sha256(
-        [
-            "oamb-phase-review-occurrence-v1",
-            phase_id,
-            review_bundle_hash,
-            reviewer_role_binding_hash,
-            ordinal,
-        ]
-    )
-
-
-class PhaseReviewOccurrenceRecordV2(StrictContract):
-    schema_name: Literal["phase_review_occurrence_record"] = "phase_review_occurrence_record"
-    schema_version: Literal[2] = 2
-    phase_review_occurrence_id: Sha256
-    phase_id: NonEmptyStr
-    review_bundle_hash: Sha256
-    reviewer_role_binding_hash: Sha256
-    artifact_repository_fingerprint: Sha256
-    ordinal: PositiveInt
-    approval_record_id: Sha256
-    budget_id: NonEmptyStr
-    state: Literal[
-        "planned",
-        "budget_reserved",
-        "running",
-        "sealed",
-        "error",
-        "cancelled",
-        "budget_exceeded",
-        "evidence_inconclusive",
-        "interrupted_unknown_outcome",
-    ]
-    started_at: UtcDateTime | None
-    ended_at: UtcDateTime | None
-
-    @model_validator(mode="after")
-    def occurrence_identity_and_times_are_canonical(self) -> Self:
-        expected = phase_review_occurrence_id_v2(
-            phase_id=self.phase_id,
-            review_bundle_hash=self.review_bundle_hash,
-            reviewer_role_binding_hash=self.reviewer_role_binding_hash,
-            artifact_repository_fingerprint=self.artifact_repository_fingerprint,
-            ordinal=self.ordinal,
-        )
-        if self.phase_review_occurrence_id != expected:
-            raise ValueError("phase-review occurrence identity does not match its payload")
-        if (self.started_at is None) != (self.ended_at is None):
-            raise ValueError("phase-review occurrence timing requires both endpoints")
-        if self.started_at is not None and self.ended_at is not None:
-            if self.ended_at < self.started_at:
-                raise ValueError("phase-review occurrence ends before it starts")
-        return self
-
-
-def phase_review_occurrence_id_v2(
-    *,
-    phase_id: str,
-    review_bundle_hash: str,
-    reviewer_role_binding_hash: str,
-    artifact_repository_fingerprint: str,
-    ordinal: int,
-) -> str:
-    return canonical_sha256(
-        [
-            "oamb-phase-review-occurrence-v2",
-            phase_id,
-            review_bundle_hash,
-            reviewer_role_binding_hash,
-            artifact_repository_fingerprint,
-            ordinal,
-        ]
-    )
-
-
 class CapsuleManifestEntry(StrictContract):
     schema_name: Literal["capsule_manifest_entry"] = "capsule_manifest_entry"
     schema_version: Literal[1] = 1
@@ -1124,6 +1286,96 @@ class ProviderServiceEvidenceManifest(StrictContract):
         return self
 
 
+_SEALED_CONFORMANCE_RECORD_KINDS = frozenset(
+    {
+        "memory_conformance_spec",
+        "budget_spec",
+        "memory_conformance_occurrence_record",
+        "occurrence_claim_record",
+        "budget_reservation_record",
+        "attempt_intent_record",
+        "attempt_receipt_record",
+        "attempt_record",
+        "token_usage_record",
+        "resource_usage_record",
+        "cost_record",
+        "projection_before",
+        "projection_after",
+    }
+)
+
+
+class MemoryConformanceEvidenceManifest(StrictContract):
+    schema_name: Literal["memory_conformance_evidence_manifest"] = (
+        "memory_conformance_evidence_manifest"
+    )
+    schema_version: Literal[1] = 1
+    manifest_hash: Sha256
+    conformance_spec_id: NonEmptyStr
+    conformance_spec_hash: Sha256
+    occurrence_id: NonEmptyStr
+    terminal_occurrence_hash: Sha256
+    terminal_state: MemoryConformanceOccurrenceState
+    source_entries: tuple[CapsuleManifestEntry, ...]
+    raw_entries: tuple[CapsuleManifestEntry, ...]
+    attempt_root_hash: Sha256
+    token_usage_root_hash: Sha256
+    resource_usage_root_hash: Sha256
+    cost_root_hash: Sha256
+    created_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def commit_marker_hash_inventory_and_paths_close(self) -> Self:
+        expected_hash = memory_conformance_evidence_manifest_hash(
+            self.model_dump(mode="python", exclude={"manifest_hash"})
+        )
+        if self.manifest_hash != expected_hash:
+            raise ValueError("memory-conformance manifest hash does not match its fields")
+        terminal_states = {
+            MemoryConformanceOccurrenceState.SEALED,
+            MemoryConformanceOccurrenceState.ERROR,
+            MemoryConformanceOccurrenceState.CANCELLED,
+            MemoryConformanceOccurrenceState.BUDGET_EXCEEDED,
+            MemoryConformanceOccurrenceState.INTERRUPTED_UNKNOWN_OUTCOME,
+        }
+        if self.terminal_state not in terminal_states:
+            raise ValueError("memory-conformance manifest requires a terminal state")
+        if not self.source_entries:
+            raise ValueError("memory-conformance manifest requires source entries")
+        all_paths = tuple(
+            entry.relative_path for entry in (*self.source_entries, *self.raw_entries)
+        )
+        if len(set(all_paths)) != len(all_paths):
+            raise ValueError("memory-conformance manifest contains duplicate paths")
+        if any(not entry.relative_path.startswith("source/") for entry in self.source_entries):
+            raise ValueError("memory-conformance source entries must use source paths")
+        if any(not entry.relative_path.startswith("raw/") for entry in self.raw_entries):
+            raise ValueError("memory-conformance raw entries must use raw paths")
+        if any(
+            path == "memory-conformance-manifest.json" or path.startswith(".runtime/")
+            for path in all_paths
+        ):
+            raise ValueError("memory-conformance manifest cannot index itself or runtime pointers")
+        if self.terminal_state == MemoryConformanceOccurrenceState.SEALED:
+            if not self.raw_entries:
+                raise ValueError("sealed memory-conformance manifest requires raw entries")
+            record_kinds = {entry.record_kind for entry in self.source_entries}
+            missing_kinds = _SEALED_CONFORMANCE_RECORD_KINDS - record_kinds
+            if missing_kinds:
+                raise ValueError(
+                    "sealed memory-conformance manifest lacks its complete source inventory"
+                )
+        return self
+
+
+def memory_conformance_evidence_manifest_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "memory_conformance_evidence_manifest")
+    payload.setdefault("schema_version", 1)
+    payload.pop("manifest_hash", None)
+    return canonical_sha256(payload)
+
+
 class RecoveryDecisionRecord(StrictContract):
     schema_name: Literal["recovery_decision_record"] = "recovery_decision_record"
     schema_version: Literal[1] = 1
@@ -1156,7 +1408,7 @@ class CloseErrorRecord(StrictContract):
     schema_name: Literal["close_error_record"] = "close_error_record"
     schema_version: Literal[1] = 1
     close_error_id: Sha256
-    owner_kind: Literal["run", "phase_review", "model_readiness", "worker"]
+    owner_kind: Literal["run", "model_readiness", "worker"]
     owner_id: NonEmptyStr
     client_profile_id: NonEmptyStr
     error_ref: Sha256

@@ -430,6 +430,203 @@ async def test_cancelled_queued_add_releases_the_dispatch_guard_for_retry() -> N
 
 
 @pytest.mark.asyncio
+async def test_add_rejects_out_of_order_source_before_dispatch() -> None:
+    add_source_ids: list[str] = []
+
+    async def public_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, content=_openapi())
+        if request.url.path == "/memories":
+            add_source_ids.append(json.loads(request.content)["metadata"]["oamb_source_unit_id"])
+            return httpx.Response(200, content=b'{"results":[]}')
+        raise AssertionError(f"unexpected public request: {request.method} {request.url}")
+
+    def inspector_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                content=b'{"status":"ok","mode":"read_only_projection"}',
+            )
+        if request.url.path == "/v1/projection":
+            return httpx.Response(200, content=_empty_projection())
+        raise AssertionError(f"unexpected inspector request: {request.method} {request.url}")
+
+    adapter = _adapter(
+        public_transport=httpx.MockTransport(public_handler),
+        inspector_transport=httpx.MockTransport(inspector_handler),
+    )
+    await adapter.resolve()
+    scope = await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(ingestion_occurrence_id=RUN_ID, ingestion_plan_id=PLAN_ID)
+    )
+    second_source_id = "e" * 64
+    first_dispatch, second_dispatch = adapter.plan_ingestion(
+        IngestionRequest(
+            scope=scope,
+            ordered_source_units=(_source(), _source(second_source_id, 2)),
+        )
+    )
+
+    with pytest.raises(ValueError, match="next ordered source"):
+        await adapter.ingest(
+            IngestionDispatchRequest(
+                scope=scope,
+                attempt_id="2" * 64,
+                dispatch=second_dispatch,
+            )
+        )
+    assert add_source_ids == []
+
+    await adapter.ingest(
+        IngestionDispatchRequest(scope=scope, attempt_id="1" * 64, dispatch=first_dispatch)
+    )
+    await adapter.ingest(
+        IngestionDispatchRequest(scope=scope, attempt_id="3" * 64, dispatch=second_dispatch)
+    )
+    assert add_source_ids == [SOURCE_ID, second_source_id]
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_adds_from_independent_ingestion_plans_can_dispatch_in_parallel() -> None:
+    both_adds_started = asyncio.Event()
+    release_adds = asyncio.Event()
+    add_run_ids: list[str] = []
+
+    async def public_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, content=_openapi())
+        if request.url.path == "/memories":
+            add_run_ids.append(json.loads(request.content)["run_id"])
+            if len(add_run_ids) == 2:
+                both_adds_started.set()
+            await release_adds.wait()
+            return httpx.Response(200, content=b'{"results":[]}')
+        raise AssertionError(f"unexpected public request: {request.method} {request.url}")
+
+    def inspector_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                content=b'{"status":"ok","mode":"read_only_projection"}',
+            )
+        if request.url.path == "/v1/projection":
+            return httpx.Response(
+                200,
+                json={
+                    "collection": "oamb_memories",
+                    "run_id": request.url.params["run_id"],
+                    "count": 0,
+                    "points": [],
+                    "next_cursor": None,
+                },
+            )
+        raise AssertionError(f"unexpected inspector request: {request.method} {request.url}")
+
+    adapter = _adapter(
+        public_transport=httpx.MockTransport(public_handler),
+        inspector_transport=httpx.MockTransport(inspector_handler),
+    )
+    await adapter.resolve()
+    second_run_id = "e" * 64
+    scopes = [
+        await adapter.allocate_ingestion_scope(
+            ScopeAllocationRequest(ingestion_occurrence_id=RUN_ID, ingestion_plan_id=PLAN_ID)
+        ),
+        await adapter.allocate_ingestion_scope(
+            ScopeAllocationRequest(
+                ingestion_occurrence_id=second_run_id,
+                ingestion_plan_id="d" * 64,
+            )
+        ),
+    ]
+    dispatches = [
+        adapter.plan_ingestion(IngestionRequest(scope=scope, ordered_source_units=(_source(),)))[0]
+        for scope in scopes
+    ]
+    tasks = [
+        asyncio.create_task(
+            adapter.ingest(
+                IngestionDispatchRequest(
+                    scope=scope,
+                    attempt_id=str(index) * 64,
+                    dispatch=dispatch,
+                )
+            )
+        )
+        for index, (scope, dispatch) in enumerate(zip(scopes, dispatches, strict=True), start=1)
+    ]
+
+    try:
+        await asyncio.wait_for(both_adds_started.wait(), timeout=1.0)
+    finally:
+        release_adds.set()
+
+    receipts = await asyncio.gather(*tasks)
+    assert [receipt.accepted_source_unit_ids for receipt in receipts] == [
+        (SOURCE_ID,),
+        (SOURCE_ID,),
+    ]
+    assert set(add_run_ids) == {RUN_ID, second_run_id}
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_projection_capture_sequences_are_independent_per_scope() -> None:
+    store = CapturingStore()
+
+    def public_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, content=_openapi())
+        raise AssertionError(f"unexpected public request: {request.method} {request.url}")
+
+    def inspector_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                content=b'{"status":"ok","mode":"read_only_projection"}',
+            )
+        if request.url.path == "/v1/projection":
+            return httpx.Response(
+                200,
+                json={
+                    "collection": "oamb_memories",
+                    "run_id": request.url.params["run_id"],
+                    "count": 0,
+                    "points": [],
+                    "next_cursor": None,
+                },
+            )
+        raise AssertionError(f"unexpected inspector request: {request.method} {request.url}")
+
+    adapter = _adapter(
+        public_transport=httpx.MockTransport(public_handler),
+        inspector_transport=httpx.MockTransport(inspector_handler),
+        store=store,
+    )
+    await adapter.resolve()
+    second_run_id = "e" * 64
+    await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(ingestion_occurrence_id=RUN_ID, ingestion_plan_id=PLAN_ID)
+    )
+    await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(ingestion_occurrence_id=second_run_id, ingestion_plan_id="d" * 64)
+    )
+
+    summaries = [
+        document
+        for request in store.raw
+        if (document := json.loads(request.payload_bytes)).get("schema")
+        == "oamb-mem0-projection-receipt-v1"
+    ]
+    assert [(item["run_id"], item["capture_sequence"]) for item in summaries] == [
+        (RUN_ID, 1),
+        (second_run_id, 1),
+    ]
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_close_arms_adapter_gate_before_waiting_for_client_drain() -> None:
     class BlockingCloseTransport(CloseTrackingTransport):
         def __init__(self) -> None:

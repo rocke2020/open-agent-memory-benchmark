@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class LifecycleLockTests(unittest.TestCase):
     def run_acquire(self, runtime: Path) -> subprocess.CompletedProcess[str]:
         program = """
+set -eu
 die() { printf '%s\\n' "$*" >&2; exit 1; }
 RUNTIME_DIR=$1
 LIFECYCLE_LOCK="$RUNTIME_DIR/provider-lifecycle.lock"
@@ -76,6 +77,143 @@ printf 'acquired\\n'
             result = self.run_acquire(runtime)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("active provider attempt", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_per_attempt_pointer_fails_and_releases_lifecycle_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            attempts = runtime / "active-provider-attempts"
+            attempts.mkdir()
+            (attempts / f"{'a' * 64}.json").write_text("{}\n", encoding="utf-8")
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active provider attempt", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_provider_domain_active_operation_blocks_stack_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            domain = runtime / "lifecycle-domains" / "mem0-rest-v1"
+            domain.mkdir(parents=True)
+            (domain / "active-operation").write_text('{"kind":"benchmark_run"}\n', encoding="utf-8")
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active OAMB provider operation", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_provider_domain_active_attempt_blocks_stack_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            attempts = (
+                runtime
+                / "lifecycle-domains"
+                / "openviking-session-rest-v1"
+                / "active-provider-attempts"
+            )
+            attempts.mkdir(parents=True)
+            (attempts / f"{'a' * 64}.json").write_text("{}\n", encoding="utf-8")
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active provider attempt", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_provider_domain_admission_lock_blocks_stack_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            domain_lock = (
+                runtime / "lifecycle-domains" / "hindsight-rest-v1" / "provider-lifecycle.lock"
+            )
+            domain_lock.mkdir(parents=True)
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("provider lifecycle domain admission", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_empty_provider_domains_do_not_block_stack_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            for provider in ("hindsight-rest-v1", "mem0-rest-v1"):
+                (runtime / "lifecycle-domains" / provider).mkdir(parents=True)
+
+            result = self.run_acquire(runtime)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "acquired\n")
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_symbolic_lifecycle_domains_path_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            target = runtime / "elsewhere"
+            target.mkdir(parents=True)
+            (runtime / "lifecycle-domains").symlink_to(target, target_is_directory=True)
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("lifecycle domains path is unsafe", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_dangling_root_operation_pointer_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "active-operation").symlink_to(runtime / "missing-operation")
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active OAMB provider operation", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_dangling_domain_attempt_pointer_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            domain = runtime / "lifecycle-domains" / "mem0-rest-v1"
+            domain.mkdir(parents=True)
+            (domain / "active-provider-attempt").symlink_to(domain / "missing-attempt")
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active provider attempt", result.stderr)
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_symbolic_runtime_path_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.mkdir()
+            runtime = root / "runtime"
+            runtime.symlink_to(target, target_is_directory=True)
+
+            result = self.run_acquire(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("provider runtime path is unsafe", result.stderr)
+            self.assertFalse((target / "provider-lifecycle.lock").exists())
+
+    def test_unreadable_domain_attempts_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            attempts = runtime / "lifecycle-domains" / "mem0-rest-v1" / "active-provider-attempts"
+            attempts.mkdir(parents=True)
+            (attempts / f"{'a' * 64}.json").write_text("{}\n", encoding="utf-8")
+            attempts.chmod(0)
+            try:
+                result = self.run_acquire(runtime)
+            finally:
+                attempts.chmod(0o700)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active provider attempts path is unsafe", result.stderr)
             self.assertFalse((runtime / "provider-lifecycle.lock").exists())
 
     def test_existing_lifecycle_lock_fails_closed(self) -> None:

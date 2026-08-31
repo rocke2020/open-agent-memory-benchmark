@@ -22,7 +22,6 @@ from oamb.contracts.reporting import (
     ComparisonReportModel,
     DiagnosticRunReportModel,
     EvaluationReportModel,
-    PhaseAcceptanceReport,
     ReleaseReportModel,
     RunReportModelV3,
 )
@@ -41,7 +40,6 @@ OfflineReportModel: TypeAlias = (
     | ComparisonReportModel
     | EvaluationReportModel
     | ReleaseReportModel
-    | PhaseAcceptanceReport
 )
 
 
@@ -309,14 +307,7 @@ def _static_identity_summary(model: OfflineReportModel) -> str:
             ("Report spec", model.report_spec_hash),
         )
     else:
-        rows = (
-            ("Phase", model.phase_id),
-            ("Evaluation report", model.evaluation_report_hash),
-            ("Evaluation export validation", model.evaluation_export_validation_hash),
-            ("Review bundle", model.review_bundle_hash),
-            ("Phase gate", model.phase_gate_hash),
-            ("Acceptance report spec", model.acceptance_report_spec_hash),
-        )
+        raise TypeError(f"unsupported offline report model: {type(model).__name__}")
     return "".join(
         f"<p>{html.escape(label)}: <code>{html.escape(value)}</code></p>" for label, value in rows
     )
@@ -363,11 +354,7 @@ def _static_completion_summary(model: OfflineReportModel) -> str:
             f"system results: {model.system_result_count}; "
             f"eligible comparisons: {len(model.eligible_comparison_models)}."
         )
-    return (
-        f"Review current: {str(model.review_current).lower()}; "
-        f"Passed by AI: {str(model.passed_by_ai).lower()}; "
-        f"Passed by human: {str(model.passed_by_human).lower()}."
-    )
+    raise TypeError(f"unsupported offline report model: {type(model).__name__}")
 
 
 def _static_quality_items(model: OfflineReportModel) -> str:

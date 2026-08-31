@@ -58,6 +58,7 @@ HINDSIGHT_REST_PROFILE = ExactAdapterProfile(
     build_artifact_sha256="7635a15739361dbdf221ba796ad25a813f876144fe113022eea8e26cb6ee75e7",
     transport_kind=TransportKind.REST_API,
 )
+HINDSIGHT_RETAIN_BATCH_LIMIT = 1
 MEM0_REST_PROFILE = ExactAdapterProfile(
     profile_id="mem0-rest-v1",
     memory_system_id="mem0",
@@ -92,6 +93,7 @@ PROFILE_PROOF_FILES = {
     "hindsight-rest-v1": (
         "hindsight-health.json",
         "hindsight-version.json",
+        "hindsight-model-config.json",
     ),
     "mem0-rest-v1": (
         "mem0-openapi.json",
@@ -102,6 +104,7 @@ PROFILE_PROOF_FILES = {
         "openviking-health.json",
         "openviking-auth-identity.json",
         "openviking-storage.json",
+        "openviking-model-config.json",
     ),
 }
 
@@ -447,6 +450,12 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
         valid = value.get("status") == "healthy" and value.get("database") == "connected"
     elif filename == "hindsight-version.json":
         valid = value.get("api_version") == "0.9.2" and isinstance(value.get("features"), dict)
+    elif filename == "hindsight-model-config.json":
+        valid = (
+            isinstance(value.get("model"), str)
+            and bool(value["model"])
+            and value.get("reasoning_effort") == "low"
+        )
     elif filename == "mem0-openapi.json":
         paths = value.get("paths")
         valid = isinstance(paths, dict) and all(path in paths for path in ("/memories", "/search"))
@@ -461,6 +470,8 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
         vector_config = vector_store.get("config") if isinstance(vector_store, dict) else None
         embedder = value.get("embedder")
         embedder_config = embedder.get("config") if isinstance(embedder, dict) else None
+        llm = value.get("llm")
+        llm_config = llm.get("config") if isinstance(llm, dict) else None
         valid = (
             value.get("version") == "v1.1"
             and isinstance(vector_store, dict)
@@ -469,6 +480,9 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
             and vector_config.get("embedding_model_dims") == 1024
             and isinstance(embedder_config, dict)
             and embedder_config.get("embedding_dims") == 1024
+            and isinstance(llm_config, dict)
+            and llm_config.get("reasoning_effort") == "low"
+            and llm_config.get("is_reasoning_model") is True
             and value.get("reranker") is None
         )
     elif filename == "openviking-health.json":
@@ -499,6 +513,13 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
             and int(value["files_verified"]) > 0
             and type(value.get("agfs_entries")) is int
             and int(value["agfs_entries"]) >= 0
+        )
+    elif filename == "openviking-model-config.json":
+        valid = (
+            value.get("provider") == "openai"
+            and isinstance(value.get("model"), str)
+            and bool(value["model"])
+            and value.get("reasoning_effort") == "low"
         )
     if not valid:
         raise _semantic_error(filename)

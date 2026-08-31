@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.specifications import (
-    AcceptanceReportSpec,
     DerivationSpecV2,
     DerivationSpecV3,
     EvaluationModelClosure,
@@ -13,7 +12,6 @@ from oamb.contracts.specifications import (
     ReportSpec,
     ReportSpecV2,
     SourceEvidenceBinding,
-    acceptance_report_spec_id,
     derivation_spec_v2_input_hash,
     derivation_spec_v3_input_hash,
     report_identity_spec_binding_id,
@@ -111,57 +109,8 @@ def build_evaluation_report_spec(
     return ReportSpecV2.model_validate({"report_spec_id": report_spec_v2_id(**fields), **fields})
 
 
-def build_acceptance_report_spec(
-    *,
-    audience: str,
-    evaluation_report_hash: str,
-    evaluation_export_validation_hash: str,
-    review_bundle_hash: str,
-    ai_review_record_hash: str,
-    human_review_record_hash: str,
-    phase_gate_hash: str,
-    renderer_hash: str,
-    asset_hashes: tuple[str, ...],
-    browser_contract_hash: str | None = None,
-    performance_contract_hash: str | None = None,
-    export_profile_selector_id: str,
-    export_profile_selector_version: int,
-) -> AcceptanceReportSpec:
-    from oamb.reporting.offline_renderer import offline_asset_hashes, offline_renderer_hash
-
-    expected_browser_hash = browser_acceptance_contract_hash()
-    expected_performance_hash = performance_acceptance_contract_hash()
-    if renderer_hash != offline_renderer_hash() or asset_hashes != offline_asset_hashes():
-        raise ValueError("acceptance report renderer identity is not repository-owned")
-    if browser_contract_hash not in {None, expected_browser_hash}:
-        raise ValueError("acceptance report browser contract is not repository-owned")
-    if performance_contract_hash not in {None, expected_performance_hash}:
-        raise ValueError("acceptance report performance contract is not repository-owned")
-    fields = {
-        "audience": audience,
-        "evaluation_report_hash": evaluation_report_hash,
-        "evaluation_export_validation_hash": evaluation_export_validation_hash,
-        "review_bundle_hash": review_bundle_hash,
-        "ai_review_record_hash": ai_review_record_hash,
-        "human_review_record_hash": human_review_record_hash,
-        "phase_gate_hash": phase_gate_hash,
-        "renderer_hash": renderer_hash,
-        "asset_hashes": asset_hashes,
-        "browser_contract_hash": expected_browser_hash,
-        "performance_contract_hash": expected_performance_hash,
-        "export_profile_selector_id": export_profile_selector_id,
-        "export_profile_selector_version": export_profile_selector_version,
-    }
-    return AcceptanceReportSpec.model_validate(
-        {
-            "acceptance_report_spec_id": acceptance_report_spec_id(**fields),
-            **fields,
-        }
-    )
-
-
 def build_report_identity_spec_binding(
-    spec: ReportSpec | ReportSpecV2 | AcceptanceReportSpec,
+    spec: ReportSpec | ReportSpecV2,
 ) -> ReportIdentitySpecBinding | ReportIdentitySpecBindingV2:
     if isinstance(spec, ReportSpecV2):
         fields = {
@@ -177,17 +126,11 @@ def build_report_identity_spec_binding(
                 **fields,
             }
         )
-    if isinstance(spec, ReportSpec):
-        spec_kind = "benchmark_report"
-        spec_id = spec.report_spec_id
-    else:
-        spec_kind = "acceptance_report"
-        spec_id = spec.acceptance_report_spec_id
     fields = {
-        "spec_kind": spec_kind,
+        "spec_kind": "benchmark_report",
         "spec_schema_name": spec.schema_name,
         "spec_schema_version": spec.schema_version,
-        "spec_id": spec_id,
+        "spec_id": spec.report_spec_id,
         "spec_hash": canonical_sha256(spec),
     }
     return ReportIdentitySpecBinding.model_validate(
@@ -264,7 +207,6 @@ def build_derivation_spec_v3(
 
 
 __all__ = [
-    "build_acceptance_report_spec",
     "build_derivation_spec_v2",
     "build_derivation_spec_v3",
     "build_evaluation_report_spec",

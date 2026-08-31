@@ -70,6 +70,7 @@ def test_v2_external_contracts_close_roles_budgets_and_readiness_evidence() -> N
         credential_variable_name=None,
         configured_model="qwen3-embedding:0.6b",
         resolved_model="qwen3-embedding:0.6b@sha256:manifest",
+        thinking_effort="not_applicable",
         parameters_fingerprint=HASH,
         retry_policy_id="no-retry-v1",
         configuration_fingerprint=OTHER_HASH,
@@ -79,7 +80,6 @@ def test_v2_external_contracts_close_roles_budgets_and_readiness_evidence() -> N
         budget_id="readiness-budget",
         scope_kind=specifications.BudgetScopeKindV2.MODEL_READINESS,
         scope_id="readiness-occurrence",
-        approval_id="approval-1",
         max_attempts=1,
         max_input_tokens=0,
         max_output_tokens=0,
@@ -169,7 +169,7 @@ def test_v2_external_contracts_close_roles_budgets_and_readiness_evidence() -> N
         )
 
 
-def test_pre_readiness_attestation_and_approval_keep_gates_separate() -> None:
+def test_pre_readiness_attestation_keeps_gates_separate() -> None:
     specifications = require("oamb.contracts.specifications")
     attestation_values = dict(
         provider="hindsight",
@@ -198,27 +198,6 @@ def test_pre_readiness_attestation_and_approval_keep_gates_separate() -> None:
         ),
         **attestation_values,
     )
-    approval_values = dict(
-        approval_id="approval-1",
-        operation_kind="model_readiness",
-        scope_kind=specifications.BudgetScopeKindV2.MODEL_READINESS,
-        scope_id="readiness-occurrence",
-        runtime_binding_hash=None,
-        provider_runtime_profile_attestation_hash=attestation.attestation_hash,
-        role_binding_ids=("embedding-binding",),
-        budget_hash=HASH,
-        approved_at=NOW,
-        expires_at=NOW + timedelta(hours=1),
-        unmetered_cost_acknowledged=True,
-        stop_condition_ids=("identity_drift",),
-    )
-    approval = specifications.ExternalCallApprovalRecord(
-        approval_hash=specifications.external_call_approval_hash(approval_values),
-        **approval_values,
-    )
-
-    assert approval.provider_runtime_profile_attestation_hash == attestation.attestation_hash
-
     promoted_attestation = attestation.model_dump()
     promoted_attestation["model_readiness_status"] = specifications.ProviderGateStatus.PASS
     promoted_attestation["attestation_hash"] = (
@@ -229,17 +208,6 @@ def test_pre_readiness_attestation_and_approval_keep_gates_separate() -> None:
     with pytest.raises(ValidationError, match="attestation hash"):
         specifications.ProviderRuntimeProfileAttestation(
             **(attestation.model_dump() | {"release_version": "9.9.9"})
-        )
-    missing_attestation_approval = approval.model_dump()
-    missing_attestation_approval["provider_runtime_profile_attestation_hash"] = None
-    missing_attestation_approval["approval_hash"] = specifications.external_call_approval_hash(
-        missing_attestation_approval
-    )
-    with pytest.raises(ValidationError, match="attestation"):
-        specifications.ExternalCallApprovalRecord(**missing_attestation_approval)
-    with pytest.raises(ValidationError, match="approval hash"):
-        specifications.ExternalCallApprovalRecord(
-            **(approval.model_dump() | {"scope_id": "different-occurrence"})
         )
 
 
@@ -385,7 +353,6 @@ def test_transaction_records_enforce_append_only_chain_shapes() -> None:
         provider_project_id="provider-project-1",
         provider_profile_id="profile-1",
         provider_runtime_profile_attestation_hash=HASH,
-        approval_id="approval-1",
         budget_id="readiness-budget",
         state=evidence.ModelReadinessOccurrenceState.SEALED,
         role_binding_ids=("embedding-binding",),
@@ -508,7 +475,6 @@ def test_t4_contract_versions_are_registered_explicitly() -> None:
         ("resource_budget_ceiling", 1),
         ("provider_budget_cap", 1),
         ("role_budget_ceiling", 1),
-        ("external_call_approval_record", 1),
         ("provider_runtime_profile_attestation", 1),
         ("run_lease_record", 1),
         ("run_lease_heartbeat_record", 1),
@@ -561,7 +527,6 @@ def _external_legacy_fixtures() -> tuple[tuple[dict[str, Any], type[Any]], ...]:
             "budget_id": "fake-budget",
             "scope_kind": "run",
             "scope_id": "fake-run",
-            "approval_id": None,
             "max_attempts": 0,
             "max_input_tokens": 0,
             "max_output_tokens": 0,
@@ -667,7 +632,6 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         budget_id="legacy-budget-v2",
         scope_kind=specifications.BudgetScopeKindV2.RUN,
         scope_id="legacy-run",
-        approval_id="legacy-approval-v1",
         max_attempts=1,
         max_input_tokens=0,
         max_output_tokens=0,
@@ -677,24 +641,6 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         resource_ceilings=(resource_ceiling(specifications),),
         role_ceilings=(role_ceiling(specifications),),
         stop_condition_ids=("budget_exhausted",),
-    )
-    legacy_approval_values = dict(
-        approval_id="legacy-approval-v1",
-        operation_kind="benchmark_run",
-        scope_kind=specifications.BudgetScopeKindV2.RUN,
-        scope_id="legacy-run",
-        runtime_binding_hash=HASH,
-        provider_runtime_profile_attestation_hash=None,
-        role_binding_ids=("embedding-binding",),
-        budget_hash=OTHER_HASH,
-        approved_at=NOW,
-        expires_at=NOW + timedelta(hours=1),
-        unmetered_cost_acknowledged=True,
-        stop_condition_ids=("budget_exhausted",),
-    )
-    legacy_approval = specifications.ExternalCallApprovalRecord(
-        approval_hash=specifications.external_call_approval_hash(legacy_approval_values),
-        **legacy_approval_values,
     )
     legacy_reservation = evidence.BudgetReservationRecord(
         reservation_id=HASH,
@@ -779,6 +725,214 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         reason="legacy usage unavailable",
         raw_response_ref=HASH,
     )
+
+    def _resource_ceiling(module: Any) -> Any:
+        return module.ResourceBudgetCeiling(
+            dimension_id="provider_request_wall_seconds_v1",
+            maximum=Decimal("120"),
+            unit="seconds",
+        )
+
+    def _role_ceiling(module: Any, binding_id: str) -> Any:
+        return module.RoleBudgetCeiling(
+            role_binding_id=binding_id,
+            max_attempts=3,
+            max_input_tokens=8192,
+            max_output_tokens=8192,
+            max_dispatch_wall_seconds=Decimal("120"),
+            max_cost=None,
+            currency=None,
+            price_snapshot_id=None,
+            resource_ceilings=(_resource_ceiling(module),),
+            provider_budget_cap=module.ProviderBudgetCap(
+                provider="fixture-provider",
+                operation_kind=f"{binding_id}-operation",
+                billing_unit="request",
+                maximum_accepted_units=Decimal("3"),
+            ),
+        )
+
+    def _provider_operation_ceiling(module: Any) -> Any:
+        fields = {
+            "provider_operation_ceiling_id": "mem0-add-call-cap",
+            "adapter_profile_id": "mem0-rest-v1",
+            "operation_kind": "memory_ingest",
+            "billing_unit": "request",
+            "maximum_accepted_units": Decimal("3"),
+            "max_attempts": 3,
+            "max_dispatch_wall_seconds": Decimal("120"),
+            "resource_ceilings": (_resource_ceiling(module),),
+        }
+        return module.ProviderOperationBudgetCeiling.model_validate(
+            {
+                **fields,
+                "provider_operation_ceiling_hash": (
+                    module.provider_operation_budget_ceiling_hash(fields)
+                ),
+            }
+        )
+
+    def _dispatch_route(module: Any) -> Any:
+        fields = {
+            "route_id": "mem0-ingest-route",
+            "stage": "memory_ingest",
+            "dispatch_owner_kind": module.DispatchBudgetOwnerKind.PROVIDER_OPERATION,
+            "dispatch_model_role_binding_id": None,
+            "provider_operation_ceiling_id": "mem0-add-call-cap",
+            "adapter_profile_id": "mem0-rest-v1",
+            "operation_kind": "memory_ingest",
+            "billing_unit": "request",
+            "internal_usage_role_binding_ids": (
+                "mem0-extraction",
+                "controlled-embedding",
+            ),
+        }
+        return module.DispatchBudgetRoute.model_validate(
+            {**fields, "route_hash": module.dispatch_budget_route_hash(fields)}
+        )
+
+    legacy_budget_v3 = specifications.BudgetSpecV3(
+        budget_id="legacy-conformance-budget-v3",
+        scope_kind=specifications.BudgetScopeKindV3.MEMORY_CONFORMANCE,
+        scope_id="legacy-conformance-occurrence",
+        max_attempts=3,
+        max_input_tokens=8192,
+        max_output_tokens=8192,
+        max_dispatch_wall_seconds=Decimal("120"),
+        max_cost=None,
+        currency=None,
+        resource_ceilings=(_resource_ceiling(specifications),),
+        role_ceilings=(
+            _role_ceiling(specifications, "mem0-extraction"),
+            _role_ceiling(specifications, "controlled-embedding"),
+        ),
+        provider_operation_ceilings=(_provider_operation_ceiling(specifications),),
+        dispatch_routes=(_dispatch_route(specifications),),
+        stop_condition_ids=("unknown_outcome",),
+    )
+    legacy_reservation_v2 = evidence.BudgetReservationRecordV2(
+        reservation_id=HASH,
+        budget_id=legacy_budget_v3.budget_id,
+        scope_kind=specifications.BudgetScopeKindV3.MEMORY_CONFORMANCE,
+        scope_id="legacy-conformance-occurrence",
+        dispatch_owner_kind=specifications.DispatchBudgetOwnerKind.PROVIDER_OPERATION,
+        role_binding_id=None,
+        provider_operation_ceiling_id="mem0-add-call-cap",
+        internal_usage_role_binding_ids=("mem0-extraction", "controlled-embedding"),
+        attempt_id=OTHER_HASH,
+        reserved_attempts=1,
+        reserved_input_tokens=4096,
+        reserved_output_tokens=4096,
+        reserved_dispatch_wall_seconds=Decimal("30"),
+        reserved_cost=None,
+        currency=None,
+        reserved_resource_ceilings=(_resource_ceiling(specifications),),
+        reserved_provider_units=Decimal("1"),
+        reserved_at=NOW,
+    )
+    legacy_intent_v2 = evidence.AttemptIntentRecordV2(
+        attempt_id=OTHER_HASH,
+        claim_id=HASH,
+        reservation_id=legacy_reservation_v2.reservation_id,
+        parent_kind="memory_conformance",
+        parent_id="legacy-conformance-occurrence",
+        dispatch_route_id="mem0-ingest-route",
+        dispatch_owner_kind=specifications.DispatchBudgetOwnerKind.PROVIDER_OPERATION,
+        role_binding_id=None,
+        provider_operation_ceiling_id="mem0-add-call-cap",
+        internal_usage_role_binding_ids=("mem0-extraction", "controlled-embedding"),
+        stage="memory_ingest",
+        request_fingerprint=HASH,
+        reconciliation_capability="none",
+        idempotency_key_hash=None,
+        sealed_at=NOW,
+    )
+    legacy_attempt_v3 = evidence.AttemptRecordV3(
+        attempt_id=OTHER_HASH,
+        parent_kind="memory_conformance",
+        parent_id="legacy-conformance-occurrence",
+        stage="memory_ingest",
+        ordinal=1,
+        request_fingerprint=HASH,
+        started_at=NOW,
+        ended_at=NOW,
+        outcome=states.AttemptOutcome.SUCCEEDED,
+        retry_of_attempt_id=None,
+        idempotency_key_hash=None,
+        reconciliation_capability="none",
+        raw_response_ref=HASH,
+        raw_error_ref=None,
+        index_contribution=states.IndexContribution.FINAL,
+        superseded_by_attempt_id=None,
+    )
+    legacy_usage_v4 = accounting.TokenUsageRecordV4(
+        usage_record_id=OTHER_HASH,
+        attempt_id=HASH,
+        parent_kind="memory_conformance",
+        parent_id="legacy-conformance-occurrence",
+        stage=accounting.TokenStageV3.MEMORY_CONFORMANCE,
+        operation_kind="memory_ingest",
+        usage_owner_role_binding_id="mem0-extraction",
+        token_domain=accounting.TokenDomain.EXTERNAL_LLM,
+        measurement_source=accounting.TokenMeasurementSource.SUPPLIER_RESPONSE,
+        input_tokens=None,
+        visible_output_tokens=None,
+        supplier_reported_total_tokens=None,
+        context_view_tokens=None,
+        cached_input_tokens=None,
+        reasoning_tokens=None,
+        configured_model="legacy-model",
+        runtime_model="legacy-model",
+        meter_schema_id="legacy-meter-v1",
+        raw_field_paths=(),
+        covered_dimensions=(),
+        unavailable_dimensions=(
+            "input_tokens",
+            "visible_output_tokens",
+            "supplier_reported_total_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+        ),
+        not_applicable_dimensions=(),
+        inclusion_relationships=(),
+        token_measurement_complete=False,
+        billing_complete=False,
+        proof_status=accounting.ProofStatus.UNAVAILABLE,
+        reason="legacy usage unavailable",
+        raw_response_ref=HASH,
+    )
+    legacy_resource_v1 = accounting.ResourceUsageRecord(
+        resource_record_id=HASH,
+        parent_kind="memory_conformance",
+        parent_id="legacy-conformance-occurrence",
+        stage="memory_ingest",
+        meter_boundary="provider-request",
+        dimension_id="cpu_seconds",
+        value=Decimal("1"),
+        unit="seconds",
+        measurement_source="process-meter",
+        measurement_spec_id="legacy-resource-v1",
+        environment_hash=OTHER_HASH,
+        started_at=NOW,
+        ended_at=NOW,
+        raw_telemetry_ref=HASH,
+        proof_status=accounting.ProofStatus.MEASURED_COMPLETE,
+        reason=None,
+    )
+    legacy_cost_v1 = accounting.CostRecord(
+        cost_record_id=HASH,
+        parent_kind="memory_conformance",
+        parent_id="legacy-conformance-occurrence",
+        basis=accounting.CostBasis.ESTIMATE_FROM_MEASURED_USAGE,
+        indexing_view=accounting.IndexingView.ATTEMPTED,
+        amount=Decimal("0.1"),
+        currency="USD",
+        price_snapshot_id="legacy-price-v1",
+        source_usage_record_ids=(OTHER_HASH,),
+        source_resource_record_ids=(HASH,),
+        proof_status=accounting.ProofStatus.MEASURED_COMPLETE,
+        reason=None,
+    )
     legacy_report_spec_fields = dict(
         report_kind="run",
         audience="public",
@@ -849,72 +1003,92 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         artifact_manifest_id=reporting.report_artifact_manifest_v2_id(**legacy_artifact_fields),
         **legacy_artifact_fields,
     )
-    from tests.unit.test_t8_human_review import _ai_record
-
-    legacy_ai_record = _ai_record()
-    signature_fields = dict(
-        key_binding_id=HASH,
-        trusted_key_fingerprint="legacy-key",
-        public_key_sha256=OTHER_HASH,
-        signed_payload_sha256=HASH,
-        signature_sha256=OTHER_HASH,
-        verified_at=NOW,
-    )
-    legacy_signature = reporting.SignatureVerificationRecord(
-        verification_id=reporting.signature_verification_record_id(**signature_fields),
-        **signature_fields,
-    )
-    legacy_human_fields = dict(
-        review_bundle_hash=legacy_ai_record.review_bundle_hash,
-        ai_review_record_hash=legacy_ai_record.ai_review_record_id,
-        decision_hash=HASH,
-        signature_verification=legacy_signature,
-        status="pass",
-        finding_codes=(),
-        evidence_references=(),
-        reviewer_label="legacy-reviewer",
-        decision_nonce="legacy-nonce",
-        trusted_key_fingerprint="legacy-key",
-        created_at=NOW,
-    )
-    legacy_human = reporting.HumanQualityReviewRecordV1(
-        human_review_record_id=reporting.human_quality_review_record_v1_id(**legacy_human_fields),
-        **legacy_human_fields,
-    )
-    legacy_history = (legacy_ai_record.ai_review_record_id,)
-    legacy_history_root = canonical_sha256(
-        ["oamb-review-history-v1", legacy_history, legacy_human.human_review_record_id]
-    )
-    legacy_gate_fields = dict(
-        phase_id="legacy-phase",
-        review_bundle_hash=legacy_ai_record.review_bundle_hash,
-        review_history_root_hash=legacy_history_root,
-        ordered_ai_review_record_hashes=legacy_history,
-        canonical_ai_review_record_hash=legacy_ai_record.ai_review_record_id,
-        human_review_record_hash=legacy_human.human_review_record_id,
-        passed_by_ai=True,
-        passed_by_human=True,
-        ai_record=legacy_ai_record,
-        human_record=legacy_human,
-    )
-    legacy_gate = reporting.EvaluationPhaseGateV1(
-        gate_id=reporting.evaluation_phase_gate_v1_id(
-            **{
-                key: value
-                for key, value in legacy_gate_fields.items()
-                if key not in {"ai_record", "human_record"}
-            }
+    legacy_control_snapshot = reporting.ComparisonControlSnapshot(
+        run_id="legacy-run",
+        source_root_hash=HASH,
+        memory_system_id="legacy-memory",
+        provider_native_profile_hash=OTHER_HASH,
+        controls=(
+            reporting.ComparisonControlBinding(
+                control_id="legacy-control",
+                value_hash=HASH,
+            ),
         ),
-        **legacy_gate_fields,
+    )
+    provider_service_binding = specifications.SourceEvidenceBinding(
+        binding_id=HASH,
+        source_kind=specifications.SourceEvidenceKind.PROVIDER_SERVICE,
+        source_identity="legacy-provider-readiness",
+        source_root_hash=HASH,
+        validation_result_hash=OTHER_HASH,
+        source_schema_versions=("provider_service_evidence_manifest@1",),
+    )
+    profile_binding = specifications.SourceEvidenceBinding(
+        binding_id=OTHER_HASH,
+        source_kind=specifications.SourceEvidenceKind.PROVIDER_SERVICE,
+        source_identity="provider-profile",
+        source_root_hash=OTHER_HASH,
+        validation_result_hash=HASH,
+        source_schema_versions=("provider_service_evidence_manifest@1",),
+    )
+    legacy_route_fields = dict(
+        route_id="legacy-answer-route",
+        stage="answer",
+        dispatch_owner_kind=specifications.DispatchBudgetOwnerKind.MODEL_ROLE,
+        dispatch_model_role_binding_id="legacy-answer-role",
+        provider_operation_ceiling_id=None,
+        adapter_profile_id=None,
+        operation_kind="chat_completion",
+        billing_unit="request",
+        internal_usage_role_binding_ids=(),
+    )
+    legacy_route = specifications.DispatchBudgetRoute(
+        route_hash=specifications.dispatch_budget_route_hash(legacy_route_fields),
+        **legacy_route_fields,
+    )
+    legacy_preflight_fields = dict(
+        run_id="legacy-run",
+        observed_at=NOW,
+        resolved_plan_hash=HASH,
+        run_spec_hash=OTHER_HASH,
+        dataset_manifest_hash=HASH,
+        subset_manifest_hash=OTHER_HASH,
+        adapter_profile_id="legacy-adapter-v1",
+        adapter_profile_hash=HASH,
+        provider_project_id="legacy-project",
+        provider_profile_id="legacy-profile",
+        runtime_binding_hash=OTHER_HASH,
+        provider_service_evidence=provider_service_binding,
+        provider_profile_evidence=profile_binding,
+        role_binding_ids=("legacy-answer-role",),
+        dispatch_routes=(legacy_route,),
+        budget_hash=OTHER_HASH,
+        redacted_endpoint_fingerprints=(HASH,),
+        credential_reference_fingerprints=(OTHER_HASH,),
+        artifact_repository_fingerprint=HASH,
+        artifact_durability_proof_hash=OTHER_HASH,
+    )
+    legacy_preflight = specifications.RunPreflightRecord(
+        preflight_record_hash=specifications.run_preflight_record_hash(legacy_preflight_fields),
+        **legacy_preflight_fields,
     )
     fixtures = (
         *_external_legacy_fixtures(),
-        (legacy_approval.model_dump(mode="json"), specifications.ExternalCallApprovalRecord),
         (legacy_budget.model_dump(mode="json"), specifications.BudgetSpecV2),
+        (legacy_budget_v3.model_dump(mode="json"), specifications.BudgetSpecV3),
         (legacy_reservation.model_dump(mode="json"), evidence.BudgetReservationRecord),
+        (
+            legacy_reservation_v2.model_dump(mode="json"),
+            evidence.BudgetReservationRecordV2,
+        ),
         (legacy_intent.model_dump(mode="json"), evidence.AttemptIntentRecord),
+        (legacy_intent_v2.model_dump(mode="json"), evidence.AttemptIntentRecordV2),
         (legacy_attempt_v2.model_dump(mode="json"), evidence.AttemptRecordV2),
+        (legacy_attempt_v3.model_dump(mode="json"), evidence.AttemptRecordV3),
         (legacy_usage_v3.model_dump(mode="json"), accounting.TokenUsageRecordV3),
+        (legacy_usage_v4.model_dump(mode="json"), accounting.TokenUsageRecordV4),
+        (legacy_resource_v1.model_dump(mode="json"), accounting.ResourceUsageRecord),
+        (legacy_cost_v1.model_dump(mode="json"), accounting.CostRecord),
         (legacy_report_spec.model_dump(mode="json"), specifications.ReportSpec),
         (
             legacy_binding.model_dump(mode="json"),
@@ -924,14 +1098,6 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         (
             legacy_artifact.model_dump(mode="json"),
             reporting.ReportArtifactManifestV2,
-        ),
-        (
-            legacy_human.model_dump(mode="json"),
-            reporting.HumanQualityReviewRecordV1,
-        ),
-        (
-            legacy_gate.model_dump(mode="json"),
-            reporting.EvaluationPhaseGateV1,
         ),
         (
             {
@@ -1054,29 +1220,15 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
             },
             reporting.ReportArtifactManifest,
         ),
-        (
-            {
-                "schema_name": "phase_review_occurrence_record",
-                "schema_version": 1,
-                "phase_review_occurrence_id": evidence.phase_review_occurrence_id(
-                    phase_id="legacy-phase",
-                    review_bundle_hash=HASH,
-                    reviewer_role_binding_hash=OTHER_HASH,
-                    ordinal=1,
-                ),
-                "phase_id": "legacy-phase",
-                "review_bundle_hash": HASH,
-                "reviewer_role_binding_hash": OTHER_HASH,
-                "ordinal": 1,
-                "approval_record_id": HASH,
-                "budget_id": "legacy-phase-budget",
-                "state": "planned",
-                "started_at": None,
-                "ended_at": None,
-            },
-            evidence.PhaseReviewOccurrenceRecord,
-        ),
         (run_summary_v1, reporting.RunSummary),
+        (
+            legacy_control_snapshot.model_dump(mode="json"),
+            reporting.ComparisonControlSnapshot,
+        ),
+        (
+            legacy_preflight.model_dump(mode="json"),
+            specifications.RunPreflightRecord,
+        ),
         (
             {
                 "schema_name": "run_report_model",

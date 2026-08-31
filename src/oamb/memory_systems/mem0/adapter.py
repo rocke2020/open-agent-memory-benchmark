@@ -39,6 +39,8 @@ from oamb.contracts.ports import (
     StateDigestReceipt,
 )
 from oamb.memory_systems.rest import (
+    DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
+    DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
     SealedRestClient,
     SealedRestResponse,
     bind_sealed_response_validation,
@@ -211,6 +213,8 @@ class Mem0RestAdapter:
         runtime_binding_hash: str,
         transport: httpx.AsyncBaseTransport | None = None,
         inspector_transport: httpx.AsyncBaseTransport | None = None,
+        read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
+        total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
     ) -> None:
         for label, value in (
             ("api_key", api_key),
@@ -228,20 +232,26 @@ class Mem0RestAdapter:
             base_url=base_url,
             headers={"X-API-Key": api_key},
             transport=transport,
+            read_timeout_seconds=read_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
         )
         self._inspector_client = SealedRestClient(
             store=store,
             base_url=inspector_base_url,
             headers={"Authorization": f"Bearer {inspector_api_key}"},
             transport=inspector_transport,
+            read_timeout_seconds=read_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds,
         )
         self._resolved = False
         self._scopes: dict[str, _ScopeBinding] = {}
         self._allocation_lock = asyncio.Lock()
+        self._ingestion_plan_locks: dict[str, asyncio.Lock] = {}
         self._planned_adds: dict[str, tuple[_PlannedAdd, ...]] = {}
+        self._next_ingestion_dispatch_ordinal: dict[str, int] = {}
         self._attempted_dispatches: set[tuple[str, str]] = set()
         self._ready_projections: dict[str, _CapturedProjection] = {}
-        self._projection_capture_sequence = 0
+        self._projection_capture_sequences: dict[str, int] = {}
         self._close_lock = asyncio.Lock()
         self._accepting_operations = True
         self._public_closed = False
@@ -313,6 +323,7 @@ class Mem0RestAdapter:
                 ingestion_occurrence_id=request.ingestion_occurrence_id,
                 ingestion_plan_id=request.ingestion_plan_id,
             )
+            self._ingestion_plan_locks[request.ingestion_occurrence_id] = asyncio.Lock()
             return ScopeReceipt(
                 ingestion_occurrence_id=request.ingestion_occurrence_id,
                 scope_id=request.ingestion_occurrence_id,
@@ -365,6 +376,7 @@ class Mem0RestAdapter:
             planned.append(_PlannedAdd(dispatch=dispatch, request=wire_request))
         result = tuple(planned)
         self._planned_adds[request.scope.scope_id] = result
+        self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = 1
         return tuple(item.dispatch for item in result)
 
     async def ingest(self, request: IngestionDispatchRequest) -> IngestionDispatchReceipt:
@@ -372,34 +384,48 @@ class Mem0RestAdapter:
         self._require_scope(request.scope)
         planned = self._planned_add(request.scope.scope_id, request.dispatch)
         dispatch_key = (request.scope.scope_id, request.dispatch.request_fingerprint)
-        if dispatch_key in self._attempted_dispatches:
-            raise ValueError("Mem0 add dispatch was already attempted and cannot replay")
-        self._attempted_dispatches.add(dispatch_key)
+        ingestion_plan_lock = self._ingestion_plan_locks[request.scope.scope_id]
         try:
-            response = await self._public_client.request(
-                planned.request.method,
-                planned.request.path,
-                json_payload=json.loads(planned.request.body),
-                write_intent=True,
+            await ingestion_plan_lock.acquire()
+        except asyncio.CancelledError as exc:
+            raise MemorySystemCallCancelledBeforeDispatch(
+                "Mem0 add was cancelled before its ingestion-plan dispatch turn"
+            ) from exc
+        try:
+            expected_ordinal = self._next_ingestion_dispatch_ordinal[request.scope.scope_id]
+            if request.dispatch.dispatch_ordinal_1_indexed != expected_ordinal:
+                raise ValueError("Mem0 add dispatch is not the next ordered source")
+            if dispatch_key in self._attempted_dispatches:
+                raise ValueError("Mem0 add dispatch was already attempted and cannot replay")
+            self._attempted_dispatches.add(dispatch_key)
+            try:
+                response = await self._public_client.request(
+                    planned.request.method,
+                    planned.request.path,
+                    json_payload=json.loads(planned.request.body),
+                    write_intent=True,
+                )
+            except MemorySystemCallCancelledBeforeDispatch:
+                self._attempted_dispatches.remove(dispatch_key)
+                raise
+            with bind_sealed_response_validation(
+                response,
+                message="Mem0 add response failed exact-profile validation",
+            ):
+                parse_add_response(response.raw_bytes)
+            self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = expected_ordinal + 1
+            source_id = request.dispatch.ordered_source_units[0].source_unit_id
+            return IngestionDispatchReceipt(
+                attempt_id=request.attempt_id,
+                dispatch=request.dispatch,
+                accepted_source_unit_ids=(source_id,),
+                rejected_source_unit_ids=(),
+                raw_reference=response.raw_reference,
+                raw_response_bytes=response.raw_bytes,
+                usage_records=(),
             )
-        except MemorySystemCallCancelledBeforeDispatch:
-            self._attempted_dispatches.remove(dispatch_key)
-            raise
-        with bind_sealed_response_validation(
-            response,
-            message="Mem0 add response failed exact-profile validation",
-        ):
-            parse_add_response(response.raw_bytes)
-        source_id = request.dispatch.ordered_source_units[0].source_unit_id
-        return IngestionDispatchReceipt(
-            attempt_id=request.attempt_id,
-            dispatch=request.dispatch,
-            accepted_source_unit_ids=(source_id,),
-            rejected_source_unit_ids=(),
-            raw_reference=response.raw_reference,
-            raw_response_bytes=response.raw_bytes,
-            usage_records=(),
-        )
+        finally:
+            ingestion_plan_lock.release()
 
     async def wait_ready(self, request: ReadinessRequest) -> ReadinessReceipt:
         self._require_open()
@@ -498,6 +524,7 @@ class Mem0RestAdapter:
             wire_request.method,
             wire_request.path,
             json_payload=json.loads(wire_request.body),
+            request_evidence=True,
         )
         with bind_sealed_response_validation(
             response,
@@ -546,6 +573,7 @@ class Mem0RestAdapter:
         return NativeEvidenceBatch(
             raw_reference=response.raw_reference,
             candidates=tuple(candidates),
+            request_raw_reference=response.request_reference,
         )
 
     async def close(self) -> None:
@@ -672,7 +700,8 @@ class Mem0RestAdapter:
             source_ids = projection_source_unit_ids(native)
             state_sha256 = projection_state_sha256(native)
         raw_references = tuple(response.raw_reference for response in responses)
-        self._projection_capture_sequence += 1
+        capture_sequence = self._projection_capture_sequences.get(run_id, 0) + 1
+        self._projection_capture_sequences[run_id] = capture_sequence
         summary_reference = self._seal_raw(
             canonical_json_bytes(
                 {
@@ -681,7 +710,7 @@ class Mem0RestAdapter:
                     "run_id": native.run_id,
                     "ordered_source_unit_ids": source_ids,
                     "state_sha256": state_sha256,
-                    "capture_sequence": self._projection_capture_sequence,
+                    "capture_sequence": capture_sequence,
                     "page_raw_refs": tuple(item.sha256 for item in raw_references),
                 }
             )
@@ -711,7 +740,6 @@ class Mem0RestAdapter:
         completed_positions = {
             source_id: index for index, source_id in enumerate(completed_source_ids)
         }
-        projected: list[str] = []
         for point in projection.points:
             metadata = point.metadata
             if metadata is None:
@@ -725,11 +753,6 @@ class Mem0RestAdapter:
                 raise ValueError("Mem0 projection contains an unplanned source identity")
             if metadata.source_ordinal != completed_positions[metadata.source_unit_id] + 1:
                 raise ValueError("Mem0 projection source ordinal differs from the frozen plan")
-            if metadata.source_unit_id not in projected:
-                projected.append(metadata.source_unit_id)
-        positions = tuple(completed_positions[source_id] for source_id in projected)
-        if positions != tuple(sorted(positions)):
-            raise ValueError("Mem0 projected sources changed completed source order")
 
     def _seal_raw(self, raw_bytes: bytes) -> RawReferenceHandle:
         return self._store.seal_raw(

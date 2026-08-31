@@ -120,6 +120,11 @@ class OpenVikingRestAdapter:
         self._planned_batches: dict[str, _PlannedBatch] = {}
         self._attempted_scopes: set[str] = set()
         self._attempted_wrong_peer_write_probes: set[tuple[str, str, str]] = set()
+        self._wrong_peer_probe_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._accepting_wrong_peer_probes = True
+        self._active_wrong_peer_probe_count = 0
+        self._wrong_peer_probes_drained = asyncio.Event()
+        self._wrong_peer_probes_drained.set()
         self._ready_scopes: set[str] = set()
         self._resolved = False
 
@@ -568,6 +573,7 @@ class OpenVikingRestAdapter:
                 "context_type": "resource",
                 "limit": NATIVE_RETRIEVAL_TOP_K,
             },
+            probe_lock_key=(binding.root_uri, wrong_actor_peer_id),
         )
 
     async def verify_wrong_peer_stat_isolation(
@@ -583,6 +589,7 @@ class OpenVikingRestAdapter:
             wrong_actor_peer_id=wrong_actor_peer_id,
             expected_uri=binding.root_uri,
             params={"uri": binding.root_uri},
+            probe_lock_key=(binding.root_uri, wrong_actor_peer_id),
         )
 
     async def verify_wrong_peer_create_isolation(
@@ -600,6 +607,7 @@ class OpenVikingRestAdapter:
             expected_uri=probe_uri,
             json_payload={"uri": probe_uri},
             write_probe_key=(binding.root_uri, wrong_actor_peer_id, "create"),
+            probe_lock_key=(binding.root_uri, wrong_actor_peer_id),
         )
 
     async def verify_wrong_peer_write_isolation(
@@ -626,6 +634,7 @@ class OpenVikingRestAdapter:
                 "wait": True,
             },
             write_probe_key=(binding.root_uri, wrong_actor_peer_id, "batch-write"),
+            probe_lock_key=(binding.root_uri, wrong_actor_peer_id),
         )
 
     def _require_wrong_peer(
@@ -651,55 +660,112 @@ class OpenVikingRestAdapter:
         params: dict[str, str] | None = None,
         json_payload: object | None = None,
         write_probe_key: tuple[str, str, str] | None = None,
+        probe_lock_key: tuple[str, str],
     ) -> RawReferenceHandle:
-        if write_probe_key is not None:
-            if write_probe_key in self._attempted_wrong_peer_write_probes:
-                raise OpenVikingProfileError(
-                    "OpenViking wrong-peer write probe was already attempted and cannot replay"
-                )
-            self._attempted_wrong_peer_write_probes.add(write_probe_key)
+        self._admit_wrong_peer_probe()
         try:
-            response = await self._client.request(
-                method,
-                path,
+            return await self._expect_wrong_peer_denial_admitted(
+                method=method,
+                path=path,
+                wrong_actor_peer_id=wrong_actor_peer_id,
+                expected_uri=expected_uri,
                 params=params,
                 json_payload=json_payload,
-                request_headers={ACTOR_PEER_HEADER: wrong_actor_peer_id},
-                write_intent=write_probe_key is not None,
+                write_probe_key=write_probe_key,
+                probe_lock_key=probe_lock_key,
             )
-        except MemorySystemCallCancelledBeforeDispatch:
+        finally:
+            self._release_wrong_peer_probe()
+
+    async def _expect_wrong_peer_denial_admitted(
+        self,
+        *,
+        method: str,
+        path: str,
+        wrong_actor_peer_id: str,
+        expected_uri: str,
+        params: dict[str, str] | None,
+        json_payload: object | None,
+        write_probe_key: tuple[str, str, str] | None,
+        probe_lock_key: tuple[str, str],
+    ) -> RawReferenceHandle:
+        probe_lock = self._wrong_peer_probe_locks.setdefault(probe_lock_key, asyncio.Lock())
+        try:
+            await probe_lock.acquire()
+        except asyncio.CancelledError as exc:
             if write_probe_key is not None:
-                self._attempted_wrong_peer_write_probes.remove(write_probe_key)
-            raise
-        except MemorySystemCallFailure as exc:
-            if (
-                exc.failure_kind != "http_status"
-                or exc.status_code != 403
-                or exc.raw_response_bytes is None
-                or exc.raw_reference is None
-            ):
-                raise
-            denial_response = SealedRestResponse(
-                status_code=exc.status_code,
-                raw_bytes=exc.raw_response_bytes,
-                raw_reference=exc.raw_reference,
-            )
-            with bind_sealed_response_validation(
-                denial_response,
-                message="OpenViking permission-denied response failed exact-profile validation",
-            ):
-                _parse_permission_denied_response(
-                    exc.raw_response_bytes,
-                    expected_uri=expected_uri,
+                raise MemorySystemCallCancelledBeforeDispatch(
+                    "OpenViking wrong-peer write probe was cancelled before dispatch"
+                ) from exc
+            raise MemorySystemReadCancelled(
+                "OpenViking wrong-peer read probe was cancelled before dispatch"
+            ) from exc
+        try:
+            if write_probe_key is not None:
+                if write_probe_key in self._attempted_wrong_peer_write_probes:
+                    raise OpenVikingProfileError(
+                        "OpenViking wrong-peer write probe was already attempted and cannot replay"
+                    )
+                self._attempted_wrong_peer_write_probes.add(write_probe_key)
+            try:
+                response = await self._client.request(
+                    method,
+                    path,
+                    params=params,
+                    json_payload=json_payload,
+                    request_headers={ACTOR_PEER_HEADER: wrong_actor_peer_id},
+                    write_intent=write_probe_key is not None,
                 )
-            return exc.raw_reference
-        raise sealed_response_validation_failure(
-            response,
-            message=f"OpenViking wrong-peer {path} was not denied",
-        )
+            except MemorySystemCallCancelledBeforeDispatch:
+                if write_probe_key is not None:
+                    self._attempted_wrong_peer_write_probes.remove(write_probe_key)
+                raise
+            except MemorySystemCallFailure as exc:
+                if (
+                    exc.failure_kind != "http_status"
+                    or exc.status_code != 403
+                    or exc.raw_response_bytes is None
+                    or exc.raw_reference is None
+                ):
+                    raise
+                denial_response = SealedRestResponse(
+                    status_code=exc.status_code,
+                    raw_bytes=exc.raw_response_bytes,
+                    raw_reference=exc.raw_reference,
+                )
+                with bind_sealed_response_validation(
+                    denial_response,
+                    message="OpenViking permission-denied response failed exact-profile validation",
+                ):
+                    _parse_permission_denied_response(
+                        exc.raw_response_bytes,
+                        expected_uri=expected_uri,
+                    )
+                return exc.raw_reference
+            raise sealed_response_validation_failure(
+                response,
+                message=f"OpenViking wrong-peer {path} was not denied",
+            )
+        finally:
+            probe_lock.release()
 
     async def close(self) -> None:
+        self._accepting_wrong_peer_probes = False
+        self._client.stop_accepting()
+        await self._wrong_peer_probes_drained.wait()
         await self._client.close()
+
+    def _admit_wrong_peer_probe(self) -> None:
+        if not self._accepting_wrong_peer_probes:
+            raise RuntimeError("OpenViking REST adapter is closed")
+        self._active_wrong_peer_probe_count += 1
+        if self._active_wrong_peer_probe_count == 1:
+            self._wrong_peer_probes_drained.clear()
+
+    def _release_wrong_peer_probe(self) -> None:
+        self._active_wrong_peer_probe_count -= 1
+        if self._active_wrong_peer_probe_count == 0:
+            self._wrong_peer_probes_drained.set()
 
     async def _require_absent(
         self,

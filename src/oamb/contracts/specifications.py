@@ -2,22 +2,12 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import re
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Literal, Self
 
 from pydantic import model_validator
-
-from oamb.constants import (
-    AI_REVIEW_MAX_CASES_PER_BATCH,
-    AI_REVIEW_MAX_INPUT_BYTES,
-    AI_REVIEW_MAX_INPUT_TOKENS,
-    AI_REVIEW_MAX_OUTPUT_BYTES,
-    AI_REVIEW_MAX_OUTPUT_TOKENS,
-)
 
 from .base import (
     NonEmptyStr,
@@ -44,18 +34,15 @@ class ValidationStage(StrEnum):
 
 class BudgetScopeKind(StrEnum):
     RUN = "run"
-    PHASE_REVIEW = "phase_review"
 
 
 class BudgetScopeKindV2(StrEnum):
     RUN = "run"
-    PHASE_REVIEW = "phase_review"
     MODEL_READINESS = "model_readiness"
 
 
 class BudgetScopeKindV3(StrEnum):
     RUN = "run"
-    PHASE_REVIEW = "phase_review"
     MODEL_READINESS = "model_readiness"
     MEMORY_CONFORMANCE = "memory_conformance"
 
@@ -88,7 +75,10 @@ class ModelRole(StrEnum):
     EMBEDDING = "embedding"
     ANSWER = "answer"
     JUDGE = "judge"
-    QUALITY_REVIEW = "quality_review"
+
+
+GenerativeThinkingEffort = Literal["low", "high", "max"]
+ThinkingEffort = Literal["low", "high", "max", "not_applicable"]
 
 
 class RoleBindingStatus(StrEnum):
@@ -136,64 +126,6 @@ class ComparisonCostView(StrEnum):
     RAW_RESOURCE = "raw_resource"
     ACTUAL_CHARGE = "actual_charge"
     DECLARED_RATE_ESTIMATE = "declared_rate_estimate"
-
-
-class HumanReviewKeyBinding(StrictContract):
-    schema_name: Literal["human_review_key_binding"] = "human_review_key_binding"
-    schema_version: Literal[1] = 1
-    key_binding_id: Sha256
-    algorithm: Literal["ed25519"] = "ed25519"
-    source_kind: Literal["raw", "file"]
-    source_reference: NonEmptyStr
-    public_key_base64: NonEmptyStr
-    public_key_sha256: Sha256
-    fingerprint: NonEmptyStr
-
-    @model_validator(mode="after")
-    def public_key_and_binding_identity_are_exact(self) -> Self:
-        try:
-            public_key = base64.b64decode(self.public_key_base64, validate=True)
-        except Exception as exc:
-            raise ValueError("human review public key is not canonical base64") from exc
-        if len(public_key) != 32:
-            raise ValueError("Ed25519 public key must contain exactly 32 bytes")
-        if base64.b64encode(public_key).decode("ascii") != self.public_key_base64:
-            raise ValueError("human review public key must use canonical base64")
-        public_key_sha256 = hashlib.sha256(public_key).hexdigest()
-        if self.public_key_sha256 != public_key_sha256:
-            raise ValueError("human review public-key hash does not match its bytes")
-        if self.fingerprint != f"SHA256:{public_key_sha256}":
-            raise ValueError("human review key fingerprint does not match its bytes")
-        expected = human_review_key_binding_id(
-            source_kind=self.source_kind,
-            source_reference=self.source_reference,
-            public_key_base64=self.public_key_base64,
-            public_key_sha256=self.public_key_sha256,
-            fingerprint=self.fingerprint,
-        )
-        if self.key_binding_id != expected:
-            raise ValueError("human review key binding identity does not match its payload")
-        return self
-
-
-def human_review_key_binding_id(
-    *,
-    source_kind: str,
-    source_reference: str,
-    public_key_base64: str,
-    public_key_sha256: str,
-    fingerprint: str,
-) -> str:
-    return canonical_sha256(
-        [
-            "oamb-human-review-key-binding-v1",
-            source_kind,
-            source_reference,
-            public_key_base64,
-            public_key_sha256,
-            fingerprint,
-        ]
-    )
 
 
 class ComparisonPairBinding(StrictContract):
@@ -309,210 +241,6 @@ class ComparisonSpec(StrictContract):
         if self.comparison_spec_id != expected:
             raise ValueError("comparison spec identity does not match its canonical payload")
         return self
-
-
-class AIReviewBatch(StrictContract):
-    schema_name: Literal["ai_review_batch"] = "ai_review_batch"
-    schema_version: Literal[1] = 1
-    batch_id: Sha256
-    ordered_case_occurrence_ids: tuple[Sha256, ...]
-    payload_hash: Sha256
-    request_fingerprint: Sha256
-    input_bytes: PositiveInt
-    input_tokens: PositiveInt
-    maximal_output_bytes: PositiveInt
-    maximal_output_tokens: PositiveInt
-
-    @model_validator(mode="after")
-    def batch_is_nonempty_and_unique(self) -> Self:
-        if not self.ordered_case_occurrence_ids:
-            raise ValueError("AI review batch cannot be empty")
-        if len(set(self.ordered_case_occurrence_ids)) != len(self.ordered_case_occurrence_ids):
-            raise ValueError("AI review batch contains duplicate case coverage")
-        if len(self.ordered_case_occurrence_ids) > AI_REVIEW_MAX_CASES_PER_BATCH:
-            raise ValueError("AI review batch exceeds the whole-case limit")
-        if self.input_bytes > AI_REVIEW_MAX_INPUT_BYTES:
-            raise ValueError("AI review batch exceeds the input-byte limit")
-        if self.input_tokens > AI_REVIEW_MAX_INPUT_TOKENS:
-            raise ValueError("AI review batch exceeds the input-token limit")
-        if self.maximal_output_bytes > AI_REVIEW_MAX_OUTPUT_BYTES:
-            raise ValueError("AI review batch exceeds the output-byte limit")
-        if self.maximal_output_tokens > AI_REVIEW_MAX_OUTPUT_TOKENS:
-            raise ValueError("AI review batch exceeds the output-token limit")
-        return self
-
-
-class AIReviewPlan(StrictContract):
-    schema_name: Literal["ai_review_plan"] = "ai_review_plan"
-    schema_version: Literal[1] = 1
-    review_bundle_hash: Sha256
-    projection_spec_hash: Sha256
-    finding_registry_hash: Sha256
-    prompt_pack_hash: Sha256
-    output_contract_hash: Sha256
-    parser_hash: Sha256
-    reviewer_role_binding_hash: Sha256
-    reviewer_model_hash: Sha256
-    reviewer_runtime_hash: Sha256
-    reviewer_configuration_hash: Sha256
-    reviewer_counter_fingerprint: Sha256
-    model_context_window_tokens: PositiveInt
-    ordered_case_occurrence_ids: tuple[Sha256, ...]
-    case_batches: tuple[AIReviewBatch, ...]
-    case_coverage_hash: Sha256
-    phase_integrity_id: Sha256
-    phase_integrity_payload_hash: Sha256
-    phase_integrity_request_fingerprint: Sha256
-    phase_integrity_input_bytes: PositiveInt
-    phase_integrity_input_tokens: PositiveInt
-    phase_integrity_maximal_output_bytes: PositiveInt
-    phase_integrity_maximal_output_tokens: PositiveInt
-    expected_attempt_count: PositiveInt
-    aggregate_version: NonEmptyStr
-    plan_hash: Sha256
-
-    @model_validator(mode="after")
-    def plan_identity_coverage_and_capacity_close(self) -> Self:
-        flattened = tuple(
-            case_id for batch in self.case_batches for case_id in batch.ordered_case_occurrence_ids
-        )
-        if (
-            not flattened
-            or flattened != self.ordered_case_occurrence_ids
-            or len(set(flattened)) != len(flattened)
-        ):
-            raise ValueError("AI review plan case coverage is missing, duplicated, or reordered")
-        expected_coverage_hash = canonical_sha256(
-            ["oamb-ai-review-case-coverage-v1", self.ordered_case_occurrence_ids]
-        )
-        if self.case_coverage_hash != expected_coverage_hash:
-            raise ValueError("AI review plan coverage hash does not match its case inventory")
-        for batch in self.case_batches:
-            expected_batch_id = canonical_sha256(
-                [
-                    "oamb-ai-review-batch-v1",
-                    self.review_bundle_hash,
-                    batch.ordered_case_occurrence_ids,
-                    batch.payload_hash,
-                ]
-            )
-            if batch.batch_id != expected_batch_id:
-                raise ValueError("AI review batch identity does not match its canonical payload")
-            if batch.input_tokens + batch.maximal_output_tokens > self.model_context_window_tokens:
-                raise ValueError("AI review batch exceeds the reviewer context window")
-        expected_integrity_id = canonical_sha256(
-            [
-                "oamb-ai-review-integrity-v1",
-                self.review_bundle_hash,
-                self.phase_integrity_payload_hash,
-            ]
-        )
-        if self.phase_integrity_id != expected_integrity_id:
-            raise ValueError("phase-integrity identity does not match its canonical payload")
-        if (
-            self.phase_integrity_input_tokens + self.phase_integrity_maximal_output_tokens
-            > self.model_context_window_tokens
-        ):
-            raise ValueError("phase integrity exceeds the reviewer context window")
-        if self.phase_integrity_input_bytes > AI_REVIEW_MAX_INPUT_BYTES:
-            raise ValueError("phase integrity exceeds the input-byte limit")
-        if self.phase_integrity_input_tokens > AI_REVIEW_MAX_INPUT_TOKENS:
-            raise ValueError("phase integrity exceeds the input-token limit")
-        if self.phase_integrity_maximal_output_bytes > AI_REVIEW_MAX_OUTPUT_BYTES:
-            raise ValueError("phase integrity exceeds the output-byte limit")
-        if self.phase_integrity_maximal_output_tokens > AI_REVIEW_MAX_OUTPUT_TOKENS:
-            raise ValueError("phase integrity exceeds the output-token limit")
-        if self.expected_attempt_count != len(self.case_batches) + 1:
-            raise ValueError(
-                "AI review expected attempt count must include every batch and integrity"
-            )
-        expected_plan_hash = ai_review_plan_hash(
-            review_bundle_hash=self.review_bundle_hash,
-            projection_spec_hash=self.projection_spec_hash,
-            finding_registry_hash=self.finding_registry_hash,
-            prompt_pack_hash=self.prompt_pack_hash,
-            output_contract_hash=self.output_contract_hash,
-            parser_hash=self.parser_hash,
-            reviewer_role_binding_hash=self.reviewer_role_binding_hash,
-            reviewer_model_hash=self.reviewer_model_hash,
-            reviewer_runtime_hash=self.reviewer_runtime_hash,
-            reviewer_configuration_hash=self.reviewer_configuration_hash,
-            reviewer_counter_fingerprint=self.reviewer_counter_fingerprint,
-            model_context_window_tokens=self.model_context_window_tokens,
-            ordered_case_occurrence_ids=self.ordered_case_occurrence_ids,
-            case_batches=self.case_batches,
-            case_coverage_hash=self.case_coverage_hash,
-            phase_integrity_id=self.phase_integrity_id,
-            phase_integrity_payload_hash=self.phase_integrity_payload_hash,
-            phase_integrity_request_fingerprint=self.phase_integrity_request_fingerprint,
-            phase_integrity_input_bytes=self.phase_integrity_input_bytes,
-            phase_integrity_input_tokens=self.phase_integrity_input_tokens,
-            phase_integrity_maximal_output_bytes=self.phase_integrity_maximal_output_bytes,
-            phase_integrity_maximal_output_tokens=self.phase_integrity_maximal_output_tokens,
-            expected_attempt_count=self.expected_attempt_count,
-            aggregate_version=self.aggregate_version,
-        )
-        if self.plan_hash != expected_plan_hash:
-            raise ValueError("AI review plan hash does not match its canonical payload")
-        return self
-
-
-def ai_review_plan_hash(
-    *,
-    review_bundle_hash: str,
-    projection_spec_hash: str,
-    finding_registry_hash: str,
-    prompt_pack_hash: str,
-    output_contract_hash: str,
-    parser_hash: str,
-    reviewer_role_binding_hash: str,
-    reviewer_model_hash: str,
-    reviewer_runtime_hash: str,
-    reviewer_configuration_hash: str,
-    reviewer_counter_fingerprint: str,
-    model_context_window_tokens: int,
-    ordered_case_occurrence_ids: tuple[str, ...],
-    case_batches: tuple[AIReviewBatch, ...],
-    case_coverage_hash: str,
-    phase_integrity_id: str,
-    phase_integrity_payload_hash: str,
-    phase_integrity_request_fingerprint: str,
-    phase_integrity_input_bytes: int,
-    phase_integrity_input_tokens: int,
-    phase_integrity_maximal_output_bytes: int,
-    phase_integrity_maximal_output_tokens: int,
-    expected_attempt_count: int,
-    aggregate_version: str,
-) -> str:
-    return canonical_sha256(
-        [
-            "oamb-ai-review-plan-v1",
-            review_bundle_hash,
-            projection_spec_hash,
-            finding_registry_hash,
-            prompt_pack_hash,
-            output_contract_hash,
-            parser_hash,
-            reviewer_role_binding_hash,
-            reviewer_model_hash,
-            reviewer_runtime_hash,
-            reviewer_configuration_hash,
-            reviewer_counter_fingerprint,
-            model_context_window_tokens,
-            ordered_case_occurrence_ids,
-            case_batches,
-            case_coverage_hash,
-            phase_integrity_id,
-            phase_integrity_payload_hash,
-            phase_integrity_request_fingerprint,
-            phase_integrity_input_bytes,
-            phase_integrity_input_tokens,
-            phase_integrity_maximal_output_bytes,
-            phase_integrity_maximal_output_tokens,
-            expected_attempt_count,
-            aggregate_version,
-        ]
-    )
 
 
 def comparison_pair_id(
@@ -1037,6 +765,7 @@ class ModelRoleBindingV2(StrictContract):
     credential_variable_name: NonEmptyStr | None
     configured_model: NonEmptyStr | None
     resolved_model: NonEmptyStr | None
+    thinking_effort: ThinkingEffort | None
     parameters_fingerprint: Sha256 | None
     retry_policy_id: NonEmptyStr | None
     configuration_fingerprint: Sha256
@@ -1049,6 +778,7 @@ class ModelRoleBindingV2(StrictContract):
             self.endpoint_reference,
             self.configured_model,
             self.resolved_model,
+            self.thinking_effort,
             self.parameters_fingerprint,
             self.retry_policy_id,
             self.redacted_endpoint_fingerprint,
@@ -1058,6 +788,11 @@ class ModelRoleBindingV2(StrictContract):
                 raise ValueError("selected binding requires native or model_client kind")
             if any(value is None for value in selected_fields):
                 raise ValueError("selected binding requires resolved provider and model fields")
+            if self.role == ModelRole.EMBEDDING:
+                if self.thinking_effort != "not_applicable":
+                    raise ValueError("selected embedding binding requires not_applicable effort")
+            elif self.thinking_effort == "not_applicable":
+                raise ValueError("selected generative binding requires low, high, or max effort")
         else:
             expected_kind = (
                 BindingKind.DISABLED
@@ -1212,7 +947,6 @@ class BudgetSpec(StrictContract):
     budget_id: NonEmptyStr
     scope_kind: BudgetScopeKind
     scope_id: NonEmptyStr
-    approval_id: NonEmptyStr | None
     max_attempts: NonNegativeInt
     max_input_tokens: NonNegativeInt
     max_output_tokens: NonNegativeInt
@@ -1235,7 +969,6 @@ class BudgetSpecV2(StrictContract):
     budget_id: NonEmptyStr
     scope_kind: BudgetScopeKindV2
     scope_id: NonEmptyStr
-    approval_id: NonEmptyStr
     max_attempts: PositiveInt
     max_input_tokens: NonNegativeInt
     max_output_tokens: NonNegativeInt
@@ -1278,7 +1011,6 @@ class BudgetSpecV3(StrictContract):
     budget_id: NonEmptyStr
     scope_kind: BudgetScopeKindV3
     scope_id: NonEmptyStr
-    approval_id: NonEmptyStr
     max_attempts: PositiveInt
     max_input_tokens: NonNegativeInt
     max_output_tokens: NonNegativeInt
@@ -1298,7 +1030,7 @@ class BudgetSpecV3(StrictContract):
         if self.currency is not None and len(self.currency) != 3:
             raise ValueError("currency must be an ISO 4217 code")
         if self.scope_kind != BudgetScopeKindV3.MEMORY_CONFORMANCE:
-            raise ValueError("version 3 budget currently authorizes memory conformance only")
+            raise ValueError("version 3 budget currently applies to memory conformance only")
         if not self.role_ceilings:
             raise ValueError("version 3 budget requires at least one role ceiling")
         if not self.provider_operation_ceilings:
@@ -1357,6 +1089,177 @@ class BudgetSpecV3(StrictContract):
         return self
 
 
+class BudgetSpecV4(StrictContract):
+    schema_name: Literal["budget_spec"] = "budget_spec"
+    schema_version: Literal[4] = 4
+    budget_id: NonEmptyStr
+    budget_hash: Sha256
+    scope_kind: BudgetScopeKindV3
+    scope_id: NonEmptyStr
+    max_attempts: PositiveInt
+    max_input_tokens: NonNegativeInt
+    max_output_tokens: NonNegativeInt
+    max_dispatch_wall_seconds: NonNegativeDecimal
+    max_cost: NonNegativeDecimal | None
+    currency: str | None
+    resource_ceilings: tuple[ResourceBudgetCeiling, ...]
+    role_ceilings: tuple[RoleBudgetCeiling, ...]
+    provider_operation_ceilings: tuple[ProviderOperationBudgetCeiling, ...]
+    dispatch_routes: tuple[DispatchBudgetRoute, ...]
+    stop_condition_ids: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def live_run_budget_and_routes_close(self) -> Self:
+        expected_hash = budget_spec_v4_hash(self.model_dump(mode="python", exclude={"budget_hash"}))
+        if self.budget_hash != expected_hash:
+            raise ValueError("budget hash does not match its canonical fields")
+        if self.scope_kind != BudgetScopeKindV3.RUN:
+            raise ValueError("version 4 budget applies to a benchmark run only")
+        if (self.max_cost is None) != (self.currency is None):
+            raise ValueError("max_cost and currency must be present together")
+        if self.currency is not None and len(self.currency) != 3:
+            raise ValueError("currency must be an ISO 4217 code")
+        if not self.role_ceilings:
+            raise ValueError("version 4 budget requires at least one role ceiling")
+        if not self.provider_operation_ceilings:
+            raise ValueError("version 4 budget requires a provider-operation ceiling")
+        if not self.dispatch_routes:
+            raise ValueError("version 4 budget requires a dispatch route")
+
+        role_ids = tuple(item.role_binding_id for item in self.role_ceilings)
+        operation_ids = tuple(
+            item.provider_operation_ceiling_id for item in self.provider_operation_ceilings
+        )
+        route_ids = tuple(item.route_id for item in self.dispatch_routes)
+        if len(set(role_ids)) != len(role_ids):
+            raise ValueError("duplicate role ceiling")
+        if len(set(operation_ids)) != len(operation_ids):
+            raise ValueError("duplicate provider-operation ceiling")
+        if set(role_ids) & set(operation_ids):
+            raise ValueError("budget owner identities must be unique across owner kinds")
+        if len(set(route_ids)) != len(route_ids):
+            raise ValueError("duplicate dispatch route")
+        resource_ids = tuple(item.dimension_id for item in self.resource_ceilings)
+        if len(set(resource_ids)) != len(resource_ids):
+            raise ValueError("budget contains duplicate resource dimensions")
+        if len(set(self.stop_condition_ids)) != len(self.stop_condition_ids):
+            raise ValueError("budget contains duplicate stop conditions")
+        if any(ceiling.currency != self.currency for ceiling in self.role_ceilings):
+            raise ValueError("role budget currency must match the parent currency")
+        if self.max_cost is not None and any(
+            ceiling.max_cost is None or ceiling.max_cost > self.max_cost
+            for ceiling in self.role_ceilings
+        ):
+            raise ValueError("role cost ceiling must fit the parent cost ceiling")
+
+        role_set = set(role_ids)
+        operation_set = set(operation_ids)
+        operations_by_id = {
+            item.provider_operation_ceiling_id: item for item in self.provider_operation_ceilings
+        }
+        referenced_roles: set[str] = set()
+        referenced_operations: set[str] = set()
+        for route in self.dispatch_routes:
+            if route.dispatch_owner_kind == DispatchBudgetOwnerKind.MODEL_ROLE:
+                role_id = route.dispatch_model_role_binding_id
+                if role_id not in role_set:
+                    raise ValueError("dispatch route names an unknown model-role ceiling")
+                referenced_roles.add(role_id or "")
+            else:
+                operation_id = route.provider_operation_ceiling_id
+                if operation_id not in operation_set:
+                    raise ValueError("dispatch route names an unknown provider-operation ceiling")
+                operation = operations_by_id.get(operation_id or "")
+                if operation is None or (
+                    route.adapter_profile_id != operation.adapter_profile_id
+                    or route.operation_kind != operation.operation_kind
+                    or route.stage != operation.operation_kind
+                    or route.billing_unit != operation.billing_unit
+                ):
+                    raise ValueError(
+                        "dispatch route and provider-operation ceiling do not exactly match"
+                    )
+                referenced_operations.add(operation_id or "")
+            if not set(route.internal_usage_role_binding_ids) <= role_set:
+                raise ValueError("dispatch route names an unknown internal usage owner")
+            referenced_roles.update(route.internal_usage_role_binding_ids)
+
+        if referenced_roles != role_set or referenced_operations != operation_set:
+            raise ValueError("live budget contains an orphan budget owner ceiling")
+        return self
+
+
+def budget_spec_v4_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "budget_spec")
+    payload.setdefault("schema_version", 4)
+    payload.pop("budget_hash", None)
+    return canonical_sha256(payload)
+
+
+MEMORY_CONFORMANCE_ROUTE_STAGES = (
+    "runtime_resolve",
+    "scope_allocate",
+    "memory_ingest",
+    "memory_readiness",
+    "pre_query_projection",
+    "memory_query",
+    "post_query_projection",
+)
+
+
+class MemoryConformanceSpec(StrictContract):
+    schema_name: Literal["memory_conformance_spec"] = "memory_conformance_spec"
+    schema_version: Literal[1] = 1
+    conformance_spec_id: NonEmptyStr
+    conformance_spec_hash: Sha256
+    occurrence_id: NonEmptyStr
+    provider: NonEmptyStr
+    provider_project_id: NonEmptyStr
+    provider_profile_id: NonEmptyStr
+    runtime_binding_hash: Sha256
+    budget_id: NonEmptyStr
+    budget_hash: Sha256
+    dispatch_routes: tuple[DispatchBudgetRoute, ...]
+    minimal_source_sha256: Sha256
+    minimal_query_sha256: Sha256
+    expected_marker_sha256: Sha256
+    stop_condition_ids: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def immutable_authority_and_routes_close(self) -> Self:
+        expected_hash = memory_conformance_spec_hash(
+            self.model_dump(mode="python", exclude={"conformance_spec_hash"})
+        )
+        if self.conformance_spec_hash != expected_hash:
+            raise ValueError("memory-conformance spec hash does not match its canonical fields")
+        if tuple(route.stage for route in self.dispatch_routes) != (
+            MEMORY_CONFORMANCE_ROUTE_STAGES
+        ):
+            raise ValueError("memory-conformance spec requires the exact seven-stage route order")
+        route_ids = tuple(route.route_id for route in self.dispatch_routes)
+        if len(set(route_ids)) != len(route_ids):
+            raise ValueError("memory-conformance spec contains duplicate routes")
+        if len(set(self.stop_condition_ids)) != len(self.stop_condition_ids):
+            raise ValueError("memory-conformance spec contains duplicate stop conditions")
+        for route in self.dispatch_routes:
+            if route.dispatch_owner_kind != DispatchBudgetOwnerKind.PROVIDER_OPERATION:
+                raise ValueError("memory-conformance stages require provider-operation routes")
+            if route.adapter_profile_id != self.provider_profile_id:
+                raise ValueError("memory-conformance route profile does not match the spec")
+            if route.operation_kind != route.stage:
+                raise ValueError("memory-conformance route stage and operation must match")
+        return self
+
+
+def memory_conformance_spec_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "memory_conformance_spec")
+    payload.setdefault("schema_version", 1)
+    payload.pop("conformance_spec_hash", None)
+    return canonical_sha256(payload)
+
+
 class ProviderRuntimeProfileAttestation(StrictContract):
     schema_name: Literal["provider_runtime_profile_attestation"] = (
         "provider_runtime_profile_attestation"
@@ -1403,120 +1306,11 @@ class ProviderRuntimeProfileAttestation(StrictContract):
         return self
 
 
-class ExternalCallApprovalRecord(StrictContract):
-    schema_name: Literal["external_call_approval_record"] = "external_call_approval_record"
-    schema_version: Literal[1] = 1
-    approval_id: NonEmptyStr
-    approval_hash: Sha256
-    operation_kind: NonEmptyStr
-    scope_kind: BudgetScopeKindV2
-    scope_id: NonEmptyStr
-    runtime_binding_hash: Sha256 | None
-    provider_runtime_profile_attestation_hash: Sha256 | None
-    role_binding_ids: tuple[NonEmptyStr, ...]
-    budget_hash: Sha256
-    approved_at: UtcDateTime
-    expires_at: UtcDateTime
-    unmetered_cost_acknowledged: bool
-    stop_condition_ids: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def scope_runtime_and_expiry_close(self) -> Self:
-        expected_hash = external_call_approval_hash(
-            self.model_dump(mode="python", exclude={"approval_hash"})
-        )
-        if self.approval_hash != expected_hash:
-            raise ValueError("approval hash does not match its canonical fields")
-        if self.expires_at <= self.approved_at:
-            raise ValueError("approval expiry must follow approval time")
-        if not self.role_binding_ids:
-            raise ValueError("approval requires at least one role binding")
-        if len(set(self.role_binding_ids)) != len(self.role_binding_ids):
-            raise ValueError("approval contains duplicate role bindings")
-        if len(set(self.stop_condition_ids)) != len(self.stop_condition_ids):
-            raise ValueError("approval contains duplicate stop conditions")
-        if self.scope_kind == BudgetScopeKindV2.RUN:
-            if self.runtime_binding_hash is None:
-                raise ValueError("run approval requires a runtime binding")
-            if self.provider_runtime_profile_attestation_hash is not None:
-                raise ValueError("run approval cannot use a pre-readiness attestation")
-        elif self.scope_kind == BudgetScopeKindV2.MODEL_READINESS:
-            if self.provider_runtime_profile_attestation_hash is None:
-                raise ValueError("model-readiness approval requires an attestation")
-            if self.runtime_binding_hash is not None:
-                raise ValueError("model-readiness approval cannot use a runtime binding")
-        elif (
-            self.runtime_binding_hash is not None
-            or self.provider_runtime_profile_attestation_hash is not None
-        ):
-            raise ValueError("phase-review approval has no memory-system runtime binding")
-        return self
-
-
 def provider_runtime_profile_attestation_hash(fields: Mapping[str, Any]) -> str:
     payload = dict(fields)
     payload.setdefault("schema_name", "provider_runtime_profile_attestation")
     payload.setdefault("schema_version", 1)
     payload.pop("attestation_hash", None)
-    return canonical_sha256(payload)
-
-
-def external_call_approval_hash(fields: Mapping[str, Any]) -> str:
-    payload = dict(fields)
-    payload.setdefault("schema_name", "external_call_approval_record")
-    payload.setdefault("schema_version", 1)
-    payload.pop("approval_hash", None)
-    return canonical_sha256(payload)
-
-
-class ExternalCallApprovalRecordV2(StrictContract):
-    schema_name: Literal["external_call_approval_record"] = "external_call_approval_record"
-    schema_version: Literal[2] = 2
-    approval_id: NonEmptyStr
-    approval_hash: Sha256
-    operation_kind: NonEmptyStr
-    scope_kind: BudgetScopeKindV3
-    scope_id: NonEmptyStr
-    runtime_binding_hash: Sha256 | None
-    provider_runtime_profile_attestation_hash: Sha256 | None
-    role_binding_ids: tuple[NonEmptyStr, ...]
-    budget_hash: Sha256
-    approved_at: UtcDateTime
-    expires_at: UtcDateTime
-    unmetered_cost_acknowledged: bool
-    stop_condition_ids: tuple[NonEmptyStr, ...]
-
-    @model_validator(mode="after")
-    def conformance_scope_and_expiry_close(self) -> Self:
-        expected = external_call_approval_v2_hash(
-            self.model_dump(mode="python", exclude={"approval_hash"})
-        )
-        if self.approval_hash != expected:
-            raise ValueError("approval hash does not match its canonical fields")
-        if self.expires_at <= self.approved_at:
-            raise ValueError("approval expiry must follow approval time")
-        if self.scope_kind != BudgetScopeKindV3.MEMORY_CONFORMANCE:
-            raise ValueError("version 2 approval currently authorizes memory conformance only")
-        if self.operation_kind != "memory_conformance":
-            raise ValueError("memory-conformance approval requires its operation kind")
-        if self.runtime_binding_hash is None:
-            raise ValueError("memory-conformance approval requires a runtime binding")
-        if self.provider_runtime_profile_attestation_hash is not None:
-            raise ValueError("memory-conformance approval cannot use a pre-readiness attestation")
-        if not self.role_binding_ids:
-            raise ValueError("approval requires at least one role binding")
-        if len(set(self.role_binding_ids)) != len(self.role_binding_ids):
-            raise ValueError("approval contains duplicate role bindings")
-        if len(set(self.stop_condition_ids)) != len(self.stop_condition_ids):
-            raise ValueError("approval contains duplicate stop conditions")
-        return self
-
-
-def external_call_approval_v2_hash(fields: Mapping[str, Any]) -> str:
-    payload = dict(fields)
-    payload.setdefault("schema_name", "external_call_approval_record")
-    payload.setdefault("schema_version", 2)
-    payload.pop("approval_hash", None)
     return canonical_sha256(payload)
 
 
@@ -1629,65 +1423,18 @@ class ReportSpecV2(StrictContract):
         return self
 
 
-class AcceptanceReportSpec(StrictContract):
-    schema_name: Literal["acceptance_report_spec"] = "acceptance_report_spec"
-    schema_version: Literal[1] = 1
-    acceptance_report_spec_id: Sha256
-    audience: Literal["local", "public"]
-    evaluation_report_hash: Sha256
-    evaluation_export_validation_hash: Sha256
-    review_bundle_hash: Sha256
-    ai_review_record_hash: Sha256
-    human_review_record_hash: Sha256
-    phase_gate_hash: Sha256
-    renderer_hash: Sha256
-    asset_hashes: tuple[Sha256, ...]
-    browser_contract_hash: Sha256
-    performance_contract_hash: Sha256
-    export_profile_selector_id: NonEmptyStr
-    export_profile_selector_version: PositiveInt
-
-    @model_validator(mode="after")
-    def acceptance_report_spec_identity_is_canonical(self) -> Self:
-        if len(set(self.asset_hashes)) != len(self.asset_hashes):
-            raise ValueError("acceptance report spec contains duplicate asset hashes")
-        expected = acceptance_report_spec_id(
-            audience=self.audience,
-            evaluation_report_hash=self.evaluation_report_hash,
-            evaluation_export_validation_hash=self.evaluation_export_validation_hash,
-            review_bundle_hash=self.review_bundle_hash,
-            ai_review_record_hash=self.ai_review_record_hash,
-            human_review_record_hash=self.human_review_record_hash,
-            phase_gate_hash=self.phase_gate_hash,
-            renderer_hash=self.renderer_hash,
-            asset_hashes=self.asset_hashes,
-            browser_contract_hash=self.browser_contract_hash,
-            performance_contract_hash=self.performance_contract_hash,
-            export_profile_selector_id=self.export_profile_selector_id,
-            export_profile_selector_version=self.export_profile_selector_version,
-        )
-        if self.acceptance_report_spec_id != expected:
-            raise ValueError("acceptance report spec identity does not match its canonical payload")
-        return self
-
-
 class ReportIdentitySpecBinding(StrictContract):
     schema_name: Literal["report_identity_spec_binding"] = "report_identity_spec_binding"
     schema_version: Literal[1] = 1
     binding_id: Sha256
-    spec_kind: Literal["benchmark_report", "acceptance_report"]
-    spec_schema_name: Literal["report_spec", "acceptance_report_spec"]
+    spec_kind: Literal["benchmark_report"] = "benchmark_report"
+    spec_schema_name: Literal["report_spec"] = "report_spec"
     spec_schema_version: Literal[1] = 1
     spec_id: Sha256
     spec_hash: Sha256
 
     @model_validator(mode="after")
     def binding_discriminator_and_identity_are_canonical(self) -> Self:
-        expected_schema_name = (
-            "report_spec" if self.spec_kind == "benchmark_report" else "acceptance_report_spec"
-        )
-        if self.spec_schema_name != expected_schema_name:
-            raise ValueError("report identity binding discriminator does not match its schema")
         expected = report_identity_spec_binding_id(
             spec_kind=self.spec_kind,
             spec_schema_name=self.spec_schema_name,
@@ -1776,7 +1523,6 @@ RENDERING_DERIVATION_KINDS = frozenset(
         "diagnostic_run_report",
         "comparison_report",
         "release_report",
-        "phase_acceptance_report",
     }
 )
 
@@ -1878,10 +1624,6 @@ def report_spec_v2_id(**fields: object) -> str:
     return canonical_sha256(["oamb-report-spec-v2", fields])
 
 
-def acceptance_report_spec_id(**fields: object) -> str:
-    return canonical_sha256(["oamb-acceptance-report-spec-v1", fields])
-
-
 def report_identity_spec_binding_id(**fields: object) -> str:
     return canonical_sha256(["oamb-report-identity-spec-binding-v1", fields])
 
@@ -1935,10 +1677,9 @@ class RunPreflightRecord(StrictContract):
     provider_profile_id: NonEmptyStr
     runtime_binding_hash: Sha256
     provider_service_evidence: SourceEvidenceBinding
-    memory_conformance_evidence: SourceEvidenceBinding
+    provider_profile_evidence: SourceEvidenceBinding
     role_binding_ids: tuple[NonEmptyStr, ...]
     dispatch_routes: tuple[DispatchBudgetRoute, ...]
-    approval_hash: Sha256
     budget_hash: Sha256
     redacted_endpoint_fingerprints: tuple[Sha256, ...]
     credential_reference_fingerprints: tuple[Sha256, ...]
@@ -1949,10 +1690,12 @@ class RunPreflightRecord(StrictContract):
     def closure_and_identity_match(self) -> Self:
         if self.provider_service_evidence.source_kind != SourceEvidenceKind.PROVIDER_SERVICE:
             raise ValueError("preflight provider-service evidence has the wrong source kind")
-        if self.memory_conformance_evidence.source_kind != SourceEvidenceKind.PROVIDER_SERVICE:
-            raise ValueError("preflight memory-conformance evidence has the wrong source kind")
-        if "conformance" not in self.memory_conformance_evidence.source_identity:
-            raise ValueError("preflight requires an explicit memory-conformance source binding")
+        if self.provider_profile_evidence.source_kind != SourceEvidenceKind.PROVIDER_SERVICE:
+            raise ValueError("preflight provider-profile evidence has the wrong source kind")
+        if "provider_service_evidence_manifest@1" not in (
+            self.provider_profile_evidence.source_schema_versions
+        ):
+            raise ValueError("preflight requires an explicit provider-profile source binding")
         inventories = (
             self.role_binding_ids,
             tuple(item.route_id for item in self.dispatch_routes),
@@ -1989,6 +1732,81 @@ def run_preflight_record_hash(fields: Mapping[str, Any]) -> str:
     payload.setdefault("schema_version", 1)
     payload.pop("preflight_record_hash", None)
     return canonical_sha256(payload)
+
+
+class RunPreflightRecordV2(StrictContract):
+    schema_name: Literal["run_preflight_record"] = "run_preflight_record"
+    schema_version: Literal[2] = 2
+    preflight_record_hash: Sha256
+    run_id: NonEmptyStr
+    observed_at: UtcDateTime
+    resolved_plan_hash: Sha256
+    run_spec_hash: Sha256
+    dataset_manifest_hash: Sha256
+    subset_manifest_hash: Sha256
+    adapter_profile_id: NonEmptyStr
+    adapter_profile_hash: Sha256
+    provider_project_id: NonEmptyStr
+    provider_profile_id: NonEmptyStr
+    runtime_binding_hash: Sha256
+    provider_service_evidence: SourceEvidenceBinding
+    memory_conformance_evidence: SourceEvidenceBinding
+    role_binding_ids: tuple[NonEmptyStr, ...]
+    dispatch_routes: tuple[DispatchBudgetRoute, ...]
+    budget_hash: Sha256
+    redacted_endpoint_fingerprints: tuple[Sha256, ...]
+    credential_reference_fingerprints: tuple[Sha256, ...]
+    artifact_repository_fingerprint: Sha256
+    artifact_durability_proof_hash: Sha256
+    comparison_control_basis_hash: Sha256
+
+    @model_validator(mode="after")
+    def closure_and_identity_match(self) -> Self:
+        if self.provider_service_evidence.source_kind != SourceEvidenceKind.PROVIDER_SERVICE:
+            raise ValueError("preflight provider-service evidence has the wrong source kind")
+        if self.memory_conformance_evidence.source_kind != SourceEvidenceKind.PROVIDER_SERVICE:
+            raise ValueError("preflight memory-conformance evidence has the wrong source kind")
+        if (
+            "memory_conformance_evidence_manifest@1"
+            not in self.memory_conformance_evidence.source_schema_versions
+        ):
+            raise ValueError("preflight requires an explicit memory-conformance source binding")
+        inventories = (
+            self.role_binding_ids,
+            tuple(item.route_id for item in self.dispatch_routes),
+            self.redacted_endpoint_fingerprints,
+            self.credential_reference_fingerprints,
+        )
+        if any(len(set(items)) != len(items) for items in inventories):
+            raise ValueError("preflight inventories cannot contain duplicates")
+        role_ids = set(self.role_binding_ids)
+        for route in self.dispatch_routes:
+            if (
+                route.dispatch_model_role_binding_id is not None
+                and route.dispatch_model_role_binding_id not in role_ids
+            ):
+                raise ValueError("preflight route names an unknown dispatch role")
+            if not set(route.internal_usage_role_binding_ids) <= role_ids:
+                raise ValueError("preflight route names an unknown internal usage role")
+            if (
+                route.dispatch_owner_kind == DispatchBudgetOwnerKind.PROVIDER_OPERATION
+                and route.adapter_profile_id != self.adapter_profile_id
+            ):
+                raise ValueError("preflight route adapter profile does not match the run")
+        expected = run_preflight_record_v2_hash(
+            self.model_dump(mode="python", exclude={"preflight_record_hash"})
+        )
+        if self.preflight_record_hash != expected:
+            raise ValueError("preflight record hash does not match its canonical fields")
+        return self
+
+
+def run_preflight_record_v2_hash(fields: Mapping[str, Any]) -> str:
+    payload = dict(fields)
+    payload.setdefault("schema_name", "run_preflight_record")
+    payload.setdefault("schema_version", 2)
+    payload.pop("preflight_record_hash", None)
+    return canonical_sha256(["oamb-run-preflight-record-v2", payload])
 
 
 class ValidationRuleRequirement(StrictContract):

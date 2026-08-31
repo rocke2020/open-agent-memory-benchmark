@@ -135,7 +135,24 @@ def test_built_and_installed_distributions_expose_no_generated_schema_surface(
             "-c",
             (
                 "from importlib import resources; "
-                "assert not resources.files('oamb').joinpath('schemas').is_dir()"
+                "from oamb.contracts.schema import CONTRACT_REGISTRY, parse_contract; "
+                "assert not resources.files('oamb').joinpath('schemas').is_dir(); "
+                'expected={("comparison_control_source_reference",1),'
+                '("comparison_control_provenance_binding",1),'
+                '("workload_execution_control_record",1),'
+                '("controlled_embedding_comparison_projection",1),'
+                '("runtime_measurement_control_record",1),'
+                '("run_comparison_control_basis_record",1),'
+                '("run_preflight_record",2),'
+                '("comparison_control_snapshot",2)}; '
+                "assert expected <= set(CONTRACT_REGISTRY); "
+                'document={"schema_name":"comparison_control_source_reference",'
+                '"schema_version":1,"record_kind":"run_spec",'
+                '"referenced_schema_name":"run_spec",'
+                '"referenced_schema_version":1,"record_id":"run",'
+                '"record_sha256":"a"*64,"json_pointers":["/run_id"]}; '
+                "assert type(parse_contract(document)).__name__ == "
+                '"ComparisonControlSourceReference"'
             ),
         ],
         check=False,

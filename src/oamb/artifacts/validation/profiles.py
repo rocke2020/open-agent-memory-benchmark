@@ -41,15 +41,6 @@ T4_PROVIDER_SERVICE_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
     ("t4-provider-control-redaction", 1),
 )
 
-T8_T10_PHASE_GATE_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
-    ("phase.schema-identity.v1", 1),
-    ("phase.root-coverage.v1", 1),
-    ("phase.case-coverage.v1", 1),
-    ("phase.derivation-export.v1", 1),
-    ("phase.review-order.v1", 1),
-    ("phase.human-approval.v1", 1),
-)
-
 T8_REPORT_EXPORT_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
     ("report.export.payload-closure.v1", 1),
     ("report.export.canonical-bindings.v1", 1),
@@ -146,14 +137,13 @@ T9_EXTERNAL_EVIDENCE_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
     ("external.limitations.v1", 1),
 )
 
-ReportKind = Literal["run", "comparison", "evaluation", "release", "phase_acceptance"]
+ReportKind = Literal["run", "comparison", "evaluation", "release"]
 ReportAudience = Literal["public", "local"]
 REPORT_KINDS: tuple[ReportKind, ...] = (
     "run",
     "comparison",
     "evaluation",
     "release",
-    "phase_acceptance",
 )
 REPORT_AUDIENCES: tuple[ReportAudience, ...] = ("public", "local")
 
@@ -234,23 +224,6 @@ def fake_export_profile() -> ValidationProfile:
     )
 
 
-def t10_phase_gate_profile() -> ValidationProfile:
-    return ValidationProfile.create(
-        profile_id="oamb-t8-t10-phase-gate-v1",
-        stage=ValidationStage.EVIDENCE,
-        required_rules=tuple(
-            ValidationRuleRequirement(rule_id=rule_id, minimum_version=minimum_version)
-            for rule_id, minimum_version in T8_T10_PHASE_GATE_RULE_INVENTORY
-        ),
-        applicability=(
-            "phase=phase_1_smoke_acceptance",
-            "capsules=4",
-            "unique_cases=11",
-            "system_results=22",
-        ),
-    )
-
-
 def exact_report_export_profile(
     *,
     report_kind: ReportKind = "run",
@@ -276,7 +249,7 @@ def report_export_profile() -> ValidationProfile:
             for rule_id, minimum_version in T8_REPORT_EXPORT_RULE_INVENTORY
         ),
         applicability=(
-            "report_kind=run|comparison|evaluation|release|phase_acceptance",
+            "report_kind=run|comparison|evaluation|release",
             "audience=public|local",
         ),
     )
@@ -366,10 +339,6 @@ def t8_profile_catalog() -> dict[str, ClosedProfileDefinition]:
                 "component=comparison",
                 "comparison=paired-native-v1",
             ),
-        ),
-        ClosedProfileDefinition(
-            profile=t10_phase_gate_profile(),
-            rule_inventory=T8_T10_PHASE_GATE_RULE_INVENTORY,
         ),
         *(
             ClosedProfileDefinition(

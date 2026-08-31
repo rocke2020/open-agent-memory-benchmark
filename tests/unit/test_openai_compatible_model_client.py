@@ -4,12 +4,12 @@ import asyncio
 import hashlib
 import json
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 
-from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ids import attempt_id, canonical_sha256
 from oamb.contracts.ports import (
     ArtifactReadRequest,
     ArtifactSealReceipt,
@@ -20,6 +20,7 @@ from oamb.contracts.ports import (
     ModelRequest,
     RawPayloadSealRequest,
     RawReferenceHandle,
+    ThinkingEffort,
 )
 from oamb.contracts.specifications import (
     BindingKind,
@@ -31,6 +32,7 @@ from oamb.contracts.specifications import (
 from oamb.model_clients.openai_compatible import (
     OpenAICompatibleModelClient,
     RuntimeModelPolicy,
+    UsageProfile,
 )
 
 
@@ -60,24 +62,22 @@ class CapturingStore:
         raise AssertionError(f"unexpected read: {request.relative_path}")
 
 
-def _request(*, stage: str = "answer") -> ModelRequest:
+def _request(*, stage: str = "answer", thinking_effort: ThinkingEffort = "low") -> ModelRequest:
     messages = (("system", "follow the contract"), ("user", "hello"))
     return ModelRequest(
         attempt_id="a" * 64,
-        parent_kind="phase_review" if stage == "quality_review" else "case",
+        parent_kind="case",
         parent_id="case-1",
         stage=stage,
         role_binding_id=f"{stage}-binding",
         messages_sha256=canonical_sha256(messages),
         messages=messages,
-        output_contract_id="ai-quality-review-json-v1"
-        if stage == "quality_review"
-        else "lme-answer-text-v1",
+        output_contract_id="lme-answer-text-v1",
         max_output_tokens=128,
         candidate_count=1,
         temperature="0",
         top_p="1",
-        reasoning_disabled=True,
+        thinking_effort=thinking_effort,
         stop=None,
     )
 
@@ -93,6 +93,47 @@ def test_model_request_fingerprint_binds_output_and_sampling_controls() -> None:
             max_output_tokens=request.max_output_tokens + 1,
         ).request_fingerprint
     )
+    assert (
+        request.request_fingerprint
+        != replace(
+            request,
+            thinking_effort="high",
+        ).request_fingerprint
+    )
+
+
+def test_model_request_attempt_identity_binds_the_full_request_fingerprint() -> None:
+    messages = (("user", "hello"),)
+    request = ModelRequest.for_attempt(
+        ordinal=2,
+        parent_kind="case",
+        parent_id="case-1",
+        stage="answer",
+        role_binding_id="answer-binding",
+        messages_sha256=canonical_sha256(messages),
+        messages=messages,
+        thinking_effort="low",
+    )
+
+    assert request.attempt_id == attempt_id(
+        "case-1",
+        "answer",
+        2,
+        request.request_fingerprint,
+    )
+
+
+@pytest.mark.parametrize("thinking_effort", ["low", "high", "max"])
+def test_model_request_accepts_supported_thinking_effort(
+    thinking_effort: ThinkingEffort,
+) -> None:
+    assert _request(thinking_effort=thinking_effort).thinking_effort == thinking_effort
+
+
+@pytest.mark.parametrize("thinking_effort", ["none", "invalid"])
+def test_model_request_rejects_unsupported_thinking_effort(thinking_effort: str) -> None:
+    with pytest.raises(ValueError, match="thinking effort"):
+        _request(thinking_effort=cast(ThinkingEffort, thinking_effort))
 
 
 def _binding(
@@ -101,12 +142,12 @@ def _binding(
     binding_id: str | None = None,
     configured_model: str = "answer-model",
     resolved_model: str | None = None,
+    thinking_effort: ThinkingEffort = "low",
 ) -> ModelRoleBindingV2:
     default_binding_ids = {
         ModelRole.MEMORY_EXTRACTION: "memory_ingest-binding",
         ModelRole.ANSWER: "answer-binding",
         ModelRole.JUDGE: "judge-binding",
-        ModelRole.QUALITY_REVIEW: "quality_review-binding",
     }
     return ModelRoleBindingV2(
         binding_id=binding_id or default_binding_ids[role],
@@ -119,6 +160,7 @@ def _binding(
         credential_variable_name="OAMB_FIXTURE_MODEL_API_KEY",
         configured_model=configured_model,
         resolved_model=resolved_model or configured_model,
+        thinking_effort=thinking_effort,
         parameters_fingerprint="1" * 64,
         retry_policy_id="no-retry-v1",
         configuration_fingerprint="2" * 64,
@@ -135,6 +177,8 @@ def _client(
     role: ModelRole = ModelRole.ANSWER,
     binding_id: str | None = None,
     runtime_model_policy: RuntimeModelPolicy = "record",
+    usage_profile: UsageProfile = "strict-base-v2",
+    thinking_effort: ThinkingEffort = "low",
 ) -> OpenAICompatibleModelClient:
     return OpenAICompatibleModelClient(
         store=store,
@@ -145,28 +189,16 @@ def _client(
             binding_id=binding_id,
             configured_model=configured_model,
             resolved_model=resolved_model,
+            thinking_effort=thinking_effort,
         ),
         runtime_model_policy=runtime_model_policy,
-        reasoning_control=("reasoning_effort", "none"),
+        usage_profile=usage_profile,
         transport=httpx.MockTransport(handler),
     )
 
 
-def test_reasoning_control_cannot_override_a_core_request_field() -> None:
-    with pytest.raises(ValueError, match="reserved"):
-        OpenAICompatibleModelClient(
-            store=CapturingStore(),
-            base_url="https://models.example/v1",
-            api_key="secret",
-            role_binding=_binding(),
-            runtime_model_policy="record",
-            reasoning_control=("model", "none"),
-            transport=httpx.MockTransport(lambda request: httpx.Response(200)),
-        )
-
-
 @pytest.mark.asyncio
-async def test_openai_chat_completion_dispatches_once_and_seals_raw_usage() -> None:
+async def test_answer_sends_request_bound_low_effort_and_seals_raw_usage() -> None:
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -194,11 +226,10 @@ async def test_openai_chat_completion_dispatches_once_and_seals_raw_usage() -> N
         api_key="secret",
         role_binding=_binding(),
         runtime_model_policy="record",
-        reasoning_control=("reasoning_effort", "none"),
         transport=httpx.MockTransport(handler),
     )
 
-    receipt = await client.complete(_request())
+    receipt = await client.complete(_request(thinking_effort="low"))
     sent = json.loads(calls[0].content)
 
     assert len(calls) == 1
@@ -206,7 +237,7 @@ async def test_openai_chat_completion_dispatches_once_and_seals_raw_usage() -> N
     assert sent["model"] == "answer-model"
     assert sent["n"] == 1
     assert sent["max_tokens"] == 128
-    assert sent["reasoning_effort"] == "none"
+    assert sent["reasoning_effort"] == "low"
     assert "tools" not in sent
     assert receipt.output_text == "answer"
     assert receipt.finish_disposition == FinishDisposition.NORMAL_STOP
@@ -218,6 +249,56 @@ async def test_openai_chat_completion_dispatches_once_and_seals_raw_usage() -> N
     assert usage["input_tokens"] == 11
     assert usage["visible_output_tokens"] == 2
     assert usage["supplier_reported_total_tokens"] == 13
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_judge_sends_request_bound_high_effort() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "model": "judge-model",
+                "choices": [{"index": 0, "message": {"content": "1"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 1, "total_tokens": 9},
+            },
+        )
+
+    client = _client(
+        CapturingStore(),
+        handler,
+        configured_model="judge-model",
+        role=ModelRole.JUDGE,
+        thinking_effort="high",
+    )
+
+    await client.complete(_request(stage="judge", thinking_effort="high"))
+
+    assert json.loads(calls[0].content)["reasoning_effort"] == "high"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_effort_must_match_resolved_role_binding_before_dispatch() -> None:
+    calls: list[httpx.Request] = []
+
+    def capture_request(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    client = _client(
+        CapturingStore(),
+        capture_request,
+        thinking_effort="low",
+    )
+
+    with pytest.raises(ValueError, match="thinking effort.*role binding"):
+        await client.complete(_request(thinking_effort="high"))
+
+    assert calls == []
     await client.close()
 
 
@@ -480,6 +561,148 @@ async def test_unknown_supplier_usage_fields_fail_closed_without_hiding_the_raw_
 
 
 @pytest.mark.asyncio
+async def test_additive_openai_details_profile_preserves_cached_and_reasoning_usage() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "answer-model",
+                "choices": [
+                    {"index": 0, "message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {
+                    "prompt_tokens": 87,
+                    "completion_tokens": 11,
+                    "total_tokens": 98,
+                    "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 7},
+                    "completion_tokens_details": {
+                        "accepted_prediction_tokens": 0,
+                        "audio_tokens": 0,
+                        "reasoning_tokens": 3,
+                        "rejected_prediction_tokens": 0,
+                    },
+                    "prompt_cached_tokens_details": {"audio_tokens": 0},
+                },
+            },
+        )
+
+    store = CapturingStore()
+    client = _client(store, handler, usage_profile="openai-details-v3")
+
+    receipt = await client.complete(_request())
+
+    assert receipt.usage_reference_ids
+    usage = json.loads(store.records[0].canonical_bytes)
+    assert usage["schema_version"] == 3
+    assert usage["cached_input_tokens"] == 7
+    assert usage["reasoning_tokens"] == 3
+    assert usage["covered_dimensions"] == [
+        "input_tokens",
+        "visible_output_tokens",
+        "supplier_reported_total_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+    ]
+    assert usage["raw_field_paths"][-2:] == [
+        ["cached_input_tokens", "usage.prompt_tokens_details.cached_tokens"],
+        ["reasoning_tokens", "usage.completion_tokens_details.reasoning_tokens"],
+    ]
+    assert usage["proof_status"] == "measured_complete"
+    assert usage["billing_complete"] is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_additive_openai_details_profile_marks_missing_details_partial() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "answer-model",
+                "choices": [
+                    {"index": 0, "message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9},
+            },
+        )
+
+    store = CapturingStore()
+    client = _client(store, handler, usage_profile="openai-details-v3")
+
+    await client.complete(_request())
+
+    usage = json.loads(store.records[0].canonical_bytes)
+    assert usage["proof_status"] == "measured_partial"
+    assert usage["unavailable_dimensions"] == ["cached_input_tokens", "reasoning_tokens"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_additive_openai_details_profile_rejects_unknown_nested_extension() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "answer-model",
+                "choices": [
+                    {"index": 0, "message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 2,
+                    "total_tokens": 9,
+                    "prompt_tokens_details": {"cached_tokens": 1, "future_tokens": 4},
+                },
+            },
+        )
+
+    store = CapturingStore()
+    client = _client(store, handler, usage_profile="openai-details-v3")
+
+    with pytest.raises(ModelCallFailure) as failure:
+        await client.complete(_request())
+
+    assert failure.value.failure_kind == "usage_parse_error"
+    assert json.loads(store.records[0].canonical_bytes)["schema_version"] == 3
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_additive_openai_details_profile_rejects_nonzero_untracked_detail() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "answer-model",
+                "choices": [
+                    {"index": 0, "message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 2,
+                    "total_tokens": 9,
+                    "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 1},
+                    "completion_tokens_details": {
+                        "accepted_prediction_tokens": 1,
+                        "audio_tokens": 0,
+                        "reasoning_tokens": 1,
+                        "rejected_prediction_tokens": 0,
+                    },
+                    "prompt_cached_tokens_details": {"audio_tokens": 0},
+                },
+            },
+        )
+
+    client = _client(CapturingStore(), handler, usage_profile="openai-details-v3")
+
+    with pytest.raises(ModelCallFailure) as failure:
+        await client.complete(_request())
+
+    assert failure.value.failure_kind == "usage_parse_error"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_supplier_usage_cannot_exceed_the_requested_output_ceiling() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -546,7 +769,6 @@ async def test_no_opaque_retry_and_timeout_is_unknown_outcome() -> None:
         api_key="secret",
         role_binding=_binding(),
         runtime_model_policy="record",
-        reasoning_control=("reasoning_effort", "none"),
         transport=httpx.MockTransport(handler),
     )
 
@@ -554,6 +776,46 @@ async def test_no_opaque_retry_and_timeout_is_unknown_outcome() -> None:
         await client.complete(_request())
     assert calls == 1
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_total_timeout_bounds_a_model_call_even_when_transport_never_returns() -> None:
+    request_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        request_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    client = OpenAICompatibleModelClient(
+        store=CapturingStore(),
+        base_url="https://models.example/v1",
+        api_key="secret",
+        role_binding=_binding(),
+        runtime_model_policy="record",
+        transport=httpx.MockTransport(handler),
+        total_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(ModelCallUnknownOutcome) as failure:
+        await client.complete(_request())
+    assert request_started.is_set()
+    assert failure.value.failure_kind == "timeout"
+    await client.close()
+
+
+@pytest.mark.parametrize("total_timeout", [0.0, -1.0, float("inf"), float("nan")])
+def test_total_timeout_requires_a_finite_positive_value(total_timeout: float) -> None:
+    with pytest.raises(ValueError, match="total timeout"):
+        OpenAICompatibleModelClient(
+            store=CapturingStore(),
+            base_url="https://models.example/v1",
+            api_key="secret",
+            role_binding=_binding(),
+            runtime_model_policy="record",
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+            total_timeout_seconds=total_timeout,
+        )
 
 
 @pytest.mark.asyncio
@@ -615,15 +877,16 @@ async def test_close_waits_for_the_single_inflight_dispatch_and_then_rejects_new
 
 
 @pytest.mark.asyncio
-async def test_close_rejects_a_queued_completion_before_it_can_dispatch() -> None:
-    request_started = asyncio.Event()
+async def test_two_admitted_completions_dispatch_in_parallel_and_close_drains_both() -> None:
+    both_requests_started = asyncio.Event()
     release_response = asyncio.Event()
     calls = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        request_started.set()
+        if calls == 2:
+            both_requests_started.set()
         await release_response.wait()
         return httpx.Response(
             200,
@@ -636,58 +899,54 @@ async def test_close_rejects_a_queued_completion_before_it_can_dispatch() -> Non
         )
 
     client = _client(CapturingStore(), handler)
-    inflight = asyncio.create_task(client.complete(_request()))
-    await request_started.wait()
-    queued = asyncio.create_task(client.complete(_request()))
-    await asyncio.sleep(0)
-    closing = asyncio.create_task(client.close())
-    await asyncio.sleep(0)
+    completions = [asyncio.create_task(client.complete(_request())) for _ in range(2)]
 
-    release_response.set()
-    assert (await inflight).output_text == "answer"
-    with pytest.raises(RuntimeError, match="closed"):
-        await queued
+    try:
+        await asyncio.wait_for(both_requests_started.wait(), timeout=1.0)
+        closing = asyncio.create_task(client.close())
+        await asyncio.sleep(0)
+
+        assert not closing.done()
+        with pytest.raises(RuntimeError, match="closed"):
+            await client.complete(_request())
+    finally:
+        release_response.set()
+
+    assert [receipt.output_text for receipt in await asyncio.gather(*completions)] == [
+        "answer",
+        "answer",
+    ]
     await closing
-    assert calls == 1
+    assert calls == 2
 
 
 @pytest.mark.asyncio
-async def test_finish_taxonomy_and_quality_review_json_boundary_fail_closed() -> None:
-    responses: list[dict[str, Any]] = [
-        {
-            "model": "review-model",
-            "choices": [{"index": 0, "message": {"content": "not json"}, "finish_reason": "stop"}],
-        },
-        {
-            "model": "review-model",
-            "choices": [{"index": 0, "message": {"content": "{}"}, "finish_reason": "length"}],
-        },
-        {
-            "model": "review-model",
-            "choices": [{"index": 0, "message": {"content": "[]"}, "finish_reason": "stop"}],
-        },
-    ]
+async def test_failed_transport_close_is_retried_before_client_reports_closed() -> None:
+    class FailFirstCloseTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.close_count = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=responses.pop(0))
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise AssertionError(f"unexpected request while testing close: {request.url}")
 
+        async def aclose(self) -> None:
+            self.close_count += 1
+            if self.close_count == 1:
+                raise RuntimeError("fixture close failure")
+
+    transport = FailFirstCloseTransport()
     client = OpenAICompatibleModelClient(
         store=CapturingStore(),
         base_url="https://models.example/v1",
         api_key="secret",
-        role_binding=_binding(
-            role=ModelRole.QUALITY_REVIEW,
-            configured_model="review-model",
-        ),
-        runtime_model_policy="require_match",
-        reasoning_control=("reasoning_effort", "none"),
-        transport=httpx.MockTransport(handler),
+        role_binding=_binding(),
+        runtime_model_policy="record",
+        transport=transport,
     )
 
-    with pytest.raises(ModelCallFailure, match="JSON"):
-        await client.complete(_request(stage="quality_review"))
-    with pytest.raises(ModelCallFailure, match="normal stop"):
-        await client.complete(_request(stage="quality_review"))
-    with pytest.raises(ModelCallFailure, match="JSON object"):
-        await client.complete(_request(stage="quality_review"))
+    with pytest.raises(RuntimeError, match="fixture close failure"):
+        await client.close()
     await client.close()
+    await client.close()
+
+    assert transport.close_count == 2

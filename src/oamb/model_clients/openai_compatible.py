@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
-from typing import Literal
+import math
+from typing import Literal, cast
 
 import httpx
 
@@ -16,6 +16,7 @@ from oamb.contracts.accounting import (
     TokenMeasurementSource,
     TokenStageV2,
     TokenUsageRecordV2,
+    TokenUsageRecordV3,
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
@@ -30,6 +31,7 @@ from oamb.contracts.ports import (
     ModelRequest,
     RawPayloadSealRequest,
     RawReferenceHandle,
+    ThinkingEffort,
 )
 from oamb.contracts.specifications import (
     BindingKind,
@@ -40,31 +42,39 @@ from oamb.contracts.specifications import (
 )
 
 RuntimeModelPolicy = Literal["record", "require_match"]
+UsageProfile = Literal["strict-base-v2", "openai-details-v3"]
+DEFAULT_MODEL_CALL_TIMEOUT_SECONDS = 120.0
 
-_CORE_REQUEST_FIELDS = {
-    "max_tokens",
-    "messages",
-    "model",
-    "n",
-    "response_format",
-    "stop",
-    "temperature",
-    "tools",
-    "top_p",
+_BASE_USAGE_FIELDS: frozenset[str] = frozenset(
+    {"prompt_tokens", "completion_tokens", "total_tokens"}
+)
+_OPENAI_DETAILS_USAGE_FIELDS: frozenset[str] = _BASE_USAGE_FIELDS | {
+    "prompt_tokens_details",
+    "completion_tokens_details",
+    "prompt_cached_tokens_details",
 }
-_BASE_USAGE_FIELDS = {"prompt_tokens", "completion_tokens", "total_tokens"}
+_OPENAI_DETAIL_FIELDS: dict[str, frozenset[str]] = {
+    "prompt_tokens_details": frozenset({"audio_tokens", "cached_tokens"}),
+    "completion_tokens_details": frozenset(
+        {
+            "accepted_prediction_tokens",
+            "audio_tokens",
+            "reasoning_tokens",
+            "rejected_prediction_tokens",
+        }
+    ),
+    "prompt_cached_tokens_details": frozenset({"audio_tokens"}),
+}
 _MODEL_PARENT_KIND_BY_STAGE = {
     "memory_ingest": "ingestion_plan",
     "answer": "case",
     "judge": "case",
-    "quality_review": "phase_review",
     "model_readiness": "model_readiness",
 }
 _MODEL_STAGES_BY_ROLE = {
     ModelRole.MEMORY_EXTRACTION: frozenset({"memory_ingest", "model_readiness"}),
     ModelRole.ANSWER: frozenset({"answer"}),
     ModelRole.JUDGE: frozenset({"judge"}),
-    ModelRole.QUALITY_REVIEW: frozenset({"quality_review"}),
 }
 
 
@@ -93,15 +103,21 @@ class OpenAICompatibleModelClient:
         api_key: str,
         role_binding: ModelRoleBindingV2,
         runtime_model_policy: RuntimeModelPolicy,
-        reasoning_control: tuple[str, str],
+        usage_profile: UsageProfile = "strict-base-v2",
         transport: httpx.AsyncBaseTransport | None = None,
         connect_timeout_seconds: float = 10.0,
-        read_timeout_seconds: float = 120.0,
+        read_timeout_seconds: float = DEFAULT_MODEL_CALL_TIMEOUT_SECONDS,
         write_timeout_seconds: float = 30.0,
         pool_timeout_seconds: float = 10.0,
+        total_timeout_seconds: float | None = None,
     ) -> None:
         if not base_url or not api_key:
             raise ValueError("model endpoint and credential are required")
+        total_timeout = (
+            read_timeout_seconds if total_timeout_seconds is None else total_timeout_seconds
+        )
+        if not math.isfinite(total_timeout) or total_timeout <= 0:
+            raise ValueError("model total timeout must be finite positive")
         role_binding = ModelRoleBindingV2.model_validate(role_binding.model_dump(mode="python"))
         if (
             role_binding.role_status != RoleBindingStatus.SELECTED
@@ -116,21 +132,20 @@ class OpenAICompatibleModelClient:
             raise ValueError("model client requires one selected no-retry harness role binding")
         if runtime_model_policy not in {"record", "require_match"}:
             raise ValueError("runtime model policy must be record or require_match")
-        if len(reasoning_control) != 2 or not reasoning_control[0] or not reasoning_control[1]:
-            raise ValueError("reasoning control requires one explicit wire field and value")
-        reasoning_field = reasoning_control[0]
-        if (
-            re.fullmatch(r"[a-z][a-z0-9_]*", reasoning_field) is None
-            or reasoning_field in _CORE_REQUEST_FIELDS
-        ):
-            raise ValueError("reasoning control field is invalid or reserved")
+        if usage_profile not in {"strict-base-v2", "openai-details-v3"}:
+            raise ValueError("unknown OpenAI-compatible usage profile")
         self._store = store
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._role_binding = role_binding
         self._configured_model = role_binding.configured_model
         self._expected_runtime_model = role_binding.resolved_model
+        if role_binding.thinking_effort == "not_applicable" or role_binding.thinking_effort is None:
+            raise ValueError("model client requires a generative thinking effort")
+        self._thinking_effort: ThinkingEffort = role_binding.thinking_effort
         self._runtime_model_policy = runtime_model_policy
-        self._reasoning_control = reasoning_control
+        self._usage_profile = usage_profile
+        self._total_timeout_seconds = total_timeout
+        self._transport = transport or httpx.AsyncHTTPTransport()
         self._client = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=httpx.Timeout(
@@ -139,24 +154,34 @@ class OpenAICompatibleModelClient:
                 write=write_timeout_seconds,
                 pool=pool_timeout_seconds,
             ),
-            transport=transport,
+            transport=self._transport,
             follow_redirects=False,
         )
         self._accepting_operations = True
         self._closed = False
-        self._operation_lock = asyncio.Lock()
+        self._active_operation_count = 0
+        self._active_operations_drained = asyncio.Event()
+        self._active_operations_drained.set()
+        self._close_lock = asyncio.Lock()
+
+    def thinking_effort_for(self, *, stage: str, role_binding_id: str) -> ThinkingEffort:
+        if role_binding_id != self._role_binding.binding_id:
+            raise ValueError("model request role binding does not match the client instance")
+        if stage not in _MODEL_STAGES_BY_ROLE[self._role_binding.role]:
+            raise ValueError(
+                f"model request stage {stage} is invalid for role {self._role_binding.role.value}"
+            )
+        return self._thinking_effort
 
     async def complete(self, request: ModelRequest) -> ModelReceipt:
-        if not self._accepting_operations:
-            raise RuntimeError("model client is closed")
-        async with self._operation_lock:
-            if not self._accepting_operations:
-                raise RuntimeError("model client is closed")
+        self._validate_request(request)
+        self._admit_operation()
+        try:
             return await self._complete_once(request)
+        finally:
+            self._release_operation()
 
     async def _complete_once(self, request: ModelRequest) -> ModelReceipt:
-        self._validate_request(request)
-        reasoning_field, reasoning_value = self._reasoning_control
         payload: dict[str, object] = {
             "model": self._configured_model,
             "messages": [{"role": role, "content": content} for role, content in request.messages],
@@ -165,17 +190,16 @@ class OpenAICompatibleModelClient:
             "top_p": float(request.top_p),
             "max_tokens": request.max_output_tokens,
             "stop": list(request.stop) if request.stop is not None else None,
-            reasoning_field: reasoning_value,
+            "reasoning_effort": request.thinking_effort,
         }
-        if request.stage == "quality_review":
-            payload["response_format"] = {"type": "json_object"}
         try:
-            response = await self._client.post(self._url, json=payload)
+            async with asyncio.timeout(self._total_timeout_seconds):
+                response = await self._client.post(self._url, json=payload)
         except asyncio.CancelledError as exc:
             raise ModelCallCancelledUnknownOutcome(
                 "model dispatch was cancelled with unknown supplier acceptance"
             ) from exc
-        except httpx.TimeoutException as exc:
+        except (TimeoutError, httpx.TimeoutException) as exc:
             raise ModelCallUnknownOutcome(
                 "model dispatch timed out with unknown supplier acceptance",
                 failure_kind="timeout",
@@ -227,6 +251,7 @@ class OpenAICompatibleModelClient:
                 request,
                 raw_reference,
                 document.get("usage"),
+                runtime_model=document.get("model"),
             )
         except _UsageProfileMismatch as exc:
             raise ModelCallFailure(
@@ -316,29 +341,42 @@ class OpenAICompatibleModelClient:
             runtime_identity_status=runtime_status,
             supplier_status_code=response.status_code,
         )
-        if request.stage == "quality_review":
-            self._validate_quality_review(receipt)
         return receipt
 
     async def close(self) -> None:
         self._accepting_operations = False
-        async with self._operation_lock:
+        await self._active_operations_drained.wait()
+        async with self._close_lock:
             if not self._closed:
-                await self._client.aclose()
+                if self._client.is_closed:
+                    await self._transport.aclose()
+                else:
+                    await self._client.aclose()
                 self._closed = True
+
+    def _admit_operation(self) -> None:
+        if self._closed or not self._accepting_operations:
+            raise RuntimeError("model client is closed")
+        self._active_operation_count += 1
+        if self._active_operation_count == 1:
+            self._active_operations_drained.clear()
+
+    def _release_operation(self) -> None:
+        self._active_operation_count -= 1
+        if self._active_operation_count == 0:
+            self._active_operations_drained.set()
 
     def _validate_request(self, request: ModelRequest) -> None:
         try:
             expected_parent_kind = _MODEL_PARENT_KIND_BY_STAGE[request.stage]
         except KeyError as exc:
             raise ValueError(f"unsupported model request stage: {request.stage}") from exc
-        if request.role_binding_id != self._role_binding.binding_id:
-            raise ValueError("model request role binding does not match the client instance")
-        if request.stage not in _MODEL_STAGES_BY_ROLE[self._role_binding.role]:
-            raise ValueError(
-                f"model request stage {request.stage} is invalid for role "
-                f"{self._role_binding.role.value}"
-            )
+        expected_effort = self.thinking_effort_for(
+            stage=request.stage,
+            role_binding_id=request.role_binding_id,
+        )
+        if request.thinking_effort != expected_effort:
+            raise ValueError("model request thinking effort differs from its role binding")
         if request.parent_kind != expected_parent_kind:
             raise ValueError(
                 f"model request stage {request.stage} requires parent {expected_parent_kind}"
@@ -349,8 +387,6 @@ class OpenAICompatibleModelClient:
             raise ValueError("model request requires a positive output ceiling")
         if request.temperature != "0" or request.top_p != "1":
             raise ValueError("model request sampling must be temperature=0 and top_p=1")
-        if not request.reasoning_disabled:
-            raise ValueError("model request must explicitly disable reasoning")
         if canonical_sha256(request.messages) != request.messages_sha256:
             raise ValueError("model request message hash does not match exact messages")
 
@@ -438,6 +474,8 @@ class OpenAICompatibleModelClient:
         request: ModelRequest,
         raw_reference: RawReferenceHandle,
         raw_usage: object,
+        *,
+        runtime_model: object,
     ) -> tuple[tuple[str, ...], int | None]:
         if raw_usage is None:
             return (
@@ -450,9 +488,17 @@ class OpenAICompatibleModelClient:
             )
         if not isinstance(raw_usage, dict):
             raise ValueError("supplier usage must be an object")
-        usage_fields = set(raw_usage)
-        if not all(isinstance(field, str) for field in usage_fields):
+        if self._usage_profile == "openai-details-v3":
+            return self._seal_openai_details_usage(
+                request,
+                raw_reference,
+                raw_usage,
+                runtime_model=runtime_model,
+            )
+        raw_usage_fields = set(raw_usage)
+        if not all(isinstance(field, str) for field in raw_usage_fields):
             raise ValueError("supplier usage field names must be strings")
+        usage_fields = cast(set[str], raw_usage_fields)
         if not _BASE_USAGE_FIELDS.issubset(usage_fields):
             raise ValueError("supplier usage is missing frozen base fields")
         values = tuple(
@@ -493,6 +539,149 @@ class OpenAICompatibleModelClient:
             reason=None,
         )
         return (self._seal_usage_record(usage),), output_tokens
+
+    def _seal_openai_details_usage(
+        self,
+        request: ModelRequest,
+        raw_reference: RawReferenceHandle,
+        raw_usage: dict[object, object],
+        *,
+        runtime_model: object,
+    ) -> tuple[tuple[str, ...], int | None]:
+        if not isinstance(runtime_model, str) or not runtime_model:
+            raise ValueError("extended supplier usage requires runtime model identity")
+        raw_usage_fields = set(raw_usage)
+        if not all(isinstance(field, str) for field in raw_usage_fields):
+            raise ValueError("supplier usage field names must be strings")
+        usage_fields = cast(set[str], raw_usage_fields)
+        if not _BASE_USAGE_FIELDS.issubset(usage_fields):
+            raise ValueError("supplier usage is missing frozen base fields")
+        base_values = tuple(
+            raw_usage.get(name) for name in ("prompt_tokens", "completion_tokens", "total_tokens")
+        )
+        if not all(type(value) is int and value >= 0 for value in base_values):
+            raise ValueError("supplier usage base token fields must be non-negative integers")
+        input_tokens, output_tokens, total_tokens = cast(tuple[int, int, int], base_values)
+        detail_values: dict[str, int | None] = {
+            "cached_input_tokens": None,
+            "reasoning_tokens": None,
+        }
+        unknown_paths: list[str] = [
+            str(field) for field in sorted(usage_fields - _OPENAI_DETAILS_USAGE_FIELDS)
+        ]
+        for container_name, allowed_fields in _OPENAI_DETAIL_FIELDS.items():
+            raw_container = raw_usage.get(container_name)
+            if raw_container is None:
+                continue
+            if not isinstance(raw_container, dict) or not all(
+                isinstance(field, str) for field in raw_container
+            ):
+                raise ValueError(f"supplier usage {container_name} must be an object")
+            detail_container = cast(dict[str, object], raw_container)
+            unknown_paths.extend(
+                f"{container_name}.{field}"
+                for field in sorted(set(detail_container) - allowed_fields)
+            )
+            for field, value in detail_container.items():
+                if field in allowed_fields and (type(value) is not int or value < 0):
+                    raise ValueError(
+                        f"supplier usage {container_name}.{field} must be a non-negative integer"
+                    )
+                tracked = (container_name, field) in {
+                    ("prompt_tokens_details", "cached_tokens"),
+                    ("completion_tokens_details", "reasoning_tokens"),
+                }
+                if field in allowed_fields and not tracked and value != 0:
+                    unknown_paths.append(f"unsupported_nonzero:{container_name}.{field}")
+            if container_name == "prompt_tokens_details":
+                cached = detail_container.get("cached_tokens")
+                if type(cached) is int:
+                    detail_values["cached_input_tokens"] = cached
+            if container_name == "completion_tokens_details":
+                reasoning = detail_container.get("reasoning_tokens")
+                if type(reasoning) is int:
+                    detail_values["reasoning_tokens"] = reasoning
+        covered_dimensions = [
+            "input_tokens",
+            "visible_output_tokens",
+            "supplier_reported_total_tokens",
+        ]
+        raw_field_paths = [
+            ("input_tokens", "usage.prompt_tokens"),
+            ("visible_output_tokens", "usage.completion_tokens"),
+            ("supplier_reported_total_tokens", "usage.total_tokens"),
+        ]
+        for dimension, raw_path in (
+            ("cached_input_tokens", "usage.prompt_tokens_details.cached_tokens"),
+            ("reasoning_tokens", "usage.completion_tokens_details.reasoning_tokens"),
+        ):
+            if detail_values[dimension] is not None:
+                covered_dimensions.append(dimension)
+                raw_field_paths.append((dimension, raw_path))
+        unavailable_dimensions = tuple(
+            dimension
+            for dimension in ("cached_input_tokens", "reasoning_tokens")
+            if detail_values[dimension] is None
+        )
+        limitations = [
+            *(f"unknown_field:{path}" for path in unknown_paths),
+            *(f"unavailable:{dimension}" for dimension in unavailable_dimensions),
+        ]
+        proof_status = (
+            ProofStatus.MEASURED_COMPLETE
+            if not unavailable_dimensions and not unknown_paths
+            else ProofStatus.MEASURED_PARTIAL
+        )
+        reason = ",".join(limitations) if limitations else None
+        usage_id = canonical_sha256(
+            [
+                "oamb-openai-compatible-details-usage-v3",
+                request.attempt_id,
+                raw_reference.sha256,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                detail_values,
+                proof_status,
+                reason,
+            ]
+        )
+        usage = TokenUsageRecordV3(
+            usage_record_id=usage_id,
+            attempt_id=request.attempt_id,
+            parent_kind=request.parent_kind,
+            parent_id=request.parent_id,
+            stage=TokenStageV2(request.stage),
+            operation_kind="openai_chat_completion",
+            token_domain=TokenDomain.EXTERNAL_LLM,
+            measurement_source=TokenMeasurementSource.SUPPLIER_RESPONSE,
+            input_tokens=input_tokens,
+            visible_output_tokens=output_tokens,
+            supplier_reported_total_tokens=total_tokens,
+            context_view_tokens=None,
+            cached_input_tokens=detail_values["cached_input_tokens"],
+            reasoning_tokens=detail_values["reasoning_tokens"],
+            configured_model=self._configured_model,
+            runtime_model=runtime_model,
+            meter_schema_id="openai-chat-usage-details-v1",
+            raw_field_paths=tuple(raw_field_paths),
+            covered_dimensions=tuple(covered_dimensions),
+            unavailable_dimensions=unavailable_dimensions,
+            not_applicable_dimensions=(),
+            inclusion_relationships=(),
+            token_measurement_complete=not unavailable_dimensions,
+            billing_complete=False,
+            proof_status=proof_status,
+            reason=reason,
+            raw_response_ref=raw_reference.sha256,
+        )
+        usage_ids = (self._seal_usage_record(usage),)
+        if unknown_paths:
+            raise _UsageProfileMismatch(
+                "supplier usage fields differ from the extended profile",
+                usage_reference_ids=usage_ids,
+            )
+        return usage_ids, output_tokens
 
     def _seal_unavailable_usage(
         self,
@@ -553,7 +742,7 @@ class OpenAICompatibleModelClient:
             raw_response_ref=raw_reference.sha256,
         )
 
-    def _seal_usage_record(self, usage: TokenUsageRecordV2) -> str:
+    def _seal_usage_record(self, usage: TokenUsageRecordV2 | TokenUsageRecordV3) -> str:
         canonical = canonical_json_bytes(usage)
         self._store.seal_source_record(
             ArtifactWriteRequest(
@@ -564,51 +753,3 @@ class OpenAICompatibleModelClient:
             )
         )
         return usage.usage_record_id
-
-    @staticmethod
-    def _validate_quality_review(receipt: ModelReceipt) -> None:
-        if receipt.finish_disposition != FinishDisposition.NORMAL_STOP:
-            raise ModelCallFailure(
-                "quality review requires a normal stop",
-                raw_reference=receipt.raw_reference,
-                raw_response_bytes=receipt.raw_response_bytes,
-                usage_reference_ids=receipt.usage_reference_ids,
-                retryable=False,
-                failure_kind="output_contract_error",
-                supplier_status_code=receipt.supplier_status_code,
-            )
-        if len(receipt.candidates) != 1:
-            raise ModelCallFailure(
-                "quality review requires exactly one candidate",
-                raw_reference=receipt.raw_reference,
-                raw_response_bytes=receipt.raw_response_bytes,
-                usage_reference_ids=receipt.usage_reference_ids,
-                retryable=False,
-                failure_kind="output_contract_error",
-                supplier_status_code=receipt.supplier_status_code,
-            )
-        candidate = receipt.candidates[0]
-        if candidate.content is None or candidate.tool_call_present or not candidate.complete:
-            raise ModelCallFailure(
-                "quality review requires complete text without tool calls",
-                raw_reference=receipt.raw_reference,
-                raw_response_bytes=receipt.raw_response_bytes,
-                usage_reference_ids=receipt.usage_reference_ids,
-                retryable=False,
-                failure_kind="output_contract_error",
-                supplier_status_code=receipt.supplier_status_code,
-            )
-        try:
-            document = json.loads(candidate.content, parse_constant=_reject_json_constant)
-            if not isinstance(document, dict):
-                raise ValueError("quality review requires a JSON object")
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ModelCallFailure(
-                f"quality review requires a complete JSON object: {exc}",
-                raw_reference=receipt.raw_reference,
-                raw_response_bytes=receipt.raw_response_bytes,
-                usage_reference_ids=receipt.usage_reference_ids,
-                retryable=False,
-                failure_kind="output_contract_error",
-                supplier_status_code=receipt.supplier_status_code,
-            ) from exc

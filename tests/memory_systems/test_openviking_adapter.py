@@ -1123,7 +1123,6 @@ async def test_find_hydrates_l0_l1_l2_in_provider_order_with_ordered_raw_referen
         ("http_status", "http_status"),
         ("transport_error", "transport_error"),
         ("cancelled", "cancelled"),
-        ("queued_cancelled", "cancelled"),
     ],
 )
 async def test_late_l2_failure_preserves_find_and_prior_hydration_raws(
@@ -1161,19 +1160,9 @@ async def test_late_l2_failure_preserves_find_and_prior_hydration_raws(
     failure_response = b'{"unexpected":true}'
     find_seen = False
     second_hydration_started = asyncio.Event()
-    holder_started = asyncio.Event()
-    release_holder = asyncio.Event()
-    holder_task: asyncio.Task[RawReferenceHandle] | None = None
-    wrong_peer = "oamb-" + "e" * 64
-    adapter: Any
-    scope: Any
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal find_seen, holder_task
-        if request.headers.get("X-OpenViking-Actor-Peer") == wrong_peer:
-            holder_started.set()
-            await release_holder.wait()
-            return httpx.Response(403, content=_permission_denied(EXPECTED_ROOT))
+        nonlocal find_seen
         if request.url.path == "/api/v1/fs/stat":
             return httpx.Response(
                 404,
@@ -1202,14 +1191,6 @@ async def test_late_l2_failure_preserves_find_and_prior_hydration_raws(
                 return projection_response
         if request.url.path == "/api/v1/content/read":
             if request.url.params["uri"] == chunk_uris[0]:
-                if failure_mode == "queued_cancelled":
-                    holder_task = asyncio.create_task(
-                        adapter.verify_wrong_peer_stat_isolation(
-                            scope=scope,
-                            wrong_actor_peer_id=wrong_peer,
-                        )
-                    )
-                    await asyncio.sleep(0)
                 return httpx.Response(200, content=first_read_response)
             if failure_mode == "response_validation":
                 return httpx.Response(200, content=failure_response)
@@ -1221,7 +1202,6 @@ async def test_late_l2_failure_preserves_find_and_prior_hydration_raws(
                 second_hydration_started.set()
                 await asyncio.Event().wait()
                 raise AssertionError("cancelled L2 hydration unexpectedly resumed")
-            raise AssertionError("queued L2 hydration unexpectedly dispatched")
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
     adapter = await _resolved_adapter(httpx.MockTransport(handler))
@@ -1236,21 +1216,14 @@ async def test_late_l2_failure_preserves_find_and_prior_hydration_raws(
 
     request = RetrievalRequest(scope, "d" * 64, b"query", 100)
     call_failure: MemorySystemCallFailure | MemorySystemReadCancelled
-    if failure_mode in {"cancelled", "queued_cancelled"}:
+    if failure_mode == "cancelled":
         retrieval_task = asyncio.create_task(adapter.retrieve(request))
-        if failure_mode == "cancelled":
-            await second_hydration_started.wait()
-        else:
-            await holder_started.wait()
-            await asyncio.sleep(0)
+        await second_hydration_started.wait()
         retrieval_task.cancel()
         with pytest.raises(asyncio.CancelledError) as cancelled:
             await retrieval_task
         assert isinstance(cancelled.value, MemorySystemReadCancelled)
         call_failure = cancelled.value
-        if holder_task is not None:
-            release_holder.set()
-            await holder_task
     else:
         with pytest.raises(MemorySystemCallFailure) as failure:
             await adapter.retrieve(request)
@@ -1616,6 +1589,77 @@ async def test_cancelled_queued_wrong_peer_write_is_retryable_before_dispatch() 
     )
     assert wrong_peer_write_calls == 1
     await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_admitted_wrong_peer_probes_and_rejects_new_probe() -> None:
+    wrong_peer = "oamb-" + "e" * 64
+    late_wrong_peer = "oamb-" + "d" * 64
+    active_stat_started = asyncio.Event()
+    release_active_stat = asyncio.Event()
+    wrong_peer_write_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal wrong_peer_write_calls
+        actor_peer = request.headers.get("X-OpenViking-Actor-Peer")
+        if actor_peer == wrong_peer:
+            if request.url.path == "/api/v1/fs/stat":
+                active_stat_started.set()
+                await release_active_stat.wait()
+                return httpx.Response(403, content=_permission_denied(EXPECTED_ROOT))
+            wrong_peer_write_calls += 1
+            return httpx.Response(403, content=_permission_denied(EXPECTED_ROOT))
+        if actor_peer == late_wrong_peer:
+            raise AssertionError("late wrong-peer probe unexpectedly dispatched")
+        if request.url.path == "/api/v1/fs/stat":
+            return httpx.Response(
+                404,
+                content=_fixture("stat-not-found.json").replace(
+                    b'"fixture"', json.dumps(request.url.params["uri"]).encode()
+                ),
+            )
+        return httpx.Response(
+            200,
+            content=_fixture("mkdir-ok.json").replace(
+                b'"fixture"', json.dumps(EXPECTED_ROOT).encode()
+            ),
+        )
+
+    adapter = await _resolved_adapter(httpx.MockTransport(handler))
+    scope = await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID)
+    )
+    active_stat = asyncio.create_task(
+        adapter.verify_wrong_peer_stat_isolation(
+            scope=scope,
+            wrong_actor_peer_id=wrong_peer,
+        )
+    )
+    await active_stat_started.wait()
+    admitted_write = asyncio.create_task(
+        adapter.verify_wrong_peer_write_isolation(
+            scope=scope,
+            wrong_actor_peer_id=wrong_peer,
+        )
+    )
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(adapter.close())
+    await asyncio.sleep(0)
+
+    assert not closing.done()
+    with pytest.raises(RuntimeError, match="closed"):
+        await adapter.verify_wrong_peer_stat_isolation(
+            scope=scope,
+            wrong_actor_peer_id=late_wrong_peer,
+        )
+
+    release_active_stat.set()
+    await active_stat
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await admitted_write
+    assert isinstance(cancelled.value, MemorySystemCallCancelledBeforeDispatch)
+    await closing
+    assert wrong_peer_write_calls == 0
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,6 @@ from oamb.contracts.reporting import (
     MabPlanMetricSummary,
     MeasurementSummaryLine,
     MetricSummary,
-    PhaseAcceptanceReport,
     ReducerBinding,
     ReleaseReportModel,
     ReportArtifactManifestV2,
@@ -34,7 +33,6 @@ from oamb.contracts.reporting import (
     diagnostic_run_report_model_id,
     evaluation_report_model_id,
     metric_summary_id,
-    phase_acceptance_report_id,
     release_report_model_id,
     report_artifact_manifest_v2_id,
     report_artifact_manifest_v3_id,
@@ -475,52 +473,10 @@ def build_release_report_model(
     )
 
 
-def build_phase_acceptance_report(
-    *,
-    acceptance_report_spec_hash: str,
-    phase_id: str,
-    evaluation_report_hash: str,
-    evaluation_export_validation_hash: str,
-    review_bundle_hash: str,
-    phase_gate_hash: str,
-    ai_review_record_hash: str,
-    human_review_record_hash: str,
-    gate_review_bundle_hash: str,
-    gate_passed_by_ai: bool,
-    gate_passed_by_human: bool,
-    finding_codes: tuple[str, ...],
-    evidence_references: tuple[str, ...],
-    limitations: tuple[str, ...],
-) -> PhaseAcceptanceReport:
-    review_current = review_bundle_hash == gate_review_bundle_hash
-    passed_by_ai = review_current and gate_passed_by_ai
-    passed_by_human = review_current and gate_passed_by_ai and gate_passed_by_human
-    fields = {
-        "acceptance_report_spec_hash": acceptance_report_spec_hash,
-        "phase_id": phase_id,
-        "evaluation_report_hash": evaluation_report_hash,
-        "evaluation_export_validation_hash": evaluation_export_validation_hash,
-        "review_bundle_hash": review_bundle_hash,
-        "phase_gate_hash": phase_gate_hash,
-        "ai_review_record_hash": ai_review_record_hash,
-        "human_review_record_hash": human_review_record_hash,
-        "gate_review_bundle_hash": gate_review_bundle_hash,
-        "review_current": review_current,
-        "passed_by_ai": passed_by_ai,
-        "passed_by_human": passed_by_human,
-        "finding_codes": finding_codes,
-        "evidence_references": evidence_references,
-        "limitations": limitations,
-    }
-    return PhaseAcceptanceReport.model_validate(
-        {"report_id": phase_acceptance_report_id(**fields), **fields}
-    )
-
-
 def build_report_artifact_manifest_v2(
     *,
     report_id: str,
-    report_kind: Literal["run", "comparison", "release", "phase_acceptance"],
+    report_kind: Literal["run", "comparison", "release"],
     report_identity_spec_binding: ReportIdentitySpecBinding,
     ordered_source_bindings: tuple[SourceEvidenceBinding, ...],
     ordered_evidence_validation_hashes: tuple[str, ...],
@@ -621,7 +577,6 @@ __all__ = [
     "build_evaluation_report_model",
     "build_mab65_report_reduction",
     "build_metric_summary",
-    "build_phase_acceptance_report",
     "build_release_report_model",
     "build_report_artifact_manifest_v2",
     "build_report_artifact_manifest_v3",

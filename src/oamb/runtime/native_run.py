@@ -7,33 +7,41 @@ import hashlib
 import math
 import multiprocessing
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, TypeVar
 
 from oamb.artifacts.atomic import atomic_write_bytes, read_regular_file
 from oamb.contracts.accounting import (
     CostBasis,
     CostRecord,
+    CostRecordV2,
     IndexingView,
     ProofStatus,
     ResourceUsageRecord,
+    ResourceUsageRecordV2,
     TokenDomain,
     TokenMeasurementSource,
+    TokenStage,
     TokenStageV2,
     TokenUsageRecordV2,
+    TokenUsageRecordV3,
+    TokenUsageRecordV5,
 )
 from oamb.contracts.base import StrictContract
 from oamb.contracts.evidence import (
     AttemptIntentRecord,
+    AttemptIntentRecordV3,
     AttemptReceiptKind,
     AttemptReceiptRecord,
     AttemptRecordV2,
+    AttemptRecordV4,
     BudgetReservationRecord,
+    BudgetReservationRecordV3,
     CapsuleManifest,
     CaseEvaluationDisposition,
     CaseRecordV3,
@@ -43,6 +51,14 @@ from oamb.contracts.evidence import (
     OccurrenceClaimRecord,
     RunLeaseRecord,
     RunRecord,
+    attempt_intent_v3_hash,
+    attempt_record_v4_hash,
+    budget_owner_allocation_hash,
+    budget_reservation_v3_hash,
+    budget_reservation_v3_id,
+)
+from oamb.contracts.evidence import (
+    BudgetOwnerAllocation as EvidenceBudgetOwnerAllocation,
 )
 from oamb.contracts.ids import (
     attempt_id,
@@ -53,7 +69,10 @@ from oamb.contracts.ids import (
 )
 from oamb.contracts.ports import (
     AnswerValue,
+    ArtifactReadRequest,
+    ArtifactSealReceipt,
     ArtifactStorePort,
+    ArtifactWriteRequest,
     CasePlan,
     DeterministicEvaluation,
     IngestionDispatchRequest,
@@ -69,8 +88,11 @@ from oamb.contracts.ports import (
     ModelCallUnknownOutcome,
     ModelClientPort,
     ModelRequest,
+    NativeEvidenceBatch,
     ProjectionReceipt,
     RawPayloadSealRequest,
+    RawReferenceHandle,
+    ReadinessReceipt,
     ReadinessRequest,
     RetrievalRequest,
     ScopeAllocationRequest,
@@ -78,12 +100,22 @@ from oamb.contracts.ports import (
     VisibleEvidencePolicy,
     WorkloadPort,
 )
+from oamb.contracts.reporting import (
+    RunComparisonControlBasisRecord,
+    RuntimeMeasurementControlRecord,
+    WorkloadExecutionControlRecord,
+    provider_native_profile_hash,
+)
 from oamb.contracts.specifications import (
     BudgetScopeKindV2,
-    BudgetSpecV2,
-    ExternalCallApprovalRecord,
+    BudgetScopeKindV3,
+    BudgetSpecV4,
+    DispatchBudgetOwnerKind,
+    DispatchBudgetRoute,
+    MemorySystemRuntimeBindingV2,
     ModelRoleBindingV2,
     RunPreflightRecord,
+    RunPreflightRecordV2,
     RunSpec,
 )
 from oamb.contracts.states import (
@@ -94,12 +126,27 @@ from oamb.contracts.states import (
     ResumeDisposition,
     RunState,
 )
+from oamb.runtime.budget import (
+    BudgetAmount,
+    BudgetCeiling,
+    BudgetExceededError,
+    BudgetLedger,
+    ReservationRequest,
+)
+from oamb.runtime.budget import (
+    BudgetOwnerAllocation as RuntimeBudgetOwnerAllocation,
+)
 from oamb.runtime.memory_query import execute_read_only_retrieval
+from oamb.runtime.native_continuation import (
+    ImportedAttemptAccounting,
+    NativeContinuation,
+    PartialPlanContinuation,
+)
+from oamb.runtime.resume import ProviderLifecycleBridge, ResumeRejectedError
 from oamb.runtime.source_records import seal_source_contract
 
 NATIVE_FIXTURE_STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 NATIVE_RETRIEVAL_TOP_K = 100
-NATIVE_JUDGE_MAX_OUTPUT_TOKENS = 1
 NATIVE_CLOSE_TIMEOUT_SECONDS = 5.0
 NATIVE_PROCESS_POLL_SECONDS = 0.01
 NATIVE_PROCESS_TERMINATION_SECONDS = 0.10
@@ -107,6 +154,7 @@ NATIVE_OWNER_NAME = "native-run-owner.json"
 NATIVE_OWNER_ID = "native-fixture-owner-v1"
 
 NativeIngestionPlanRecord: TypeAlias = IngestionPlanRecordV2 | IngestionPlanRecordV3
+_LiveDispatchResult = TypeVar("_LiveDispatchResult")
 
 
 class NativeRunOwnershipError(RuntimeError):
@@ -141,6 +189,56 @@ class CapsuleArtifactStorePort(ArtifactStorePort, Protocol):
     def finalize_capsule(self, *, run_id: str, run_spec_hash: str) -> CapsuleManifest: ...
 
 
+class _LiveModelUsageCaptureStore:
+    """Keep transient model V2 usage out of the final source inventory until V5 conversion."""
+
+    def __init__(
+        self,
+        delegate: ArtifactStorePort,
+        pending_usage: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3],
+    ) -> None:
+        self._delegate = delegate
+        self._pending_usage = pending_usage
+
+    def seal_raw(self, request: RawPayloadSealRequest) -> RawReferenceHandle:
+        return self._delegate.seal_raw(request)
+
+    def seal_source_record(self, request: ArtifactWriteRequest) -> ArtifactSealReceipt:
+        if request.relative_path.startswith("source/usage/"):
+            try:
+                usage: TokenUsageRecordV2 | TokenUsageRecordV3 = (
+                    TokenUsageRecordV3.model_validate_json(request.canonical_bytes)
+                )
+            except ValueError:
+                usage = TokenUsageRecordV2.model_validate_json(request.canonical_bytes)
+            expected_path = f"source/usage/{usage.usage_record_id}.json"
+            if request.record_id != usage.usage_record_id or request.relative_path != expected_path:
+                raise ValueError("live model usage record ID or path does not match its bytes")
+            if canonical_json_bytes(usage) != request.canonical_bytes:
+                raise ValueError("live model usage record is not canonical")
+            if hashlib.sha256(request.canonical_bytes).hexdigest() != request.canonical_sha256:
+                raise ValueError("live model usage request hash does not match its bytes")
+            previous = self._pending_usage.get(usage.usage_record_id)
+            if previous is not None and previous != usage:
+                raise ValueError("live model usage record collides with different bytes")
+            self._pending_usage[usage.usage_record_id] = usage
+            return ArtifactSealReceipt(
+                usage.usage_record_id,
+                request.canonical_sha256,
+                created=previous is None,
+            )
+        return self._delegate.seal_source_record(request)
+
+    def seal_checkpoint(self, request: ArtifactWriteRequest) -> ArtifactSealReceipt:
+        return self._delegate.seal_checkpoint(request)
+
+    def seal_source_manifest(self, request: ArtifactWriteRequest) -> ArtifactSealReceipt:
+        return self._delegate.seal_source_manifest(request)
+
+    def read_verified(self, request: ArtifactReadRequest) -> bytes:
+        return self._delegate.read_verified(request)
+
+
 @dataclass(frozen=True, slots=True)
 class NativeRunArtifacts:
     capsule_root: Path
@@ -151,35 +249,40 @@ class NativeRunArtifacts:
 
 @dataclass(frozen=True, slots=True)
 class NativeRunControl:
-    """Exact durable authorization and identity closure for one live native run."""
+    """Exact durable budget and identity closure for one live native run."""
 
     run_spec: RunSpec
-    preflight_record: RunPreflightRecord
-    approval: ExternalCallApprovalRecord
-    budget: BudgetSpecV2
+    preflight_record: RunPreflightRecord | RunPreflightRecordV2
+    budget: BudgetSpecV4
     role_bindings: tuple[ModelRoleBindingV2, ...]
     owner_id: str
     host_fingerprint: str
     process_id: int
-    started_at: datetime
+    provider_runtime_directory: Path
+    wall_clock: Callable[[], datetime]
+    monotonic_clock: Callable[[], float]
+    runtime_binding: MemorySystemRuntimeBindingV2 | None = None
+    workload_control: WorkloadExecutionControlRecord | None = None
+    runtime_measurement_control: RuntimeMeasurementControlRecord | None = None
+    comparison_control_basis: RunComparisonControlBasisRecord | None = None
+    max_parallel_history_ingestions: int = 1
+    max_parallel_questions: int = 1
+    provider_lifecycle_coordination_directory: Path | None = None
 
     def __post_init__(self) -> None:
         run_id = self.run_spec.run_id
         if (
             self.preflight_record.run_id != run_id
-            or self.approval.scope_kind != BudgetScopeKindV2.RUN
-            or self.approval.scope_id != run_id
-            or self.budget.scope_kind != BudgetScopeKindV2.RUN
+            or self.budget.scope_kind != BudgetScopeKindV3.RUN
             or self.budget.scope_id != run_id
-            or self.budget.approval_id != self.approval.approval_id
         ):
-            raise ValueError("live native control run, approval, and budget scopes do not close")
+            raise ValueError("live native control run and budget scopes do not close")
         if self.preflight_record.run_spec_hash != canonical_sha256(self.run_spec):
             raise ValueError("live native control preflight does not bind its run spec")
-        if self.preflight_record.approval_hash != self.approval.approval_hash:
-            raise ValueError("live native control preflight does not bind its approval")
         if self.preflight_record.budget_hash != canonical_sha256(self.budget):
             raise ValueError("live native control preflight does not bind its budget")
+        if self.preflight_record.dispatch_routes != self.budget.dispatch_routes:
+            raise ValueError("live native control preflight does not bind its dispatch routes")
         if self.preflight_record.runtime_binding_hash != self.run_spec.runtime_binding_hash:
             raise ValueError("live native control runtime binding does not close")
         role_ids = tuple(item.binding_id for item in self.role_bindings)
@@ -188,19 +291,164 @@ class NativeRunControl:
             or len(set(role_ids)) != len(role_ids)
             or role_ids != self.run_spec.model_role_binding_ids
             or role_ids != self.preflight_record.role_binding_ids
-            or role_ids != self.approval.role_binding_ids
             or set(item.role_binding_id for item in self.budget.role_ceilings) != set(role_ids)
         ):
             raise ValueError("live native control role inventory does not close")
         if not self.owner_id or not self.host_fingerprint or self.process_id <= 0:
             raise ValueError("live native control requires concrete owner and host identity")
-        if self.started_at.tzinfo is None or self.started_at.utcoffset() is None:
-            raise ValueError("live native control start time requires an explicit timezone")
-        if not (
-            self.approval.approved_at <= self.started_at < self.approval.expires_at
-            and self.preflight_record.observed_at <= self.started_at
+        if not self.provider_runtime_directory.is_absolute():
+            raise ValueError("live native control provider runtime directory must be absolute")
+        if (
+            self.provider_lifecycle_coordination_directory is not None
+            and not self.provider_lifecycle_coordination_directory.is_absolute()
         ):
-            raise ValueError("live native control is outside its approval/preflight time window")
+            raise ValueError("live native lifecycle coordination directory must be absolute")
+        if not callable(self.wall_clock) or not callable(self.monotonic_clock):
+            raise ValueError("live native control requires trusted wall and monotonic clocks")
+        if (
+            min(
+                self.max_parallel_history_ingestions,
+                self.max_parallel_questions,
+            )
+            < 1
+        ):
+            raise ValueError("live native concurrency limits must be positive")
+        comparison_records = (
+            self.runtime_binding,
+            self.workload_control,
+            self.runtime_measurement_control,
+            self.comparison_control_basis,
+        )
+        if isinstance(self.preflight_record, RunPreflightRecordV2):
+            if any(record is None for record in comparison_records):
+                raise ValueError(
+                    "version 2 live control requires concrete comparison policy and basis records"
+                )
+            runtime_binding = self.runtime_binding
+            workload_control = self.workload_control
+            runtime_control = self.runtime_measurement_control
+            basis = self.comparison_control_basis
+            assert runtime_binding is not None
+            assert workload_control is not None
+            assert runtime_control is not None
+            assert basis is not None
+            expected_native_profile = provider_native_profile_hash(
+                provider_project_id=runtime_binding.provider_project_id,
+                provider_profile_id=runtime_binding.provider_profile_id,
+                adapter_profile_hash=self.preflight_record.adapter_profile_hash,
+                memory_system_id=runtime_binding.memory_system_id,
+                release_version=runtime_binding.release_version,
+                source_revision=runtime_binding.source_revision,
+                artifact_sha256=runtime_binding.artifact_sha256,
+                deployment_configuration_sha256=(runtime_binding.deployment_configuration_sha256),
+                storage_engine=runtime_binding.storage_engine,
+                storage_engine_version=runtime_binding.storage_engine_version,
+                schema_revision=runtime_binding.schema_revision,
+                vector_index_type=runtime_binding.vector_index_type,
+                distance_metric=runtime_binding.distance_metric,
+                index_configuration_sha256=runtime_binding.index_configuration_sha256,
+                native_feature_flags_fingerprint=(runtime_binding.native_feature_flags_fingerprint),
+                native_reranking_status=runtime_binding.native_reranking_status,
+            )
+            if (
+                runtime_binding.runtime_binding_hash != self.run_spec.runtime_binding_hash
+                or workload_control.run_id != run_id
+                or workload_control.workload_id != self.run_spec.workload_id
+                or workload_control.dataset_manifest_hash != self.run_spec.dataset_manifest_hash
+                or workload_control.case_manifest_hash != self.run_spec.case_manifest_hash
+                or runtime_control.run_id != run_id
+                or runtime_control.runtime_binding_hash != self.run_spec.runtime_binding_hash
+                or runtime_control.execution_environment.environment_hash
+                != self.run_spec.environment_hash
+                or basis.run_id != run_id
+                or basis.run_spec_hash != canonical_sha256(self.run_spec)
+                or basis.workload_control_hash != workload_control.workload_control_hash
+                or basis.runtime_measurement_control_hash != runtime_control.runtime_control_hash
+                or basis.runtime_binding_hash != runtime_binding.runtime_binding_hash
+                or basis.provider_native_profile_hash != expected_native_profile
+                or self.preflight_record.comparison_control_basis_hash != basis.basis_record_hash
+            ):
+                raise ValueError("version 2 live comparison control hash closure drifted")
+        elif any(record is not None for record in comparison_records):
+            raise ValueError("legacy live preflight cannot carry version 2 comparison controls")
+
+    def require_budget_route(self, *, stage: str) -> DispatchBudgetRoute:
+        routes = tuple(route for route in self.budget.dispatch_routes if route.stage == stage)
+        if len(routes) != 1:
+            raise ValueError(f"live native dispatch requires exactly one budget route for {stage}")
+        return routes[0]
+
+
+def seal_and_verify_live_comparison_controls(
+    store: ArtifactStorePort,
+    control: NativeRunControl,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> None:
+    """Durably seal and re-read the v2 comparison chain before client construction."""
+
+    if not isinstance(control.preflight_record, RunPreflightRecordV2):
+        raise ValueError("pre-dispatch comparison sealing requires RunPreflightRecord version 2")
+    runtime_binding = control.runtime_binding
+    workload_control = control.workload_control
+    runtime_control = control.runtime_measurement_control
+    basis = control.comparison_control_basis
+    if any(
+        record is None for record in (runtime_binding, workload_control, runtime_control, basis)
+    ):
+        raise ValueError("pre-dispatch comparison sealing requires the concrete control chain")
+    assert runtime_binding is not None
+    assert workload_control is not None
+    assert runtime_control is not None
+    assert basis is not None
+    records: tuple[tuple[str, str, StrictContract], ...] = (
+        (
+            "source/specs/memory-system-runtime-binding.json",
+            runtime_binding.runtime_binding_hash,
+            runtime_binding,
+        ),
+        (
+            "source/specs/workload-execution-control.json",
+            workload_control.workload_control_id,
+            workload_control,
+        ),
+        (
+            "source/specs/runtime-measurement-control.json",
+            runtime_control.runtime_control_id,
+            runtime_control,
+        ),
+        (
+            "source/specs/run-comparison-control-basis.json",
+            basis.basis_record_id,
+            basis,
+        ),
+        (
+            "source/specs/run-preflight.json",
+            control.preflight_record.preflight_record_hash,
+            control.preflight_record,
+        ),
+    )
+    for relative_path, record_id, record in records:
+        seal_source_contract(
+            store,
+            relative_path=relative_path,
+            record_id=record_id,
+            record=record,
+        )
+        if failpoint is not None:
+            failpoint(f"sealed:{record.schema_name}")  # type: ignore[attr-defined]
+    for relative_path, _record_id, record in records:
+        expected = canonical_json_bytes(record)
+        observed = store.read_verified(
+            ArtifactReadRequest(
+                relative_path=relative_path,
+                expected_sha256=hashlib.sha256(expected).hexdigest(),
+            )
+        )
+        if observed != expected:
+            raise ValueError("pre-dispatch comparison control canonical bytes changed")
+        if failpoint is not None:
+            failpoint(f"verified:{record.schema_name}")  # type: ignore[attr-defined]
 
 
 _NativeErrorCategory: TypeAlias = Literal[
@@ -291,6 +539,9 @@ class _NativeRunRequest:
     judge_role_binding_id: str | None
     close_timeout_seconds: float
     control: NativeRunControl | None
+    continuation: NativeContinuation | None = None
+    lease: RunLeaseRecord | None = None
+    provider_lifecycle: ProviderLifecycleBridge | None = None
 
 
 class _StoppableNativeProcess(Protocol):
@@ -316,26 +567,37 @@ class _NativeExecutionState:
     run_id: str
     lease_record_hash: str
     close_timeout_seconds: float
+    lease_epoch: int = 1
     owner_id: str = NATIVE_OWNER_ID
     budget_id: str = "native-fixture-budget-v1"
     budget_scope_id: str | None = None
     started_at: datetime = NATIVE_FIXTURE_STARTED_AT
     live_timing: bool = False
     monotonic_started: float | None = None
+    wall_clock: Callable[[], datetime] | None = None
+    monotonic_clock: Callable[[], float] | None = None
+    control: NativeRunControl | None = None
+    budget_ledger: BudgetLedger | None = None
+    provider_lifecycle: ProviderLifecycleBridge | None = None
+    pending_model_usage: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] | None = None
     sequence: int = 0
 
     def timestamp(self) -> datetime:
         self.sequence += 1
         deterministic_floor = self.started_at + timedelta(microseconds=self.sequence)
-        return (
-            max(datetime.now(UTC), deterministic_floor) if self.live_timing else deterministic_floor
-        )
+        if not self.live_timing:
+            return deterministic_floor
+        if self.wall_clock is None:
+            raise RuntimeError("live native timing has no trusted wall clock")
+        return max(self.wall_clock(), deterministic_floor)
 
     def monotonic(self) -> Decimal:
         if self.live_timing:
             if self.monotonic_started is None:
                 raise RuntimeError("live native timing has no monotonic origin")
-            return Decimal(str(time.monotonic() - self.monotonic_started))
+            if self.monotonic_clock is None:
+                raise RuntimeError("live native timing has no trusted monotonic clock")
+            return Decimal(str(self.monotonic_clock() - self.monotonic_started))
         self.sequence += 1
         return Decimal(self.sequence) / Decimal("1000000")
 
@@ -348,7 +610,193 @@ class _PreparedNativeAttempt:
     stage: str
     ordinal: int
     request_fingerprint: str
+    request_messages_sha256: str | None
     role_binding_id: str
+    retry_of_attempt_id: str | None = None
+    route: DispatchBudgetRoute | None = None
+    reservation: BudgetReservationRecordV3 | None = None
+    intent: AttemptIntentRecordV3 | None = None
+    maximum: BudgetAmount | None = None
+    owner_maximums: tuple[RuntimeBudgetOwnerAllocation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveDispatchArtifacts:
+    attempt_id: str
+    usage_record_ids: tuple[str, ...]
+    resource_record_id: str
+    cost_record_id: str
+
+
+def _imported_dispatch_artifacts(
+    accounting: ImportedAttemptAccounting,
+) -> _LiveDispatchArtifacts:
+    return _LiveDispatchArtifacts(
+        attempt_id=accounting.attempt_id,
+        usage_record_ids=accounting.usage_record_ids,
+        resource_record_id=accounting.resource_record_id,
+        cost_record_id=accounting.cost_record_id,
+    )
+
+
+async def _execute_live_memory_dispatch(
+    state: _NativeExecutionState,
+    *,
+    parent_kind: Literal["ingestion_plan", "case"],
+    parent_id: str,
+    stage: str,
+    ordinal: int,
+    request_fingerprint: str,
+    role_binding_id: str,
+    call: Callable[[], Awaitable[_LiveDispatchResult]],
+    raw_reference: Callable[[_LiveDispatchResult], str | None],
+) -> tuple[_LiveDispatchResult, _LiveDispatchArtifacts]:
+    prepared = _prepare_native_attempt(
+        state,
+        attempt_identity=attempt_id(parent_id, stage, ordinal, request_fingerprint),
+        parent_kind=parent_kind,
+        parent_id=parent_id,
+        stage=stage,
+        ordinal=ordinal,
+        request_fingerprint=request_fingerprint,
+        role_binding_id=role_binding_id,
+    )
+    started_at = state.timestamp()
+    try:
+        result = await call()
+    except BaseException as exc:
+        _seal_native_failure_preserving(
+            state,
+            prepared,
+            started_at=started_at,
+            error=exc,
+        )
+        raise
+    ended_at = state.timestamp()
+    raw_response_ref = raw_reference(result)
+    if raw_response_ref is None:
+        raw_response_ref = _seal_raw(
+            state.store,
+            canonical_json_bytes(
+                {
+                    "operation": stage,
+                    "request_fingerprint": request_fingerprint,
+                    "result": repr(result),
+                }
+            ),
+            media_type="application/json",
+        )
+    _seal_native_success(
+        state,
+        prepared,
+        started_at=started_at,
+        ended_at=ended_at,
+        raw_response_ref=raw_response_ref,
+        index_contribution=IndexContribution.NOT_APPLICABLE,
+    )
+    usage_ids, resource_id, cost_id = _seal_native_attempt_accounting(
+        state,
+        prepared,
+        started_at=started_at,
+        ended_at=ended_at,
+        raw_response_ref=raw_response_ref,
+        usage_record_ids=(),
+        indexing_view=IndexingView.NOT_APPLICABLE,
+    )
+    return result, _LiveDispatchArtifacts(
+        attempt_id=prepared.attempt_id,
+        usage_record_ids=usage_ids,
+        resource_record_id=resource_id,
+        cost_record_id=cost_id,
+    )
+
+
+def _scope_raw_reference(result: object) -> str | None:
+    raw_reference = getattr(result, "raw_reference", None)
+    return getattr(raw_reference, "sha256", None)
+
+
+def _readiness_raw_reference(result: object) -> str | None:
+    references = getattr(result, "evidence_references", ())
+    return getattr(references[0], "sha256", None) if references else None
+
+
+def _projection_raw_reference(result: object) -> str | None:
+    inventory = getattr(result, "inventory", None)
+    return getattr(getattr(inventory, "raw_reference", None), "sha256", None)
+
+
+def _live_budget_ledger(control: NativeRunControl) -> BudgetLedger:
+    budget = control.budget
+
+    def resources(items: tuple[object, ...]) -> tuple[tuple[str, Decimal, str], ...]:
+        return tuple(
+            (item.dimension_id, item.maximum, item.unit)  # type: ignore[attr-defined]
+            for item in items
+        )
+
+    role_ceilings = {
+        item.role_binding_id: BudgetCeiling(
+            maximum=BudgetAmount(
+                attempts=item.max_attempts,
+                input_tokens=item.max_input_tokens,
+                output_tokens=item.max_output_tokens,
+                wall_seconds=item.max_dispatch_wall_seconds,
+                cost=item.max_cost or Decimal("0"),
+                resources=resources(item.resource_ceilings),
+                provider_units=(
+                    (
+                        item.provider_budget_cap.provider,
+                        item.provider_budget_cap.operation_kind,
+                        item.provider_budget_cap.billing_unit,
+                        int(item.provider_budget_cap.maximum_accepted_units),
+                    ),
+                ),
+            ),
+            currency=item.currency,
+        )
+        for item in budget.role_ceilings
+    }
+    provider_ceilings = {
+        item.provider_operation_ceiling_id: BudgetCeiling(
+            maximum=BudgetAmount(
+                attempts=item.max_attempts,
+                wall_seconds=item.max_dispatch_wall_seconds,
+                resources=resources(item.resource_ceilings),
+                provider_units=(
+                    (
+                        item.adapter_profile_id,
+                        item.operation_kind,
+                        item.billing_unit,
+                        int(item.maximum_accepted_units),
+                    ),
+                ),
+            ),
+            currency=budget.currency,
+        )
+        for item in budget.provider_operation_ceilings
+    }
+    provider_units: dict[tuple[str, str, str], int] = {}
+    for ceiling in (*role_ceilings.values(), *provider_ceilings.values()):
+        for provider, operation, unit, maximum in ceiling.maximum.provider_units:
+            key = (provider, operation, unit)
+            provider_units[key] = provider_units.get(key, 0) + maximum
+    return BudgetLedger(
+        BudgetCeiling(
+            maximum=BudgetAmount(
+                attempts=budget.max_attempts,
+                input_tokens=budget.max_input_tokens,
+                output_tokens=budget.max_output_tokens,
+                wall_seconds=budget.max_dispatch_wall_seconds,
+                cost=budget.max_cost or Decimal("0"),
+                resources=resources(budget.resource_ceilings),
+                provider_units=tuple((*key, maximum) for key, maximum in provider_units.items()),
+            ),
+            currency=budget.currency,
+        ),
+        role_ceilings=role_ceilings,
+        provider_operation_ceilings=provider_ceilings,
+    )
 
 
 def _new_execution_state(
@@ -358,21 +806,34 @@ def _new_execution_state(
     sequence: int = 0,
 ) -> _NativeExecutionState:
     control = request.control
+    lease = request.lease or _native_run_lease(
+        request.run_id,
+        request.adapter_profile_id,
+        control=control,
+    )
     return _NativeExecutionState(
         store=store,
         run_id=request.run_id,
-        lease_record_hash=_native_run_lease(
-            request.run_id,
-            request.adapter_profile_id,
-            control=control,
-        ).lease_record_hash,
+        lease_record_hash=lease.lease_record_hash,
+        lease_epoch=lease.lease_epoch,
         close_timeout_seconds=request.close_timeout_seconds,
         owner_id=control.owner_id if control is not None else NATIVE_OWNER_ID,
         budget_id=(control.budget.budget_id if control is not None else "native-fixture-budget-v1"),
         budget_scope_id=control.run_spec.run_id if control is not None else None,
-        started_at=control.started_at if control is not None else NATIVE_FIXTURE_STARTED_AT,
+        started_at=(
+            request.continuation.initialized.aborted_run.started_at
+            if request.continuation is not None
+            and request.continuation.initialized.aborted_run.started_at is not None
+            else lease.acquired_at
+        ),
         live_timing=control is not None,
-        monotonic_started=time.monotonic() if control is not None else None,
+        monotonic_started=control.monotonic_clock() if control is not None else None,
+        wall_clock=control.wall_clock if control is not None else None,
+        monotonic_clock=control.monotonic_clock if control is not None else None,
+        control=control,
+        budget_ledger=_live_budget_ledger(control) if control is not None else None,
+        provider_lifecycle=request.provider_lifecycle,
+        pending_model_usage={} if control is not None else None,
         sequence=sequence,
     )
 
@@ -392,11 +853,10 @@ def run_native_vertical_slice(
     judge_role_binding_id: str | None = None,
     close_timeout_seconds: float = NATIVE_CLOSE_TIMEOUT_SECONDS,
     control: NativeRunControl | None = None,
+    continuation: NativeContinuation | None = None,
 ) -> NativeRunArtifacts:
     """Compose one deterministic native capsule without selecting any live transport."""
 
-    if control is not None:
-        raise ValueError("live native execution requires the lifecycle-aware composition root")
     _require_safe_component(run_id, "run ID")
     if not adapter_profile_id or not answer_role_binding_id:
         raise ValueError("native adapter profile and answer role identities are required")
@@ -416,24 +876,102 @@ def run_native_vertical_slice(
         ):
             raise ValueError("live native judge role is outside the preflight inventory")
     capsule_root = Path(output_root) / run_id
+    if continuation is not None:
+        if control is None:
+            raise ValueError("native continuation requires live control")
+        if (
+            continuation.initialized.run_id != run_id
+            or continuation.initialized.target_root != capsule_root.absolute()
+        ):
+            raise ValueError("native continuation target differs from the requested run")
     _acquire_native_run_owner(capsule_root, run_id, control=control)
-    return _run_native_supervised(
-        _NativeRunRequest(
-            output_root=Path(output_root),
-            run_id=run_id,
-            adapter_profile_id=adapter_profile_id,
-            workload=workload,
-            visible_evidence_policy=visible_evidence_policy,
-            artifact_store_factory=artifact_store_factory,
-            memory_factory=memory_factory,
-            model_factory=model_factory,
-            answer_role_binding_id=answer_role_binding_id,
-            judge_model_factory=judge_model_factory,
-            judge_role_binding_id=judge_role_binding_id,
-            close_timeout_seconds=close_timeout_seconds,
+    lease: RunLeaseRecord | None = None
+    lifecycle: ProviderLifecycleBridge | None = None
+    authority = None
+    live_run_spec_hash: str | None = None
+    if control is not None:
+        observed_at = control.wall_clock()
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("trusted wall clock requires an explicit timezone")
+        lease = _native_run_lease(
+            run_id,
+            adapter_profile_id,
             control=control,
+            acquired_at=observed_at,
+            previous=(continuation.previous_lease if continuation is not None else None),
         )
+        store = artifact_store_factory(capsule_root)
+        lifecycle = ProviderLifecycleBridge(
+            control.provider_runtime_directory,
+            coordination_directory=control.provider_lifecycle_coordination_directory,
+        )
+
+        def seal_live_lease() -> None:
+            seal_source_contract(
+                store,
+                relative_path=f"source/run-leases/{lease.lease_epoch}.json",
+                record_id=lease.lease_record_hash,
+                record=lease,
+            )
+
+        authority = lifecycle.acquire_run(
+            run_id=run_id,
+            provider_project=control.preflight_record.provider_project_id,
+            profile_id=adapter_profile_id,
+            lease_epoch=lease.lease_epoch,
+            lease_record_hash=lease.lease_record_hash,
+            durable_lease=seal_live_lease,
+        )
+        live_run_spec_hash = canonical_sha256(control.run_spec)
+    request = _NativeRunRequest(
+        output_root=Path(output_root),
+        run_id=run_id,
+        adapter_profile_id=adapter_profile_id,
+        workload=workload,
+        visible_evidence_policy=visible_evidence_policy,
+        artifact_store_factory=artifact_store_factory,
+        memory_factory=memory_factory,
+        model_factory=model_factory,
+        answer_role_binding_id=answer_role_binding_id,
+        judge_model_factory=judge_model_factory,
+        judge_role_binding_id=judge_role_binding_id,
+        close_timeout_seconds=close_timeout_seconds,
+        control=control,
+        continuation=continuation,
+        lease=lease,
+        provider_lifecycle=lifecycle,
     )
+    try:
+        completed = _run_native_supervised(request)
+    except BaseException as error:
+        if lifecycle is not None and authority is not None and not _contains_unknown_outcome(error):
+            if live_run_spec_hash is None:
+                raise AssertionError("live lifecycle has no run-spec hash") from error
+            try:
+                lifecycle.release_run(
+                    authority,
+                    seal_and_verify_terminal_manifest=lambda: _verify_terminal_capsule(
+                        capsule_root,
+                        run_id=run_id,
+                        run_spec_hash=live_run_spec_hash,
+                    ),
+                )
+            except ResumeRejectedError as release_error:
+                if "active provider attempt" not in str(release_error):
+                    raise
+        raise
+    if lifecycle is not None and authority is not None:
+        if live_run_spec_hash is None:
+            raise AssertionError("live lifecycle has no run-spec hash")
+        lifecycle.release_run(
+            authority,
+            seal_and_verify_terminal_manifest=lambda: _verify_terminal_capsule(
+                capsule_root,
+                run_id=run_id,
+                run_spec_hash=live_run_spec_hash,
+            ),
+        )
+    return completed
 
 
 def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
@@ -565,30 +1103,44 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
 
 def _native_process_entry(request: _NativeRunRequest, sender: Connection) -> None:
     try:
-        ready = asyncio.run(
-            _run_native_vertical_slice(
-                output_root=request.output_root,
-                run_id=request.run_id,
-                adapter_profile_id=request.adapter_profile_id,
-                workload=request.workload,
-                visible_evidence_policy=request.visible_evidence_policy,
-                artifact_store_factory=request.artifact_store_factory,
-                memory_factory=request.memory_factory,
-                model_factory=request.model_factory,
-                answer_role_binding_id=request.answer_role_binding_id,
-                judge_model_factory=request.judge_model_factory,
-                judge_role_binding_id=request.judge_role_binding_id,
-                close_timeout_seconds=request.close_timeout_seconds,
-                control=request.control,
-                lifecycle_sender=sender,
-            )
-        )
+        ready = asyncio.run(_run_native_with_cell_deadline(request, sender))
     except BaseException as exc:
         sender.send(_NativeRunFailed(_native_error_envelope(exc)))
     else:
         sender.send(ready)
     finally:
         sender.close()
+
+
+async def _run_native_with_cell_deadline(
+    request: _NativeRunRequest,
+    sender: Connection | None,
+) -> _NativeRunReady:
+    async def execute() -> _NativeRunReady:
+        return await _run_native_vertical_slice(
+            output_root=request.output_root,
+            run_id=request.run_id,
+            adapter_profile_id=request.adapter_profile_id,
+            workload=request.workload,
+            visible_evidence_policy=request.visible_evidence_policy,
+            artifact_store_factory=request.artifact_store_factory,
+            memory_factory=request.memory_factory,
+            model_factory=request.model_factory,
+            answer_role_binding_id=request.answer_role_binding_id,
+            judge_model_factory=request.judge_model_factory,
+            judge_role_binding_id=request.judge_role_binding_id,
+            close_timeout_seconds=request.close_timeout_seconds,
+            control=request.control,
+            continuation=getattr(request, "continuation", None),
+            lease=request.lease,
+            provider_lifecycle=request.provider_lifecycle,
+            lifecycle_sender=sender,
+        )
+
+    if request.control is None:
+        return await execute()
+    async with asyncio.timeout(float(request.control.budget.max_dispatch_wall_seconds)):
+        return await execute()
 
 
 def _join_completed_native_process(process: _StoppableNativeProcess) -> None:
@@ -654,6 +1206,10 @@ def _native_error_envelope(error: BaseException) -> _NativeErrorEnvelope:
             message=error.message,
             children=tuple(_native_error_envelope(item) for item in error.exceptions),
         )
+    if isinstance(error, asyncio.CancelledError) or getattr(error, "receipt", None) is not None:
+        wrapped_dispatch_error = _wrapped_dispatch_error(error)
+        if wrapped_dispatch_error is not None and wrapped_dispatch_error is not error:
+            return _native_error_envelope(wrapped_dispatch_error)
     if isinstance(error, MemorySystemCallCancelledBeforeDispatch):
         category: _NativeErrorCategory = "memory_cancelled_before_dispatch"
     elif isinstance(error, MemorySystemCallCancelledUnknownOutcome):
@@ -684,6 +1240,36 @@ def _native_error_envelope(error: BaseException) -> _NativeErrorEnvelope:
         message=str(error),
         failure_kind=getattr(error, "failure_kind", None),
     )
+
+
+def _wrapped_dispatch_error(error: BaseException) -> BaseException | None:
+    typed_errors = (
+        MemorySystemCallCancelledBeforeDispatch,
+        MemorySystemCallCancelledUnknownOutcome,
+        ModelCallCancelledUnknownOutcome,
+        MemorySystemCallUnknownOutcome,
+        ModelCallUnknownOutcome,
+    )
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop(0)
+        if id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        if isinstance(candidate, typed_errors):
+            return candidate
+        for linked in (candidate.__cause__, candidate.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+        receipt = getattr(candidate, "receipt", None)
+        for linked in (
+            getattr(receipt, "provider_error", None),
+            getattr(receipt, "post_projection_error", None),
+        ):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return None
 
 
 def _restore_native_error(envelope: _NativeErrorEnvelope) -> BaseException:
@@ -881,6 +1467,9 @@ async def _run_native_vertical_slice(
     judge_role_binding_id: str | None,
     close_timeout_seconds: float,
     control: NativeRunControl | None = None,
+    continuation: NativeContinuation | None = None,
+    lease: RunLeaseRecord | None = None,
+    provider_lifecycle: ProviderLifecycleBridge | None = None,
     lifecycle_sender: Connection | None = None,
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
@@ -905,10 +1494,13 @@ async def _run_native_vertical_slice(
         judge_role_binding_id=judge_role_binding_id,
         close_timeout_seconds=close_timeout_seconds,
         control=control,
+        lease=lease,
+        provider_lifecycle=provider_lifecycle,
     )
-    lease = _native_run_lease(run_id, adapter_profile_id, control=control)
+    lease = lease or _native_run_lease(run_id, adapter_profile_id, control=control)
     state = _new_execution_state(request_identity, store)
-    _seal(state, "run-leases", lease.lease_record_hash, lease)
+    if control is None:
+        _seal(state, "run-leases", lease.lease_record_hash, lease)
     memory: MemorySystemPort | None = None
     answer_model: ModelClientPort | None = None
     judge_model: ModelClientPort | None = None
@@ -946,10 +1538,40 @@ async def _run_native_vertical_slice(
         )
     try:
         memory = memory_factory(store, ingestion_plans)
-        answer_model = model_factory(store)
+        model_store: ArtifactStorePort = store
+        if state.pending_model_usage is not None:
+            model_store = _LiveModelUsageCaptureStore(store, state.pending_model_usage)
+        answer_model = model_factory(model_store)
         if judge_model_factory is not None:
-            judge_model = judge_model_factory(store)
-        runtime = await memory.resolve()
+            judge_model = judge_model_factory(model_store)
+        setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = ()
+        if control is not None:
+            runtime_parent_id = ingestion_occurrence_id(
+                run_id,
+                control.run_spec.memory_system_id,
+                ingestion_plans[0].ingestion_plan_id,
+            )
+            runtime_fingerprint = canonical_sha256(
+                ["oamb-live-runtime-resolve-v1", run_id, adapter_profile_id]
+            )
+            if continuation is None:
+                runtime_result, runtime_artifacts = await _execute_live_memory_dispatch(
+                    state,
+                    parent_kind="ingestion_plan",
+                    parent_id=runtime_parent_id,
+                    stage="runtime_resolve",
+                    ordinal=1,
+                    request_fingerprint=runtime_fingerprint,
+                    role_binding_id=adapter_profile_id,
+                    call=memory.resolve,
+                    raw_reference=lambda _result: None,
+                )
+                runtime = runtime_result
+                setup_artifacts = (runtime_artifacts,)
+            else:
+                runtime = await memory.resolve()
+        else:
+            runtime = await memory.resolve()
         capabilities = await memory.capabilities()
         if not capabilities.provider_order_preserved or not capabilities.native_reranking_disabled:
             raise ValueError("native adapter must preserve provider order with reranking disabled")
@@ -1004,16 +1626,7 @@ async def _run_native_vertical_slice(
                     sequence=state.sequence,
                 )
             )
-        plan_records, scopes = await _execute_ingestion_plans(
-            state=state,
-            memory=memory,
-            plans=ingestion_plans,
-            case_plans=case_plans,
-            memory_system_id=runtime.memory_system_id,
-            runtime_binding_hash=runtime.runtime_binding_hash,
-            adapter_profile_id=adapter_profile_id,
-        )
-        case_records = await _execute_cases(
+        plan_records, case_records = await _execute_history_question_pipeline(
             state=state,
             workload=workload,
             memory=memory,
@@ -1021,12 +1634,14 @@ async def _run_native_vertical_slice(
             judge_model=judge_model,
             plans=ingestion_plans,
             case_plans=case_plans,
-            scopes=scopes,
             memory_system_id=runtime.memory_system_id,
+            runtime_binding_hash=runtime.runtime_binding_hash,
             adapter_profile_id=adapter_profile_id,
             visible_evidence_policy=visible_evidence_policy,
             answer_role_binding_id=answer_role_binding_id,
             judge_role_binding_id=judge_role_binding_id,
+            setup_artifacts=setup_artifacts,
+            continuation=continuation,
         )
     except BaseException as exc:
         execution_error = exc
@@ -1043,6 +1658,10 @@ async def _run_native_vertical_slice(
         case_occurrence_ids=case_occurrence_ids,
         lifecycle_sender=lifecycle_sender,
     )
+    if execution_error is None and state.pending_model_usage:
+        execution_error = ValueError(
+            "live model usage contains unreferenced records at terminal seal"
+        )
     terminal_errors = (
         *((execution_error,) if execution_error is not None else ()),
         *close_errors,
@@ -1143,7 +1762,228 @@ async def _close_ports(
     return tuple(errors)
 
 
-async def _execute_ingestion_plans(
+async def _execute_history_question_pipeline(
+    *,
+    state: _NativeExecutionState,
+    workload: WorkloadPort,
+    memory: MemorySystemPort,
+    answer_model: ModelClientPort,
+    judge_model: ModelClientPort | None,
+    plans: tuple[IngestionPlan, ...],
+    case_plans: tuple[CasePlan, ...],
+    memory_system_id: str,
+    runtime_binding_hash: str,
+    adapter_profile_id: str,
+    visible_evidence_policy: VisibleEvidencePolicy,
+    answer_role_binding_id: str,
+    judge_role_binding_id: str | None,
+    setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
+    continuation: NativeContinuation | None = None,
+) -> tuple[tuple[NativeIngestionPlanRecord, ...], tuple[CaseRecordV3, ...]]:
+    history_limit = state.control.max_parallel_history_ingestions if state.control else 1
+    question_limit = state.control.max_parallel_questions if state.control else 1
+    history_permits = asyncio.Semaphore(history_limit)
+    question_permits = asyncio.Semaphore(question_limit)
+    admission_stopped = False
+    plan_records: list[NativeIngestionPlanRecord | None] = [None] * len(plans)
+    case_records: list[CaseRecordV3 | None] = [None] * len(case_plans)
+    completed_plan_ids: set[str] = set()
+    if continuation is not None:
+        plan_index_by_id = {plan.ingestion_plan_id: index for index, plan in enumerate(plans)}
+        case_index_by_id = {
+            case.case_manifest_entry_id: index for index, case in enumerate(case_plans)
+        }
+        for plan_record in continuation.completed_plan_records:
+            index = plan_index_by_id.get(plan_record.ingestion_plan_id)
+            if index is None:
+                raise ValueError("continued ingestion plan is outside the frozen workload")
+            plan_records[index] = plan_record
+            completed_plan_ids.add(plan_record.ingestion_plan_id)
+        for case_record in continuation.completed_case_records:
+            index = case_index_by_id.get(case_record.case_manifest_entry_id)
+            if index is None:
+                raise ValueError("continued case is outside the frozen workload")
+            case_records[index] = case_record
+    case_by_id = {
+        case.case_manifest_entry_id: (index, case) for index, case in enumerate(case_plans)
+    }
+    if len(case_by_id) != len(case_plans):
+        raise ValueError("native case manifest identities must be unique")
+    cases_by_plan: dict[str, tuple[tuple[int, CasePlan], ...]] = {}
+    assigned_case_ids: set[str] = set()
+    for plan in plans:
+        selected: list[tuple[int, CasePlan]] = []
+        for case_id in plan.ordered_case_manifest_entry_ids:
+            indexed = case_by_id.get(case_id)
+            if indexed is None:
+                raise ValueError("native ingestion plan references an unknown case")
+            if case_id in assigned_case_ids:
+                raise ValueError("native case belongs to multiple ingestion plans")
+            assigned_case_ids.add(case_id)
+            selected.append(indexed)
+        cases_by_plan[plan.ingestion_plan_id] = tuple(selected)
+    if assigned_case_ids != set(case_by_id):
+        raise ValueError("native case has no ingestion plan")
+
+    async def admitted(
+        permits: asyncio.Semaphore,
+        operation: Callable[[], Awaitable[_LiveDispatchResult]],
+    ) -> tuple[bool, _LiveDispatchResult | None]:
+        nonlocal admission_stopped
+        if admission_stopped:
+            return False, None
+        await permits.acquire()
+        if admission_stopped:
+            permits.release()
+            return False, None
+        try:
+            return True, await operation()
+        except BaseException:
+            admission_stopped = True
+            raise
+        finally:
+            permits.release()
+
+    async def execute_question(
+        *,
+        plan: IngestionPlan,
+        case_index: int,
+        case_plan: CasePlan,
+        scope: ScopeReceipt,
+    ) -> None:
+        async def operation() -> CaseRecordV3:
+            records = await _execute_cases_serial(
+                state=state,
+                workload=workload,
+                memory=memory,
+                answer_model=answer_model,
+                judge_model=judge_model,
+                plans=(plan,),
+                case_plans=(case_plan,),
+                scopes={plan.ingestion_plan_id: scope},
+                memory_system_id=memory_system_id,
+                adapter_profile_id=adapter_profile_id,
+                visible_evidence_policy=visible_evidence_policy,
+                answer_role_binding_id=answer_role_binding_id,
+                judge_role_binding_id=judge_role_binding_id,
+            )
+            if len(records) != 1:
+                raise AssertionError("admitted question did not produce exactly one result")
+            return records[0]
+
+        was_admitted, result = await admitted(question_permits, operation)
+        if not was_admitted:
+            return
+        if result is None:
+            raise AssertionError("admitted question did not produce a result")
+        case_records[case_index] = result
+
+    async def execute_history(plan_index: int, plan: IngestionPlan) -> None:
+        async def operation() -> tuple[NativeIngestionPlanRecord, ScopeReceipt]:
+            records, scopes = await _execute_ingestion_plans_serial(
+                state=state,
+                memory=memory,
+                plans=(plan,),
+                case_plans=case_plans,
+                memory_system_id=memory_system_id,
+                runtime_binding_hash=runtime_binding_hash,
+                adapter_profile_id=adapter_profile_id,
+                setup_artifacts=setup_artifacts if plan_index == 0 else (),
+                continuation=(
+                    continuation.partial_plan
+                    if continuation is not None
+                    and continuation.partial_plan.ingestion_plan_id == plan.ingestion_plan_id
+                    else None
+                ),
+            )
+            if len(records) != 1 or set(scopes) != {plan.ingestion_plan_id}:
+                raise AssertionError("admitted history did not close one record and scope")
+            return records[0], scopes[plan.ingestion_plan_id]
+
+        was_admitted, result = await admitted(history_permits, operation)
+        if not was_admitted:
+            return
+        if result is None:
+            raise AssertionError("admitted history did not produce a result")
+        plan_record, scope = result
+        plan_records[plan_index] = plan_record
+        question_results = await _settle_pipeline_operations(
+            tuple(
+                execute_question(
+                    plan=plan,
+                    case_index=case_index,
+                    case_plan=case_plan,
+                    scope=scope,
+                )
+                for case_index, case_plan in cases_by_plan[plan.ingestion_plan_id]
+            )
+        )
+        _raise_pipeline_errors(question_results)
+
+    history_results = await _settle_pipeline_operations(
+        tuple(
+            execute_history(index, plan)
+            for index, plan in enumerate(plans)
+            if plan.ingestion_plan_id not in completed_plan_ids
+        )
+    )
+    _raise_pipeline_errors(history_results)
+    if any(record is None for record in plan_records):
+        raise AssertionError("pipeline did not produce every admitted history record")
+    if any(record is None for record in case_records):
+        raise AssertionError("pipeline did not produce every admitted question record")
+    return (
+        tuple(record for record in plan_records if record is not None),
+        tuple(record for record in case_records if record is not None),
+    )
+
+
+async def _capture_pipeline_outcome(
+    operation: Awaitable[_LiveDispatchResult],
+) -> _LiveDispatchResult | BaseException:
+    try:
+        return await operation
+    except asyncio.CancelledError as error:
+        return error
+    except BaseException as error:
+        return error
+
+
+async def _settle_pipeline_operations(
+    operations: Sequence[Awaitable[_LiveDispatchResult]],
+) -> tuple[_LiveDispatchResult | BaseException, ...]:
+    tasks = tuple(
+        asyncio.create_task(_capture_pipeline_outcome(operation)) for operation in operations
+    )
+    try:
+        return tuple(await asyncio.gather(*tasks))
+    except asyncio.CancelledError as cancellation:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        settled = await asyncio.gather(*tasks, return_exceptions=True)
+        drain_errors = tuple(
+            outcome
+            for outcome in settled
+            if isinstance(outcome, BaseException) and type(outcome) is not asyncio.CancelledError
+        )
+        if drain_errors:
+            raise BaseExceptionGroup(
+                "pipeline cancellation retained active task failures",
+                [cancellation, *drain_errors],
+            ) from None
+        raise
+
+
+def _raise_pipeline_errors(results: Sequence[object]) -> None:
+    errors = tuple(result for result in results if isinstance(result, BaseException))
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("multiple admitted pipeline tasks failed", list(errors))
+
+
+async def _execute_ingestion_plans_serial(
     *,
     state: _NativeExecutionState,
     memory: MemorySystemPort,
@@ -1152,6 +1992,8 @@ async def _execute_ingestion_plans(
     memory_system_id: str,
     runtime_binding_hash: str,
     adapter_profile_id: str,
+    setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
+    continuation: PartialPlanContinuation | None = None,
 ) -> tuple[tuple[NativeIngestionPlanRecord, ...], dict[str, ScopeReceipt]]:
     case_ids = {case.case_manifest_entry_id for case in case_plans}
     records: list[NativeIngestionPlanRecord] = []
@@ -1164,12 +2006,66 @@ async def _execute_ingestion_plans(
             memory_system_id,
             plan.ingestion_plan_id,
         )
-        scope = await memory.allocate_ingestion_scope(
-            ScopeAllocationRequest(
-                ingestion_occurrence_id=occurrence_id,
-                ingestion_plan_id=plan.ingestion_plan_id,
-            )
+        scope_request = ScopeAllocationRequest(
+            ingestion_occurrence_id=occurrence_id,
+            ingestion_plan_id=plan.ingestion_plan_id,
         )
+        plan_artifacts: list[_LiveDispatchArtifacts] = list(
+            setup_artifacts if plan is plans[0] else ()
+        )
+        imported_readiness_references: tuple[RawReferenceHandle, ...] = ()
+        if continuation is not None:
+            if (
+                continuation.ingestion_plan_id != plan.ingestion_plan_id
+                or continuation.ingestion_occurrence_id != occurrence_id
+            ):
+                raise ValueError("native continuation partial plan identity mismatch")
+            adopt = getattr(memory, "adopt_ingestion_scope", None)
+            if adopt is None:
+                raise ValueError("native continuation adapter cannot adopt an ingestion scope")
+            adopted_scope = await adopt(
+                scope_request,
+                completed_session_task_ids=tuple(
+                    item.task_id for item in continuation.completed_dispatches
+                ),
+                failed_session_task_id=continuation.failed_task_id,
+            )
+            if (
+                adopted_scope.ingestion_occurrence_id != continuation.scope.ingestion_occurrence_id
+                or adopted_scope.scope_id != continuation.scope.scope_id
+            ):
+                raise ValueError("native continuation adopted the wrong scope")
+            scope = continuation.scope
+            plan_artifacts.append(_imported_dispatch_artifacts(continuation.scope_accounting))
+            imported_readiness_references = tuple(
+                reference
+                for item in continuation.completed_dispatches
+                for reference in item.evidence_references
+            )
+        elif state.control is not None:
+
+            async def allocate_scope(
+                request: ScopeAllocationRequest = scope_request,
+            ) -> ScopeReceipt:
+                return await memory.allocate_ingestion_scope(request)
+
+            scope_result, scope_artifacts = await _execute_live_memory_dispatch(
+                state,
+                parent_kind="ingestion_plan",
+                parent_id=occurrence_id,
+                stage="scope_allocate",
+                ordinal=1,
+                request_fingerprint=canonical_sha256(
+                    ["oamb-live-scope-allocation-v1", occurrence_id, plan.ingestion_plan_id]
+                ),
+                role_binding_id=adapter_profile_id,
+                call=allocate_scope,
+                raw_reference=_scope_raw_reference,
+            )
+            scope = scope_result
+            plan_artifacts.append(scope_artifacts)
+        else:
+            scope = await memory.allocate_ingestion_scope(scope_request)
         scopes[plan.ingestion_plan_id] = scope
         dispatches = memory.plan_ingestion(
             IngestionRequest(scope=scope, ordered_source_units=plan.ordered_source_units)
@@ -1186,18 +2082,50 @@ async def _execute_ingestion_plans(
         if dispatched_sources != expected_sources:
             raise ValueError("native ingestion dispatches changed source order")
 
-        dispatch_receipts = []
-        dispatch_attempt_ids: list[str] = []
-        usage_record_ids: list[str] = []
-        resource_record_ids: list[str] = []
-        cost_record_ids: list[str] = []
-        for dispatch in dispatches:
-            dispatch_attempt_id = attempt_id(
-                occurrence_id,
-                "memory_ingest",
-                dispatch.dispatch_ordinal_1_indexed,
-                dispatch.request_fingerprint,
-            )
+        imported_dispatches = continuation.completed_dispatches if continuation is not None else ()
+        for imported, dispatch in zip(imported_dispatches, dispatches, strict=False):
+            if (
+                imported.ordinal != dispatch.dispatch_ordinal_1_indexed
+                or imported.receipt.dispatch != dispatch
+            ):
+                raise ValueError("native continuation dispatch prefix differs from the frozen plan")
+        dispatch_receipts = [item.receipt for item in imported_dispatches]
+        dispatch_attempt_ids: list[str] = [item.receipt.attempt_id for item in imported_dispatches]
+        usage_record_ids: list[str] = [
+            usage_id
+            for item in imported_dispatches
+            for usage_id in item.accounting.usage_record_ids
+        ]
+        resource_record_ids: list[str] = [
+            item.accounting.resource_record_id for item in imported_dispatches
+        ]
+        cost_record_ids: list[str] = [
+            item.accounting.cost_record_id for item in imported_dispatches
+        ]
+        for dispatch in dispatches[len(imported_dispatches) :]:
+            retry_of_attempt_id: str | None = None
+            if (
+                continuation is not None
+                and dispatch.dispatch_ordinal_1_indexed == continuation.failed_attempt.ordinal
+            ):
+                if dispatch.request_fingerprint != continuation.failed_attempt.request_fingerprint:
+                    raise ValueError("native continuation failed dispatch fingerprint changed")
+                retry_of_attempt_id = continuation.failed_attempt.attempt_id
+                dispatch_attempt_id = canonical_sha256(
+                    [
+                        "oamb-native-retry-attempt-v1",
+                        retry_of_attempt_id,
+                        1,
+                        dispatch.request_fingerprint,
+                    ]
+                )
+            else:
+                dispatch_attempt_id = attempt_id(
+                    occurrence_id,
+                    "memory_ingest",
+                    dispatch.dispatch_ordinal_1_indexed,
+                    dispatch.request_fingerprint,
+                )
             prepared = _prepare_native_attempt(
                 state,
                 attempt_identity=dispatch_attempt_id,
@@ -1207,6 +2135,7 @@ async def _execute_ingestion_plans(
                 ordinal=dispatch.dispatch_ordinal_1_indexed,
                 request_fingerprint=dispatch.request_fingerprint,
                 role_binding_id=adapter_profile_id,
+                retry_of_attempt_id=retry_of_attempt_id,
             )
             started_at = state.timestamp()
             try:
@@ -1236,9 +2165,10 @@ async def _execute_ingestion_plans(
                 raw_response_ref=receipt.raw_reference.sha256,
                 index_contribution=IndexContribution.FINAL,
             )
-            for usage in receipt.usage_records:
-                _seal(state, "usage", usage.usage_record_id, usage)
-                usage_record_ids.append(usage.usage_record_id)
+            if state.control is None:
+                for usage in receipt.usage_records:
+                    _seal(state, "usage", usage.usage_record_id, usage)
+                    usage_record_ids.append(usage.usage_record_id)
             attempt_usage_ids, attempt_resource_id, attempt_cost_id = (
                 _seal_native_attempt_accounting(
                     state,
@@ -1249,10 +2179,11 @@ async def _execute_ingestion_plans(
                     usage_record_ids=tuple(
                         usage.usage_record_id for usage in receipt.usage_records
                     ),
+                    inline_usage_records=tuple(receipt.usage_records),
                     indexing_view=IndexingView.FINAL_CONTRIBUTION,
                 )
             )
-            if not receipt.usage_records:
+            if state.control is not None or not receipt.usage_records:
                 usage_record_ids.extend(attempt_usage_ids)
             resource_record_ids.append(attempt_resource_id)
             cost_record_ids.append(attempt_cost_id)
@@ -1274,16 +2205,62 @@ async def _execute_ingestion_plans(
             raw_references=tuple(receipt.raw_reference for receipt in dispatch_receipts),
             dispatch_receipts=tuple(dispatch_receipts),
         )
-        readiness = await memory.wait_ready(
-            ReadinessRequest(
-                scope=scope,
-                expected_source_unit_ids=ingestion_receipt.accepted_source_unit_ids,
-                ingestion_receipt=ingestion_receipt,
-            )
+        readiness_request = ReadinessRequest(
+            scope=scope,
+            expected_source_unit_ids=ingestion_receipt.accepted_source_unit_ids,
+            ingestion_receipt=ingestion_receipt,
         )
+        if state.control is not None:
+
+            async def wait_for_readiness(
+                request: ReadinessRequest = readiness_request,
+            ) -> ReadinessReceipt:
+                return await memory.wait_ready(request)
+
+            async def project_ready_scope(
+                requested_scope: ScopeReceipt = scope,
+            ) -> ProjectionReceipt:
+                return await memory.project(requested_scope)
+
+            readiness_result, readiness_artifacts = await _execute_live_memory_dispatch(
+                state,
+                parent_kind="ingestion_plan",
+                parent_id=occurrence_id,
+                stage="memory_readiness",
+                ordinal=1,
+                request_fingerprint=canonical_sha256(
+                    [
+                        "oamb-live-memory-readiness-v1",
+                        occurrence_id,
+                        ingestion_receipt.accepted_source_unit_ids,
+                    ]
+                ),
+                role_binding_id=adapter_profile_id,
+                call=wait_for_readiness,
+                raw_reference=_readiness_raw_reference,
+            )
+            readiness = readiness_result
+            plan_artifacts.append(readiness_artifacts)
+            projection_result, projection_artifacts = await _execute_live_memory_dispatch(
+                state,
+                parent_kind="ingestion_plan",
+                parent_id=occurrence_id,
+                stage="memory_projection",
+                ordinal=1,
+                request_fingerprint=canonical_sha256(
+                    ["oamb-live-memory-projection-v1", occurrence_id]
+                ),
+                role_binding_id=adapter_profile_id,
+                call=project_ready_scope,
+                raw_reference=_projection_raw_reference,
+            )
+            projection = projection_result
+            plan_artifacts.append(projection_artifacts)
+        else:
+            readiness = await memory.wait_ready(readiness_request)
+            projection = await memory.project(scope)
         if not readiness.ready:
             raise ValueError("native fixture ingestion did not reach readiness")
-        projection = await memory.project(scope)
         _require_projection_occurrence(projection, occurrence_id)
         if (
             adapter_profile_id != "mem0-rest-v1"
@@ -1320,15 +2297,34 @@ async def _execute_ingestion_plans(
             ),
             accepted_source_unit_ids=ingestion_receipt.accepted_source_unit_ids,
             rejected_source_unit_ids=ingestion_receipt.rejected_source_unit_ids,
-            readiness_evidence_refs=tuple(item.sha256 for item in readiness.evidence_references),
+            readiness_evidence_refs=tuple(
+                dict.fromkeys(
+                    (
+                        *(item.sha256 for item in imported_readiness_references),
+                        *(item.sha256 for item in readiness.evidence_references),
+                    )
+                )
+            ),
             inventory_raw_ref=projection.inventory.raw_reference.sha256,
             projected_source_unit_ids=projection.inventory.ordered_source_unit_ids,
             projection_raw_refs=_projection_raw_refs(projection),
             protected_state_sha256=projection.state_digest.state_sha256,
-            attempt_ids=tuple(dispatch_attempt_ids),
-            usage_record_ids=tuple(usage_record_ids),
-            resource_record_ids=tuple(resource_record_ids),
-            cost_record_ids=tuple(cost_record_ids),
+            attempt_ids=(
+                *(item.attempt_id for item in plan_artifacts),
+                *dispatch_attempt_ids,
+            ),
+            usage_record_ids=(
+                *(usage_id for item in plan_artifacts for usage_id in item.usage_record_ids),
+                *usage_record_ids,
+            ),
+            resource_record_ids=(
+                *(item.resource_record_id for item in plan_artifacts),
+                *resource_record_ids,
+            ),
+            cost_record_ids=(
+                *(item.cost_record_id for item in plan_artifacts),
+                *cost_record_ids,
+            ),
         )
         record: NativeIngestionPlanRecord
         if adapter_profile_id == "mem0-rest-v1":
@@ -1345,7 +2341,69 @@ async def _execute_ingestion_plans(
     return tuple(records), scopes
 
 
-async def _execute_cases(
+@dataclass(slots=True)
+class _LiveAttemptedQueryMemory:
+    state: _NativeExecutionState
+    memory: MemorySystemPort
+    scope: ScopeReceipt
+    case_occurrence_id: str
+    adapter_profile_id: str
+    projection_count: int = 0
+    artifacts: list[_LiveDispatchArtifacts] | None = None
+
+    def __post_init__(self) -> None:
+        self.artifacts = []
+
+    async def project(self, scope: ScopeReceipt) -> ProjectionReceipt:
+        if scope != self.scope:
+            raise ValueError("live attempted projection scope differs from the case scope")
+        self.projection_count += 1
+        stage = "pre_query_projection" if self.projection_count == 1 else "post_query_projection"
+        result, artifacts = await _execute_live_memory_dispatch(
+            self.state,
+            parent_kind="case",
+            parent_id=self.case_occurrence_id,
+            stage=stage,
+            ordinal=1,
+            request_fingerprint=canonical_sha256(
+                ["oamb-live-query-projection-v1", self.case_occurrence_id, stage]
+            ),
+            role_binding_id=self.adapter_profile_id,
+            call=lambda: self.memory.project(scope),
+            raw_reference=_projection_raw_reference,
+        )
+        assert self.artifacts is not None
+        self.artifacts.append(artifacts)
+        return result
+
+    async def retrieve(self, request: RetrievalRequest) -> NativeEvidenceBatch:
+        if request.scope != self.scope:
+            raise ValueError("live attempted retrieval scope differs from the case scope")
+        if request.case_occurrence_id != self.case_occurrence_id:
+            raise ValueError("live attempted retrieval case identity differs from its owner")
+        result, artifacts = await _execute_live_memory_dispatch(
+            self.state,
+            parent_kind="case",
+            parent_id=self.case_occurrence_id,
+            stage="memory_query",
+            ordinal=1,
+            request_fingerprint=canonical_sha256(
+                [
+                    "oamb-live-memory-query-v1",
+                    self.case_occurrence_id,
+                    hashlib.sha256(request.query_bytes).hexdigest(),
+                ]
+            ),
+            role_binding_id=self.adapter_profile_id,
+            call=lambda: self.memory.retrieve(request),
+            raw_reference=_scope_raw_reference,
+        )
+        assert self.artifacts is not None
+        self.artifacts.append(artifacts)
+        return result
+
+
+async def _execute_cases_serial(
     *,
     state: _NativeExecutionState,
     workload: WorkloadPort,
@@ -1386,55 +2444,82 @@ async def _execute_cases(
         query_fingerprint = canonical_sha256(
             ["oamb-native-query-v1", case_occurrence, hashlib.sha256(query).hexdigest()]
         )
-        query_attempt_id = attempt_id(
-            case_occurrence,
-            "memory_query",
-            1,
-            query_fingerprint,
-        )
-        prepared_query = _prepare_native_attempt(
-            state,
-            attempt_identity=query_attempt_id,
-            parent_kind="case",
-            parent_id=case_occurrence,
-            stage="memory_query",
-            ordinal=1,
-            request_fingerprint=query_fingerprint,
-            role_binding_id=adapter_profile_id,
-        )
-        query_started_at = state.timestamp()
-        try:
+        retrieval_request = _retrieval_request(scope, case_occurrence, case_plan, query)
+        if state.control is not None:
+            attempted_memory = _LiveAttemptedQueryMemory(
+                state,
+                memory,
+                scope,
+                case_occurrence,
+                adapter_profile_id,
+            )
             query_receipt = await execute_read_only_retrieval(
-                memory=memory,
-                request=_retrieval_request(scope, case_occurrence, case_plan, query),
+                memory=attempted_memory,
+                request=retrieval_request,
                 clock=state.monotonic,
             )
-        except BaseException as exc:
-            _seal_native_failure_preserving(
+            query_artifacts = tuple(attempted_memory.artifacts or ())
+            if len(query_artifacts) != 3:
+                raise ValueError("live query did not seal projection/query/projection attempts")
+            query_attempt_ids = tuple(item.attempt_id for item in query_artifacts)
+            query_usage_ids = tuple(
+                usage_id for item in query_artifacts for usage_id in item.usage_record_ids
+            )
+            query_resource_ids = tuple(item.resource_record_id for item in query_artifacts)
+            query_cost_ids = tuple(item.cost_record_id for item in query_artifacts)
+        else:
+            query_attempt_id = attempt_id(
+                case_occurrence,
+                "memory_query",
+                1,
+                query_fingerprint,
+            )
+            prepared_query = _prepare_native_attempt(
+                state,
+                attempt_identity=query_attempt_id,
+                parent_kind="case",
+                parent_id=case_occurrence,
+                stage="memory_query",
+                ordinal=1,
+                request_fingerprint=query_fingerprint,
+                role_binding_id=adapter_profile_id,
+            )
+            query_started_at = state.timestamp()
+            try:
+                query_receipt = await execute_read_only_retrieval(
+                    memory=memory,
+                    request=retrieval_request,
+                    clock=state.monotonic,
+                )
+            except BaseException as exc:
+                _seal_native_failure_preserving(
+                    state,
+                    prepared_query,
+                    started_at=query_started_at,
+                    error=exc,
+                )
+                raise
+            query_ended_at = state.timestamp()
+            _seal_native_success(
                 state,
                 prepared_query,
                 started_at=query_started_at,
-                error=exc,
+                ended_at=query_ended_at,
+                raw_response_ref=query_receipt.native_batch.raw_reference.sha256,
+                index_contribution=IndexContribution.NOT_APPLICABLE,
             )
-            raise
-        query_ended_at = state.timestamp()
-        _seal_native_success(
-            state,
-            prepared_query,
-            started_at=query_started_at,
-            ended_at=query_ended_at,
-            raw_response_ref=query_receipt.native_batch.raw_reference.sha256,
-            index_contribution=IndexContribution.NOT_APPLICABLE,
-        )
-        query_usage_ids, query_resource_id, query_cost_id = _seal_native_attempt_accounting(
-            state,
-            prepared_query,
-            started_at=query_started_at,
-            ended_at=query_ended_at,
-            raw_response_ref=query_receipt.native_batch.raw_reference.sha256,
-            usage_record_ids=(),
-            indexing_view=IndexingView.NOT_APPLICABLE,
-        )
+            query_usage_ids, query_resource_id, query_cost_id = _seal_native_attempt_accounting(
+                state,
+                prepared_query,
+                started_at=query_started_at,
+                ended_at=query_ended_at,
+                raw_response_ref=query_receipt.native_batch.raw_reference.sha256,
+                usage_record_ids=(),
+                indexing_view=IndexingView.NOT_APPLICABLE,
+            )
+            query_attempt_ids = (query_attempt_id,)
+            query_resource_ids = (query_resource_id,)
+            query_cost_ids = (query_cost_id,)
 
         visible = workload.build_visible_evidence(
             query_receipt.native_batch,
@@ -1480,7 +2565,22 @@ async def _execute_cases(
         )
         messages = (("user", prompt.canonical_bytes.decode("utf-8", errors="strict")),)
         messages_sha256 = canonical_sha256(messages)
-        answer_attempt_id = attempt_id(case_occurrence, "answer", 1, messages_sha256)
+        answer_request = ModelRequest.for_attempt(
+            ordinal=1,
+            parent_kind="case",
+            parent_id=case_occurrence,
+            stage="answer",
+            role_binding_id=answer_role_binding_id,
+            messages_sha256=messages_sha256,
+            messages=messages,
+            thinking_effort=answer_model.thinking_effort_for(
+                stage="answer",
+                role_binding_id=answer_role_binding_id,
+            ),
+            output_contract_id=case_plan.output_contract_id,
+            max_output_tokens=case_plan.answer_max_output_tokens,
+        )
+        answer_attempt_id = answer_request.attempt_id
         prepared_answer = _prepare_native_attempt(
             state,
             attempt_identity=answer_attempt_id,
@@ -1488,25 +2588,14 @@ async def _execute_cases(
             parent_id=case_occurrence,
             stage="answer",
             ordinal=1,
-            request_fingerprint=messages_sha256,
+            request_fingerprint=answer_request.request_fingerprint,
             role_binding_id=answer_role_binding_id,
+            request_messages_sha256=messages_sha256,
             maximum_output_tokens=case_plan.answer_max_output_tokens,
         )
         answer_started_at = state.timestamp()
         try:
-            answer_receipt = await answer_model.complete(
-                ModelRequest(
-                    attempt_id=answer_attempt_id,
-                    parent_kind="case",
-                    parent_id=case_occurrence,
-                    stage="answer",
-                    role_binding_id=answer_role_binding_id,
-                    messages_sha256=messages_sha256,
-                    messages=messages,
-                    output_contract_id=case_plan.output_contract_id,
-                    max_output_tokens=case_plan.answer_max_output_tokens,
-                )
-            )
+            answer_receipt = await answer_model.complete(answer_request)
         except BaseException as exc:
             _seal_native_failure_preserving(
                 state,
@@ -1541,10 +2630,10 @@ async def _execute_cases(
             parsed_value_sha256=hashlib.sha256(parsed_answer).hexdigest(),
         )
         evaluation = workload.evaluate(case_plan, answer_value)
-        case_attempt_ids = [query_attempt_id, answer_attempt_id]
+        case_attempt_ids = [*query_attempt_ids, answer_attempt_id]
         usage_record_ids = [*query_usage_ids, *answer_usage_ids]
-        resource_record_ids = [query_resource_id, answer_resource_id]
-        cost_record_ids = [query_cost_id, answer_cost_id]
+        resource_record_ids = [*query_resource_ids, answer_resource_id]
+        cost_record_ids = [*query_cost_ids, answer_cost_id]
         evaluation_disposition = CaseEvaluationDisposition.DETERMINISTIC_EVALUATED
         judge_prompt_raw_ref: str | None = None
         if isinstance(evaluation, JudgeRequest):
@@ -1568,12 +2657,22 @@ async def _execute_cases(
                 ("user", judge_prompt.canonical_bytes.decode("utf-8", errors="strict")),
             )
             judge_messages_sha256 = canonical_sha256(judge_messages)
-            judge_attempt_id = attempt_id(
-                case_occurrence,
-                "judge",
-                1,
-                judge_messages_sha256,
+            judge_request = ModelRequest.for_attempt(
+                ordinal=1,
+                parent_kind="case",
+                parent_id=case_occurrence,
+                stage="judge",
+                role_binding_id=judge_role_binding_id,
+                messages_sha256=judge_messages_sha256,
+                messages=judge_messages,
+                thinking_effort=judge_model.thinking_effort_for(
+                    stage="judge",
+                    role_binding_id=judge_role_binding_id,
+                ),
+                output_contract_id=evaluation.output_contract_id,
+                max_output_tokens=evaluation.max_output_tokens,
             )
+            judge_attempt_id = judge_request.attempt_id
             prepared_judge = _prepare_native_attempt(
                 state,
                 attempt_identity=judge_attempt_id,
@@ -1581,25 +2680,14 @@ async def _execute_cases(
                 parent_id=case_occurrence,
                 stage="judge",
                 ordinal=1,
-                request_fingerprint=judge_messages_sha256,
+                request_fingerprint=judge_request.request_fingerprint,
                 role_binding_id=case_plan.judge_binding_id,
-                maximum_output_tokens=NATIVE_JUDGE_MAX_OUTPUT_TOKENS,
+                request_messages_sha256=judge_messages_sha256,
+                maximum_output_tokens=evaluation.max_output_tokens,
             )
             judge_started_at = state.timestamp()
             try:
-                judge_receipt = await judge_model.complete(
-                    ModelRequest(
-                        attempt_id=judge_attempt_id,
-                        parent_kind="case",
-                        parent_id=case_occurrence,
-                        stage="judge",
-                        role_binding_id=judge_role_binding_id,
-                        messages_sha256=judge_messages_sha256,
-                        messages=judge_messages,
-                        output_contract_id=evaluation.output_contract_id,
-                        max_output_tokens=NATIVE_JUDGE_MAX_OUTPUT_TOKENS,
-                    )
-                )
+                judge_receipt = await judge_model.complete(judge_request)
             except BaseException as exc:
                 _seal_native_failure_preserving(
                     state,
@@ -1656,6 +2744,11 @@ async def _execute_cases(
             retrieval_raw_ref=query_receipt.native_batch.raw_reference.sha256,
             retrieval_supporting_raw_refs=tuple(
                 item.sha256 for item in query_receipt.native_batch.supporting_raw_references
+            ),
+            retrieval_request_raw_ref=(
+                None
+                if query_receipt.native_batch.request_raw_reference is None
+                else query_receipt.native_batch.request_raw_reference.sha256
             ),
             ordered_native_candidate_ids=tuple(
                 candidate.native_id for candidate in query_receipt.native_batch.candidates
@@ -1792,11 +2885,6 @@ def _seal_live_control(state: _NativeExecutionState, control: NativeRunControl) 
             control.preflight_record.preflight_record_hash,
             control.preflight_record,
         ),
-        (
-            "source/specs/external-call-approval.json",
-            control.approval.approval_hash,
-            control.approval,
-        ),
         ("source/specs/budget.json", control.budget.budget_id, control.budget),
     )
     for relative_path, record_id, record in records:
@@ -1837,13 +2925,29 @@ def _prepare_native_attempt(
     ordinal: int,
     request_fingerprint: str,
     role_binding_id: str,
+    request_messages_sha256: str | None = None,
     maximum_output_tokens: int = 0,
+    retry_of_attempt_id: str | None = None,
 ) -> _PreparedNativeAttempt:
+    if state.control is not None:
+        return _prepare_live_native_attempt(
+            state,
+            attempt_identity=attempt_identity,
+            parent_kind=parent_kind,
+            parent_id=parent_id,
+            stage=stage,
+            ordinal=ordinal,
+            request_fingerprint=request_fingerprint,
+            role_binding_id=role_binding_id,
+            request_messages_sha256=request_messages_sha256,
+            maximum_output_tokens=maximum_output_tokens,
+            retry_of_attempt_id=retry_of_attempt_id,
+        )
     claimed_at = state.timestamp()
     claim_fields = {
         "occurrence_id": parent_id,
         "lease_record_hash": state.lease_record_hash,
-        "lease_epoch": 1,
+        "lease_epoch": state.lease_epoch,
         "owner_id": state.owner_id,
         "stage": stage,
         "request_fingerprint": request_fingerprint,
@@ -1896,7 +3000,307 @@ def _prepare_native_attempt(
         stage=stage,
         ordinal=ordinal,
         request_fingerprint=request_fingerprint,
+        request_messages_sha256=request_messages_sha256,
         role_binding_id=role_binding_id,
+        retry_of_attempt_id=retry_of_attempt_id,
+    )
+
+
+def _reservation_allocations_for_route(
+    budget: BudgetSpecV4,
+    route: DispatchBudgetRoute,
+    *,
+    maximum_output_tokens: int,
+) -> tuple[
+    tuple[EvidenceBudgetOwnerAllocation, ...],
+    tuple[RuntimeBudgetOwnerAllocation, ...],
+    BudgetAmount,
+]:
+    role_ceilings = {item.role_binding_id: item for item in budget.role_ceilings}
+    operation_ceilings = {
+        item.provider_operation_ceiling_id: item for item in budget.provider_operation_ceilings
+    }
+    descriptors: list[
+        tuple[
+            DispatchBudgetOwnerKind,
+            str,
+            str,
+            str,
+            str,
+            bool,
+            bool,
+        ]
+    ] = []
+    if route.dispatch_owner_kind == DispatchBudgetOwnerKind.PROVIDER_OPERATION:
+        operation_ceiling = operation_ceilings.get(route.provider_operation_ceiling_id or "")
+        if operation_ceiling is None:
+            raise BudgetExceededError("dispatch route has no provider-operation ceiling")
+        descriptors.append(
+            (
+                DispatchBudgetOwnerKind.PROVIDER_OPERATION,
+                operation_ceiling.provider_operation_ceiling_id,
+                operation_ceiling.adapter_profile_id,
+                operation_ceiling.operation_kind,
+                operation_ceiling.billing_unit,
+                True,
+                False,
+            )
+        )
+        for owner_id in route.internal_usage_role_binding_ids:
+            role = role_ceilings.get(owner_id)
+            if role is None:
+                raise BudgetExceededError("dispatch route has no internal-role ceiling")
+            descriptors.append(
+                (
+                    DispatchBudgetOwnerKind.MODEL_ROLE,
+                    owner_id,
+                    role.provider_budget_cap.provider,
+                    role.provider_budget_cap.operation_kind,
+                    role.provider_budget_cap.billing_unit,
+                    False,
+                    True,
+                )
+            )
+    else:
+        owner_id = route.dispatch_model_role_binding_id or ""
+        role = role_ceilings.get(owner_id)
+        if role is None:
+            raise BudgetExceededError("dispatch route has no model-role ceiling")
+        descriptors.append(
+            (
+                DispatchBudgetOwnerKind.MODEL_ROLE,
+                owner_id,
+                role.provider_budget_cap.provider,
+                role.provider_budget_cap.operation_kind,
+                role.provider_budget_cap.billing_unit,
+                True,
+                False,
+            )
+        )
+
+    evidence_allocations: list[EvidenceBudgetOwnerAllocation] = []
+    runtime_allocations: list[RuntimeBudgetOwnerAllocation] = []
+    maximum = BudgetAmount.zero()
+    for (
+        owner_kind,
+        owner_id,
+        provider,
+        operation_kind,
+        billing_unit,
+        owns_wall,
+        internal,
+    ) in descriptors:
+        if owner_kind == DispatchBudgetOwnerKind.MODEL_ROLE:
+            role = role_ceilings[owner_id]
+            input_tokens = _integer_per_attempt(role.max_input_tokens, role.max_attempts)
+            output_ceiling = _integer_per_attempt(role.max_output_tokens, role.max_attempts)
+            output_tokens = output_ceiling if internal else maximum_output_tokens
+            if output_tokens > output_ceiling:
+                raise BudgetExceededError("model request output exceeds its per-attempt ceiling")
+            wall_seconds = (
+                role.max_dispatch_wall_seconds / role.max_attempts if owns_wall else Decimal("0")
+            )
+            cost = (
+                (role.max_cost or Decimal("0")) / role.max_attempts
+                if budget.currency is not None
+                else Decimal("0")
+            )
+            resource_ceilings = (
+                tuple(
+                    item.model_copy(update={"maximum": item.maximum / role.max_attempts})
+                    for item in role.resource_ceilings
+                )
+                if owns_wall
+                else ()
+            )
+        else:
+            operation_ceiling = operation_ceilings[owner_id]
+            input_tokens = 0
+            output_tokens = 0
+            wall_seconds = (
+                operation_ceiling.max_dispatch_wall_seconds / operation_ceiling.max_attempts
+            )
+            cost = Decimal("0")
+            resource_ceilings = tuple(
+                item.model_copy(update={"maximum": item.maximum / operation_ceiling.max_attempts})
+                for item in operation_ceiling.resource_ceilings
+            )
+        allocation_fields = dict(
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            allocated_attempts=1,
+            allocated_input_tokens=input_tokens,
+            allocated_output_tokens=output_tokens,
+            allocated_dispatch_wall_seconds=wall_seconds,
+            allocated_provider_units=Decimal("1"),
+            allocated_resource_ceilings=resource_ceilings,
+            allocated_cost=cost if budget.currency is not None else None,
+            currency=budget.currency,
+        )
+        evidence = EvidenceBudgetOwnerAllocation.model_validate(
+            {
+                "allocation_hash": budget_owner_allocation_hash(allocation_fields),
+                **allocation_fields,
+            }
+        )
+        owner_maximum = BudgetAmount(
+            attempts=1,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            wall_seconds=wall_seconds,
+            cost=cost,
+            resources=tuple(
+                (item.dimension_id, item.maximum, item.unit) for item in resource_ceilings
+            ),
+            provider_units=((provider, operation_kind, billing_unit, 1),),
+        )
+        evidence_allocations.append(evidence)
+        runtime_allocations.append(RuntimeBudgetOwnerAllocation(owner_id, owner_maximum))
+        maximum = maximum.add(owner_maximum)
+    return tuple(evidence_allocations), tuple(runtime_allocations), maximum
+
+
+def _integer_per_attempt(total: int, attempts: int) -> int:
+    return total // attempts
+
+
+def _prepare_live_native_attempt(
+    state: _NativeExecutionState,
+    *,
+    attempt_identity: str,
+    parent_kind: Literal["ingestion_plan", "case"],
+    parent_id: str,
+    stage: str,
+    ordinal: int,
+    request_fingerprint: str,
+    role_binding_id: str,
+    request_messages_sha256: str | None,
+    maximum_output_tokens: int,
+    retry_of_attempt_id: str | None,
+) -> _PreparedNativeAttempt:
+    control = state.control
+    ledger = state.budget_ledger
+    lifecycle = state.provider_lifecycle
+    if control is None or ledger is None or lifecycle is None:
+        raise ValueError("live native attempt requires budget and provider lifecycle ownership")
+    route = control.require_budget_route(stage=stage)
+    if route.dispatch_owner_kind == DispatchBudgetOwnerKind.PROVIDER_OPERATION:
+        if route.adapter_profile_id != control.preflight_record.adapter_profile_id:
+            raise ValueError("live dispatch route adapter profile differs from preflight")
+    evidence_allocations, runtime_allocations, maximum = _reservation_allocations_for_route(
+        control.budget,
+        route,
+        maximum_output_tokens=maximum_output_tokens,
+    )
+
+    claim_fields = {
+        "occurrence_id": parent_id,
+        "lease_record_hash": state.lease_record_hash,
+        "lease_epoch": state.lease_epoch,
+        "owner_id": state.owner_id,
+        "stage": stage,
+        "request_fingerprint": request_fingerprint,
+        "reconciliation_capability": "none",
+        "claimed_at": state.timestamp(),
+    }
+    claim_id = canonical_sha256(["oamb-native-occurrence-claim-v1", claim_fields])
+    claim = OccurrenceClaimRecord.model_validate({"claim_id": claim_id, **claim_fields})
+    reservation_fields = dict(
+        budget_id=control.budget.budget_id,
+        budget_hash=control.budget.budget_hash,
+        scope_kind=BudgetScopeKindV3.RUN,
+        scope_id=state.run_id,
+        attempt_id=attempt_identity,
+        dispatch_route_id=route.route_id,
+        dispatch_route_hash=route.route_hash,
+        owner_allocations=evidence_allocations,
+        reserved_attempts=sum(item.allocated_attempts for item in evidence_allocations),
+        reserved_input_tokens=sum(item.allocated_input_tokens for item in evidence_allocations),
+        reserved_output_tokens=sum(item.allocated_output_tokens for item in evidence_allocations),
+        reserved_dispatch_wall_seconds=sum(
+            (item.allocated_dispatch_wall_seconds for item in evidence_allocations), Decimal("0")
+        ),
+        reserved_provider_units=sum(
+            (item.allocated_provider_units for item in evidence_allocations), Decimal("0")
+        ),
+        reserved_resource_ceilings=tuple(
+            ceiling
+            for allocation in evidence_allocations
+            for ceiling in allocation.allocated_resource_ceilings
+        ),
+        reserved_cost=(
+            sum(
+                (item.allocated_cost or Decimal("0") for item in evidence_allocations),
+                Decimal("0"),
+            )
+            if control.budget.currency is not None
+            else None
+        ),
+        currency=control.budget.currency,
+        reserved_at=state.timestamp(),
+    )
+    reservation_id = budget_reservation_v3_id(reservation_fields)
+    reservation = BudgetReservationRecordV3.model_validate(
+        {
+            "reservation_id": reservation_id,
+            "reservation_hash": budget_reservation_v3_hash(
+                {**reservation_fields, "reservation_id": reservation_id}
+            ),
+            **reservation_fields,
+        }
+    )
+    intent_fields = dict(
+        attempt_id=attempt_identity,
+        claim_id=claim_id,
+        reservation_id=reservation.reservation_id,
+        reservation_hash=reservation.reservation_hash,
+        scope_kind=BudgetScopeKindV3.RUN,
+        scope_id=state.run_id,
+        parent_kind=parent_kind,
+        parent_id=parent_id,
+        stage=stage,
+        preflight_record_hash=control.preflight_record.preflight_record_hash,
+        budget_id=control.budget.budget_id,
+        budget_hash=control.budget.budget_hash,
+        dispatch_route_id=route.route_id,
+        dispatch_route_hash=route.route_hash,
+        request_fingerprint=request_fingerprint,
+        reconciliation_capability="none",
+        idempotency_key_hash=None,
+        sealed_at=state.timestamp(),
+    )
+    intent = AttemptIntentRecordV3.model_validate(
+        {"intent_hash": attempt_intent_v3_hash(intent_fields), **intent_fields}
+    )
+    ledger.reserve(
+        ReservationRequest(
+            reservation_id=reservation.reservation_id,
+            maximum=maximum,
+            owner_allocations=runtime_allocations,
+        )
+    )
+    _seal(state, "occurrence-claims", claim_id, claim)
+    _seal(state, "budget-reservations", reservation.reservation_id, reservation)
+    _seal(state, "attempt-intents", attempt_identity, intent)
+    lifecycle.mark_attempt_dispatched(
+        attempt_id=attempt_identity,
+        intent_record_hash=intent.intent_hash,
+    )
+    return _PreparedNativeAttempt(
+        attempt_id=attempt_identity,
+        parent_kind=parent_kind,
+        parent_id=parent_id,
+        stage=stage,
+        ordinal=ordinal,
+        request_fingerprint=request_fingerprint,
+        request_messages_sha256=request_messages_sha256,
+        role_binding_id=role_binding_id,
+        retry_of_attempt_id=retry_of_attempt_id,
+        route=route,
+        reservation=reservation,
+        intent=intent,
+        maximum=maximum,
+        owner_maximums=runtime_allocations,
     )
 
 
@@ -1908,7 +3312,7 @@ def _seal_native_success(
     ended_at: datetime,
     raw_response_ref: str,
     index_contribution: IndexContribution,
-) -> AttemptRecordV2:
+) -> AttemptRecordV2 | AttemptRecordV4:
     receipt = AttemptReceiptRecord(
         attempt_id=prepared.attempt_id,
         receipt_kind=AttemptReceiptKind.RESPONSE,
@@ -1919,6 +3323,40 @@ def _seal_native_success(
         provider_request_wall_seconds=_elapsed_seconds(started_at, ended_at),
     )
     _seal(state, "attempt-receipts", prepared.attempt_id, receipt)
+    if prepared.intent is not None and prepared.route is not None:
+        receipt_hash = canonical_sha256(receipt)
+        terminal_fields = dict(
+            attempt_id=prepared.attempt_id,
+            intent_hash=prepared.intent.intent_hash,
+            dispatch_route_id=prepared.route.route_id,
+            dispatch_route_hash=prepared.route.route_hash,
+            receipt_record_hash=receipt_hash,
+            run_id=state.run_id,
+            parent_kind=prepared.parent_kind,
+            parent_id=prepared.parent_id,
+            stage=prepared.stage,
+            ordinal=prepared.ordinal,
+            request_fingerprint=prepared.request_fingerprint,
+            request_messages_sha256=prepared.request_messages_sha256,
+            started_at=started_at,
+            ended_at=ended_at,
+            outcome=AttemptOutcome.SUCCEEDED,
+            retry_of_attempt_id=prepared.retry_of_attempt_id,
+            idempotency_key_hash=None,
+            reconciliation_capability="none",
+            raw_response_ref=raw_response_ref,
+            raw_error_ref=None,
+            index_contribution=index_contribution,
+            superseded_by_attempt_id=None,
+        )
+        live_terminal = AttemptRecordV4.model_validate(
+            {
+                "attempt_record_hash": attempt_record_v4_hash(terminal_fields),
+                **terminal_fields,
+            }
+        )
+        _seal(state, "attempts", prepared.attempt_id, live_terminal)
+        return live_terminal
     terminal = AttemptRecordV2(
         attempt_id=prepared.attempt_id,
         parent_kind=prepared.parent_kind,
@@ -1926,10 +3364,11 @@ def _seal_native_success(
         stage=prepared.stage,
         ordinal=prepared.ordinal,
         request_fingerprint=prepared.request_fingerprint,
+        request_messages_sha256=prepared.request_messages_sha256,
         started_at=started_at,
         ended_at=ended_at,
         outcome=AttemptOutcome.SUCCEEDED,
-        retry_of_attempt_id=None,
+        retry_of_attempt_id=prepared.retry_of_attempt_id,
         idempotency_key_hash=None,
         reconciliation_capability="none",
         raw_response_ref=raw_response_ref,
@@ -1950,7 +3389,19 @@ def _seal_native_attempt_accounting(
     raw_response_ref: str,
     usage_record_ids: tuple[str, ...],
     indexing_view: IndexingView,
+    inline_usage_records: tuple[StrictContract, ...] = (),
 ) -> tuple[tuple[str, ...], str, str]:
+    if prepared.route is not None:
+        return _seal_live_native_attempt_accounting(
+            state,
+            prepared,
+            started_at=started_at,
+            ended_at=ended_at,
+            raw_response_ref=raw_response_ref,
+            usage_record_ids=usage_record_ids,
+            inline_usage_records=inline_usage_records,
+            indexing_view=indexing_view,
+        )
     if len(usage_record_ids) > 1:
         raise ValueError("native attempt cannot bind multiple token-usage records")
     if usage_record_ids:
@@ -2038,13 +3489,366 @@ def _seal_native_attempt_accounting(
     return closed_usage_ids, resource_record_id, cost_record_id
 
 
+def _seal_live_native_attempt_accounting(
+    state: _NativeExecutionState,
+    prepared: _PreparedNativeAttempt,
+    *,
+    started_at: datetime,
+    ended_at: datetime,
+    raw_response_ref: str,
+    usage_record_ids: tuple[str, ...],
+    inline_usage_records: tuple[StrictContract, ...],
+    indexing_view: IndexingView,
+) -> tuple[tuple[str, ...], str, str]:
+    route = prepared.route
+    if route is None or prepared.reservation is None or prepared.intent is None:
+        raise ValueError("live native accounting requires closed route evidence")
+    control = state.control
+    if control is None:
+        raise ValueError("live native accounting requires the durable run control")
+    usage_ids: tuple[str, ...] = ()
+    try:
+        token_stage = TokenStage(prepared.stage)
+    except ValueError:
+        token_stage = None
+    if token_stage is not None:
+        usage_ids = _seal_live_token_usage(
+            state,
+            prepared,
+            token_stage=token_stage,
+            raw_response_ref=raw_response_ref,
+            usage_record_ids=usage_record_ids,
+            inline_usage_records=inline_usage_records,
+        )
+
+    resource_record_id = canonical_sha256(
+        ["oamb-live-dispatch-wall-v1", prepared.attempt_id, route.route_hash]
+    )
+    resource = ResourceUsageRecordV2(
+        resource_record_id=resource_record_id,
+        attempt_id=prepared.attempt_id,
+        dispatch_route_id=route.route_id,
+        dispatch_route_hash=route.route_hash,
+        budget_owner_kind=prepared.reservation.owner_allocations[0].owner_kind,
+        budget_owner_id=prepared.reservation.owner_allocations[0].owner_id,
+        parent_kind=prepared.parent_kind,
+        parent_id=prepared.parent_id,
+        stage=prepared.stage,
+        meter_boundary="trusted_dispatch_wall_v1",
+        dimension_id="provider_request_wall_seconds_v1",
+        value=_elapsed_seconds(started_at, ended_at),
+        unit="seconds",
+        measurement_source="trusted_wall_clock",
+        measurement_spec_id="oamb-trusted-dispatch-wall-v1",
+        environment_hash=control.run_spec.environment_hash,
+        started_at=started_at,
+        ended_at=ended_at,
+        raw_telemetry_ref=raw_response_ref,
+        proof_status=ProofStatus.MEASURED_COMPLETE,
+        reason=None,
+    )
+    _seal(state, "resources", resource_record_id, resource)
+    cost_record_id = canonical_sha256(
+        ["oamb-live-unavailable-cost-v1", prepared.attempt_id, usage_ids, resource_record_id]
+    )
+    cost = CostRecordV2(
+        cost_record_id=cost_record_id,
+        attempt_id=prepared.attempt_id,
+        dispatch_route_id=route.route_id,
+        dispatch_route_hash=route.route_hash,
+        budget_owner_kind=prepared.reservation.owner_allocations[0].owner_kind,
+        budget_owner_id=prepared.reservation.owner_allocations[0].owner_id,
+        parent_kind=prepared.parent_kind,
+        parent_id=prepared.parent_id,
+        basis=CostBasis.ACTUAL_SUPPLIER_CHARGE,
+        indexing_view=indexing_view,
+        amount=None,
+        currency=None,
+        price_snapshot_id=None,
+        source_usage_record_ids=usage_ids,
+        source_resource_record_ids=(resource_record_id,),
+        proof_status=ProofStatus.UNAVAILABLE,
+        reason="supplier_cost_unavailable",
+    )
+    _seal(state, "costs", cost_record_id, cost)
+    ledger = state.budget_ledger
+    lifecycle = state.provider_lifecycle
+    if ledger is None or lifecycle is None or prepared.maximum is None:
+        raise ValueError("live native accounting lost budget or lifecycle state")
+    ledger.commit(
+        prepared.reservation.reservation_id,
+        observed=prepared.maximum,
+        owner_observed=prepared.owner_maximums,
+    )
+    lifecycle.clear_attempt_after_receipt(
+        attempt_id=prepared.attempt_id,
+        expected_intent_record_hash=prepared.intent.intent_hash,
+    )
+    return usage_ids, resource_record_id, cost_record_id
+
+
+def _seal_live_token_usage(
+    state: _NativeExecutionState,
+    prepared: _PreparedNativeAttempt,
+    *,
+    token_stage: TokenStage,
+    raw_response_ref: str,
+    usage_record_ids: tuple[str, ...],
+    inline_usage_records: tuple[StrictContract, ...],
+) -> tuple[str, ...]:
+    route = prepared.route
+    reservation = prepared.reservation
+    control = state.control
+    if route is None or reservation is None or control is None:
+        raise ValueError("live token usage requires route, reservation, and run control")
+    if len(set(usage_record_ids)) != len(usage_record_ids):
+        raise ValueError("live token usage contains duplicate source usage IDs")
+    inline_by_id: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] = {}
+    for record in inline_usage_records:
+        usage: TokenUsageRecordV2 | TokenUsageRecordV3
+        if isinstance(record, TokenUsageRecordV3):
+            usage = record
+        elif isinstance(record, TokenUsageRecordV2):
+            usage = record
+        else:
+            raise ValueError("live token usage source requires version 2 or 3")
+        inline_by_id[usage.usage_record_id] = usage
+    if len(inline_by_id) != len(inline_usage_records):
+        raise ValueError("live token usage contains duplicate inline records")
+    pending = state.pending_model_usage
+    if pending is None:
+        raise ValueError("live token usage capture is unavailable")
+    sources: list[TokenUsageRecordV2 | TokenUsageRecordV3] = []
+    for usage_id in usage_record_ids:
+        inline = inline_by_id.get(usage_id)
+        captured = pending.get(usage_id)
+        if (inline is None) == (captured is None):
+            raise ValueError("live token usage ID is missing or ambiguously sourced")
+        sources.append(inline if inline is not None else captured)  # type: ignore[arg-type]
+    if set(inline_by_id) != set(usage_record_ids) & set(inline_by_id):
+        raise ValueError("live token usage contains an unreferenced inline record")
+
+    model_allocations = tuple(
+        allocation
+        for allocation in reservation.owner_allocations
+        if allocation.owner_kind == DispatchBudgetOwnerKind.MODEL_ROLE
+    )
+    token_allocations = model_allocations or (reservation.owner_allocations[0],)
+    roles_by_id = {binding.binding_id: binding for binding in control.role_bindings}
+    source_by_owner: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] = {}
+    if route.dispatch_owner_kind == DispatchBudgetOwnerKind.MODEL_ROLE:
+        if len(token_allocations) != 1 or len(sources) > 1:
+            raise ValueError("direct live model usage requires one owner and at most one source")
+        if sources:
+            source_by_owner[token_allocations[0].owner_id] = sources[0]
+    else:
+        if not model_allocations and len(token_allocations) == 1 and len(sources) == 1:
+            source_by_owner[token_allocations[0].owner_id] = sources[0]
+        for source in sources:
+            if source in source_by_owner.values():
+                continue
+            if not isinstance(source, TokenUsageRecordV3):
+                raise ValueError("provider-internal live usage requires version 3 model identity")
+            matching = tuple(
+                allocation
+                for allocation in token_allocations
+                if allocation.owner_id in roles_by_id
+                and roles_by_id[allocation.owner_id].configured_model == source.configured_model
+                and roles_by_id[allocation.owner_id].resolved_model == source.runtime_model
+            )
+            if len(matching) != 1 or matching[0].owner_id in source_by_owner:
+                raise ValueError("provider-internal live usage does not map to one role owner")
+            source_by_owner[matching[0].owner_id] = source
+
+    sealed_ids: list[str] = []
+    for allocation in token_allocations:
+        assigned_source = source_by_owner.get(allocation.owner_id)
+        role = roles_by_id.get(allocation.owner_id)
+        usage = _live_token_usage_v5(
+            prepared,
+            route=route,
+            owner=allocation,
+            token_stage=token_stage,
+            raw_response_ref=raw_response_ref,
+            role=role,
+            source=assigned_source,
+        )
+        _seal(state, "usage", usage.usage_record_id, usage)
+        sealed_ids.append(usage.usage_record_id)
+    for usage_id in usage_record_ids:
+        pending.pop(usage_id, None)
+    return tuple(sealed_ids)
+
+
+def _live_token_usage_v5(
+    prepared: _PreparedNativeAttempt,
+    *,
+    route: DispatchBudgetRoute,
+    owner: EvidenceBudgetOwnerAllocation,
+    token_stage: TokenStage,
+    raw_response_ref: str,
+    role: ModelRoleBindingV2 | None,
+    source: TokenUsageRecordV2 | TokenUsageRecordV3 | None,
+) -> TokenUsageRecordV5:
+    if source is not None and (
+        source.attempt_id != prepared.attempt_id
+        or source.parent_kind != prepared.parent_kind
+        or source.parent_id != prepared.parent_id
+        or source.stage.value != prepared.stage
+        or source.raw_response_ref != raw_response_ref
+        or source.token_domain != TokenDomain.EXTERNAL_LLM
+        or source.measurement_source != TokenMeasurementSource.SUPPLIER_RESPONSE
+    ):
+        raise ValueError("live token usage source does not bind its attempt and raw response")
+    configured_model = (
+        source.configured_model
+        if isinstance(source, TokenUsageRecordV3)
+        else role.configured_model
+        if role is not None
+        else "provider-managed-model"
+    )
+    runtime_model = (
+        source.runtime_model
+        if isinstance(source, TokenUsageRecordV3)
+        else role.resolved_model
+        if role is not None
+        else "provider-managed-model"
+    )
+    if configured_model is None or runtime_model is None:
+        raise ValueError("live token usage owner lacks configured/runtime model identity")
+    values: tuple[int | None, int | None, int | None, int | None, int | None]
+    raw_paths: tuple[tuple[str, str], ...]
+    covered: tuple[str, ...]
+    unavailable: tuple[str, ...]
+    proof: ProofStatus
+    reason: str | None
+    meter_schema_id: str
+    relationships: tuple[tuple[str, str], ...]
+    if source is None:
+        values = (None, None, None, None, None)
+        raw_paths = ()
+        covered = ()
+        unavailable = (
+            "input_tokens",
+            "visible_output_tokens",
+            "supplier_reported_total_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+        )
+        proof = ProofStatus.UNAVAILABLE
+        reason = "supplier_token_usage_unavailable"
+        meter_schema_id = "supplier-usage-unavailable-v1"
+        relationships = ()
+    elif isinstance(source, TokenUsageRecordV3):
+        values = (
+            source.input_tokens,
+            source.visible_output_tokens,
+            source.supplier_reported_total_tokens,
+            source.cached_input_tokens,
+            source.reasoning_tokens,
+        )
+        raw_paths = source.raw_field_paths
+        covered = source.covered_dimensions
+        unavailable = source.unavailable_dimensions
+        proof = source.proof_status
+        reason = source.reason
+        meter_schema_id = source.meter_schema_id
+        relationships = source.inclusion_relationships
+    else:
+        values = (
+            source.input_tokens,
+            source.visible_output_tokens,
+            source.supplier_reported_total_tokens,
+            None,
+            None,
+        )
+        base_names = (
+            "input_tokens",
+            "visible_output_tokens",
+            "supplier_reported_total_tokens",
+        )
+        raw_names = (
+            "usage.prompt_tokens",
+            "usage.completion_tokens",
+            "usage.total_tokens",
+        )
+        raw_paths = tuple(
+            (name, path)
+            for name, path, value in zip(base_names, raw_names, values[:3], strict=True)
+            if value is not None
+        )
+        covered = tuple(
+            name for name, value in zip(base_names, values[:3], strict=True) if value is not None
+        )
+        unavailable = tuple(
+            name
+            for name, value in zip(
+                (*base_names, "cached_input_tokens", "reasoning_tokens"),
+                values,
+                strict=True,
+            )
+            if value is None
+        )
+        proof = ProofStatus.MEASURED_PARTIAL if covered else ProofStatus.UNAVAILABLE
+        reason = (
+            "source_v2_omits_cached_and_reasoning_dimensions"
+            if covered
+            else source.reason or "supplier_token_usage_unavailable"
+        )
+        meter_schema_id = "openai-compatible-usage-v2-conversion-v1"
+        relationships = ()
+    usage_id = canonical_sha256(
+        [
+            "oamb-live-token-usage-v5",
+            prepared.attempt_id,
+            route.route_hash,
+            owner.owner_kind,
+            owner.owner_id,
+            canonical_sha256(source) if source is not None else None,
+        ]
+    )
+    return TokenUsageRecordV5(
+        usage_record_id=usage_id,
+        attempt_id=prepared.attempt_id,
+        dispatch_route_id=route.route_id,
+        dispatch_route_hash=route.route_hash,
+        budget_owner_kind=owner.owner_kind,
+        budget_owner_id=owner.owner_id,
+        parent_kind=prepared.parent_kind,
+        parent_id=prepared.parent_id,
+        stage=token_stage,
+        operation_kind=route.operation_kind,
+        token_domain=TokenDomain.EXTERNAL_LLM,
+        measurement_source=TokenMeasurementSource.SUPPLIER_RESPONSE,
+        input_tokens=values[0],
+        visible_output_tokens=values[1],
+        supplier_reported_total_tokens=values[2],
+        context_view_tokens=None,
+        cached_input_tokens=values[3],
+        reasoning_tokens=values[4],
+        configured_model=configured_model,
+        runtime_model=runtime_model,
+        meter_schema_id=meter_schema_id,
+        raw_field_paths=raw_paths,
+        covered_dimensions=covered,
+        unavailable_dimensions=unavailable,
+        not_applicable_dimensions=(),
+        inclusion_relationships=relationships,
+        token_measurement_complete=not unavailable,
+        billing_complete=False,
+        proof_status=proof,
+        reason=reason,
+        raw_response_ref=raw_response_ref,
+    )
+
+
 def _seal_native_failure_preserving(
     state: _NativeExecutionState,
     prepared: _PreparedNativeAttempt,
     *,
     started_at: datetime,
     error: BaseException,
-) -> AttemptRecordV2:
+) -> AttemptRecordV2 | AttemptRecordV4:
     try:
         return _seal_native_failure(
             state,
@@ -2067,7 +3871,7 @@ def _seal_native_failure(
     *,
     started_at: datetime,
     error: BaseException,
-) -> AttemptRecordV2:
+) -> AttemptRecordV2 | AttemptRecordV4:
     ended_at = state.timestamp()
     cancelled_before_dispatch = _contains_cancelled_before_dispatch(error)
     unknown = not cancelled_before_dispatch and (
@@ -2112,6 +3916,66 @@ def _seal_native_failure(
         provider_request_wall_seconds=_elapsed_seconds(started_at, ended_at),
     )
     _seal(state, "attempt-receipts", prepared.attempt_id, receipt)
+    if prepared.intent is not None and prepared.route is not None:
+        terminal_fields = dict(
+            attempt_id=prepared.attempt_id,
+            intent_hash=prepared.intent.intent_hash,
+            dispatch_route_id=prepared.route.route_id,
+            dispatch_route_hash=prepared.route.route_hash,
+            receipt_record_hash=canonical_sha256(receipt),
+            run_id=state.run_id,
+            parent_kind=prepared.parent_kind,
+            parent_id=prepared.parent_id,
+            stage=prepared.stage,
+            ordinal=prepared.ordinal,
+            request_fingerprint=prepared.request_fingerprint,
+            request_messages_sha256=prepared.request_messages_sha256,
+            started_at=started_at,
+            ended_at=ended_at,
+            outcome=outcome,
+            retry_of_attempt_id=prepared.retry_of_attempt_id,
+            idempotency_key_hash=None,
+            reconciliation_capability="none",
+            raw_response_ref=None,
+            raw_error_ref=raw_error_ref,
+            index_contribution=IndexContribution.NONE,
+            superseded_by_attempt_id=None,
+        )
+        live_terminal = AttemptRecordV4.model_validate(
+            {
+                "attempt_record_hash": attempt_record_v4_hash(terminal_fields),
+                **terminal_fields,
+            }
+        )
+        _seal(state, "attempts", prepared.attempt_id, live_terminal)
+        ledger = state.budget_ledger
+        lifecycle = state.provider_lifecycle
+        reservation = prepared.reservation
+        if ledger is None or lifecycle is None or reservation is None:
+            raise ValueError("live failed attempt lost budget or lifecycle state")
+        if unknown:
+            ledger.mark_unknown(reservation.reservation_id)
+            return live_terminal
+        if cancelled_before_dispatch:
+            ledger.cancel_before_dispatch(reservation.reservation_id)
+            lifecycle.clear_attempt_after_receipt(
+                attempt_id=prepared.attempt_id,
+                expected_intent_record_hash=prepared.intent.intent_hash,
+            )
+            return live_terminal
+        if raw_error_ref is None:
+            raise ValueError("failed live attempt requires durable raw error evidence")
+        _seal_live_native_attempt_accounting(
+            state,
+            prepared,
+            started_at=started_at,
+            ended_at=ended_at,
+            raw_response_ref=raw_error_ref,
+            usage_record_ids=(),
+            inline_usage_records=(),
+            indexing_view=IndexingView.ATTEMPTED,
+        )
+        return live_terminal
     terminal = AttemptRecordV2(
         attempt_id=prepared.attempt_id,
         parent_kind=prepared.parent_kind,
@@ -2119,10 +3983,11 @@ def _seal_native_failure(
         stage=prepared.stage,
         ordinal=prepared.ordinal,
         request_fingerprint=prepared.request_fingerprint,
+        request_messages_sha256=prepared.request_messages_sha256,
         started_at=started_at,
         ended_at=ended_at,
         outcome=outcome,
-        retry_of_attempt_id=None,
+        retry_of_attempt_id=prepared.retry_of_attempt_id,
         idempotency_key_hash=None,
         reconciliation_capability="none",
         raw_response_ref=None,
@@ -2211,16 +4076,24 @@ def _native_run_lease(
     adapter_profile_id: str,
     *,
     control: NativeRunControl | None = None,
+    acquired_at: datetime | None = None,
+    previous: RunLeaseRecord | None = None,
 ) -> RunLeaseRecord:
     provider_project_id = (
         control.preflight_record.provider_project_id if control is not None else "native-fixture"
     )
+    if previous is not None and (
+        previous.run_id != run_id
+        or previous.provider_project_id != provider_project_id
+        or previous.provider_profile_id != adapter_profile_id
+    ):
+        raise ValueError("native continuation lease identity changed")
     candidate = RunLeaseRecord(
         lease_record_hash="0" * 64,
         run_id=run_id,
         provider_project_id=provider_project_id,
         provider_profile_id=adapter_profile_id,
-        lease_epoch=1,
+        lease_epoch=(previous.lease_epoch + 1 if previous is not None else 1),
         owner_id=control.owner_id if control is not None else NATIVE_OWNER_ID,
         host_fingerprint=(
             control.host_fingerprint
@@ -2228,8 +4101,16 @@ def _native_run_lease(
             else canonical_sha256(["oamb-native-fixture-host-v1"])
         ),
         process_id=control.process_id if control is not None else 1,
-        predecessor_lease_record_hash=None,
-        acquired_at=control.started_at if control is not None else NATIVE_FIXTURE_STARTED_AT,
+        predecessor_lease_record_hash=(
+            previous.lease_record_hash if previous is not None else None
+        ),
+        acquired_at=(
+            acquired_at
+            if acquired_at is not None
+            else control.wall_clock()
+            if control is not None
+            else NATIVE_FIXTURE_STARTED_AT
+        ),
     )
     return candidate.model_copy(
         update={
@@ -2238,6 +4119,61 @@ def _native_run_lease(
             )
         }
     )
+
+
+def _contains_unknown_outcome(error: BaseException) -> bool:
+    pending: list[BaseException] = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if (
+            isinstance(
+                current,
+                (
+                    ModelCallCancelledUnknownOutcome,
+                    ModelCallUnknownOutcome,
+                    MemorySystemCallCancelledUnknownOutcome,
+                    MemorySystemCallUnknownOutcome,
+                ),
+            )
+            or "UnknownOutcome" in type(current).__name__
+        ):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return False
+
+
+def _verify_terminal_capsule(
+    capsule_root: Path,
+    *,
+    run_id: str,
+    run_spec_hash: str,
+) -> None:
+    payload = read_regular_file(capsule_root / "capsule-manifest.json")
+    manifest = CapsuleManifest.model_validate_json(payload)
+    if payload != canonical_json_bytes(manifest):
+        raise ValueError("terminal capsule manifest is not canonical")
+    if manifest.run_id != run_id or manifest.run_spec_hash != run_spec_hash:
+        raise ValueError("terminal capsule manifest does not bind the live run")
+    run_path = capsule_root / "source" / "run" / f"{run_id}.json"
+    run_payload = read_regular_file(run_path)
+    run_record = RunRecord.model_validate_json(run_payload)
+    if run_record.state not in {RunState.FINALIZED, RunState.ABORTED}:
+        raise ValueError("terminal capsule does not contain a terminal run record")
+    relative_run_path = run_path.relative_to(capsule_root).as_posix()
+    expected_entry = next(
+        (entry for entry in manifest.source_entries if entry.relative_path == relative_run_path),
+        None,
+    )
+    if expected_entry is None or expected_entry.sha256 != hashlib.sha256(run_payload).hexdigest():
+        raise ValueError("terminal capsule manifest does not bind its run record")
 
 
 def _seal_close_error(

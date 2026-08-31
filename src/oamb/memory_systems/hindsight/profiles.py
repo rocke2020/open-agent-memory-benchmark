@@ -39,7 +39,7 @@ EXPECTED_FEATURES: Final[dict[str, bool]] = {
     "store_document_text": True,
 }
 BANK_PAGE_FIELDS: Final = frozenset({"banks", "total", "limit", "offset"})
-BANK_ITEM_FIELDS: Final = frozenset(
+BANK_ITEM_BASE_FIELDS: Final = frozenset(
     {
         "bank_id",
         "name",
@@ -48,22 +48,74 @@ BANK_ITEM_FIELDS: Final = frozenset(
         "created_at",
         "updated_at",
         "fact_count",
-        "last_document_at",
-        "last_write_at",
     }
 )
+BANK_ITEM_ACTIVITY_FIELDS: Final = frozenset({"last_document_at", "last_write_at"})
+BANK_ITEM_FIELDS: Final = BANK_ITEM_BASE_FIELDS | BANK_ITEM_ACTIVITY_FIELDS
 DISPOSITION_FIELDS: Final = frozenset({"skepticism", "literalism", "empathy"})
 BANK_PROFILE_FIELDS: Final = frozenset({"bank_id", "name", "disposition", "mission", "background"})
 BANK_CONFIG_FIELDS: Final = frozenset({"bank_id", "config", "overrides"})
-RETAIN_RESPONSE_FIELDS: Final = frozenset(
+EXPECTED_BANK_CONFIG: Final[dict[str, object]] = {
+    "llm_gemini_safety_settings": None,
+    "mcp_enabled_tools": None,
+    "retain_chunk_size": 3000,
+    "retain_structured_chunk_size": None,
+    "retain_extraction_mode": "concise",
+    "retain_mission": None,
+    "retain_custom_instructions": None,
+    "retain_default_strategy": None,
+    "retain_strategies": None,
+    "retain_chunk_batch_size": 100,
+    "store_document_text": True,
+    "enable_observations": False,
+    "enable_auto_consolidation": True,
+    "mental_model_min_refresh_interval_seconds": 0,
+    "consolidation_max_memories_per_round": 100,
+    "consolidation_llm_batch_size": 8,
+    "consolidation_llm_parallelism": 4,
+    "consolidation_source_facts_max_tokens": 4096,
+    "consolidation_source_facts_max_tokens_per_observation": 256,
+    "observations_mission": None,
+    "max_observations_per_scope": -1,
+    "observation_scope_limits": None,
+    "entity_labels": None,
+    "entities_allow_free_form": True,
+    "memory_defense": None,
+    "reflect_mission": None,
+    "reflect_source_facts_max_tokens": -1,
+    "enable_temporal_retrieval": True,
+    "enable_graph_retrieval": True,
+    "enable_reranking": False,
+    "recall_include_chunks": True,
+    "recall_max_tokens": 2048,
+    "recall_chunks_max_tokens": 1000,
+    "recall_budget_function": "fixed",
+    "recall_budget_fixed_low": 100,
+    "recall_budget_fixed_mid": 300,
+    "recall_budget_fixed_high": 1000,
+    "recall_budget_adaptive_low": 0.025,
+    "recall_budget_adaptive_mid": 0.075,
+    "recall_budget_adaptive_high": 0.25,
+    "recall_budget_min": 20,
+    "recall_budget_max": 2000,
+    "disposition_skepticism": None,
+    "disposition_literalism": None,
+    "disposition_empathy": None,
+    "audit_log_enabled": False,
+}
+RETAIN_SYNC_RESPONSE_FIELDS: Final = frozenset(
     {
         "success",
         "bank_id",
         "items_count",
         "async",
+        "usage",
+    }
+)
+RETAIN_RESPONSE_FIELDS: Final = RETAIN_SYNC_RESPONSE_FIELDS | frozenset(
+    {
         "operation_id",
         "operation_ids",
-        "usage",
     }
 )
 RETAIN_USAGE_FIELDS: Final = frozenset(
@@ -136,7 +188,12 @@ def parse_bank_page(raw_bytes: bytes, *, expected_limit: int, expected_offset: i
         raise ValueError("Hindsight bank page banks must be an array")
     bank_ids: list[str] = []
     for item in banks:
-        bank = _require_exact_object(item, BANK_ITEM_FIELDS, "bank item")
+        if not isinstance(item, dict) or set(item) not in {
+            BANK_ITEM_BASE_FIELDS,
+            BANK_ITEM_FIELDS,
+        }:
+            raise ValueError("Hindsight bank item fields do not match the exact profile")
+        bank = item
         bank_id = bank["bank_id"]
         if not isinstance(bank_id, str) or not bank_id:
             raise ValueError("Hindsight bank ID must be non-empty")
@@ -165,12 +222,7 @@ def parse_bank_config(raw_bytes: bytes, *, expected_bank_id: str) -> None:
     overrides = document["overrides"]
     if not isinstance(config, dict) or not isinstance(overrides, dict):
         raise ValueError("Hindsight bank config values must be objects")
-    expected_values = {
-        "enable_observations": False,
-        "enable_reranking": False,
-        "store_document_text": True,
-    }
-    if config != expected_values:
+    if config != EXPECTED_BANK_CONFIG:
         raise ValueError("Hindsight score-affecting bank config does not match the profile")
     if overrides != {"enable_observations": False}:
         raise ValueError("Hindsight bank overrides do not match create-only allocation")
@@ -182,7 +234,16 @@ def parse_retain_response(
     expected_bank_id: str,
     expected_items_count: int,
 ) -> RetainResult:
-    document = parse_exact_json_object(raw_bytes, expected_fields=RETAIN_RESPONSE_FIELDS)
+    try:
+        document = parse_exact_json_object(raw_bytes, expected_fields=RETAIN_RESPONSE_FIELDS)
+    except ValueError as response_error:
+        try:
+            document = parse_exact_json_object(
+                raw_bytes,
+                expected_fields=RETAIN_SYNC_RESPONSE_FIELDS,
+            )
+        except ValueError:
+            raise response_error from None
     if document["success"] is not True:
         raise ValueError("Hindsight retain did not report success")
     if document["bank_id"] != expected_bank_id:
@@ -194,7 +255,7 @@ def parse_retain_response(
         raise ValueError("Hindsight retain response count does not match the dispatch")
     if document["async"] is not False:
         raise ValueError("Hindsight retain response is not synchronous")
-    if document["operation_id"] is not None or document["operation_ids"] is not None:
+    if document.get("operation_id") is not None or document.get("operation_ids") is not None:
         raise ValueError("Hindsight synchronous retain returned async operation identity")
     usage = _require_exact_object(document["usage"], RETAIN_USAGE_FIELDS, "retain usage")
     parsed_usage = {

@@ -311,6 +311,7 @@ def test_scripted_fake_model_seals_failed_usage_then_succeeds_on_explicit_retry(
             role_binding_id="fake-answer-v1",
             messages_sha256="2" * 64,
             messages=messages,
+            thinking_effort="low",
         )
         with pytest.raises(ModelCallFailure) as failed:
             await client.complete(first)
@@ -325,6 +326,7 @@ def test_scripted_fake_model_seals_failed_usage_then_succeeds_on_explicit_retry(
             role_binding_id="fake-answer-v1",
             messages_sha256="2" * 64,
             messages=messages,
+            thinking_effort="low",
         )
         receipt = await client.complete(retry)
         assert receipt.output_text == "beta"

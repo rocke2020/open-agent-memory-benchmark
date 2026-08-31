@@ -27,9 +27,16 @@ from oamb.contracts.accounting import (
     TokenDomain,
     TokenMeasurementSource,
     TokenStageV2,
+    TokenUsageRecordV2,
     TokenUsageRecordV3,
+    TokenUsageRecordV5,
 )
-from oamb.contracts.evidence import CapsuleManifest, IngestionPlanRecordV3
+from oamb.contracts.evidence import (
+    CapsuleManifest,
+    IngestionPlanRecordV3,
+    OccurrenceClaimRecord,
+    RunLeaseRecord,
+)
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
     AnswerValue,
@@ -44,6 +51,7 @@ from oamb.contracts.ports import (
     InventoryReceipt,
     JudgeRequest,
     MemorySystemCallCancelledBeforeDispatch,
+    MemorySystemCallCancelledUnknownOutcome,
     MemorySystemCallUnknownOutcome,
     ModelReceipt,
     ModelRequest,
@@ -56,6 +64,7 @@ from oamb.contracts.ports import (
     ScopeAllocationRequest,
     ScopeReceipt,
     StateDigestReceipt,
+    ThinkingEffort,
     VisibleEvidence,
     VisibleEvidencePolicy,
 )
@@ -261,6 +270,13 @@ class _RecordedNativeModel:
         self._store = store
         self._closed = False
 
+    def thinking_effort_for(self, *, stage: str, role_binding_id: str) -> ThinkingEffort:
+        if stage == "answer" and role_binding_id == "recorded-answer-v1":
+            return "low"
+        if stage == "judge" and role_binding_id == "fake-judge-v1":
+            return "high"
+        raise ValueError("recorded model request differs from its fixture role binding")
+
     async def complete(self, request: ModelRequest) -> ModelReceipt:
         if self._closed:
             raise RuntimeError("recorded model is closed")
@@ -293,6 +309,90 @@ class _RecordedNativeModel:
 
     async def close(self) -> None:
         self._closed = True
+
+
+class _MeasuredLiveModel(_RecordedNativeModel):
+    async def complete(self, request: ModelRequest) -> ModelReceipt:
+        receipt = await super().complete(request)
+        usage = self._usage_record(request, receipt.raw_reference.sha256)
+        payload = canonical_json_bytes(usage)
+        self._store.seal_source_record(
+            ArtifactWriteRequest(
+                record_id=usage.usage_record_id,
+                relative_path=f"source/usage/{usage.usage_record_id}.json",
+                canonical_sha256=hashlib.sha256(payload).hexdigest(),
+                canonical_bytes=payload,
+            )
+        )
+        return replace(receipt, usage_reference_ids=(usage.usage_record_id,))
+
+    def _usage_record(self, request: ModelRequest, raw_response_ref: str) -> TokenUsageRecordV2:
+        usage_id = canonical_sha256(
+            ["measured-live-model-usage", request.attempt_id, raw_response_ref]
+        )
+        return TokenUsageRecordV2(
+            usage_record_id=usage_id,
+            attempt_id=request.attempt_id,
+            parent_kind=request.parent_kind,
+            parent_id=request.parent_id,
+            stage=TokenStageV2(request.stage),
+            operation_kind="openai_chat_completion",
+            token_domain=TokenDomain.EXTERNAL_LLM,
+            measurement_source=TokenMeasurementSource.SUPPLIER_RESPONSE,
+            input_tokens=13,
+            visible_output_tokens=5,
+            supplier_reported_total_tokens=18,
+            context_view_tokens=None,
+            proof_status=ProofStatus.MEASURED_COMPLETE,
+            reason=None,
+            raw_response_ref=raw_response_ref,
+        )
+
+
+class _MismatchedLiveModel(_MeasuredLiveModel):
+    def _usage_record(self, request: ModelRequest, raw_response_ref: str) -> TokenUsageRecordV2:
+        return (
+            super()
+            ._usage_record(request, raw_response_ref)
+            .model_copy(update={"parent_id": "wrong-parent"})
+        )
+
+
+class _TamperedLiveModel(_MeasuredLiveModel):
+    async def complete(self, request: ModelRequest) -> ModelReceipt:
+        receipt = await _RecordedNativeModel.complete(self, request)
+        usage = self._usage_record(request, receipt.raw_reference.sha256)
+        payload = canonical_json_bytes(usage)
+        wrong_id = canonical_sha256(["tampered-live-usage-id", usage.usage_record_id])
+        self._store.seal_source_record(
+            ArtifactWriteRequest(
+                record_id=wrong_id,
+                relative_path=f"source/usage/{wrong_id}.json",
+                canonical_sha256=hashlib.sha256(payload).hexdigest(),
+                canonical_bytes=payload,
+            )
+        )
+        return replace(receipt, usage_reference_ids=(wrong_id,))
+
+
+class _ExtraUnreferencedLiveModel(_MeasuredLiveModel):
+    async def complete(self, request: ModelRequest) -> ModelReceipt:
+        receipt = await super().complete(request)
+        extra = self._usage_record(request, receipt.raw_reference.sha256).model_copy(
+            update={
+                "usage_record_id": canonical_sha256(["unreferenced-live-usage", request.attempt_id])
+            }
+        )
+        payload = canonical_json_bytes(extra)
+        self._store.seal_source_record(
+            ArtifactWriteRequest(
+                record_id=extra.usage_record_id,
+                relative_path=f"source/usage/{extra.usage_record_id}.json",
+                canonical_sha256=hashlib.sha256(payload).hexdigest(),
+                canonical_bytes=payload,
+            )
+        )
+        return receipt
 
 
 def _answer_for_prompt(prompt: str) -> str:
@@ -677,6 +777,120 @@ def _append_source_contract_copy(
     _reseal_manifest(root)
 
 
+def _successor_run_lease(
+    predecessor: RunLeaseRecord,
+    **updates: object,
+) -> RunLeaseRecord:
+    candidate = predecessor.model_copy(
+        update={
+            "lease_record_hash": "0" * 64,
+            "lease_epoch": predecessor.lease_epoch + 1,
+            "owner_id": f"{predecessor.owner_id}-successor",
+            "predecessor_lease_record_hash": predecessor.lease_record_hash,
+            **updates,
+        }
+    )
+    return candidate.model_copy(
+        update={
+            "lease_record_hash": canonical_sha256(
+                candidate.model_dump(mode="python", exclude={"lease_record_hash"})
+            )
+        }
+    )
+
+
+def _append_run_lease(
+    root: Path,
+    lease: RunLeaseRecord,
+    *,
+    relative_path: str | None = None,
+) -> None:
+    manifest_path = root / "capsule-manifest.json"
+    manifest = CapsuleManifest.model_validate_json(manifest_path.read_bytes())
+    template_entry = next(
+        entry for entry in manifest.source_entries if entry.record_kind == "run_lease_record"
+    )
+    path = relative_path or f"source/run-leases/{lease.lease_epoch}.json"
+    content = canonical_json_bytes(lease)
+    destination = root / path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(content)
+    entry = template_entry.model_copy(
+        update={
+            "record_id": Path(path).stem,
+            "relative_path": path,
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    )
+    manifest_path.write_bytes(
+        canonical_json_bytes(
+            manifest.model_copy(update={"source_entries": (*manifest.source_entries, entry)})
+        )
+    )
+    _reseal_manifest(root)
+
+
+def _rebind_first_occurrence_claim(
+    root: Path,
+    lease: RunLeaseRecord,
+    **updates: object,
+) -> None:
+    manifest_path = root / "capsule-manifest.json"
+    manifest = CapsuleManifest.model_validate_json(manifest_path.read_bytes())
+    claim_entry = next(
+        entry for entry in manifest.source_entries if entry.record_kind == "occurrence_claim_record"
+    )
+    claim_path = root / claim_entry.relative_path
+    previous = OccurrenceClaimRecord.model_validate_json(claim_path.read_bytes())
+    candidate = previous.model_copy(
+        update={
+            "claim_id": "0" * 64,
+            "lease_record_hash": lease.lease_record_hash,
+            "lease_epoch": lease.lease_epoch,
+            "owner_id": lease.owner_id,
+            **updates,
+        }
+    )
+    claim_fields = candidate.model_dump(
+        mode="python",
+        exclude={"schema_name", "schema_version", "claim_id"},
+    )
+    successor_claim = candidate.model_copy(
+        update={"claim_id": canonical_sha256(["oamb-native-occurrence-claim-v1", claim_fields])}
+    )
+    intent_entry = next(
+        entry
+        for entry in manifest.source_entries
+        if entry.record_kind == "attempt_intent_record"
+        and json.loads((root / entry.relative_path).read_bytes())["claim_id"] == previous.claim_id
+    )
+    intent_path = root / intent_entry.relative_path
+    intent = json.loads(intent_path.read_bytes())
+    intent["claim_id"] = successor_claim.claim_id
+    intent_path.write_bytes(canonical_json_bytes(intent))
+
+    successor_path = Path("source/occurrence-claims") / f"{successor_claim.claim_id}.json"
+    successor_content = canonical_json_bytes(successor_claim)
+    (root / successor_path).write_bytes(successor_content)
+    claim_path.unlink()
+    source_entries = tuple(
+        entry.model_copy(
+            update={
+                "record_id": successor_claim.claim_id,
+                "relative_path": successor_path.as_posix(),
+                "sha256": hashlib.sha256(successor_content).hexdigest(),
+            }
+        )
+        if entry.relative_path == claim_entry.relative_path
+        else entry
+        for entry in manifest.source_entries
+    )
+    manifest_path.write_bytes(
+        canonical_json_bytes(manifest.model_copy(update={"source_entries": source_entries}))
+    )
+    _reseal_manifest(root)
+
+
 def _issue_codes(root: Path) -> set[str]:
     return {issue.code for issue in validate_native_capsule(root).issues}
 
@@ -697,9 +911,11 @@ def test_recorded_native_ports_seal_a_root_only_validatable_capsule(tmp_path: Pa
     assert all(record.metric_denominator == 1 for record in completed.case_records)
 
 
-def test_fixture_entrypoint_rejects_live_control_without_lifecycle_composition(
+def test_live_entrypoint_owns_provider_lifecycle_through_terminal_capsule(
     tmp_path: Path,
 ) -> None:
+    from oamb.artifacts.validation.source_root import validate_source_root
+
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
     case_manifest = workload.build_case_manifest(dataset)
@@ -712,12 +928,280 @@ def test_fixture_entrypoint_rejects_live_control_without_lifecycle_composition(
         runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
         adapter_profile_id="recorded-native-fixture-v1",
         answer_role_binding_id="recorded-answer-v1",
+        provider_runtime_directory=tmp_path / "provider-runtime",
     )
 
-    with pytest.raises(
-        ValueError,
-        match="live native execution requires the lifecycle-aware composition root",
-    ):
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id=control.run_spec.run_id,
+        adapter_profile_id=control.preflight_record.adapter_profile_id,
+        workload=workload,
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=_RecordedNativeModel,
+        answer_role_binding_id="recorded-answer-v1",
+        control=control,
+    )
+
+    assert completed.manifest.run_id == control.run_spec.run_id
+    assert not (control.provider_runtime_directory / "active-operation").exists()
+    attempts_directory = control.provider_runtime_directory / "active-provider-attempts"
+    assert not attempts_directory.exists() or not any(attempts_directory.iterdir())
+    reservations = tuple(
+        json.loads(path.read_bytes())
+        for path in sorted((completed.capsule_root / "source/budget-reservations").glob("*.json"))
+    )
+    intents = tuple(
+        json.loads(path.read_bytes())
+        for path in sorted((completed.capsule_root / "source/attempt-intents").glob("*.json"))
+    )
+    attempts = tuple(
+        json.loads(path.read_bytes())
+        for path in sorted((completed.capsule_root / "source/attempts").glob("*.json"))
+    )
+    assert reservations and {item["schema_version"] for item in reservations} == {3}
+    assert intents and {item["schema_version"] for item in intents} == {3}
+    assert attempts and {item["schema_version"] for item in attempts} == {4}
+    assert {
+        "runtime_resolve",
+        "scope_allocate",
+        "memory_ingest",
+        "memory_readiness",
+        "memory_projection",
+        "pre_query_projection",
+        "memory_query",
+        "post_query_projection",
+        "answer",
+    } <= {item["stage"] for item in attempts}
+    validation = validate_source_root(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+
+    hash_drift_root = tmp_path / "live-attempt-hash-drift"
+    shutil.copytree(completed.capsule_root, hash_drift_root)
+    attempt_path = _first_source_document(hash_drift_root, "attempt_record", 4)
+    _mutate_source_document(
+        hash_drift_root,
+        attempt_path,
+        request_fingerprint="f" * 64,
+    )
+    assert validate_source_root(hash_drift_root).disposition == ValidationDisposition.INVALID
+
+    path_drift_root = tmp_path / "live-attempt-path-drift"
+    shutil.copytree(completed.capsule_root, path_drift_root)
+    manifest_path = path_drift_root / "capsule-manifest.json"
+    manifest = CapsuleManifest.model_validate_json(manifest_path.read_bytes())
+    attempt_entry = next(
+        entry
+        for entry in manifest.source_entries
+        if entry.record_kind == "attempt_record"
+        and json.loads((path_drift_root / entry.relative_path).read_bytes())["schema_version"] == 4
+    )
+    wrong_relative_path = f"source/attempts/wrong-{attempt_entry.record_id}.json"
+    (path_drift_root / attempt_entry.relative_path).rename(path_drift_root / wrong_relative_path)
+    manifest_path.write_bytes(
+        canonical_json_bytes(
+            manifest.model_copy(
+                update={
+                    "source_entries": tuple(
+                        entry.model_copy(update={"relative_path": wrong_relative_path})
+                        if entry == attempt_entry
+                        else entry
+                        for entry in manifest.source_entries
+                    )
+                }
+            )
+        )
+    )
+    _reseal_manifest(path_drift_root)
+    assert validate_source_root(path_drift_root).disposition == ValidationDisposition.INVALID
+
+
+def test_live_validation_accepts_multiple_provider_usage_records_with_model_role_owners(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id="controlled-native-multiple-provider-usage",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=case_manifest.manifest_hash,
+        workload_id=case_manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="recorded-answer-v1",
+        provider_runtime_directory=tmp_path / "provider-runtime-multiple-usage",
+    )
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id=control.run_spec.run_id,
+        adapter_profile_id=control.preflight_record.adapter_profile_id,
+        workload=workload,
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=_RecordedNativeModel,
+        answer_role_binding_id="recorded-answer-v1",
+        control=control,
+    )
+    root = completed.capsule_root
+    plan = completed.ingestion_plan_records[0]
+    attempt_id = plan.ordered_dispatch_attempt_ids[0]
+    usage_path = next(
+        path
+        for path in (root / "source/usage").glob("*.json")
+        if json.loads(path.read_bytes())["attempt_id"] == attempt_id
+    )
+    original_usage = json.loads(usage_path.read_bytes())
+    original_usage_id = original_usage["usage_record_id"]
+    additional_usage_id = canonical_sha256(
+        ["oamb-fixture-secondary-provider-model-usage-v1", attempt_id]
+    )
+    _append_source_contract_copy(
+        root,
+        schema_name="token_usage_record",
+        identity_field="usage_record_id",
+        record_id=additional_usage_id,
+    )
+    _mutate_source_document(
+        root,
+        root / f"source/usage/{additional_usage_id}.json",
+        attempt_id=attempt_id,
+        parent_kind="ingestion_plan",
+        parent_id=plan.ingestion_occurrence_id,
+        stage="memory_ingest",
+        operation_kind="recorded_fixture_secondary_ingest",
+        configured_model="deepseek-chat",
+        runtime_model="deepseek-chat",
+        budget_owner_kind="model_role",
+        budget_owner_id="recorded-answer-v1",
+        raw_response_ref=original_usage["raw_response_ref"],
+        dispatch_route_id=original_usage["dispatch_route_id"],
+        dispatch_route_hash=original_usage["dispatch_route_hash"],
+    )
+    plan_path = root / f"source/ingestion-plans/{plan.ingestion_occurrence_id}.json"
+    plan_document = json.loads(plan_path.read_bytes())
+    usage_index = plan_document["usage_record_ids"].index(original_usage_id)
+    plan_usage_ids = list(plan_document["usage_record_ids"])
+    plan_usage_ids[usage_index : usage_index + 1] = [additional_usage_id, original_usage_id]
+    _mutate_source_document(root, plan_path, usage_record_ids=plan_usage_ids)
+    cost_path = next(
+        path
+        for path in (root / "source/costs").glob("*.json")
+        if json.loads(path.read_bytes())["attempt_id"] == attempt_id
+    )
+    _mutate_source_document(
+        root,
+        cost_path,
+        source_usage_record_ids=[additional_usage_id, original_usage_id],
+    )
+
+    validation = validate_native_capsule(root)
+
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+
+
+def test_live_answer_and_judge_usage_is_converted_to_route_bound_v5(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureJudgeWorkload()
+    dataset = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id="controlled-native-measured-usage",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=case_manifest.manifest_hash,
+        workload_id=case_manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="recorded-answer-v1",
+        judge_role_binding_id="fake-judge-v1",
+        provider_runtime_directory=tmp_path / "provider-runtime-usage",
+    )
+
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id=control.run_spec.run_id,
+        adapter_profile_id=control.preflight_record.adapter_profile_id,
+        workload=workload,
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=_MeasuredLiveModel,
+        answer_role_binding_id="recorded-answer-v1",
+        judge_model_factory=_MeasuredLiveModel,
+        judge_role_binding_id="fake-judge-v1",
+        control=control,
+    )
+
+    usage_documents = tuple(
+        json.loads(path.read_bytes())
+        for path in sorted((completed.capsule_root / "source/usage").glob("*.json"))
+    )
+    measured = tuple(
+        TokenUsageRecordV5.model_validate_json(canonical_json_bytes(document))
+        for document in usage_documents
+        if document["stage"] in {"answer", "judge"}
+    )
+    assert {document["schema_version"] for document in usage_documents} == {5}
+    assert {record.stage.value for record in measured} == {"answer", "judge"}
+    assert all(
+        (
+            record.input_tokens,
+            record.visible_output_tokens,
+            record.supplier_reported_total_tokens,
+        )
+        == (13, 5, 18)
+        for record in measured
+    )
+    assert all(
+        record.unavailable_dimensions == ("cached_input_tokens", "reasoning_tokens")
+        and record.proof_status == ProofStatus.MEASURED_PARTIAL
+        and not record.billing_complete
+        for record in measured
+    )
+    resource_documents = tuple(
+        json.loads(path.read_bytes())
+        for path in sorted((completed.capsule_root / "source/resources").glob("*.json"))
+    )
+    assert resource_documents
+    assert {item["environment_hash"] for item in resource_documents} == {
+        control.run_spec.environment_hash
+    }
+    cost_documents = tuple(
+        json.loads(path.read_bytes())
+        for path in sorted((completed.capsule_root / "source/costs").glob("*.json"))
+    )
+    measured_ids = {record.usage_record_id for record in measured}
+    assert measured_ids <= {
+        usage_id for cost in cost_documents for usage_id in cost["source_usage_record_ids"]
+    }
+
+
+@pytest.mark.parametrize("model_type", (_MismatchedLiveModel, _TamperedLiveModel))
+def test_live_usage_mismatch_or_tamper_fails_without_orphaning_v2_usage(
+    tmp_path: Path,
+    model_type: type[_MeasuredLiveModel],
+) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id=f"controlled-native-rejected-usage-{model_type.__name__}",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=case_manifest.manifest_hash,
+        workload_id=case_manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="recorded-answer-v1",
+        provider_runtime_directory=tmp_path / f"provider-runtime-{model_type.__name__}",
+    )
+
+    with pytest.raises(ValueError, match="usage"):
         run_native_vertical_slice(
             output_root=tmp_path / "capsules",
             run_id=control.run_spec.run_id,
@@ -726,13 +1210,54 @@ def test_fixture_entrypoint_rejects_live_control_without_lifecycle_composition(
             visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
             artifact_store_factory=ArtifactStore,
             memory_factory=_memory_factory,
-            model_factory=_RecordedNativeModel,
+            model_factory=model_type,
+            answer_role_binding_id="recorded-answer-v1",
+            control=control,
+        )
+
+    capsule_root = tmp_path / "capsules" / control.run_spec.run_id
+    manifest = CapsuleManifest.model_validate_json(
+        (capsule_root / "capsule-manifest.json").read_bytes()
+    )
+    assert manifest.run_id == control.run_spec.run_id
+    assert all(
+        json.loads(path.read_bytes())["schema_version"] == 5
+        for path in (capsule_root / "source/usage").glob("*.json")
+    )
+
+
+def test_live_terminal_seal_rejects_unreferenced_captured_usage(tmp_path: Path) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id="controlled-native-unreferenced-usage",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=case_manifest.manifest_hash,
+        workload_id=case_manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="recorded-answer-v1",
+        provider_runtime_directory=tmp_path / "provider-runtime-unreferenced",
+    )
+
+    with pytest.raises(ValueError, match="unreferenced records"):
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=control.run_spec.run_id,
+            adapter_profile_id=control.preflight_record.adapter_profile_id,
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=_memory_factory,
+            model_factory=_ExtraUnreferencedLiveModel,
             answer_role_binding_id="recorded-answer-v1",
             control=control,
         )
 
 
-def test_validator_rejects_private_live_path_until_complete_control_is_wired(
+def test_private_live_path_rejects_missing_lifecycle_composition(
     tmp_path: Path,
 ) -> None:
     workload = _NativeFixtureWorkload()
@@ -747,33 +1272,30 @@ def test_validator_rejects_private_live_path_until_complete_control_is_wired(
         runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
         adapter_profile_id="recorded-native-fixture-v1",
         answer_role_binding_id="recorded-answer-v1",
+        provider_runtime_directory=tmp_path / "provider-runtime-private",
     )
     output_root = tmp_path / "capsules"
     native_run_module._acquire_native_run_owner(
         output_root / control.run_spec.run_id, control.run_spec.run_id, control=control
     )
-    completed = native_run_module._run_native_supervised(
-        native_run_module._NativeRunRequest(
-            output_root=output_root,
-            run_id=control.run_spec.run_id,
-            adapter_profile_id=control.preflight_record.adapter_profile_id,
-            workload=workload,
-            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
-            artifact_store_factory=ArtifactStore,
-            memory_factory=_memory_factory,
-            model_factory=_RecordedNativeModel,
-            answer_role_binding_id="recorded-answer-v1",
-            judge_model_factory=None,
-            judge_role_binding_id=None,
-            close_timeout_seconds=1.0,
-            control=control,
+    with pytest.raises(ValueError, match="budget and provider lifecycle ownership"):
+        native_run_module._run_native_supervised(
+            native_run_module._NativeRunRequest(
+                output_root=output_root,
+                run_id=control.run_spec.run_id,
+                adapter_profile_id=control.preflight_record.adapter_profile_id,
+                workload=workload,
+                visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+                artifact_store_factory=ArtifactStore,
+                memory_factory=_memory_factory,
+                model_factory=_RecordedNativeModel,
+                answer_role_binding_id="recorded-answer-v1",
+                judge_model_factory=None,
+                judge_role_binding_id=None,
+                close_timeout_seconds=1.0,
+                control=control,
+            )
         )
-    )
-
-    validation = validate_native_capsule(completed.capsule_root)
-
-    assert validation.disposition == ValidationDisposition.INVALID
-    assert any(issue.code == "live-control-composition-unavailable" for issue in validation.issues)
 
 
 def test_native_validator_rejects_case_inventory_removed_from_run_and_root(
@@ -837,6 +1359,17 @@ def test_recorded_native_judge_path_seals_judge_attempt_and_exact_fraction(
 
 
 def test_native_judge_path_uses_a_separately_bound_model_client(tmp_path: Path) -> None:
+    class BoundedJudgeWorkload(_NativeFixtureJudgeWorkload):
+        def evaluate(
+            self,
+            case_plan: CasePlan,
+            answer: AnswerValue,
+        ) -> DeterministicEvaluation | JudgeRequest:
+            evaluation = super().evaluate(case_plan, answer)
+            if isinstance(evaluation, JudgeRequest):
+                return replace(evaluation, max_output_tokens=1024)
+            return evaluation
+
     class AnswerOnlyModel(_RecordedNativeModel):
         async def complete(self, request: ModelRequest) -> ModelReceipt:
             if request.stage != "answer":
@@ -847,13 +1380,15 @@ def test_native_judge_path_uses_a_separately_bound_model_client(tmp_path: Path) 
         async def complete(self, request: ModelRequest) -> ModelReceipt:
             if request.stage != "judge":
                 raise AssertionError("judge client received a non-judge request")
+            if request.max_output_tokens != 1024:
+                raise AssertionError("judge client received the wrong output ceiling")
             return await super().complete(request)
 
     completed = run_native_vertical_slice(
         output_root=tmp_path / "capsules",
         run_id="native-fixture-separate-judge",
         adapter_profile_id="recorded-native-fixture-v1",
-        workload=_NativeFixtureJudgeWorkload(),
+        workload=BoundedJudgeWorkload(),
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
         artifact_store_factory=ArtifactStore,
         memory_factory=_memory_factory,
@@ -1058,6 +1593,110 @@ def test_native_validator_recomputes_durable_prerequisite_identities(
     validation = validate_native_capsule(completed.capsule_root)
     assert validation.disposition == ValidationDisposition.INVALID
     assert issue_code in {issue.code for issue in validation.issues}
+
+
+def test_native_validator_accepts_a_strict_successor_lease_chain_and_claim_binding(
+    tmp_path: Path,
+) -> None:
+    completed = _run_fixture_capsule(tmp_path, "native-fixture-successor-lease")
+    lease_path = _first_source_document(completed.capsule_root, "run_lease_record", 1)
+    predecessor = RunLeaseRecord.model_validate_json(lease_path.read_bytes())
+    successor = _successor_run_lease(predecessor)
+    _append_run_lease(completed.capsule_root, successor)
+    _rebind_first_occurrence_claim(completed.capsule_root, successor)
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+
+
+@pytest.mark.parametrize(
+    "invalid_chain",
+    (
+        "gap",
+        "wrong_predecessor",
+        "mixed_run",
+        "mixed_provider_project",
+        "mixed_provider_profile",
+    ),
+)
+def test_native_validator_rejects_a_non_contiguous_or_mixed_successor_lease(
+    tmp_path: Path,
+    invalid_chain: str,
+) -> None:
+    completed = _run_fixture_capsule(tmp_path, f"native-fixture-lease-chain-{invalid_chain}")
+    lease_path = _first_source_document(completed.capsule_root, "run_lease_record", 1)
+    predecessor = RunLeaseRecord.model_validate_json(lease_path.read_bytes())
+    updates: dict[str, object] = {}
+    if invalid_chain == "gap":
+        updates["lease_epoch"] = 3
+    elif invalid_chain == "wrong_predecessor":
+        updates["predecessor_lease_record_hash"] = "f" * 64
+    elif invalid_chain == "mixed_run":
+        updates["run_id"] = "another-run"
+    elif invalid_chain == "mixed_provider_project":
+        updates["provider_project_id"] = "another-provider-project"
+    elif invalid_chain == "mixed_provider_profile":
+        updates["provider_profile_id"] = "another-provider-profile"
+    successor = _successor_run_lease(predecessor, **updates)
+    _append_run_lease(completed.capsule_root, successor)
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "run-lease-chain-mismatch" in {issue.code for issue in validation.issues}
+
+
+@pytest.mark.parametrize("duplicate_kind", ("epoch", "hash"))
+def test_native_validator_rejects_duplicate_lease_epochs_or_hashes(
+    tmp_path: Path,
+    duplicate_kind: str,
+) -> None:
+    completed = _run_fixture_capsule(tmp_path, f"native-fixture-duplicate-lease-{duplicate_kind}")
+    lease_path = _first_source_document(completed.capsule_root, "run_lease_record", 1)
+    predecessor = RunLeaseRecord.model_validate_json(lease_path.read_bytes())
+    successor = _successor_run_lease(predecessor)
+    _append_run_lease(completed.capsule_root, successor)
+    duplicate = (
+        _successor_run_lease(predecessor, owner_id="another-successor-owner")
+        if duplicate_kind == "epoch"
+        else successor
+    )
+    _append_run_lease(
+        completed.capsule_root,
+        duplicate,
+        relative_path=f"source/duplicate-run-leases/{duplicate.lease_record_hash}.json",
+    )
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "run-lease-chain-mismatch" in {issue.code for issue in validation.issues}
+
+
+@pytest.mark.parametrize("claim_mismatch", ("hash", "epoch", "owner"))
+def test_native_validator_binds_each_claim_to_its_referenced_lease(
+    tmp_path: Path,
+    claim_mismatch: str,
+) -> None:
+    completed = _run_fixture_capsule(tmp_path, f"native-fixture-claim-lease-{claim_mismatch}")
+    lease_path = _first_source_document(completed.capsule_root, "run_lease_record", 1)
+    predecessor = RunLeaseRecord.model_validate_json(lease_path.read_bytes())
+    successor = _successor_run_lease(predecessor)
+    _append_run_lease(completed.capsule_root, successor)
+    updates: dict[str, object] = {}
+    if claim_mismatch == "hash":
+        updates["lease_record_hash"] = "f" * 64
+    elif claim_mismatch == "epoch":
+        updates["lease_epoch"] = predecessor.lease_epoch
+    elif claim_mismatch == "owner":
+        updates["owner_id"] = predecessor.owner_id
+    _rebind_first_occurrence_claim(completed.capsule_root, successor, **updates)
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "attempt-evidence-mismatch" in {issue.code for issue in validation.issues}
 
 
 def test_native_validator_rejects_projection_drift(tmp_path: Path) -> None:
@@ -1349,6 +1988,42 @@ def test_before_dispatch_cancellation_seals_known_cancelled_attempt(
     assert receipt["raw_error_ref"] == attempt["raw_error_ref"]
     assert (root / "capsule-manifest.json").is_file()
     assert validate_native_capsule(root).disposition == ValidationDisposition.INVALID
+
+
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    (
+        (MemorySystemCallCancelledBeforeDispatch, "planted query cancel before dispatch"),
+        (MemorySystemCallCancelledUnknownOutcome, "planted query cancel with unknown outcome"),
+    ),
+)
+def test_supervised_query_cancellation_preserves_the_provider_error_type(
+    tmp_path: Path,
+    error_type: type[asyncio.CancelledError],
+    message: str,
+) -> None:
+    class CancelledQueryMemory(_RecordedNativeMemory):
+        async def retrieve(self, _request: RetrievalRequest) -> NativeEvidenceBatch:
+            raise error_type(message)
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> CancelledQueryMemory:
+        return CancelledQueryMemory(store)
+
+    with pytest.raises(error_type, match=message):
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=f"native-fixture-query-{error_type.__name__.lower()}",
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=_NativeFixtureWorkload(),
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=memory_factory,
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="recorded-answer-v1",
+        )
 
 
 def test_supervised_boundary_preserves_explicit_unknown_outcome_type(tmp_path: Path) -> None:

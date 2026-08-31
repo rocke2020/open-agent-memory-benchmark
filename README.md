@@ -2,28 +2,34 @@
 
 > **TL;DR:** Open Agent Memory Benchmark (OAMB) keeps execution evidence,
 > validation, metrics, resource usage, cost, and reports separate so a partial
-> run cannot be mistaken for a score. The repository offers a complete
-> credential-free fake workflow, a hash-pinned external historical report, and
-> approval-scoped phase-review commands. None implies that a live provider run
-> passed.
+> run cannot be mistaken for a score. The planned v0.1.0 comparison covers
+> Hindsight, Mem0, and OpenViking on LongMemEval only. MemoryAgentBench is
+> deferred. The OpenViking session profile and generation-free retrieval remain
+> unverified until live preflight, execution, and capsule validation pass.
 
 ## Current status
 
-**The offline evidence pipeline and standalone distribution are implemented and
-testable without credentials, while live benchmark execution remains gated.**
-The repository contains
-exact-pinned REST service preparation for Hindsight, Mem0, and OpenViking,
-strict versioned artifact contracts, fail-closed validation, reducers, quality
-review records, deterministic offline reports, and Linux/macOS clean-checkout
-CI.
+**Implemented offline capabilities, planned v0.1 scope, and live-verified
+provider support are separate states.** The repository contains exact-pinned
+REST service preparation for Hindsight, Mem0, and OpenViking, a credential-free
+fake path, fail-closed validation, reducers, deterministic offline reports, and
+Linux/macOS clean-checkout CI. The current product refactor targets one generic
+`doctor → run → validate → compare → report` flow; it is not complete merely
+because the older fake path works.
+
+The v0.1 execution target is three LongMemEval cells: Hindsight, Mem0, and an
+OpenViking session/message/commit profile. MAB research artifacts do not
+constitute v0.1 support, and no OpenViking LongMemEval claim is valid before its
+new profile passes live gates.
 
 No fixture, healthy service, non-empty response, or generated report implies a
 live provider passed, a benchmark score is valid, or a release is ready.
 
-## Credential-free workflow
+## Credential-free implementation check
 
-**A source checkout can run one complete fake benchmark path from manifest to
-offline report.** Requirements are Python 3.11 or newer and
+**A source checkout can exercise the existing fake evidence path from manifest
+to offline report, but this is not the target v0.1 provider workflow.**
+Requirements are Python 3.11 or newer and
 [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
@@ -85,40 +91,37 @@ provenance command for the one pinned raw producer artifact. It first verifies
 the complete source byte count and SHA-256, then emits only the repository-owned
 field allowlist. It cannot import an arbitrary self-attested result.
 
-## Phase quality review
-
-**Phase review is a separate post-report operation with its own bundle, plan,
-approval, budget, occurrence, attempts, usage, resources, and cost evidence.**
-Use `oamb phase --help` for the bundle, AI plan/run, local human confirmation,
-gate validation, and acceptance-report commands. After the canonical AI review
-passes, `oamb phase human-review record` requires one interactive TTY entry of
-`STATUS BUNDLE_HASH AI_HASH NONCE` and writes one create-only version 2 human
-record at `human-review.json` inside that review evidence directory. A second
-record in the same authoritative review root is rejected. This local benchmark
-confirmation uses no signing key or model client;
-version 1 signed artifacts remain readable only as historical contracts.
-
-The recorded-output reducer is explicitly offline. A model-backed AI review is
-constructed only after the exact role, runtime, approval, budget, request
-inventory, and artifact durability preflight close; normal tests use a fake
-client and make no external call.
-
 ## Runtime contracts
 
-**Persisted artifacts are parsed by strict, immutable, versioned Pydantic
-models rather than checked-in generated schema files.** Every persisted model
-retains explicit `schema_name` and `schema_version` fields. The registry rejects
-unknown names and versions, while semantic validators enforce identities,
-cross-artifact references, accounting completeness, and report eligibility.
+**The current refactor converges product artifacts on one strict, immutable
+initial-v1 Pydantic family rather than checked-in generated schema files.**
+Persisted models retain `schema_name` and `schema_version` wire discriminators;
+semantic validators enforce identities, cross-artifact references, accounting
+completeness, and report eligibility. Unreleased historical forms are not
+public compatibility promises.
 
 ## Production workflow boundary
 
-**Provider configuration, live execution, eligible comparisons, and acceptance
-remain explicit external operations, not installation claims.** Do not
+**Provider configuration, live execution, validation, and eligible comparisons
+remain explicit operations, not installation claims.** Do not
 translate the fake commands into a real provider run or reuse their artifact
-root for live evidence. Every live call requires a separately approved scope,
-immutable runtime binding, budget, unique artifact root, stop conditions, and
-retained raw receipts.
+root for live evidence. Every live call requires an explicit scope, immutable
+runtime binding, bounded budget, unique artifact root, stop conditions, and retained
+raw receipts.
+
+## v0.1 retrieval boundary
+
+**Retrieval generation is disabled.** Query embedding remains allowed, but
+query planning, rewriting, decomposition, reflection, generative reranking,
+and fallback to a generation-model retrieval path are prohibited. The selected
+routes are Hindsight `recall` without `reflect`, Mem0 `/search` with effective
+native reranking disabled, and OpenViking `/api/v1/search/find` with
+`enable_intent=false`.
+
+These are release-profile constraints, not claims about every provider mode.
+Only complete runtime outbound evidence may label a finished cell
+`runtime_verified`; source inspection or configuration defaults alone cannot
+prove zero generative retrieval calls.
 
 ## Provider API services
 
@@ -135,8 +138,10 @@ Start the services explicitly with:
 cd provider-services && ./bin/provider-services up
 ```
 
-Provider state is preserved. Normal tests never delete databases, run memory
-conformance, or execute a paid evaluation.
+The provider bundle prepares services only. v0.1 uses LongMemEval for all three
+providers, and OpenViking requires the separate session/message/commit profile;
+service health does not establish that workload support. Provider state is
+preserved. Normal tests never delete databases or execute a paid evaluation.
 
 ## Project policies
 

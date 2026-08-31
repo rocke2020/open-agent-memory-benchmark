@@ -11,6 +11,7 @@ from oamb.memory_systems.rest import parse_exact_json_object
 RECALL_FIELDS: Final = frozenset(
     {"results", "trace", "entities", "chunks", "source_facts", "source_facts_truncated"}
 )
+REQUIRED_RECALL_FIELDS: Final = frozenset({"results", "trace"})
 RESULT_FIELDS: Final = frozenset(
     {
         "id",
@@ -29,12 +30,29 @@ RESULT_FIELDS: Final = frozenset(
         "scores",
     }
 )
+REQUIRED_RESULT_FIELDS: Final = frozenset({"id", "text", "type"})
 CHUNK_FIELDS: Final = frozenset({"id", "text", "chunk_index", "truncated"})
 SCORE_FIELDS: Final = frozenset({"final", "reranker", "semantic", "keyword"})
+REQUIRED_SCORE_FIELDS: Final = frozenset({"final"})
 
 
 def _exact_object(value: object, fields: frozenset[str], label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or frozenset(value) != fields:
+        raise ValueError(f"Hindsight recall {label} fields do not match the exact profile")
+    return value
+
+
+def _closed_object(
+    value: object,
+    *,
+    allowed_fields: frozenset[str],
+    required_fields: frozenset[str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Hindsight recall {label} must be an object")
+    actual_fields = frozenset(value)
+    if not required_fields <= actual_fields or not actual_fields <= allowed_fields:
         raise ValueError(f"Hindsight recall {label} fields do not match the exact profile")
     return value
 
@@ -56,15 +74,20 @@ def _string_list_or_none(value: object, label: str) -> list[str] | None:
 def _native_score(value: object) -> str | None:
     if value is None:
         return None
-    scores = _exact_object(value, SCORE_FIELDS, "scores")
+    scores = _closed_object(
+        value,
+        allowed_fields=SCORE_FIELDS,
+        required_fields=REQUIRED_SCORE_FIELDS,
+        label="scores",
+    )
     final_score = scores["final"]
     if type(final_score) not in {int, float}:
         raise ValueError("Hindsight recall final score must be numeric")
     for name in ("reranker", "semantic", "keyword"):
-        score = scores[name]
+        score = scores.get(name)
         if score is not None and type(score) not in {int, float}:
             raise ValueError(f"Hindsight recall {name} score must be numeric or null")
-    if scores["reranker"] is not None:
+    if scores.get("reranker") is not None:
         raise ValueError("Hindsight recall returned a reranker score after reranking was disabled")
     return json.dumps(final_score, allow_nan=False, separators=(",", ":"))
 
@@ -94,23 +117,36 @@ def normalize_recall(
     *,
     document_to_source_unit: dict[str, str],
 ) -> tuple[NativeEvidenceCandidate, ...]:
-    document = parse_exact_json_object(raw_bytes, expected_fields=RECALL_FIELDS)
-    if document["entities"] is not None:
+    decoded = json.loads(raw_bytes)
+    if not isinstance(decoded, dict):
+        raise ValueError("Hindsight recall response root must be an object")
+    actual_fields = frozenset(decoded)
+    if not REQUIRED_RECALL_FIELDS <= actual_fields or not actual_fields <= RECALL_FIELDS:
+        raise ValueError("Hindsight recall response fields do not match the exact profile")
+    document = parse_exact_json_object(raw_bytes, expected_fields=actual_fields)
+    if document.get("entities") is not None:
         raise ValueError("Hindsight recall returned entities after they were disabled")
-    if document["source_facts"] is not None or document["source_facts_truncated"] is not None:
+    if (
+        document.get("source_facts") is not None
+        or document.get("source_facts_truncated") is not None
+    ):
         raise ValueError("Hindsight recall returned unrequested source facts")
     if document["trace"] is not None and not isinstance(document["trace"], dict):
         raise ValueError("Hindsight recall trace must be an object or null")
-    chunks = _chunks(document["chunks"])
+    _chunks(document.get("chunks", {}))
     results = document["results"]
     if not isinstance(results, list):
         raise ValueError("Hindsight recall results must be an array")
 
     candidates: list[NativeEvidenceCandidate] = []
     seen_ids: set[str] = set()
-    referenced_chunks: set[str] = set()
     for rank, raw_result in enumerate(results, start=1):
-        result = _exact_object(raw_result, RESULT_FIELDS, "result")
+        result = _closed_object(
+            raw_result,
+            allowed_fields=RESULT_FIELDS,
+            required_fields=REQUIRED_RESULT_FIELDS,
+            label="result",
+        )
         memory_id = result["id"]
         if not isinstance(memory_id, str) or not memory_id:
             raise ValueError("Hindsight recall memory ID must be non-empty")
@@ -123,13 +159,13 @@ def normalize_recall(
         fact_type = result["type"]
         if fact_type not in {"world", "experience"}:
             raise ValueError("Hindsight recall returned an unrequested fact type")
-        _string_list_or_none(result["entities"], "entities")
-        _string_list_or_none(result["tags"], "tags")
-        if result["metadata"] is not None and not isinstance(result["metadata"], dict):
+        _string_list_or_none(result.get("entities"), "entities")
+        _string_list_or_none(result.get("tags"), "tags")
+        if result.get("metadata") is not None and not isinstance(result["metadata"], dict):
             raise ValueError("Hindsight recall metadata must be an object or null")
-        if result["source_fact_ids"] is not None:
+        if result.get("source_fact_ids") is not None:
             raise ValueError("Hindsight raw fact unexpectedly returned source_fact_ids")
-        document_id = _nullable_string(result["document_id"], "document_id")
+        document_id = _nullable_string(result.get("document_id"), "document_id")
         source_unit_id = None
         if document_id is not None:
             try:
@@ -138,21 +174,17 @@ def normalize_recall(
                 raise ValueError(
                     "Hindsight recall result names an unknown source document"
                 ) from exc
-        chunk_id = _nullable_string(result["chunk_id"], "chunk_id")
-        if chunk_id is not None:
-            if chunk_id not in chunks:
-                raise ValueError("Hindsight recall result names an unknown chunk")
-            referenced_chunks.add(chunk_id)
-        occurred_start = _nullable_string(result["occurred_start"], "occurred_start")
-        occurred_end = _nullable_string(result["occurred_end"], "occurred_end")
-        mentioned_at = _nullable_string(result["mentioned_at"], "mentioned_at")
-        _nullable_string(result["context"], "context")
+        chunk_id = _nullable_string(result.get("chunk_id"), "chunk_id")
+        occurred_start = _nullable_string(result.get("occurred_start"), "occurred_start")
+        occurred_end = _nullable_string(result.get("occurred_end"), "occurred_end")
+        mentioned_at = _nullable_string(result.get("mentioned_at"), "mentioned_at")
+        _nullable_string(result.get("context"), "context")
         candidates.append(
             NativeEvidenceCandidate(
                 native_id=memory_id,
                 native_rank_1_indexed=rank,
                 content=text,
-                native_score=_native_score(result["scores"]),
+                native_score=_native_score(result.get("scores")),
                 provider_evidence_identity=memory_id,
                 source_unit_id=source_unit_id,
                 evidence_kind=fact_type,
@@ -160,9 +192,7 @@ def normalize_recall(
                 occurred_end=occurred_end,
                 mentioned_at=mentioned_at,
                 native_reference=chunk_id,
-                native_truncated=chunks[chunk_id]["truncated"] if chunk_id is not None else False,
+                native_truncated=False,
             )
         )
-    if set(chunks) != referenced_chunks:
-        raise ValueError("Hindsight recall returned an unreferenced raw chunk")
     return tuple(candidates)
