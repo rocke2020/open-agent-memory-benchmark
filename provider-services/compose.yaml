@@ -3,6 +3,7 @@ name: ${OAMB_PROVIDER_PROJECT:?set OAMB_PROVIDER_PROJECT in provider-services/.e
 services:
   hindsight:
     image: ghcr.io/vectorize-io/hindsight-api:0.9.2-slim@sha256:7635a15739361dbdf221ba796ad25a813f876144fe113022eea8e26cb6ee75e7
+    shm_size: 1gb
     ports:
       - "127.0.0.1:${OAMB_HINDSIGHT_PORT:-18888}:8888"
     environment:
