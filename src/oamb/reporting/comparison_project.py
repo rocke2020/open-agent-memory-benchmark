@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import html
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from fractions import Fraction
+from html.parser import HTMLParser
 from itertools import combinations
 from pathlib import Path
 from typing import Any
 
-from oamb.artifacts.atomic import read_regular_file
+from oamb.artifacts.atomic import read_regular_file, sha256_file
 from oamb.artifacts.capsule import publish_with_last_marker, verify_published_directory
 from oamb.artifacts.composition import inspect_embedded_composition
 from oamb.artifacts.validation.composition import declares_composition
@@ -55,6 +58,53 @@ RESOURCE_REPORT_DIMENSIONS = (
     ("peak_memory_bytes", "peak_memory_bytes", "bytes", "maximum"),
     ("storage_bytes", "storage_bytes", "bytes", "terminal_snapshot"),
 )
+VISIBLE_EVIDENCE_KEYS = frozenset(
+    {
+        "provider_evidence_identity",
+        "source_unit_id",
+        "evidence_kind",
+        "text",
+        "occurred_start",
+        "occurred_end",
+        "mentioned_at",
+    }
+)
+_BIDI_CONTROL_PATTERN = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_UNSAFE_HTML_TAGS = frozenset(
+    {"script", "img", "link", "iframe", "object", "embed", "audio", "video", "source"}
+)
+
+
+class _OfflineHtmlInspector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.unsafe = False
+        self.references: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        normalized_tag = tag.casefold()
+        if normalized_tag in _UNSAFE_HTML_TAGS:
+            self.unsafe = True
+        for name, value in attrs:
+            normalized_name = name.casefold()
+            if normalized_name.startswith("on"):
+                self.unsafe = True
+            if normalized_name in {"href", "src"}:
+                reference = value or ""
+                self.references.append(reference)
+                if reference.lstrip().casefold().startswith("javascript:"):
+                    self.unsafe = True
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self.handle_starttag(tag, attrs)
 
 
 class ComparisonProjectError(ValueError):
@@ -87,12 +137,14 @@ class _CellSnapshot:
     case_manifest_bytes: bytes
     case_manifest: dict[str, Any]
     cases: tuple[dict[str, Any], ...]
+    ingestion_plans: tuple[dict[str, Any], ...]
     attempts: tuple[dict[str, Any], ...]
     token_usage: tuple[dict[str, Any], ...]
     resources: tuple[dict[str, Any], ...]
     costs: tuple[dict[str, Any], ...]
     run_record: dict[str, Any]
     retrieval_runtime_proof_state: str
+    raw_payloads: Mapping[str, bytes]
     infrastructure_retries: tuple[dict[str, Any], ...] = ()
     composition_part_states: tuple[str, ...] = ()
 
@@ -102,6 +154,7 @@ def build_comparison_project(
     sources: Mapping[str, ValidatedCellRoot],
     *,
     output_root: Path,
+    dataset_source: Path | None = None,
 ) -> ComparisonProjectBuildResult:
     """Revalidate all cells, derive every canonical pair, and publish one offline report."""
 
@@ -116,6 +169,19 @@ def build_comparison_project(
     snapshots = tuple(_load_cell_snapshot(plan, cell, sources[cell.cell_id]) for cell in plan.cells)
     _require_shared_case_manifest(plan, snapshots)
     cell_documents = tuple(_cell_document(plan, snapshot) for snapshot in snapshots)
+    local_question_content = (
+        _load_local_question_content(plan, Path(dataset_source), snapshots[0].case_manifest_bytes)
+        if dataset_source is not None
+        else ()
+    )
+    question_documents = _question_documents(
+        snapshots,
+        local_question_content=local_question_content,
+    )
+    dataset_details = _dataset_details_document(
+        plan,
+        included=bool(local_question_content),
+    )
     comparison_documents = tuple(
         _pair_document(plan, left, right) for left, right in combinations(cell_documents, 2)
     )
@@ -148,12 +214,14 @@ def build_comparison_project(
             "source_sha256": plan.dataset.source_sha256,
             "case_manifest_hash": plan.dataset.case_manifest_hash,
         },
+        "dataset_details": dataset_details,
         "coverage": {
             "cell_count": len(cell_documents),
             "unique_case_count": len(snapshots[0].cases),
             "provider_specific_result_count": sum(len(item.cases) for item in snapshots),
         },
         "cells": cell_documents,
+        "questions": question_documents,
         "comparisons": comparison_documents,
         "models": tuple(_model_document(item) for item in plan.model_roles),
         "retrieval_generation": plan.retrieval.generation,
@@ -168,7 +236,6 @@ def build_comparison_project(
     export = {**export_body, "report_id": report_id}
     export_bytes = canonical_json_bytes(export)
     html_bytes = _render_html(export)
-
     payloads: dict[str, bytes] = {
         REPORT_EXPORT_NAME: export_bytes,
         REPORT_HTML_NAME: html_bytes,
@@ -189,6 +256,7 @@ def build_comparison_project(
                 "sha256": hashlib.sha256(content).hexdigest(),
             }
         )
+    _validate_comparison_export(export, payloads, tuple(pair_relative_paths))
     marker = canonical_json_bytes(
         {
             "schema_name": "comparison_project_manifest",
@@ -263,6 +331,7 @@ def _load_cell_snapshot(
     case_manifest_bytes, case_manifest = _exact_record(documents, "case_manifest", cell.cell_id)
     run_record = _exact_document(documents, "run_record", cell.cell_id)
     case_records = tuple(item[1] for item in documents.get("case_record", ()))
+    ingestion_plans = tuple(item[1] for item in documents.get("ingestion_plan_record", ()))
     attempts = tuple(item[1] for item in documents.get("attempt_record", ()))
     token_usage = tuple(item[1] for item in documents.get("token_usage_record", ()))
     resources = tuple(item[1] for item in documents.get("resource_usage_record", ()))
@@ -348,12 +417,14 @@ def _load_cell_snapshot(
         case_manifest_bytes=case_manifest_bytes,
         case_manifest=case_manifest,
         cases=ordered_cases,
+        ingestion_plans=ingestion_plans,
         attempts=attempts,
         token_usage=token_usage,
         resources=resources,
         costs=costs,
         run_record=run_record,
         retrieval_runtime_proof_state=retrieval_proof_state,
+        raw_payloads=raw_payloads,
         infrastructure_retries=infrastructure_retries,
     )
 
@@ -450,11 +521,18 @@ def _load_composed_cell_snapshot(
             f"cell {cell.cell_id} case manifest requires {expected_count} cases"
         )
 
+    selected_ingestion_plans: list[dict[str, Any]] = []
     selected_case_records: list[dict[str, Any]] = []
     ingestion_occurrence_ids: list[str] = []
     case_occurrence_ids: list[str] = []
     for contribution in composition.ordered_contributions:
         documents = part_documents[contribution.source_capsule_id]
+        ingestion_plans_by_occurrence = _unique_by(
+            tuple(item[1] for item in documents.get("ingestion_plan_record", ())),
+            "ingestion_occurrence_id",
+            "ingestion occurrence",
+        )
+        ingestion_plan = ingestion_plans_by_occurrence[contribution.ingestion_occurrence_id]
         cases_by_occurrence = _unique_by(
             tuple(item[1] for item in documents.get("case_record", ())),
             "case_occurrence_id",
@@ -464,12 +542,22 @@ def _load_composed_cell_snapshot(
             cases_by_occurrence[occurrence_id] for occurrence_id in contribution.case_occurrence_ids
         )
         if (
+            ingestion_plan.get("ingestion_plan_id") != contribution.ingestion_plan_id
+            or ingestion_plan.get("run_id") != contribution.source_run_id
+            or tuple(ingestion_plan.get("ordered_case_occurrence_ids", ()))
+            != contribution.case_occurrence_ids
+        ):
+            raise ComparisonProjectError(
+                f"cell {cell.cell_id} composition ingestion provenance does not close"
+            )
+        if (
             tuple(_required_text(item, "case_manifest_entry_id") for item in contributed_cases)
             != contribution.case_manifest_entry_ids
         ):
             raise ComparisonProjectError(
                 f"cell {cell.cell_id} composition case provenance does not close"
             )
+        selected_ingestion_plans.append(ingestion_plan)
         selected_case_records.extend(contributed_cases)
         ingestion_occurrence_ids.append(contribution.ingestion_occurrence_id)
         case_occurrence_ids.extend(contribution.case_occurrence_ids)
@@ -505,6 +593,11 @@ def _load_composed_cell_snapshot(
         (all_resources, "resource_record_id", "composed resource usage"),
         (all_costs, "cost_record_id", "composed cost"),
         (all_infrastructure_retries, "retry_event_id", "composed retry event"),
+        (
+            tuple(selected_ingestion_plans),
+            "ingestion_occurrence_id",
+            "composed ingestion occurrence",
+        ),
     ):
         _unique_by(values, identity, label)
 
@@ -548,12 +641,14 @@ def _load_composed_cell_snapshot(
         case_manifest_bytes=case_manifest_bytes,
         case_manifest=case_manifest,
         cases=ordered_cases,
+        ingestion_plans=tuple(selected_ingestion_plans),
         attempts=all_attempts,
         token_usage=all_usage,
         resources=all_resources,
         costs=all_costs,
         run_record=run_record,
         retrieval_runtime_proof_state=retrieval_proof_state,
+        raw_payloads=merged_raw_payloads,
         infrastructure_retries=all_infrastructure_retries,
         composition_part_states=tuple(
             binding.run_state.value for binding in composition.ordered_parts
@@ -720,6 +815,7 @@ def _accounting_document(snapshot: _CellSnapshot) -> dict[str, object]:
             ),
             "measurement_coverage": "complete",
         },
+        "answer_visible_context_tokens": _answer_visible_context_document(snapshot),
         "tokens": token_stages,
         "resources": resource_document,
         "cost": cost_document,
@@ -733,6 +829,41 @@ def _accounting_document(snapshot: _CellSnapshot) -> dict[str, object]:
             "cost": cost_document["billing_coverage"]["status"],
         },
     }
+
+
+def _answer_visible_context_document(snapshot: _CellSnapshot) -> dict[str, object]:
+    measured: list[int] = []
+    for case in snapshot.cases:
+        count = case.get("visible_evidence_token_count")
+        if count is None:
+            continue
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ComparisonProjectError("answer-visible context token count is invalid")
+        _visible_context_text(snapshot, case)
+        measured.append(count)
+    if not measured:
+        return {
+            "status": "unavailable",
+            "case_count": len(snapshot.cases),
+            "measured_case_count": 0,
+            "total": "unavailable",
+            "mean": "unavailable",
+        }
+    status = "measured_complete" if len(measured) == len(snapshot.cases) else "measured_partial"
+    total = sum(measured)
+    return {
+        "status": status,
+        "case_count": len(snapshot.cases),
+        "measured_case_count": len(measured),
+        "total": total,
+        "mean": _mean_text(total, len(measured)),
+    }
+
+
+def _mean_text(total: int, count: int) -> str:
+    value = (Decimal(total) / Decimal(count)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    rendered = format(value, "f")
+    return rendered[:-2] if rendered.endswith(".0") else rendered
 
 
 def _attempt_document(attempts: tuple[dict[str, Any], ...]) -> dict[str, object]:
@@ -921,6 +1052,345 @@ def _decimal_text(value: Decimal) -> str:
     return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
+def _load_local_question_content(
+    plan: ResolvedPlan,
+    dataset_source: Path,
+    case_manifest_bytes: bytes,
+) -> tuple[dict[str, object], ...]:
+    from oamb.workloads.longmemeval import build_lme6_bundle, build_lme30_bundle
+
+    try:
+        before_hash = sha256_file(dataset_source)
+    except OSError as exc:
+        raise ComparisonProjectError("dataset source is not one readable regular file") from exc
+    if before_hash != plan.dataset.source_sha256:
+        raise ComparisonProjectError("dataset source hash differs from the resolved plan")
+    try:
+        full = build_lme30_bundle(dataset_source)
+        if plan.dataset.selection == "lme6":
+            bundle = build_lme6_bundle(full)
+        elif plan.dataset.selection == "lme30":
+            bundle = full
+        else:
+            raise ComparisonProjectError(
+                "question-detail report supports only the frozen LongMemEval selections"
+            )
+    except ComparisonProjectError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise ComparisonProjectError("dataset source cannot rebuild the frozen workload") from exc
+    try:
+        after_hash = sha256_file(dataset_source)
+    except OSError as exc:
+        raise ComparisonProjectError("dataset source changed while the report was built") from exc
+    if after_hash != before_hash:
+        raise ComparisonProjectError("dataset source changed while the report was built")
+    if (
+        bundle.dataset_manifest.dataset_id != plan.dataset.dataset_id
+        or bundle.dataset_manifest.revision != plan.dataset.revision
+        or bundle.case_manifest.workload_id != plan.dataset.workload_id
+        or bundle.case_manifest.manifest_hash != plan.dataset.case_manifest_hash
+        or canonical_json_bytes(bundle.case_manifest) != case_manifest_bytes
+    ):
+        raise ComparisonProjectError("dataset source does not match the frozen case manifest")
+
+    content: list[dict[str, object]] = []
+    for manifest_case, row in zip(
+        bundle.case_manifest.cases,
+        bundle.selected_rows,
+        strict=True,
+    ):
+        if manifest_case.raw_question_id != row.question_id:
+            raise ComparisonProjectError("dataset question identity differs from the case manifest")
+        answer_sessions = _answer_session_documents(row)
+        content.append(
+            {
+                "case_manifest_entry_id": manifest_case.case_manifest_entry_id,
+                "raw_question_id": row.question_id,
+                "question_type": row.question_type,
+                "question": row.question,
+                "gold_answer": row.answer,
+                "answer_sessions": answer_sessions,
+                "has_answer_label_mismatch": row.has_answer_label_mismatch,
+            }
+        )
+    return tuple(content)
+
+
+def _answer_session_documents(row: Any) -> tuple[dict[str, object], ...]:
+    answer_session_ids = frozenset(row.answer_session_ids)
+    if len(answer_session_ids) != len(row.answer_session_ids):
+        raise ComparisonProjectError("dataset answer session identity is duplicated")
+    selected: list[dict[str, object]] = []
+    resolved_ids: set[str] = set()
+    for session in row.sessions:
+        if session.session_id not in answer_session_ids:
+            continue
+        if session.session_id in resolved_ids:
+            raise ComparisonProjectError("dataset answer session identity is duplicated")
+        resolved_ids.add(session.session_id)
+        selected.append(
+            {
+                "session_id": session.session_id,
+                "timestamp": session.raw_timestamp,
+                "messages": tuple(
+                    {
+                        "role": message.role,
+                        "content": message.content,
+                        "has_answer": message.has_answer,
+                    }
+                    for message in session.messages
+                ),
+            }
+        )
+    if resolved_ids != answer_session_ids:
+        raise ComparisonProjectError("dataset answer session identity cannot be resolved")
+    return tuple(selected)
+
+
+def _dataset_details_document(
+    plan: ResolvedPlan,
+    *,
+    included: bool,
+) -> dict[str, object]:
+    if not included:
+        return {
+            "status": "absent",
+            "reason": "dataset_source_not_supplied",
+        }
+    from oamb.workloads.longmemeval import (
+        LME_DATASET_CITATION,
+        LME_DATASET_SOURCE_ID,
+        LME_PAYLOAD_POLICY,
+        LME_SOURCE_LICENSE_ID,
+    )
+
+    return {
+        "status": "verified",
+        "source_id": LME_DATASET_SOURCE_ID,
+        "revision": plan.dataset.revision,
+        "source_sha256": plan.dataset.source_sha256,
+        "case_manifest_hash": plan.dataset.case_manifest_hash,
+        "distribution_scope": "local_only",
+        "license_id": LME_SOURCE_LICENSE_ID,
+        "payload_policy": LME_PAYLOAD_POLICY,
+        "citation": LME_DATASET_CITATION,
+    }
+
+
+def _question_documents(
+    snapshots: tuple[_CellSnapshot, ...],
+    *,
+    local_question_content: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    manifest_cases = snapshots[0].case_manifest.get("cases")
+    if not isinstance(manifest_cases, list):
+        raise ComparisonProjectError("question report requires a case manifest inventory")
+    manifest_case_ids = tuple(
+        _required_text(item, "case_manifest_entry_id") for item in manifest_cases
+    )
+    content_by_id: dict[str, dict[str, object]] = {}
+    if local_question_content:
+        for item in local_question_content:
+            identity = item.get("case_manifest_entry_id")
+            if not isinstance(identity, str) or identity in content_by_id:
+                raise ComparisonProjectError("question content is missing or duplicated")
+            content_by_id[identity] = item
+        if tuple(content_by_id) != manifest_case_ids:
+            raise ComparisonProjectError("question content order differs from the manifest")
+
+    questions: list[dict[str, object]] = []
+    for index, case_id in enumerate(manifest_case_ids):
+        provider_results = tuple(
+            _question_provider_result(
+                snapshot,
+                snapshot.cases[index],
+                include_content=bool(local_question_content),
+            )
+            for snapshot in snapshots
+        )
+        document: dict[str, object] = {
+            "case_manifest_entry_id": case_id,
+            "ordinal_1_indexed": index + 1,
+            "provider_results": provider_results,
+        }
+        if local_question_content:
+            document.update(content_by_id[case_id])
+        questions.append(document)
+    return tuple(questions)
+
+
+def _question_provider_result(
+    snapshot: _CellSnapshot,
+    case: dict[str, Any],
+    *,
+    include_content: bool,
+) -> dict[str, object]:
+    state = _case_display_state(case)
+    result: dict[str, object] = {
+        "provider_id": snapshot.cell.provider_id,
+        "display_state": state,
+        "evaluation_disposition": case.get("evaluation_disposition", "unavailable"),
+        "metric_numerator": case.get("metric_numerator", "unavailable"),
+        "metric_denominator": case.get("metric_denominator", "unavailable"),
+        "context_tokens": case.get("visible_evidence_token_count", "unavailable"),
+    }
+    if not include_content:
+        return result
+    if state not in {"correct", "incorrect", "unjudged"}:
+        result["detail_unavailable_reason"] = f"case state is {state}"
+        return result
+    answer_reference = case.get("answer_raw_ref")
+    answer_hash = case.get("parsed_answer_sha256")
+    evaluation_reference = case.get("evaluation_raw_ref")
+    if not all(isinstance(item, str) for item in (answer_reference, answer_hash)):
+        result["detail_unavailable_reason"] = "answer evidence is unavailable"
+        return result
+    answer_payload = snapshot.raw_payloads.get(str(answer_reference))
+    if answer_payload is None:
+        raise ComparisonProjectError("answer raw reference is absent from the capsule")
+    result["model_answer"] = _model_output_text(
+        answer_payload,
+        expected_sha256=str(answer_hash),
+    )
+    result["injected_context"] = _visible_context_text(snapshot, case)
+    if isinstance(evaluation_reference, str):
+        evaluation_payload = snapshot.raw_payloads.get(evaluation_reference)
+        if evaluation_payload is None:
+            raise ComparisonProjectError("evaluation raw reference is absent from the capsule")
+        result["judge_decision"] = _judge_decision(evaluation_payload, case)
+    else:
+        result["judge_decision"] = "unavailable"
+    return result
+
+
+def _case_display_state(case: Mapping[str, Any]) -> str:
+    state = case.get("state")
+    disposition = case.get("evaluation_disposition")
+    numerator = case.get("metric_numerator")
+    denominator = case.get("metric_denominator")
+    if state == "completed" and disposition == "judged":
+        if (
+            isinstance(numerator, int)
+            and not isinstance(numerator, bool)
+            and isinstance(denominator, int)
+            and not isinstance(denominator, bool)
+            and denominator > 0
+        ):
+            return "correct" if numerator == denominator else "incorrect"
+        return "unavailable"
+    if state == "completed":
+        return "unjudged"
+    error_stage = str(case.get("error_stage", ""))
+    if "unknown" in error_stage:
+        return "unknown"
+    if "timeout" in error_stage:
+        return "timeout"
+    if state == "error":
+        return "failed"
+    if state in {"unsupported", "budget_exceeded"}:
+        return "blocked"
+    return "unavailable"
+
+
+def _model_output_text(payload: bytes, *, expected_sha256: str) -> str:
+    try:
+        document = json.loads(payload, object_pairs_hook=_unique_json_object)
+    except (TypeError, ValueError) as exc:
+        raise ComparisonProjectError("answer evidence is not strict JSON") from exc
+    choices = document.get("choices") if isinstance(document, dict) else None
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise ComparisonProjectError("answer evidence must contain exactly one choice")
+    choice = choices[0]
+    message = choice.get("message") if isinstance(choice, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        raise ComparisonProjectError("answer evidence choice does not contain text")
+    try:
+        encoded = content.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ComparisonProjectError("answer evidence is not valid UTF-8 text") from exc
+    if hashlib.sha256(encoded).hexdigest() != expected_sha256:
+        raise ComparisonProjectError("answer hash differs from the parsed model output")
+    return content
+
+
+def _judge_decision(payload: bytes, case: Mapping[str, Any]) -> str:
+    try:
+        evaluation = json.loads(payload, object_pairs_hook=_unique_json_object)
+        trace_hex = evaluation.get("trace_hex") if isinstance(evaluation, dict) else None
+        trace_bytes = bytes.fromhex(trace_hex) if isinstance(trace_hex, str) else b""
+        trace = json.loads(trace_bytes, object_pairs_hook=_unique_json_object)
+    except (TypeError, ValueError) as exc:
+        raise ComparisonProjectError("judge evaluation trace is invalid") from exc
+    if (
+        not isinstance(evaluation, dict)
+        or hashlib.sha256(trace_bytes).hexdigest() != evaluation.get("result_sha256")
+        or evaluation.get("metric_id") != case.get("metric_id")
+        or evaluation.get("numerator") != case.get("metric_numerator")
+        or evaluation.get("denominator") != case.get("metric_denominator")
+        or evaluation.get("parsed_answer_sha256") != case.get("parsed_answer_sha256")
+    ):
+        raise ComparisonProjectError("judge evaluation trace differs from the case result")
+    decision = trace.get("judge_decision") if isinstance(trace, dict) else None
+    expected = "yes" if case.get("metric_numerator") == case.get("metric_denominator") else "no"
+    if not isinstance(decision, str) or decision not in {"yes", "no"} or decision != expected:
+        raise ComparisonProjectError("judge decision differs from the case metric")
+    return decision
+
+
+def _visible_context_text(snapshot: _CellSnapshot, case: Mapping[str, Any]) -> str:
+    from oamb.workloads.visible_evidence import count_o200k_tokens, tokenizer_fingerprint
+
+    reference = case.get("visible_evidence_raw_ref")
+    expected_hash = case.get("visible_evidence_sha256")
+    byte_count = case.get("visible_evidence_byte_count")
+    token_count = case.get("visible_evidence_token_count")
+    fingerprint = case.get("visible_evidence_tokenizer_fingerprint")
+    if not isinstance(reference, str):
+        raise ComparisonProjectError("answer-visible context raw reference is unavailable")
+    payload = snapshot.raw_payloads.get(reference)
+    if payload is None:
+        raise ComparisonProjectError("answer-visible context raw reference is absent")
+    if (
+        reference != expected_hash
+        or hashlib.sha256(payload).hexdigest() != reference
+        or len(payload) != byte_count
+        or fingerprint != tokenizer_fingerprint()
+        or count_o200k_tokens(payload) != token_count
+    ):
+        raise ComparisonProjectError("answer-visible context hash, token, or fingerprint drifted")
+    try:
+        text = payload.decode("utf-8", errors="strict")
+        lines = text.splitlines()
+        for line in lines:
+            item = json.loads(line, object_pairs_hook=_unique_json_object)
+            if not isinstance(item, dict) or set(item) != VISIBLE_EVIDENCE_KEYS:
+                raise ValueError("visible evidence line has the wrong shape")
+            if not all(
+                isinstance(item[field], str) and item[field]
+                for field in (
+                    "provider_evidence_identity",
+                    "evidence_kind",
+                    "text",
+                )
+            ):
+                raise ValueError("visible evidence line has empty identity or text")
+            source_unit_id = item["source_unit_id"]
+            if source_unit_id is not None and (
+                not isinstance(source_unit_id, str) or not source_unit_id
+            ):
+                raise ValueError("visible evidence line has an invalid source unit")
+            if any(
+                item[field] is not None and not isinstance(item[field], str)
+                for field in ("occurred_start", "occurred_end", "mentioned_at")
+            ):
+                raise ValueError("visible evidence line has an invalid timestamp")
+    except (UnicodeDecodeError, TypeError, ValueError) as exc:
+        raise ComparisonProjectError("answer-visible context is not strict UTF-8 JSONL") from exc
+    return text
+
+
 def _pair_document(
     plan: ResolvedPlan,
     left: dict[str, Any],
@@ -1022,10 +1492,68 @@ def _observed_time(snapshot: _CellSnapshot) -> dict[str, object]:
     run_interval = _duration_interval(snapshot.run_record)
     return {
         "run_wall_microseconds": run_interval[2] if run_interval is not None else "unavailable",
+        "indexing_ready": _indexing_ready_summary(snapshot.attempts, snapshot.ingestion_plans),
         "provider_request": _duration_summary(tuple(provider_request_durations)),
         "cases": case_timings,
         "comparability": "observed_only",
     }
+
+
+def _indexing_ready_summary(
+    attempts: tuple[Mapping[str, object], ...],
+    ingestion_plans: tuple[Mapping[str, object], ...],
+) -> dict[str, object]:
+    grouped: dict[str, list[Mapping[str, object]]] = {}
+    for attempt in attempts:
+        if (
+            attempt.get("parent_kind") == "ingestion_plan"
+            and attempt.get("stage") in {"memory_ingest", "memory_readiness"}
+            and isinstance(attempt.get("parent_id"), str)
+        ):
+            grouped.setdefault(str(attempt["parent_id"]), []).append(attempt)
+    plan_by_id = _unique_by(
+        tuple(dict(item) for item in ingestion_plans),
+        "ingestion_occurrence_id",
+        "ingestion occurrence",
+    )
+    spans: list[int] = []
+    for plan_id, plan in plan_by_id.items():
+        if plan.get("state") not in {"ready", "sealed"}:
+            continue
+        selected = grouped.get(plan_id, ())
+        ingest_intervals = tuple(
+            interval
+            for item in selected
+            if item.get("stage") == "memory_ingest"
+            and (interval := _duration_interval(item)) is not None
+        )
+        readiness_attempts = tuple(
+            (item, interval)
+            for item in selected
+            if item.get("stage") == "memory_readiness"
+            and (interval := _duration_interval(item)) is not None
+        )
+        if not ingest_intervals or not readiness_attempts:
+            continue
+        final_readiness, final_interval = max(
+            readiness_attempts,
+            key=lambda item: (
+                item[1][1],
+                item[1][0],
+                str(item[0].get("attempt_id", "")),
+            ),
+        )
+        if final_readiness.get("outcome") != "succeeded":
+            continue
+        started = min(item[0] for item in ingest_intervals)
+        ready = final_interval[1]
+        if any(item[1] > ready for item in ingest_intervals):
+            raise ComparisonProjectError("indexing readiness ended before ingestion settled")
+        spans.append(_microseconds(started, ready))
+    summary = _duration_summary(tuple(spans))
+    if spans and len(spans) != len(plan_by_id):
+        summary["status"] = "measured_partial"
+    return summary
 
 
 def _duration_interval(document: Mapping[str, object]) -> tuple[datetime, datetime, int] | None:
@@ -1146,34 +1674,146 @@ def _retrieval_runtime_proof(
     return "invalid"
 
 
+def _validate_comparison_export(
+    export: Mapping[str, Any],
+    payloads: Mapping[str, bytes],
+    pair_relative_paths: tuple[str, ...],
+) -> None:
+    body = dict(export)
+    report_id = body.pop("report_id", None)
+    if report_id != canonical_sha256(["oamb-comparison-project-initial-v1", body]):
+        raise ComparisonProjectError("comparison export report identity drifted")
+    expected_paths = {REPORT_EXPORT_NAME, REPORT_HTML_NAME, *pair_relative_paths}
+    if set(payloads) != expected_paths:
+        raise ComparisonProjectError("comparison export payload inventory is incomplete")
+    if payloads[REPORT_EXPORT_NAME] != canonical_json_bytes(export):
+        raise ComparisonProjectError("comparison export JSON is not canonical")
+    comparisons = export.get("comparisons")
+    if not isinstance(comparisons, tuple) or len(comparisons) != len(pair_relative_paths):
+        raise ComparisonProjectError("comparison export pair inventory is incomplete")
+    for comparison, relative_path in zip(comparisons, pair_relative_paths, strict=True):
+        if payloads[relative_path] != canonical_json_bytes(comparison):
+            raise ComparisonProjectError("comparison export pair payload drifted")
+
+    questions = export.get("questions")
+    cells = export.get("cells")
+    details = export.get("dataset_details")
+    if (
+        not isinstance(questions, tuple)
+        or not isinstance(cells, tuple)
+        or not isinstance(details, dict)
+    ):
+        raise ComparisonProjectError("comparison export dataset detail shape is invalid")
+    detail_status = details.get("status")
+    content_keys = {
+        "raw_question_id",
+        "question_type",
+        "question",
+        "gold_answer",
+        "answer_sessions",
+    }
+    if detail_status == "absent":
+        if details != {"status": "absent", "reason": "dataset_source_not_supplied"}:
+            raise ComparisonProjectError("comparison export absent dataset detail is invalid")
+        if any(content_keys.intersection(question) for question in questions):
+            raise ComparisonProjectError("comparison export has partial dataset detail")
+    elif detail_status == "verified":
+        required_detail_keys = {
+            "status",
+            "source_id",
+            "revision",
+            "source_sha256",
+            "case_manifest_hash",
+            "distribution_scope",
+            "license_id",
+            "payload_policy",
+            "citation",
+        }
+        if (
+            set(details) != required_detail_keys
+            or details.get("distribution_scope") != "local_only"
+            or any(not content_keys.issubset(question) for question in questions)
+        ):
+            raise ComparisonProjectError("comparison export verified dataset detail is incomplete")
+    else:
+        raise ComparisonProjectError("comparison export dataset detail status is invalid")
+    expected_providers = {item.get("provider_id") for item in cells}
+    allowed_states = {
+        "correct",
+        "incorrect",
+        "unjudged",
+        "failed",
+        "blocked",
+        "timeout",
+        "unknown",
+        "unavailable",
+    }
+    for question in questions:
+        results = question.get("provider_results")
+        if (
+            not isinstance(results, tuple)
+            or {item.get("provider_id") for item in results if isinstance(item, dict)}
+            != expected_providers
+        ):
+            raise ComparisonProjectError("comparison export question/provider matrix is incomplete")
+        if any(item.get("display_state") not in allowed_states for item in results):
+            raise ComparisonProjectError("comparison export question state is invalid")
+
+    html_bytes = payloads[REPORT_HTML_NAME]
+    try:
+        rendered = html_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ComparisonProjectError("comparison export does not contain safe HTML") from exc
+    if html_bytes != _render_html(export):
+        raise ComparisonProjectError("comparison export HTML re-render differs")
+    lowered = rendered.lower()
+    inspector = _OfflineHtmlInspector()
+    inspector.feed(rendered)
+    inspector.close()
+    unsafe = (
+        inspector.unsafe
+        or '<meta http-equiv="content-security-policy"' not in lowered
+        or "default-src 'none'" not in lowered
+        or "connect-src 'none'" not in lowered
+        or "object-src 'none'" not in lowered
+        or "base-uri 'none'" not in lowered
+    )
+    if unsafe or inspector.references != [REPORT_EXPORT_NAME]:
+        raise ComparisonProjectError("comparison export does not contain safe HTML")
+    if rendered.count('<a href="report.json" download>') != 1:
+        raise ComparisonProjectError("comparison export JSON download target is invalid")
+
+
 def _render_html(export: Mapping[str, Any]) -> bytes:
     cells = export["cells"]
     comparisons = export["comparisons"]
     models = export["models"]
     retrieval = export["retrieval"]
+    questions = export["questions"]
     limitations = export["limitations"]
     assert isinstance(cells, tuple)
     assert isinstance(comparisons, tuple)
     assert isinstance(models, tuple)
     assert isinstance(retrieval, tuple)
+    assert isinstance(questions, tuple)
     assert isinstance(limitations, tuple)
-    cell_rows = "".join(
-        "<tr>"
-        f"<td>{_escape(item['provider_id'])}</td>"
-        f"<td>{_escape(item['adapter_profile_id'])}</td>"
-        f"<td>{item['judged_numerator']}/{item['judged_denominator']}</td>"
-        f"<td>{_escape(_time_text(item['observed_time']['run_wall_microseconds']))}</td>"
-        f"<td>{_escape(_request_time_text(item['observed_time']['provider_request']))}</td>"
-        "</tr>"
-        for item in cells
-    )
+    cell_rows = "".join(_provider_summary_row(item) for item in cells)
+    secondary_accounting = _secondary_accounting_html(cells)
     comparison_rows = "".join(
         "<tr>"
-        f"<td>{_escape(item['left_provider_id'])} / {_escape(item['right_provider_id'])}</td>"
+        f"<td>{_escape(item['left_provider_id'])}</td>"
+        f"<td>{_escape(item['right_provider_id'])}</td>"
         f"<td>{_escape(_delta_text(item['signed_delta']))}</td>"
-        f"<td>{str(item['comparable']).lower()}</td>"
         "</tr>"
         for item in comparisons
+        if item["comparable"] is True
+    )
+    incomparable_count = sum(item["comparable"] is not True for item in comparisons)
+    comparison_note = (
+        f'<p class="muted">{incomparable_count} incomparable pair(s) are omitted here and '
+        "retained with reasons in report.json.</p>"
+        if incomparable_count
+        else ""
     )
     model_rows = "".join(
         "<tr>"
@@ -1181,7 +1821,6 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
         f"<td>{_escape(item['configured_model'])}</td>"
         f"<td>{_escape(item['runtime_model'])}</td>"
         f"<td>{_escape(item['thinking_effort'])}</td>"
-        f"<td>{_escape(_scale_text(item))}</td>"
         f"<td>{_escape(item['proof_kind'])}</td>"
         "</tr>"
         for item in models
@@ -1195,95 +1834,343 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
         "</tr>"
         for item in retrieval
     )
-    accounting_rows = "".join(
-        "<tr>"
-        f"<td>{_escape(item['provider_id'])}</td>"
-        f"<td>{_escape(_token_usage_text(item['accounting']['tokens']['indexing']))}</td>"
-        f"<td>{_escape(_token_usage_text(item['accounting']['tokens']['retrieval']))}</td>"
-        f"<td>{_escape(_token_usage_text(item['accounting']['tokens']['answer']))}</td>"
-        f"<td>{_escape(_token_usage_text(item['accounting']['tokens']['judge']))}</td>"
-        f"<td>{_escape(_failure_retry_text(item['accounting']['attempts']))}</td>"
-        f"<td>{_escape(_resource_text(item['accounting']['resources']['peak_memory_bytes']))}</td>"
-        f"<td>{_escape(_resource_text(item['accounting']['resources']['storage_bytes']))}</td>"
-        f"<td>{_escape(_cost_text(item['accounting']['cost']))}</td>"
-        f"<td>{_escape(_coverage_text(item['accounting']['measurement_coverage']))}</td>"
-        "</tr>"
-        for item in cells
-    )
+    question_rows = _question_matrix_rows(questions, cells)
+    question_details = _question_detail_html(questions)
+    provider_headings = "".join(f"<th>{_escape(item['provider_id'])}</th>" for item in cells)
     limitation_items = "".join(f"<li>{_escape(item)}</li>" for item in limitations)
-    embedded_json = html.escape(canonical_json_bytes(export).decode("utf-8"))
+    dataset_notice = _dataset_notice(export["dataset_details"])
+    style = """
+:root { color-scheme: light dark; --bg:#fff; --fg:#17202a; --muted:#5d6d7e; --panel:#f5f7f9; --border:#ccd1d1; --warning-bg:#fff3cd; --warning-fg:#664d03; --pre-bg:#f1f3f5; --good-bg:#d1e7dd; --good-fg:#0f5132; --bad-bg:#f8d7da; --bad-fg:#842029; }
+@media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#edf2f7; --muted:#aab4bf; --panel:#1b2026; --border:#47515c; --warning-bg:#4b3b00; --warning-fg:#ffe69c; --pre-bg:#0b0d10; --good-bg:#123c2d; --good-fg:#a3e9c4; --bad-bg:#4a1d24; --bad-fg:#ffb3bd; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,sans-serif; }
+main { max-width:1180px; margin:auto; padding:2rem; }
+section { margin:1.5rem 0; padding:1rem; background:var(--panel); border:1px solid var(--border); border-radius:.6rem; }
+.table-wrap { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; }
+th,td { padding:.55rem; text-align:left; vertical-align:top; border-bottom:1px solid var(--border); }
+th { white-space:nowrap; }
+code,pre { background:var(--pre-bg); }
+code { padding:.1rem .25rem; overflow-wrap:anywhere; word-break:break-word; }
+pre { max-height:26rem; padding:1rem; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; }
+details { margin:.7rem 0; }
+summary { cursor:pointer; font-weight:650; }
+.muted { color:var(--muted); }
+.badge { display:inline-block; padding:.12rem .42rem; border-radius:.35rem; white-space:nowrap; }
+.correct { background:var(--good-bg); color:var(--good-fg); }
+.incorrect,.failed,.timeout,.unknown { background:var(--bad-bg); color:var(--bad-fg); }
+.unjudged,.blocked,.unavailable,.warning,.dataset-notice { background:var(--warning-bg); color:var(--warning-fg); }
+.dataset-notice { padding:.8rem 1rem; border-radius:.5rem; }
+.provider-detail,.session { border-left:3px solid var(--border); padding-left:1rem; }
+.metric-key { padding:.75rem 1rem; border-left:4px solid #2f6fdd; background:var(--pre-bg); }
+a { color:inherit; }
+""".strip()
+    style_hash = base64.b64encode(hashlib.sha256(style.encode()).digest()).decode("ascii")
+    csp = (
+        "default-src 'none'; "
+        f"style-src 'sha256-{style_hash}'; "
+        "connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; "
+        "object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"
+    )
     document = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="color-scheme" content="light dark">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{csp}">
 <title>OAMB comparison report</title>
-<style>
-:root {{ color-scheme: light dark; --bg: #ffffff; --fg: #17202a; --muted: #5d6d7e; --panel: #f5f7f9; --border: #ccd1d1; --warning-bg: #fff3cd; --warning-fg: #664d03; --pre-bg: #f1f3f5; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg: #111418; --fg: #edf2f7; --muted: #aab4bf; --panel: #1b2026; --border: #47515c; --warning-bg: #4b3b00; --warning-fg: #ffe69c; --pre-bg: #0b0d10; }} }}
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }}
-main {{ max-width: 1120px; margin: auto; padding: 2rem; }}
-section {{ margin: 1.5rem 0; padding: 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: .5rem; }}
-table {{ width: 100%; border-collapse: collapse; }} th, td {{ padding: .5rem; text-align: left; border-bottom: 1px solid var(--border); }}
-code, pre {{ background: var(--pre-bg); }} code {{ padding: .1rem .25rem; }} pre {{ padding: 1rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }}
-.muted {{ color: var(--muted); }} .badge {{ padding: .15rem .4rem; border-radius: .3rem; }} .warning {{ background: var(--warning-bg); color: var(--warning-fg); }}
-</style>
+<style>{style}</style>
 </head>
 <body><main>
 <h1>OAMB comparison report</h1>
 <p><strong>{_escape(export["controlled_comparison_warning"])}</strong></p>
+{dataset_notice}
 <p class="muted">Report ID: <code>{_escape(export["report_id"])}</code></p>
-<section><h2>Coverage and judged accuracy</h2><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results.</p>
-<table><thead><tr><th>Provider</th><th>Profile</th><th>Judged</th><th>Run wall</th><th>Provider request</th></tr></thead><tbody>{cell_rows}</tbody></table></section>
-<section><h2>Pairwise accuracy deltas</h2><table><thead><tr><th>Pair</th><th>Left minus right</th><th>Comparable</th></tr></thead><tbody>{comparison_rows}</tbody></table></section>
-<section><h2>Model and thinking-effort bindings</h2><table><thead><tr><th>Role</th><th>Configured</th><th>Runtime</th><th>Effort</th><th>Scale rank</th><th>Proof</th></tr></thead><tbody>{model_rows}</tbody></table></section>
-<section><h2>Generation-free retrieval</h2><table><thead><tr><th>Provider</th><th>Route</th><th>Disabled setting</th><th>Runtime proof</th></tr></thead><tbody>{retrieval_rows}</tbody></table></section>
-<section><h2>Accounting and measurement coverage</h2><table><thead><tr><th>Provider</th><th>Indexing / retain supplier usage</th><th>Retrieval supplier usage</th><th>Answer supplier usage</th><th>Judge supplier usage</th><th>Failures / retries</th><th>Peak memory</th><th>Storage</th><th>Cost / billing</th><th>Measurement coverage</th></tr></thead><tbody>{accounting_rows}</tbody></table></section>
+<section><h2>Provider decision summary</h2><p class="metric-key"><strong>Four decision metrics:</strong> Accuracy · Ctx tokens · Indexing tokens · Index / recall latency</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Ctx tokens are the exact retrieval context shown to the answer model.</p>
+<div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Judged accuracy / coverage</th><th>Ctx tokens / coverage</th><th>Indexing supplier tokens</th><th>Index-ready latency / coverage (s)</th><th>Recall latency / coverage (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
+{_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Ctx tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Index-ready latency spans first ingest through readiness per isolated context; recall latency is the provider memory-query request. Both show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
+<section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
+<section><h2>Question results</h2><p>Each row shows one frozen question across all providers; expand the evidence-backed details below when available.</p><div class="table-wrap"><table><thead><tr><th>Question</th><th>Type</th>{provider_headings}</tr></thead><tbody>{question_rows}</tbody></table></div>{question_details}</section>
+<section><h2>Model and thinking-effort bindings</h2><p>For generative roles, effort follows <code>low &lt; high &lt; max</code>; embedding is not applicable. These are this comparison's frozen resolved-plan bindings, not values reread from the current environment, so a later configuration change does not rewrite completed evidence.</p><div class="table-wrap"><table><thead><tr><th>Role</th><th>Configured</th><th>Runtime</th><th>Effort</th><th>Proof</th></tr></thead><tbody>{model_rows}</tbody></table></div></section>
+<section><h2>Generation-free retrieval</h2><div class="table-wrap"><table><thead><tr><th>Provider</th><th>Route</th><th>Disabled setting</th><th>Runtime proof</th></tr></thead><tbody>{retrieval_rows}</tbody></table></div></section>
 <section><h2>Limitations</h2><ul>{limitation_items}</ul></section>
-<section><h2>Deterministic export</h2><pre>{embedded_json}</pre></section>
+<section><h2>Deterministic export</h2><p><a href="report.json" download>Download report.json</a> for the complete machine-readable evidence and unavailable-measurement detail.</p></section>
 </main></body></html>
 """
     return document.encode("utf-8")
 
 
-def _scale_text(item: Mapping[str, Any]) -> str:
-    scale = item["thinking_effort_scale"]
-    rank = item["thinking_effort_rank_1_indexed"]
-    if not scale:
-        return "not applicable"
-    return f"{rank}/{len(scale)} ({' < '.join(str(value) for value in scale)})"
+def _provider_summary_row(item: Mapping[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td><strong>{_escape(item['provider_id'])}</strong><br>"
+        f'<span class="muted">{_escape(item["adapter_profile_id"])}</span></td>'
+        f"<td>{_escape(_accuracy_text(item))}</td>"
+        f"<td>{_escape(_context_text(item))}</td>"
+        f"<td>{_escape(_supplier_tokens_text(item['accounting']['tokens']['indexing']))}</td>"
+        f"<td>{_escape(_request_time_text(item['observed_time']['indexing_ready']))}</td>"
+        f"<td>{_escape(_request_time_text(item['observed_time']['provider_request']))}</td>"
+        "</tr>"
+    )
+
+
+def _accuracy_text(item: Mapping[str, Any]) -> str:
+    numerator = item["judged_numerator"]
+    denominator = item["judged_denominator"]
+    judged_case_count = item.get("judged_case_count")
+    case_count = item.get("case_count")
+    if (
+        isinstance(judged_case_count, bool)
+        or not isinstance(judged_case_count, int)
+        or judged_case_count < 0
+        or isinstance(case_count, bool)
+        or not isinstance(case_count, int)
+        or case_count < judged_case_count
+    ):
+        return "unavailable"
+    coverage = f"judged {judged_case_count}/{case_count} cases"
+    if (
+        isinstance(numerator, bool)
+        or not isinstance(numerator, int)
+        or isinstance(denominator, bool)
+        or not isinstance(denominator, int)
+        or denominator <= 0
+    ):
+        return f"unavailable; {coverage}"
+    percentage = (Decimal(numerator) * Decimal(100) / Decimal(denominator)).quantize(
+        Decimal("0.1"),
+        rounding=ROUND_HALF_UP,
+    )
+    return f"{numerator}/{denominator} ({format(percentage, 'f')}%); {coverage}"
+
+
+def _context_text(item: Mapping[str, Any]) -> str:
+    accounting = item["accounting"]
+    context = accounting["answer_visible_context_tokens"]
+    coverage = (
+        f"{context['measured_case_count']}/{context['case_count']} cases ({context['status']})"
+    )
+    if context["status"] == "unavailable":
+        return f"unavailable; {coverage}"
+    return (
+        f"{_number_text(context['total'])} total / {_number_text(context['mean'])} mean; {coverage}"
+    )
+
+
+def _secondary_accounting_html(cells: tuple[Mapping[str, Any], ...]) -> str:
+    items = "".join(
+        "<li>"
+        f"<strong>{_escape(item['provider_id'])}</strong>: Answer input "
+        f"{_escape(_number_text(item['accounting']['tokens']['answer']['totals']['input_tokens']['value']))}; "
+        f"Failures / retries {_escape(_failure_retry_text(item['accounting']['attempts']))}; "
+        f"cost {_escape(_cost_text(item['accounting']['cost']))}</li>"
+        for item in cells
+    )
+    return (
+        "<details><summary>Secondary accounting</summary>"
+        f'<ul>{items}</ul><p class="muted">Lower Ctx tokens usually reduce Answer input, '
+        "but this report does not infer a provider's internal retrieval strategy from that "
+        "correlation.</p></details>"
+    )
+
+
+def _supplier_tokens_text(stage: Mapping[str, Any]) -> str:
+    coverage = stage["supplier_usage_coverage"]
+    total = stage["totals"]["supplier_reported_total_tokens"]["value"]
+    metered = coverage["measured_record_count"]
+    records = coverage["record_count"]
+    if total == "unavailable":
+        return f"unavailable ({metered}/{records} metered)"
+    return f"{_number_text(total)}; {metered}/{records} metered ({coverage['status']})"
+
+
+def _number_text(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, str) and re.fullmatch(r"-?\d+(?:\.\d+)?", value):
+        return format(Decimal(value), ",f")
+    return str(value)
+
+
+def _omitted_measurements_note(
+    cells: tuple[Mapping[str, Any], ...],
+) -> str:
+    omitted: list[str] = []
+    if all(
+        item["accounting"]["tokens"]["retrieval"]["supplier_usage_coverage"]["status"]
+        == "unavailable"
+        for item in cells
+    ):
+        omitted.append("provider-internal retrieval/query supplier tokens")
+    if all(
+        item["accounting"]["resources"]["peak_memory_bytes"]["status"] == "unavailable"
+        for item in cells
+    ):
+        omitted.append("peak memory")
+    if all(
+        item["accounting"]["resources"]["storage_bytes"]["status"] == "unavailable"
+        for item in cells
+    ):
+        omitted.append("storage")
+    if not omitted:
+        return ""
+    return (
+        '<p class="muted">Omitted because unavailable across all providers: '
+        f"{_escape(', '.join(omitted))}. Full measurement states remain in report.json.</p>"
+    )
+
+
+def _indexing_measurement_note(cells: tuple[Mapping[str, Any], ...]) -> str:
+    parts = []
+    for item in cells:
+        coverage = item["accounting"]["tokens"]["indexing"]["supplier_usage_coverage"]
+        parts.append(
+            f"{item['provider_id']} {coverage['status']} "
+            f"({coverage['measured_record_count']}/{coverage['record_count']} metered)"
+        )
+    return f'<p class="muted">Indexing token meter coverage: {_escape("; ".join(parts))}.</p>'
+
+
+def _dataset_notice(details: Mapping[str, object]) -> str:
+    if details.get("status") != "verified":
+        return (
+            '<p class="muted">Question text, gold answers, and source sessions are absent '
+            "because no verified dataset source was supplied.</p>"
+        )
+    return (
+        '<details class="dataset-notice"><summary>Personal/offline detail report · '
+        "Dataset provenance</summary>"
+        "<p>This content-bearing artifact is local-only under the frozen dataset policy. "
+        f"Source: {_escape(details['source_id'])}; revision: "
+        f"<code>{_escape(details['revision'])}</code>; source SHA-256: "
+        f"<code>{_escape(details['source_sha256'])}</code>; license metadata: "
+        f"{_escape(details['license_id'])}; payload policy: "
+        f"{_escape(details['payload_policy'])}. Citation: "
+        f"{_escape(details['citation'])}.</p></details>"
+    )
+
+
+def _question_matrix_rows(
+    questions: tuple[Mapping[str, Any], ...],
+    cells: tuple[Mapping[str, Any], ...],
+) -> str:
+    provider_ids = tuple(str(item["provider_id"]) for item in cells)
+    rows: list[str] = []
+    for question in questions:
+        by_provider = {str(item["provider_id"]): item for item in question["provider_results"]}
+        label = question.get("raw_question_id", f"Case {question['ordinal_1_indexed']}")
+        question_type = question.get("question_type", "details absent")
+        states = "".join(_state_badge(by_provider[provider_id]) for provider_id in provider_ids)
+        rows.append(f"<tr><td>{_escape(label)}</td><td>{_escape(question_type)}</td>{states}</tr>")
+    return "".join(rows)
+
+
+def _state_badge(result: Mapping[str, Any]) -> str:
+    state = str(result["display_state"])
+    return f'<td><span class="badge {state}">{_escape(state)}</span></td>'
+
+
+def _question_detail_html(questions: tuple[Mapping[str, Any], ...]) -> str:
+    if not questions or "question" not in questions[0]:
+        return ""
+    return "".join(_one_question_detail(question) for question in questions)
+
+
+def _one_question_detail(question: Mapping[str, Any]) -> str:
+    mismatch = (
+        '<p class="muted">Dataset note: turn-level has_answer labels differ from '
+        "answer_session_ids; sessions shown follow answer_session_ids.</p>"
+        if question.get("has_answer_label_mismatch") is True
+        else ""
+    )
+    sessions = "".join(_answer_session_html(item) for item in question["answer_sessions"])
+    providers = "".join(_provider_detail_html(item) for item in question["provider_results"])
+    return (
+        "<details>"
+        f"<summary>{_escape(question['raw_question_id'])} — "
+        f"{_escape(question['question_type'])}</summary>"
+        f"<h3>Question</h3><pre>{_escape(question['question'])}</pre>"
+        f"<h3>Gold answer</h3><pre>{_escape(question['gold_answer'])}</pre>"
+        f"{mismatch}<h3>Original answer sessions</h3>{sessions}"
+        f"<h3>Provider evidence</h3>{providers}</details>"
+    )
+
+
+def _answer_session_html(session: Mapping[str, Any]) -> str:
+    messages = "".join(
+        "<p>"
+        f"<strong>{_escape(message['role'])}</strong> "
+        f'<span class="muted">has_answer={_escape(message["has_answer"])}</span>'
+        f"</p><pre>{_escape(message['content'])}</pre>"
+        for message in session["messages"]
+    )
+    return (
+        '<details class="session"><summary>Original answer session '
+        f"{_escape(session['session_id'])}</summary>"
+        f'<p class="muted">{_escape(session["timestamp"])}</p>{messages}</details>'
+    )
+
+
+def _provider_detail_html(result: Mapping[str, Any]) -> str:
+    heading = (
+        '<details class="provider-detail"><summary>'
+        f"{_escape(result['provider_id'])}: {_escape(result['display_state'])}</summary>"
+    )
+    reason = result.get("detail_unavailable_reason")
+    if reason is not None:
+        return f"{heading}<p>{_escape(reason)}</p></details>"
+    return (
+        f"{heading}<p>Judge decision: <strong>{_escape(result['judge_decision'])}</strong>; "
+        f"Ctx tokens: {_escape(result['context_tokens'])}</p>"
+        f"<h4>Model answer</h4><pre>{_escape(result['model_answer'])}</pre>"
+        "<details><summary>Injected context</summary>"
+        f"<pre>{_escape(result['injected_context'])}</pre></details></details>"
+    )
 
 
 def _time_text(value: object) -> str:
-    return "unavailable" if value == "unavailable" else f"{value} us"
+    if value == "unavailable":
+        return "unavailable"
+    decimal = (Decimal(str(value)) / Decimal(1_000_000)).quantize(
+        Decimal("0.001"),
+        rounding=ROUND_HALF_UP,
+    )
+    return f"{format(decimal, 'f')} s"
 
 
 def _request_time_text(value: Mapping[str, object]) -> str:
+    coverage = f"n={value['count']} ({value['status']})"
     if value["status"] == "unavailable":
-        return "unavailable"
-    return f"n={value['count']}, median={value['median_microseconds']} us"
+        return f"unavailable; {coverage}"
+    return (
+        f"median {_time_text(value['median_microseconds'])}; "
+        f"p95 {_time_text(value['p95_microseconds'])}; "
+        f"max {_time_text(value['maximum_microseconds'])}; {coverage}"
+    )
 
 
 def _delta_text(value: object) -> str:
     if not isinstance(value, dict):
         return "unavailable"
-    return f"{value['numerator']}/{value['denominator']}"
-
-
-def _token_usage_text(value: Mapping[str, Any]) -> str:
-    coverage = value["supplier_usage_coverage"]
-    totals = value["totals"]
-    dimensions = (
-        ("input", "input_tokens"),
-        ("output", "visible_output_tokens"),
-        ("total", "supplier_reported_total_tokens"),
-        ("cached", "cached_input_tokens"),
-        ("reasoning", "reasoning_tokens"),
+    numerator = value.get("numerator")
+    denominator = value.get("denominator")
+    if (
+        isinstance(numerator, bool)
+        or not isinstance(numerator, int)
+        or isinstance(denominator, bool)
+        or not isinstance(denominator, int)
+        or denominator <= 0
+    ):
+        return "unavailable"
+    points = (Decimal(numerator) * Decimal(100) / Decimal(denominator)).quantize(
+        Decimal("0.1"),
+        rounding=ROUND_HALF_UP,
     )
-    rendered = ", ".join(f"{label}={totals[dimension]['value']}" for label, dimension in dimensions)
-    return f"{coverage['status']} (n={coverage['record_count']}; {rendered})"
+    sign = "+" if points > 0 else ""
+    return f"{sign}{format(points, 'f')} pp"
 
 
 def _failure_retry_text(value: Mapping[str, object]) -> str:
@@ -1291,12 +2178,6 @@ def _failure_retry_text(value: Mapping[str, object]) -> str:
         f"failed={value['failed_count']}, retry={value['retry_count']}, "
         f"cancelled={value['cancelled_count']}, unknown={value['unknown_outcome_count']}"
     )
-
-
-def _resource_text(value: Mapping[str, object]) -> str:
-    if value["status"] == "unavailable":
-        return "unavailable"
-    return f"{value['value']} {value['unit']} ({value['status']})"
 
 
 def _cost_text(value: Mapping[str, Any]) -> str:
@@ -1309,17 +2190,12 @@ def _cost_text(value: Mapping[str, Any]) -> str:
     return f"{rendered}; billing={value['billing_coverage']['status']}"
 
 
-def _coverage_text(value: Mapping[str, Any]) -> str:
-    tokens = value["tokens"]
-    return (
-        f"attempts={value['attempts']}; tokens=indexing:{tokens['indexing']},"
-        f"retrieval:{tokens['retrieval']},answer:{tokens['answer']},judge:{tokens['judge']}; "
-        f"resources={value['resources']}; cost={value['cost']}"
-    )
-
-
 def _escape(value: object) -> str:
-    return html.escape(str(value))
+    visible = _BIDI_CONTROL_PATTERN.sub(
+        lambda match: f"\\u{ord(match.group(0)):04x}",
+        str(value),
+    )
+    return html.escape(visible)
 
 
 def _expected_case_count(selection: str) -> int | None:

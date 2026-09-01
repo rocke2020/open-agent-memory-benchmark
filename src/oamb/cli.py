@@ -463,6 +463,13 @@ def compare_command(
         Path,
         typer.Option("--output-root", help="Create-only comparison report directory."),
     ],
+    dataset_source: Annotated[
+        Path | None,
+        typer.Option(
+            "--dataset-source",
+            help="Exact frozen dataset file used to add local-only question and answer details.",
+        ),
+    ] = None,
 ) -> None:
     """Freshly validate frozen cells and build every pair plus offline report."""
 
@@ -489,7 +496,12 @@ def compare_command(
             )
             for cell in plan.cells
         }
-        built = build_comparison_project(plan, sources, output_root=output_root)
+        built = build_comparison_project(
+            plan,
+            sources,
+            output_root=output_root,
+            dataset_source=dataset_source,
+        )
     except (OSError, ComparisonProjectError, ResolvedPlanError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     for comparison_path in built.comparison_paths:

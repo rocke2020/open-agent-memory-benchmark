@@ -535,6 +535,8 @@ def test_composed_cell_uses_normal_comparison_and_report_path(
         "backoff_seconds": 1,
         "measurement_coverage": "complete",
     }
+    assert composed_cell["observed_time"]["indexing_ready"]["status"] == "measured"
+    assert composed_cell["observed_time"]["indexing_ready"]["count"] == 2
     assert any("aborted" in item for item in composed_cell["limitations"])
 
 
