@@ -69,6 +69,11 @@ LME_SOURCE_BYTE_COUNT = 277_383_467
 LME_SOURCE_LICENSE_ID = "NOASSERTION"
 LME_DATASET_SPLIT = "s-cleaned"
 LME_PAYLOAD_POLICY = "download-required-not-redistributed"
+LME_DATASET_SOURCE_ID = "huggingface:xiaowu0162/longmemeval-cleaned"
+LME_DATASET_CITATION = (
+    "Wu et al. (2024), LongMemEval: Benchmarking Chat Assistants on Long-Term "
+    "Interactive Memory, arXiv:2410.10813"
+)
 LME_DATASET_MANIFEST_HASH = "098fd29291256d5e09dc82db146ee90fadc267e6061c33167bff0b54b98c2a85"
 LME30_CASE_MANIFEST_HASH = "d7db55fb14b85ae6ae25ff83e7343e6a1a5a801257ce7c8f29c5f14729bd4ebf"
 LME6_CASE_MANIFEST_HASH = "3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4"
