@@ -1818,7 +1818,6 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
     model_rows = "".join(
         "<tr>"
         f"<td>{_escape(item['role_id'])}</td>"
-        f"<td>{_escape(item['configured_model'])}</td>"
         f"<td>{_escape(item['runtime_model'])}</td>"
         f"<td>{_escape(item['thinking_effort'])}</td>"
         f"<td>{_escape(item['proof_kind'])}</td>"
@@ -1888,11 +1887,11 @@ a { color:inherit; }
 {dataset_notice}
 <p class="muted">Report ID: <code>{_escape(export["report_id"])}</code></p>
 <section><h2>Provider decision summary</h2><p class="metric-key"><strong>Four decision metrics:</strong> Accuracy · Ctx tokens · Indexing tokens · Index / recall latency</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Ctx tokens are the exact retrieval context shown to the answer model.</p>
-<div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Judged accuracy / coverage</th><th>Ctx tokens / coverage</th><th>Indexing supplier tokens</th><th>Index-ready latency / coverage (s)</th><th>Recall latency / coverage (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Judged accuracy</th><th>Ctx tokens</th><th>Indexing tokens</th><th>Index-ready latency (s)</th><th>Recall latency (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
 {_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Ctx tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Index-ready latency spans first ingest through readiness per isolated context; recall latency is the provider memory-query request. Both show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
 <section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
 <section><h2>Question results</h2><p>Each row shows one frozen question across all providers; expand the evidence-backed details below when available.</p><div class="table-wrap"><table><thead><tr><th>Question</th><th>Type</th>{provider_headings}</tr></thead><tbody>{question_rows}</tbody></table></div>{question_details}</section>
-<section><h2>Model and thinking-effort bindings</h2><p>For generative roles, effort follows <code>low &lt; high &lt; max</code>; embedding is not applicable. These are this comparison's frozen resolved-plan bindings, not values reread from the current environment, so a later configuration change does not rewrite completed evidence.</p><div class="table-wrap"><table><thead><tr><th>Role</th><th>Configured</th><th>Runtime</th><th>Effort</th><th>Proof</th></tr></thead><tbody>{model_rows}</tbody></table></div></section>
+<section><h2>Model and thinking-effort bindings</h2><p>For generative roles, effort follows <code>low &lt; high &lt; max</code>; embedding is not applicable. Runtime models were verified against this comparison's frozen configured bindings before dispatch; any mismatch fails the run. The complete bindings remain in report.json.</p><div class="table-wrap"><table><thead><tr><th>Role</th><th>Runtime</th><th>Effort</th><th>Proof</th></tr></thead><tbody>{model_rows}</tbody></table></div></section>
 <section><h2>Generation-free retrieval</h2><div class="table-wrap"><table><thead><tr><th>Provider</th><th>Route</th><th>Disabled setting</th><th>Runtime proof</th></tr></thead><tbody>{retrieval_rows}</tbody></table></div></section>
 <section><h2>Limitations</h2><ul>{limitation_items}</ul></section>
 <section><h2>Deterministic export</h2><p><a href="report.json" download>Download report.json</a> for the complete machine-readable evidence and unavailable-measurement detail.</p></section>
@@ -2024,14 +2023,24 @@ def _omitted_measurements_note(
 
 
 def _indexing_measurement_note(cells: tuple[Mapping[str, Any], ...]) -> str:
-    parts = []
+    parts: list[str] = []
     for item in cells:
         coverage = item["accounting"]["tokens"]["indexing"]["supplier_usage_coverage"]
-        parts.append(
-            f"{item['provider_id']} {coverage['status']} "
-            f"({coverage['measured_record_count']}/{coverage['record_count']} metered)"
-        )
-    return f'<p class="muted">Indexing token meter coverage: {_escape("; ".join(parts))}.</p>'
+        measured = coverage["measured_record_count"]
+        records = coverage["record_count"]
+        prefix = f"{item['provider_id']}: {measured}/{records} metered"
+        if measured == 0:
+            parts.append(f"{prefix}, so supplier token totals are unavailable, not zero")
+        elif measured < records:
+            parts.append(
+                f"{prefix}; the displayed total sums only those metered records and is incomplete"
+            )
+        else:
+            parts.append(f"{prefix}; the displayed total covers all records")
+    return (
+        '<p class="muted">Indexing token meter coverage counts sealed supplier-usage '
+        f"records, not source units. {_escape('; '.join(parts))}.</p>"
+    )
 
 
 def _dataset_notice(details: Mapping[str, object]) -> str:

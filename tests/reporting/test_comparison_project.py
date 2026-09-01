@@ -760,12 +760,16 @@ def test_project_reports_separated_accounting_and_preserves_unavailable_measurem
         "total": 312,
     }
     rendered = built.html_path.read_text(encoding="utf-8")
-    assert "Ctx tokens" in rendered
+    assert "<th>Judged accuracy</th>" in rendered
+    assert "<th>Ctx tokens</th>" in rendered
     assert "Four decision metrics" in rendered
     assert "312 total / 52 mean" in rendered
-    assert "Indexing supplier tokens" in rendered
-    assert "Index-ready latency / coverage (s)" in rendered
-    assert "Recall latency / coverage (s)" in rendered
+    assert "<th>Indexing tokens</th>" in rendered
+    assert "<th>Index-ready latency (s)</th>" in rendered
+    assert "<th>Recall latency (s)</th>" in rendered
+    assert "/ coverage</th>" not in rendered
+    assert "<th>Configured</th>" not in rendered
+    assert "<th>Runtime</th>" in rendered
     assert "Secondary accounting" in rendered
     assert "Answer input" in rendered
     assert "Failures / retries" in rendered
@@ -779,6 +783,41 @@ def test_project_reports_separated_accounting_and_preserves_unavailable_measurem
     parser.feed(rendered)
     assert parser.counts
     assert max(parser.counts) <= 7
+
+
+def test_indexing_measurement_note_explains_partial_and_unavailable_coverage() -> None:
+    from oamb.reporting import comparison_project
+
+    def cell(provider_id: str, measured: int, records: int, status: str) -> dict[str, object]:
+        return {
+            "provider_id": provider_id,
+            "accounting": {
+                "tokens": {
+                    "indexing": {
+                        "supplier_usage_coverage": {
+                            "measured_record_count": measured,
+                            "record_count": records,
+                            "status": status,
+                        }
+                    }
+                }
+            },
+        }
+
+    note = comparison_project._indexing_measurement_note(
+        (
+            cell("hindsight", 300, 600, "measured_partial"),
+            cell("mem0", 0, 600, "unavailable"),
+            cell("openviking", 0, 602, "unavailable"),
+        )
+    )
+
+    assert "sealed supplier-usage records, not source units" in note
+    assert "hindsight: 300/600 metered" in note
+    assert "displayed total sums only those metered records and is incomplete" in note
+    assert "mem0: 0/600 metered" in note
+    assert "openviking: 0/602 metered" in note
+    assert note.count("unavailable, not zero") == 2
 
 
 def test_project_revalidates_roots_rejects_manifest_drift_and_builds_offline_deterministically(
@@ -820,7 +859,10 @@ def test_project_revalidates_roots_rejects_manifest_drift_and_builds_offline_det
     assert "Scale rank" not in html
     assert "low &lt; high &lt; max" in html
     assert "frozen T10" not in html
-    assert "this comparison's frozen resolved-plan bindings" in html
+    assert (
+        "Runtime models were verified against this comparison's frozen configured bindings" in html
+    )
+    assert "The complete bindings remain in report.json." in html
     assert re.search(r"\b\d+(?:\.\d+)? us\b", html) is None
     assert re.search(r"\b\d+(?:\.\d+)? ms\b", html) is None
     assert '<a href="report.json" download>Download report.json</a>' in html
