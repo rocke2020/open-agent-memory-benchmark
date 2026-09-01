@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from oamb.artifacts.composition import compose_capsules
 from oamb.artifacts.store import ArtifactStore
 from oamb.artifacts.validation.catalog import validate_catalog_profile
 from oamb.artifacts.validation.native import validate_native_capsule
@@ -16,11 +17,14 @@ from oamb.artifacts.validation.run_evidence import (
     native_run_evidence_validation_input,
     validate_native_run_evidence,
 )
+from oamb.artifacts.validation.source_root import validate_source_root
 from oamb.contracts.evidence import CapsuleManifest
 from oamb.contracts.ids import canonical_sha256, ingestion_occurrence_id
 from oamb.contracts.ports import ArtifactStorePort, IngestionPlan, SourceUnit, ThinkingEffort
 from oamb.contracts.specifications import (
+    INFRASTRUCTURE_RETRY_POLICY_HASH,
     BindingKind,
+    CasePartitionSpec,
     DatasetFile,
     DatasetManifest,
     ExecutionOwner,
@@ -36,6 +40,7 @@ from oamb.reporting.native_reduce import reduce_native_run_report
 from oamb.reporting.offline_renderer import offline_asset_hashes, offline_renderer_hash
 from oamb.reporting.publication import build_report_derivation
 from oamb.reporting.roots import build_report_spec
+from oamb.runtime.case_partition import build_case_partition_spec
 from oamb.runtime.native_run import NativeRunArtifacts, run_native_vertical_slice
 from oamb.workloads.longmemeval import (
     LME30_WORKLOAD_ID,
@@ -109,6 +114,54 @@ def _workload() -> LongMemEvalWorkload:
     )
     return LongMemEvalWorkload(
         _build_bundle(dataset, (row,), workload_id="recorded-lme-fixture-v1")
+    )
+
+
+def _six_case_workload() -> LongMemEvalWorkload:
+    source_file = DatasetFile(
+        relative_path="fixtures/recorded-lme6.json",
+        sha256="b" * 64,
+        byte_count=6,
+        license_id="NOASSERTION",
+    )
+    dataset = DatasetManifest(
+        dataset_id="recorded-lme6-fixture",
+        revision="recorded-v1",
+        split="fixture",
+        manifest_hash=canonical_sha256(["recorded-lme6-fixture", source_file]),
+        source_files=(source_file,),
+        payload_policy="generated-fixture",
+    )
+    rows = []
+    for index in range(1, 7):
+        session = LongMemEvalSession(
+            session_id=f"session-{index}",
+            raw_timestamp=f"2026/01/{index:02d} (Thu) 00:00",
+            canonical_timestamp=f"2026-01-{index:02d}T00:00:00+00:00",
+            messages=(
+                LongMemEvalMessage(
+                    role="user",
+                    content=f"source {index}",
+                    has_answer=True,
+                ),
+            ),
+        )
+        rows.append(
+            LongMemEvalRow(
+                source_row_number_1_indexed=index,
+                question_id=f"question-{index}",
+                question_type="multi-session",
+                question=f"What is recorded item {index}?",
+                answer=f"Recorded item {index}.",
+                raw_question_timestamp=f"2026/02/{index:02d} (Fri) 00:00",
+                canonical_question_timestamp=f"2026-02-{index:02d}T00:00:00+00:00",
+                answer_session_ids=(session.session_id,),
+                message_has_answer_session_ids=(session.session_id,),
+                sessions=(session,),
+            )
+        )
+    return LongMemEvalWorkload(
+        _build_bundle(dataset, tuple(rows), workload_id="recorded-lme6-fixture-v1")
     )
 
 
@@ -332,30 +385,33 @@ def _memory_factory(
     )
 
 
-def _real_lme6_memory_factory(
-    store: ArtifactStorePort,
-    plans: tuple[IngestionPlan, ...],
-) -> HindsightAdapter:
-    service = _RecordedHindsightService(
-        {
-            _bank_id(
-                ingestion_occurrence_id(
-                    REAL_LME6_RUN_ID,
-                    "hindsight",
-                    plan.ingestion_plan_id,
-                )
-            ): plan.ordered_source_units
-            for plan in plans
-        }
-    )
-    return HindsightAdapter(
-        store=store,
-        base_url="https://hindsight.example",
-        configured_extraction_model="fixture-extractor",
-        runtime_extraction_model="fixture-extractor@runtime",
-        runtime_binding_hash=RUNTIME_BINDING_HASH,
-        transport=httpx.MockTransport(service),
-    )
+def _recorded_lme6_memory_factory(run_id: str):  # type: ignore[no-untyped-def]
+    def factory(
+        store: ArtifactStorePort,
+        plans: tuple[IngestionPlan, ...],
+    ) -> HindsightAdapter:
+        service = _RecordedHindsightService(
+            {
+                _bank_id(
+                    ingestion_occurrence_id(
+                        run_id,
+                        "hindsight",
+                        plan.ingestion_plan_id,
+                    )
+                ): plan.ordered_source_units
+                for plan in plans
+            }
+        )
+        return HindsightAdapter(
+            store=store,
+            base_url="https://hindsight.example",
+            configured_extraction_model="fixture-extractor",
+            runtime_extraction_model="fixture-extractor@runtime",
+            runtime_binding_hash=RUNTIME_BINDING_HASH,
+            transport=httpx.MockTransport(service),
+        )
+
+    return factory
 
 
 def _model_binding(
@@ -453,15 +509,18 @@ def _run_recorded_hindsight(tmp_path: Path) -> NativeRunArtifacts:
 def _run_recorded_hindsight_lme6(
     tmp_path: Path,
     workload: LongMemEvalWorkload,
+    *,
+    run_id: str = REAL_LME6_RUN_ID,
+    partition: CasePartitionSpec | None = None,
 ) -> NativeRunArtifacts:
     return run_native_vertical_slice(
         output_root=tmp_path / "capsules",
-        run_id=REAL_LME6_RUN_ID,
+        run_id=run_id,
         adapter_profile_id="hindsight-rest-v1",
         workload=workload,
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
         artifact_store_factory=ArtifactStore,
-        memory_factory=_real_lme6_memory_factory,
+        memory_factory=_recorded_lme6_memory_factory(run_id),
         model_factory=lambda store: _model_factory(
             store,
             role=ModelRole.ANSWER,
@@ -480,6 +539,7 @@ def _run_recorded_hindsight_lme6(
             thinking_effort="high",
         ),
         judge_role_binding_id=LME_JUDGE_PROMPT_PACK_ID,
+        partition=partition,
     )
 
 
@@ -785,6 +845,63 @@ def test_real_lme_hindsight_and_model_clients_seal_one_root_validatable_capsule(
     assert completed.case_records[0].prompt_raw_ref == completed.case_records[0].prompt_sha256
     assert completed.case_records[0].judge_prompt_raw_ref is not None
     assert completed.case_records[0].evaluation_disposition == "judged"
+
+
+def test_recorded_lme6_composes_three_plus_three_into_six(tmp_path: Path) -> None:
+    workload = _six_case_workload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    case_plans = workload.iter_case_plans(manifest)
+
+    def partition(run_id: str, requested: tuple[str, ...]) -> CasePartitionSpec:
+        return build_case_partition_spec(
+            run_id=run_id,
+            resolved_plan_hash=canonical_sha256(["recorded-lme6-composition-plan"]),
+            cell_spec_hash=canonical_sha256(["recorded-lme6-composition-cell"]),
+            dataset_manifest_hash=dataset.manifest_hash,
+            case_manifest=manifest,
+            case_plans=case_plans,
+            requested_case_manifest_entry_ids=requested,
+            budget_policy_hash=canonical_sha256(["recorded-lme6-budget-policy"]),
+            retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+        )
+
+    first_partition = partition(
+        "recorded-lme6-part-a",
+        tuple(plan.ordered_case_manifest_entry_ids[0] for plan in manifest.ingestion_plans[:3]),
+    )
+    second_partition = partition(
+        "recorded-lme6-part-b",
+        tuple(plan.ordered_case_manifest_entry_ids[0] for plan in manifest.ingestion_plans[3:]),
+    )
+    first = _run_recorded_hindsight_lme6(
+        tmp_path,
+        workload,
+        run_id=first_partition.run_id,
+        partition=first_partition,
+    )
+    second = _run_recorded_hindsight_lme6(
+        tmp_path,
+        workload,
+        run_id=second_partition.run_id,
+        partition=second_partition,
+    )
+
+    composed = compose_capsules(
+        (first.capsule_root, second.capsule_root),
+        tmp_path / "recorded-lme6-composed",
+    )
+
+    validation = validate_source_root(composed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+    assert len(composed.composition.ordered_contributions) == 6
+    assert (
+        sum(
+            len(contribution.case_manifest_entry_ids)
+            for contribution in composed.composition.ordered_contributions
+        )
+        == 6
+    )
 
 
 @pytest.mark.skipif(not REAL_LME_SOURCE.is_file(), reason="pinned LongMemEval data is absent")

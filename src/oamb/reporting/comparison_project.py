@@ -18,6 +18,8 @@ from typing import Any
 
 from oamb.artifacts.atomic import read_regular_file
 from oamb.artifacts.capsule import publish_with_last_marker, verify_published_directory
+from oamb.artifacts.composition import inspect_embedded_composition
+from oamb.artifacts.validation.composition import declares_composition
 from oamb.artifacts.validation.retrieval_request import (
     retrieval_request_proves_generation_free,
 )
@@ -91,6 +93,8 @@ class _CellSnapshot:
     costs: tuple[dict[str, Any], ...]
     run_record: dict[str, Any]
     retrieval_runtime_proof_state: str
+    infrastructure_retries: tuple[dict[str, Any], ...] = ()
+    composition_part_states: tuple[str, ...] = ()
 
 
 def build_comparison_project(
@@ -242,39 +246,16 @@ def _load_cell_snapshot(
             f"cell {cell.cell_id} validation target does not bind the root"
         )
 
-    documents: dict[str, list[tuple[bytes, dict[str, Any]]]] = {}
-    raw_payloads: dict[str, bytes] = {}
-    for entry in manifest.source_entries:
-        try:
-            content = read_regular_file(root / entry.relative_path)
-        except Exception as exc:
-            raise ComparisonProjectError(
-                f"cell {cell.cell_id} source entry cannot be reopened"
-            ) from exc
-        if hashlib.sha256(content).hexdigest() != entry.sha256:
-            raise ComparisonProjectError(f"cell {cell.cell_id} source entry hash drifted")
-        if entry.record_kind == "raw_payload":
-            try:
-                payload = (
-                    gzip.decompress(content) if entry.relative_path.endswith(".gz") else content
-                )
-            except (OSError, EOFError) as exc:
-                raise ComparisonProjectError(
-                    f"cell {cell.cell_id} raw request evidence cannot be reopened"
-                ) from exc
-            if hashlib.sha256(payload).hexdigest() != entry.record_id:
-                raise ComparisonProjectError(f"cell {cell.cell_id} raw payload identity drifted")
-            raw_payloads[entry.record_id] = payload
-            continue
-        try:
-            document = json.loads(content, object_pairs_hook=_unique_json_object)
-        except (TypeError, ValueError) as exc:
-            raise ComparisonProjectError(
-                f"cell {cell.cell_id} source record is not strict JSON"
-            ) from exc
-        if not isinstance(document, dict) or document.get("schema_name") != entry.record_kind:
-            raise ComparisonProjectError(f"cell {cell.cell_id} source record kind drifted")
-        documents.setdefault(entry.record_kind, []).append((content, document))
+    if declares_composition(root):
+        return _load_composed_cell_snapshot(
+            plan,
+            cell,
+            root,
+            manifest,
+            supplied_validation,
+        )
+
+    documents, raw_payloads = _read_source_documents(root, manifest, cell.cell_id)
 
     run_spec = _exact_document(documents, "run_spec", cell.cell_id)
     preflight = _exact_document(documents, "run_preflight_record", cell.cell_id)
@@ -286,6 +267,9 @@ def _load_cell_snapshot(
     token_usage = tuple(item[1] for item in documents.get("token_usage_record", ()))
     resources = tuple(item[1] for item in documents.get("resource_usage_record", ()))
     costs = tuple(item[1] for item in documents.get("cost_record", ()))
+    infrastructure_retries = tuple(
+        item[1] for item in documents.get("infrastructure_retry_event", ())
+    )
 
     if manifest.run_id != run_spec.get("run_id") or run_record.get("run_id") != manifest.run_id:
         raise ComparisonProjectError(f"cell {cell.cell_id} run identity does not close")
@@ -370,7 +354,250 @@ def _load_cell_snapshot(
         costs=costs,
         run_record=run_record,
         retrieval_runtime_proof_state=retrieval_proof_state,
+        infrastructure_retries=infrastructure_retries,
     )
+
+
+def _load_composed_cell_snapshot(
+    plan: ResolvedPlan,
+    cell: CellSpec,
+    root: Path,
+    manifest: CapsuleManifest,
+    validation: ValidationResult,
+) -> _CellSnapshot:
+    composition, embedded_roots = inspect_embedded_composition(root)
+    if (
+        composition.resolved_plan_hash != plan.resolved_plan_hash
+        or composition.cell_spec_hash != cell.cell_spec_hash
+        or composition.target_case_manifest_hash != cell.case_manifest_hash
+        or composition.budget_policy_hash != cell.limits_hash
+    ):
+        raise ComparisonProjectError(f"cell {cell.cell_id} composition binding does not close")
+
+    part_documents: dict[str, dict[str, list[tuple[bytes, dict[str, Any]]]]] = {}
+    merged_raw_payloads: dict[str, bytes] = {}
+    case_manifest_bytes: bytes | None = None
+    case_manifest: dict[str, Any] | None = None
+    starts: list[str] = []
+    ends: list[str] = []
+    for binding, embedded_root in zip(composition.ordered_parts, embedded_roots, strict=True):
+        embedded_manifest = CapsuleManifest.model_validate_json(
+            read_regular_file(embedded_root / "capsule-manifest.json")
+        )
+        if embedded_manifest.capsule_id != binding.capsule_id:
+            raise ComparisonProjectError(
+                f"cell {cell.cell_id} embedded part identity does not close"
+            )
+        documents, raw_payloads = _read_source_documents(
+            embedded_root,
+            embedded_manifest,
+            cell.cell_id,
+        )
+        part_documents[binding.capsule_id] = documents
+        for raw_id, payload in raw_payloads.items():
+            previous = merged_raw_payloads.setdefault(raw_id, payload)
+            if previous != payload:
+                raise ComparisonProjectError(f"cell {cell.cell_id} embedded raw identity collides")
+        current_manifest_bytes, current_manifest = _exact_record(
+            documents, "case_manifest", cell.cell_id
+        )
+        if case_manifest_bytes is None:
+            case_manifest_bytes = current_manifest_bytes
+            case_manifest = current_manifest
+        elif current_manifest_bytes != case_manifest_bytes:
+            raise ComparisonProjectError(f"cell {cell.cell_id} embedded case manifests differ")
+        run_spec = _exact_document(documents, "run_spec", cell.cell_id)
+        preflight = _exact_document(documents, "run_preflight_record", cell.cell_id)
+        dataset = _exact_document(documents, "dataset_manifest", cell.cell_id)
+        part_run_record = _exact_document(documents, "run_record", cell.cell_id)
+        if (
+            run_spec.get("run_id") != binding.run_id
+            or run_spec.get("memory_system_id") != cell.provider_id
+            or run_spec.get("workload_id") != cell.workload_id
+            or run_spec.get("case_manifest_hash") != cell.case_manifest_hash
+            or preflight.get("run_id") != binding.run_id
+            or preflight.get("resolved_plan_hash") != plan.resolved_plan_hash
+            or preflight.get("adapter_profile_id") != cell.adapter_profile_id
+            or dataset.get("dataset_id") != cell.dataset_id
+            or dataset.get("revision") != plan.dataset.revision
+        ):
+            raise ComparisonProjectError(
+                f"cell {cell.cell_id} embedded part does not close the resolved cell"
+            )
+        source_files = dataset.get("source_files")
+        if not isinstance(source_files, list) or tuple(
+            item.get("sha256") for item in source_files if isinstance(item, dict)
+        ) != (cell.source_sha256,):
+            raise ComparisonProjectError(
+                f"cell {cell.cell_id} embedded dataset source does not close"
+            )
+        if isinstance(part_run_record.get("started_at"), str):
+            starts.append(part_run_record["started_at"])
+        if isinstance(part_run_record.get("ended_at"), str):
+            ends.append(part_run_record["ended_at"])
+
+    if case_manifest_bytes is None or case_manifest is None:
+        raise ComparisonProjectError(f"cell {cell.cell_id} composition has no case manifest")
+    manifest_cases = case_manifest.get("cases")
+    if not isinstance(manifest_cases, list):
+        raise ComparisonProjectError(f"cell {cell.cell_id} case manifest inventory is invalid")
+    expected_case_ids = tuple(
+        _required_text(item, "case_manifest_entry_id") for item in manifest_cases
+    )
+    expected_count = _expected_case_count(plan.dataset.selection)
+    if expected_count is not None and len(expected_case_ids) != expected_count:
+        raise ComparisonProjectError(
+            f"cell {cell.cell_id} case manifest requires {expected_count} cases"
+        )
+
+    selected_case_records: list[dict[str, Any]] = []
+    ingestion_occurrence_ids: list[str] = []
+    case_occurrence_ids: list[str] = []
+    for contribution in composition.ordered_contributions:
+        documents = part_documents[contribution.source_capsule_id]
+        cases_by_occurrence = _unique_by(
+            tuple(item[1] for item in documents.get("case_record", ())),
+            "case_occurrence_id",
+            "case record",
+        )
+        contributed_cases = tuple(
+            cases_by_occurrence[occurrence_id] for occurrence_id in contribution.case_occurrence_ids
+        )
+        if (
+            tuple(_required_text(item, "case_manifest_entry_id") for item in contributed_cases)
+            != contribution.case_manifest_entry_ids
+        ):
+            raise ComparisonProjectError(
+                f"cell {cell.cell_id} composition case provenance does not close"
+            )
+        selected_case_records.extend(contributed_cases)
+        ingestion_occurrence_ids.append(contribution.ingestion_occurrence_id)
+        case_occurrence_ids.extend(contribution.case_occurrence_ids)
+
+    all_attempts = tuple(
+        item[1]
+        for binding in composition.ordered_parts
+        for item in part_documents[binding.capsule_id].get("attempt_record", ())
+    )
+    all_usage = tuple(
+        item[1]
+        for binding in composition.ordered_parts
+        for item in part_documents[binding.capsule_id].get("token_usage_record", ())
+    )
+    all_resources = tuple(
+        item[1]
+        for binding in composition.ordered_parts
+        for item in part_documents[binding.capsule_id].get("resource_usage_record", ())
+    )
+    all_costs = tuple(
+        item[1]
+        for binding in composition.ordered_parts
+        for item in part_documents[binding.capsule_id].get("cost_record", ())
+    )
+    all_infrastructure_retries = tuple(
+        item[1]
+        for binding in composition.ordered_parts
+        for item in part_documents[binding.capsule_id].get("infrastructure_retry_event", ())
+    )
+    for values, identity, label in (
+        (all_attempts, "attempt_id", "composed attempt"),
+        (all_usage, "usage_record_id", "composed token usage"),
+        (all_resources, "resource_record_id", "composed resource usage"),
+        (all_costs, "cost_record_id", "composed cost"),
+        (all_infrastructure_retries, "retry_event_id", "composed retry event"),
+    ):
+        _unique_by(values, identity, label)
+
+    cases_by_manifest_id = _unique_by(
+        tuple(selected_case_records),
+        "case_manifest_entry_id",
+        "composed case record",
+    )
+    try:
+        ordered_cases = tuple(cases_by_manifest_id[case_id] for case_id in expected_case_ids)
+    except KeyError as exc:
+        raise ComparisonProjectError(
+            f"cell {cell.cell_id} composed cases do not close the target manifest"
+        ) from exc
+    if len(cases_by_manifest_id) != len(expected_case_ids) or any(
+        case_record.get("adapter_profile_id") != cell.adapter_profile_id
+        for case_record in ordered_cases
+    ):
+        raise ComparisonProjectError(f"cell {cell.cell_id} composed case record binding drifted")
+    run_record: dict[str, Any] = {
+        "schema_name": "run_record",
+        "schema_version": 1,
+        "run_id": composition.composition_id,
+        "state": "finalized",
+        "started_at": min(starts) if starts else None,
+        "ended_at": max(ends) if ends else None,
+        "ingestion_occurrence_ids": ingestion_occurrence_ids,
+        "case_occurrence_ids": case_occurrence_ids,
+    }
+    retrieval_proof_state = _retrieval_runtime_proof(
+        cell,
+        ordered_cases,
+        merged_raw_payloads,
+    )
+    return _CellSnapshot(
+        cell=cell,
+        root=root,
+        source_root_hash=manifest.source_manifest_hash,
+        validation_hash=canonical_sha256(validation),
+        run_id=composition.composition_id,
+        case_manifest_bytes=case_manifest_bytes,
+        case_manifest=case_manifest,
+        cases=ordered_cases,
+        attempts=all_attempts,
+        token_usage=all_usage,
+        resources=all_resources,
+        costs=all_costs,
+        run_record=run_record,
+        retrieval_runtime_proof_state=retrieval_proof_state,
+        infrastructure_retries=all_infrastructure_retries,
+        composition_part_states=tuple(
+            binding.run_state.value for binding in composition.ordered_parts
+        ),
+    )
+
+
+def _read_source_documents(
+    root: Path,
+    manifest: CapsuleManifest,
+    cell_id: str,
+) -> tuple[dict[str, list[tuple[bytes, dict[str, Any]]]], dict[str, bytes]]:
+    documents: dict[str, list[tuple[bytes, dict[str, Any]]]] = {}
+    raw_payloads: dict[str, bytes] = {}
+    for entry in manifest.source_entries:
+        try:
+            content = read_regular_file(root / entry.relative_path)
+        except Exception as exc:
+            raise ComparisonProjectError(f"cell {cell_id} source entry cannot be reopened") from exc
+        if hashlib.sha256(content).hexdigest() != entry.sha256:
+            raise ComparisonProjectError(f"cell {cell_id} source entry hash drifted")
+        if entry.record_kind == "raw_payload":
+            try:
+                payload = (
+                    gzip.decompress(content) if entry.relative_path.endswith(".gz") else content
+                )
+            except (OSError, EOFError) as exc:
+                raise ComparisonProjectError(
+                    f"cell {cell_id} raw request evidence cannot be reopened"
+                ) from exc
+            if hashlib.sha256(payload).hexdigest() != entry.record_id:
+                raise ComparisonProjectError(f"cell {cell_id} raw payload identity drifted")
+            raw_payloads[entry.record_id] = payload
+            continue
+        try:
+            document = json.loads(content, object_pairs_hook=_unique_json_object)
+        except (TypeError, ValueError) as exc:
+            raise ComparisonProjectError(
+                f"cell {cell_id} source record is not strict JSON"
+            ) from exc
+        if not isinstance(document, dict) or document.get("schema_name") != entry.record_kind:
+            raise ComparisonProjectError(f"cell {cell_id} source record kind drifted")
+        documents.setdefault(entry.record_kind, []).append((content, document))
+    return documents, raw_payloads
 
 
 def _require_shared_case_manifest(
@@ -412,6 +639,21 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
             f"{len(snapshot.cases) - len(judged)} of {len(snapshot.cases)} cases are outside the "
             "judged accuracy denominator"
         )
+    if snapshot.composition_part_states:
+        limitations.append(
+            f"composed from {len(snapshot.composition_part_states)} immutable part capsules"
+        )
+        limitations.append(
+            "accounting includes all recovery-part work; cell elapsed spans inter-part gaps"
+        )
+        nonfinal = tuple(
+            state for state in snapshot.composition_part_states if state != "finalized"
+        )
+        if nonfinal:
+            limitations.append(
+                "resume source part states "
+                f"{','.join(nonfinal)}; only terminal-success whole-plan groups contributed"
+            )
     return {
         "cell_id": snapshot.cell.cell_id,
         "cell_spec_hash": snapshot.cell.cell_spec_hash,
@@ -459,6 +701,25 @@ def _accounting_document(snapshot: _CellSnapshot) -> dict[str, object]:
     cost_document = _cost_document(snapshot.costs)
     return {
         "attempts": _attempt_document(snapshot.attempts),
+        "infrastructure_retries": {
+            "rejection_count": len(snapshot.infrastructure_retries),
+            "internal_retry_count": sum(
+                int(item.get("internal_retry_count", 0)) for item in snapshot.infrastructure_retries
+            ),
+            "scheduled_retry_count": sum(
+                item.get("retry_scheduled") is True for item in snapshot.infrastructure_retries
+            ),
+            "total_retry_count": sum(
+                int(item.get("internal_retry_count", 0)) + int(item.get("retry_scheduled") is True)
+                for item in snapshot.infrastructure_retries
+            ),
+            "backoff_seconds": sum(
+                int(item["backoff_seconds"])
+                for item in snapshot.infrastructure_retries
+                if isinstance(item.get("backoff_seconds"), int)
+            ),
+            "measurement_coverage": "complete",
+        },
         "tokens": token_stages,
         "resources": resource_document,
         "cost": cost_document,

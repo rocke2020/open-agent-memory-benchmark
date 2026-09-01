@@ -24,6 +24,7 @@ class RunState(StrEnum):
     REJECTED = "rejected"
     INTERRUPTED = "interrupted"
     ABORTED = "aborted"
+    INFRASTRUCTURE_BLOCKED = "infrastructure_blocked"
 
 
 class ValidationDisposition(StrEnum):
@@ -90,6 +91,7 @@ class TransitionEvent(StrEnum):
     SEAL_RUN = "seal_run"
     INTERRUPT = "interrupt"
     ABORT = "abort"
+    BLOCK_INFRASTRUCTURE = "block_infrastructure"
     RESUME = "resume"
     VALIDATION_PASS = "validation_pass"
     VALIDATION_FAIL = "validation_fail"
@@ -135,6 +137,11 @@ _TRANSITIONS: dict[tuple[EntityKind, StateValue, TransitionEvent], StateValue] =
     (EntityKind.RUN, RunState.FINALIZING, TransitionEvent.SEAL_RUN): RunState.FINALIZED,
     (EntityKind.RUN, RunState.RUNNING, TransitionEvent.INTERRUPT): RunState.INTERRUPTED,
     (EntityKind.RUN, RunState.RUNNING, TransitionEvent.ABORT): RunState.ABORTED,
+    (
+        EntityKind.RUN,
+        RunState.RUNNING,
+        TransitionEvent.BLOCK_INFRASTRUCTURE,
+    ): RunState.INFRASTRUCTURE_BLOCKED,
     (EntityKind.RUN, RunState.INTERRUPTED, TransitionEvent.RESUME): RunState.RUNNING,
     (
         EntityKind.VALIDATION,

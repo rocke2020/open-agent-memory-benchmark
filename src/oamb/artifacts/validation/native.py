@@ -63,6 +63,7 @@ from oamb.contracts.evidence import (
     CaseEvaluationDisposition,
     CaseRecordV3,
     CloseErrorRecord,
+    InfrastructureRetryEvent,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
     OccurrenceClaimRecord,
@@ -71,6 +72,7 @@ from oamb.contracts.evidence import (
     ValidationIssue,
     ValidationResult,
     ValidationSeverity,
+    infrastructure_supplier_call_id,
 )
 from oamb.contracts.ids import (
     canonical_sha256,
@@ -79,9 +81,13 @@ from oamb.contracts.ids import (
 )
 from oamb.contracts.ports import NativeEvidenceCandidate
 from oamb.contracts.specifications import (
+    INFRASTRUCTURE_MAX_TOTAL_RETRIES,
+    INFRASTRUCTURE_RETRY_BACKOFF_SECONDS,
+    INFRASTRUCTURE_RETRY_POLICY_HASH,
     BudgetSpecV2,
     BudgetSpecV4,
     CaseManifest,
+    CasePartitionSpec,
     DatasetManifest,
     ModelRoleBindingV2,
     RunPreflightRecord,
@@ -94,6 +100,7 @@ from oamb.contracts.states import (
     RunState,
     ValidationDisposition,
 )
+from oamb.contracts.supplier_rejection import parse_structured_supplier_rejection
 from oamb.memory_systems.hindsight.normalize import normalize_recall
 from oamb.memory_systems.hindsight.profiles import (
     PROFILE_ID as HINDSIGHT_PROFILE_ID,
@@ -106,6 +113,15 @@ from oamb.memory_systems.hindsight.profiles import (
 from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
 
 NATIVE_EVIDENCE_PROFILE_ID = "oamb-t8-native-evidence-v1"
+PARTITION_EVIDENCE_PROFILE_ID = "oamb-case-partition-evidence-v1"
+PARTITION_STRUCTURAL_RULE_ID = "native.partition-structural.v1"
+_ALLOWED_PARTITION_TERMINAL_ISSUES = frozenset(
+    {
+        "native-record-inventory-incomplete",
+        "native-manifest-record-inventory-mismatch",
+        "native-run-terminal-mismatch",
+    }
+)
 NATIVE_EVIDENCE_RULE_IDS = (
     "native.manifest-schema.v1",
     "native.raw-closure.v1",
@@ -184,6 +200,45 @@ def validate_native_capsule(capsule_root: Path) -> ValidationResult:
         implementation_versions=tuple(f"{rule_id}@1" for rule_id in NATIVE_EVIDENCE_RULE_IDS),
         issues=tuple(issues),
     )
+
+
+def validate_partition_capsule(capsule_root: Path) -> ValidationResult:
+    """Validate a sealed partition, allowing truthful aborted/blocked inventory gaps."""
+
+    native_result = validate_native_capsule(capsule_root)
+    if native_result.disposition == ValidationDisposition.VALIDATED:
+        return native_result
+    snapshot = _load_native_capsule(Path(capsule_root))
+    runs = _contracts(snapshot, RunRecord)
+    partitions = _contracts(snapshot, CasePartitionSpec)
+    acceptable = bool(
+        len(runs) == 1
+        and len(partitions) == 1
+        and runs[0].state in {RunState.ABORTED, RunState.INFRASTRUCTURE_BLOCKED}
+        and native_result.failed_rule_ids == (NATIVE_EVIDENCE_RULE_IDS[0],)
+        and native_result.issues
+        and all(
+            issue.rule_id == NATIVE_EVIDENCE_RULE_IDS[0]
+            and issue.code in _ALLOWED_PARTITION_TERMINAL_ISSUES
+            for issue in native_result.issues
+        )
+    )
+    target_hash = native_result.target_hash
+    if acceptable:
+        return ValidationResult(
+            validation_profile_id=PARTITION_EVIDENCE_PROFILE_ID,
+            target_hash=target_hash,
+            disposition=ValidationDisposition.VALIDATED,
+            required_rule_ids=(PARTITION_STRUCTURAL_RULE_ID,),
+            executed_rule_ids=(PARTITION_STRUCTURAL_RULE_ID,),
+            passed_rule_ids=(PARTITION_STRUCTURAL_RULE_ID,),
+            failed_rule_ids=(),
+            not_applicable_rule_ids=(),
+            missing_rule_ids=(),
+            implementation_versions=(f"{PARTITION_STRUCTURAL_RULE_ID}@1",),
+            issues=(),
+        )
+    return native_result
 
 
 def _load_native_capsule(root: Path) -> _NativeCapsuleSnapshot:
@@ -282,6 +337,8 @@ def _parse_native_contract(document: dict[str, Any], content: bytes) -> BaseMode
         return IngestionPlanRecordV2.model_validate_json(content)
     if identity == ("ingestion_plan_record", 3):
         return IngestionPlanRecordV3.model_validate_json(content)
+    if identity == ("infrastructure_retry_event", 1):
+        return InfrastructureRetryEvent.model_validate_json(content)
     if identity == ("occurrence_claim_record", 1):
         return OccurrenceClaimRecord.model_validate_json(content)
     if identity == ("run_lease_record", 1):
@@ -290,6 +347,8 @@ def _parse_native_contract(document: dict[str, Any], content: bytes) -> BaseMode
         return RunRecord.model_validate_json(content)
     if identity == ("case_manifest", 1):
         return CaseManifest.model_validate_json(content)
+    if identity == ("case_partition_spec", 1):
+        return CasePartitionSpec.model_validate_json(content)
     if identity == ("dataset_manifest", 1):
         return DatasetManifest.model_validate_json(content)
     if identity == ("token_usage_record", 1):
@@ -330,8 +389,10 @@ def _source_record_id(document: dict[str, Any]) -> str | None:
         "attempt_record": "attempt_id",
         "budget_reservation_record": "reservation_id",
         "case_record": "case_occurrence_id",
+        "case_partition_spec": "partition_id",
         "close_error_record": "close_error_id",
         "ingestion_plan_record": "ingestion_occurrence_id",
+        "infrastructure_retry_event": "retry_event_id",
         "occurrence_claim_record": "claim_id",
         "run_lease_record": "lease_record_hash",
         "run_record": "run_id",
@@ -437,6 +498,7 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
     runs = _contracts(snapshot, RunRecord)
     datasets = _contracts(snapshot, DatasetManifest)
     case_manifests = _contracts(snapshot, CaseManifest)
+    partitions = _contracts(snapshot, CasePartitionSpec)
     run_specs = _contracts(snapshot, RunSpec)
     run_preflights = _contracts(snapshot, RunPreflightRecord)
     expected_plan_occurrence_ids: tuple[str, ...] = ()
@@ -514,20 +576,75 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         if manifest.run_spec_hash != expected_run_spec_hash:
             issues.append(_issue(rule_id, manifest.capsule_id, "run-spec-binding-mismatch"))
         case_manifest = case_manifests[0]
+        partition = partitions[0] if len(partitions) == 1 else None
+        if len(partitions) > 1:
+            issues.append(_issue(rule_id, manifest.capsule_id, "partition-inventory-mismatch"))
+        if partition is not None:
+            requested = set(partition.requested_case_manifest_entry_ids)
+            expected_partition_plans = tuple(
+                plan
+                for plan in case_manifest.ingestion_plans
+                if requested.intersection(plan.ordered_case_manifest_entry_ids)
+            )
+            expected_partition_case_ids = tuple(
+                case_id
+                for plan in expected_partition_plans
+                for case_id in plan.ordered_case_manifest_entry_ids
+            )
+            live_partition_closes = bool(
+                not run_specs
+                and not run_preflights
+                or len(run_specs) == len(run_preflights) == 1
+                and partition.resolved_plan_hash == run_preflights[0].resolved_plan_hash
+                and partition.cell_spec_hash == run_preflights[0].adapter_profile_hash
+                and partition.dataset_manifest_hash == run_specs[0].dataset_manifest_hash
+                and partition.target_case_manifest_hash == run_specs[0].case_manifest_hash
+            )
+            partition_closes = bool(
+                partition.run_id == manifest.run_id
+                and partition.dataset_manifest_hash == datasets[0].manifest_hash
+                and partition.target_case_manifest_hash == case_manifest.manifest_hash
+                and partition.selected_ingestion_plan_ids
+                == tuple(plan.ingestion_plan_id for plan in expected_partition_plans)
+                and partition.selected_case_manifest_entry_ids == expected_partition_case_ids
+                and tuple(
+                    binding.case_manifest_entry_id
+                    for binding in partition.target_case_execution_bindings
+                )
+                == tuple(case.case_manifest_entry_id for case in case_manifest.cases)
+                and partition.retry_policy_hash == INFRASTRUCTURE_RETRY_POLICY_HASH
+                and live_partition_closes
+            )
+            if not partition_closes:
+                issues.append(_issue(rule_id, partition.partition_id, "partition-binding-mismatch"))
+        expected_manifest_plan_ids = (
+            set(partition.selected_ingestion_plan_ids)
+            if partition is not None
+            else {plan.ingestion_plan_id for plan in case_manifest.ingestion_plans}
+        )
+        expected_manifest_case_ids = (
+            set(partition.selected_case_manifest_entry_ids)
+            if partition is not None
+            else {case.case_manifest_entry_id for case in case_manifest.cases}
+        )
+        selected_manifest_plans = tuple(
+            plan
+            for plan in case_manifest.ingestion_plans
+            if plan.ingestion_plan_id in expected_manifest_plan_ids
+        )
         plan_records_by_id = {plan.ingestion_plan_id: plan for plan in plans}
         case_records_by_manifest_id = {case.case_manifest_entry_id: case for case in cases}
         inventory_closed = bool(
             len(plan_records_by_id) == len(plans)
             and len(case_records_by_manifest_id) == len(cases)
-            and set(plan_records_by_id)
-            == {plan.ingestion_plan_id for plan in case_manifest.ingestion_plans}
-            and set(case_records_by_manifest_id)
-            == {case.case_manifest_entry_id for case in case_manifest.cases}
+            and set(plan_records_by_id) == expected_manifest_plan_ids
+            and set(case_records_by_manifest_id) == expected_manifest_case_ids
+            and len(selected_manifest_plans) == len(expected_manifest_plan_ids)
         )
         plan_occurrences: list[str] = []
         case_occurrences: list[str] = []
         if inventory_closed:
-            for manifest_plan in case_manifest.ingestion_plans:
+            for manifest_plan in selected_manifest_plans:
                 plan_record = plan_records_by_id[manifest_plan.ingestion_plan_id]
                 plan_occurrence = ingestion_occurrence_id(
                     manifest.run_id,
@@ -728,6 +845,148 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
                 aligned = False
             if not aligned:
                 issues.append(_issue(rule_id, attempt_id, "attempt-evidence-mismatch"))
+    issues.extend(_infrastructure_retry_issues(snapshot, attempts, runs, partitions))
+    return tuple(issues)
+
+
+def _infrastructure_retry_issues(
+    snapshot: _NativeCapsuleSnapshot,
+    attempts: dict[str, NativeAttemptRecord],
+    runs: tuple[RunRecord, ...],
+    partitions: tuple[CasePartitionSpec, ...],
+) -> tuple[ValidationIssue, ...]:
+    rule_id = "native.manifest-schema.v1"
+    events = _contracts(snapshot, InfrastructureRetryEvent)
+    if not events:
+        if len(runs) == 1 and runs[0].state == RunState.INFRASTRUCTURE_BLOCKED:
+            return (
+                _issue(
+                    rule_id,
+                    runs[0].run_id,
+                    "infrastructure-retry-evidence-mismatch",
+                ),
+            )
+        return ()
+    usage_by_id = {usage.usage_record_id: usage for usage in _token_usage_records(snapshot)}
+    expected_policy_hash = (
+        partitions[0].retry_policy_hash
+        if len(partitions) == 1
+        else INFRASTRUCTURE_RETRY_POLICY_HASH
+    )
+    issues: list[ValidationIssue] = []
+    by_attempt: dict[str, list[InfrastructureRetryEvent]] = {}
+    supplier_call_ids: list[str] = []
+    infrastructure_usage_ids: list[str] = []
+    observed_retry_units = 0
+    for event in events:
+        by_attempt.setdefault(event.logical_attempt_id, []).append(event)
+        supplier_call_ids.append(event.supplier_call_id)
+        infrastructure_usage_ids.extend(event.usage_record_ids)
+        observed_retry_units += event.internal_retry_count + int(event.retry_scheduled)
+    for logical_attempt_id, attempt_events in by_attempt.items():
+        ordered = tuple(sorted(attempt_events, key=lambda item: item.supplier_call_ordinal))
+        ordinals = tuple(item.supplier_call_ordinal for item in ordered)
+        expected_ordinals = tuple(range(1, len(ordered) + 1))
+        terminal_unscheduled = tuple(item for item in ordered if not item.retry_scheduled)
+        attempt = attempts.get(logical_attempt_id)
+        event_usage_closes = all(
+            bool(event.usage_record_ids)
+            and all(
+                (usage := usage_by_id.get(usage_id)) is not None
+                and usage.attempt_id == event.supplier_call_id
+                and usage.raw_response_ref == event.raw_error_ref
+                for usage_id in event.usage_record_ids
+            )
+            for event in ordered
+        )
+        event_proof_closes = all(
+            (
+                classification := parse_structured_supplier_rejection(
+                    snapshot.raw_payloads.get(event.raw_error_ref, b""),
+                    status_code=event.status,
+                )
+            )
+            is not None
+            and (
+                classification.origin,
+                classification.failure_kind,
+                classification.status,
+                classification.acceptance,
+                classification.provider_mutation,
+                classification.retryable,
+                classification.internal_retry_count,
+            )
+            == (
+                event.origin,
+                event.failure_kind,
+                event.status,
+                event.acceptance,
+                event.provider_mutation,
+                event.retryable,
+                event.internal_retry_count,
+            )
+            and event.supplier_call_id
+            == infrastructure_supplier_call_id(
+                logical_attempt_id,
+                event.supplier_call_ordinal,
+                event.raw_error_ref,
+            )
+            for event in ordered
+        )
+        attempt_binding_closes = (
+            bool(
+                attempt is not None
+                and all(
+                    event.run_id == runs[0].run_id
+                    and event.parent_kind == attempt.parent_kind
+                    and event.parent_id == attempt.parent_id
+                    and event.stage == attempt.stage
+                    for event in ordered
+                )
+            )
+            if len(runs) == 1
+            else False
+        )
+        sequence_closes = bool(
+            attempt_binding_closes
+            and ordinals == expected_ordinals
+            and all(
+                event.retry_policy_hash == expected_policy_hash == INFRASTRUCTURE_RETRY_POLICY_HASH
+                and (
+                    event.backoff_seconds
+                    == INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[event.supplier_call_ordinal - 1]
+                    if event.retry_scheduled
+                    and event.supplier_call_ordinal <= len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
+                    else not event.retry_scheduled
+                )
+                for event in ordered
+            )
+            and (
+                not terminal_unscheduled
+                or terminal_unscheduled == (ordered[-1],)
+                and len(runs) == 1
+                and runs[0].state == RunState.INFRASTRUCTURE_BLOCKED
+            )
+            and event_usage_closes
+            and event_proof_closes
+        )
+        if not sequence_closes:
+            issues.append(
+                _issue(rule_id, logical_attempt_id, "infrastructure-retry-evidence-mismatch")
+            )
+    run_retry_closes = bool(
+        len(set(supplier_call_ids)) == len(supplier_call_ids)
+        and len(set(infrastructure_usage_ids)) == len(infrastructure_usage_ids)
+        and observed_retry_units <= INFRASTRUCTURE_MAX_TOTAL_RETRIES
+        and (
+            len(runs) != 1
+            or runs[0].state != RunState.INFRASTRUCTURE_BLOCKED
+            or any(not event.retry_scheduled for event in events)
+        )
+    )
+    if not run_retry_closes:
+        target = runs[0].run_id if len(runs) == 1 else "infrastructure-retry-run"
+        issues.append(_issue(rule_id, target, "infrastructure-retry-evidence-mismatch"))
     return tuple(issues)
 
 
@@ -2089,6 +2348,8 @@ def _all_raw_references(snapshot: _NativeCapsuleSnapshot) -> tuple[str, ...]:
     for usage in _token_usage_records(snapshot):
         if usage.raw_response_ref is not None:
             references.append(usage.raw_response_ref)
+    for event in _contracts(snapshot, InfrastructureRetryEvent):
+        references.append(event.raw_error_ref)
     return tuple(dict.fromkeys(references))
 
 

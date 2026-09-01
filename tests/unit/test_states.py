@@ -72,6 +72,18 @@ def test_unknown_outcome_terminal_states_are_explicit() -> None:
     assert states.ResumeDisposition.REPLACEMENT_RUN_REQUIRED.value == ("replacement_run_required")
 
 
+def test_structured_retry_exhaustion_has_an_explicit_run_terminal() -> None:
+    states = require_states()
+
+    transition = states.apply_transition(
+        states.EntityKind.RUN,
+        states.RunState.RUNNING,
+        states.TransitionEvent.BLOCK_INFRASTRUCTURE,
+    )
+
+    assert transition.next_state == states.RunState.INFRASTRUCTURE_BLOCKED
+
+
 def test_interrupted_run_resumes_only_with_resume_safe_disposition() -> None:
     states = require_states()
 

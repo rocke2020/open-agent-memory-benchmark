@@ -110,6 +110,7 @@ class LiveCell:
     dataset_path: Path
     control: NativeRunControl
     environment: Mapping[str, str] = field(repr=False, compare=False)
+    requested_case_manifest_entry_ids: tuple[str, ...] = ()
     continuation: InitializedContinuation | None = None
 
 
@@ -236,6 +237,7 @@ def execute_live_cell(cell: LiveCell) -> NativeRunArtifacts:
     """Run one already-closed cell through the generic native vertical slice."""
 
     from oamb.artifacts.store import ArtifactStore
+    from oamb.contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
     from oamb.memory_systems.hindsight.adapter import HindsightAdapter
     from oamb.memory_systems.mem0.adapter import Mem0RestAdapter
     from oamb.memory_systems.openviking.session_adapter import (
@@ -243,6 +245,7 @@ def execute_live_cell(cell: LiveCell) -> NativeRunArtifacts:
         maximum_task_polls_for_timeout,
     )
     from oamb.model_clients.openai_compatible import OpenAICompatibleModelClient
+    from oamb.runtime.case_partition import build_case_partition_spec
     from oamb.runtime.native_run import run_native_vertical_slice
 
     source_path = cell.dataset_path
@@ -250,6 +253,21 @@ def execute_live_cell(cell: LiveCell) -> NativeRunArtifacts:
         source_path = Path.cwd() / source_path
     bundle = build_lme6_bundle(build_lme30_bundle(source_path))
     workload = LongMemEvalWorkload(bundle)
+    partition = None
+    if cell.requested_case_manifest_entry_ids:
+        dataset_manifest = workload.resolve_sources()
+        case_manifest = workload.build_case_manifest(dataset_manifest)
+        partition = build_case_partition_spec(
+            run_id=cell.run_id,
+            resolved_plan_hash=cell.plan.resolved_plan_hash,
+            cell_spec_hash=cell.cell.cell_spec_hash,
+            dataset_manifest_hash=dataset_manifest.manifest_hash,
+            case_manifest=case_manifest,
+            case_plans=workload.iter_case_plans(case_manifest),
+            requested_case_manifest_entry_ids=cell.requested_case_manifest_entry_ids,
+            budget_policy_hash=cell.cell.limits_hash,
+            retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+        )
     continuation = None
     if cell.continuation is not None:
         from oamb.runtime.native_continuation import load_openviking_continuation
@@ -347,6 +365,7 @@ def execute_live_cell(cell: LiveCell) -> NativeRunArtifacts:
         judge_role_binding_id=bindings_by_role["judge"].binding_id,
         control=cell.control,
         continuation=continuation,
+        partition=partition,
     )
 
 
@@ -524,6 +543,7 @@ def build_live_cell(
     run_label: str,
     observed_at: datetime,
     code_revision: str,
+    requested_case_manifest_entry_ids: tuple[str, ...] = (),
 ) -> LiveCell:
     """Close one live cell without constructing provider or model clients."""
 
@@ -682,6 +702,7 @@ def build_live_cell(
         dataset_path=Path(plan.dataset.path),
         control=control,
         environment=resolved_environment,
+        requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
     )
 
 

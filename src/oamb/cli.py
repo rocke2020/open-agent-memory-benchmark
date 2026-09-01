@@ -167,6 +167,10 @@ def run_command(
         list[str] | None,
         typer.Option("--cell", help="Ordered frozen cell ID; repeat to select multiple."),
     ] = None,
+    case: Annotated[
+        list[str] | None,
+        typer.Option("--case", help="Ordered case ID; repeat to select whole case-plan groups."),
+    ] = None,
     run_label: Annotated[
         str | None,
         typer.Option("--run-label", help="Fresh operator-chosen run label."),
@@ -199,6 +203,8 @@ def run_command(
 
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
+        if case:
+            raise typer.BadParameter("--case requires a live resolved plan")
         _run_fake_resolved_plan(resolved_plan, scenario=scenario)
         return
 
@@ -220,6 +226,8 @@ def run_command(
         raise typer.BadParameter("fresh live run requires --run-label")
     if continue_from is not None and run_label is not None:
         raise typer.BadParameter("--continue-from and --run-label are mutually exclusive")
+    if continue_from is not None and case:
+        raise typer.BadParameter("--continue-from and --case are mutually exclusive")
     try:
         plan = load_resolved_plan_for_run(resolved_plan)
         environment = load_live_environment(
@@ -233,6 +241,8 @@ def run_command(
             environment=environment,
         )
         selected_cells = select_live_cells(plan, tuple(cell or ()))
+        if case and len(selected_cells) != 1:
+            raise LiveConfigurationError("case partition requires exactly one selected cell")
         code_revision = _live_source_revision()
         observed_at = datetime.now(UTC)
         built_cells = []
@@ -267,6 +277,7 @@ def run_command(
                         run_label=run_label,
                         observed_at=observed_at,
                         code_revision=code_revision,
+                        requested_case_manifest_entry_ids=tuple(case or ()),
                     )
                 )
         for completed in execute_live_cells(tuple(built_cells)):
@@ -381,6 +392,57 @@ def capsule_validate(
     typer.echo(f"{result.disposition.value}: {output}")
     if result.disposition != ValidationDisposition.VALIDATED and not diagnostic:
         raise typer.Exit(code=1)
+
+
+@capsule_app.command("compose")
+def capsule_compose(
+    plan: Annotated[
+        Path,
+        typer.Option("--plan", help="Canonical resolved-plan JSON path."),
+    ],
+    cell: Annotated[
+        str,
+        typer.Option("--cell", help="Frozen target cell ID."),
+    ],
+    part: Annotated[
+        list[Path],
+        typer.Option("--part", help="Sealed part capsule root; repeat for every part."),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Create-only composed capsule root."),
+    ],
+) -> None:
+    """Compose compatible immutable part capsules into one complete cell root."""
+
+    from .artifacts.composition import (
+        CapsuleCompositionError,
+        CapsuleCompositionTarget,
+        compose_capsules,
+    )
+    from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
+    from .contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
+
+    try:
+        resolved = load_resolved_plan_for_run(plan)
+        cells = tuple(item for item in resolved.cells if item.cell_id == cell)
+        if len(cells) != 1:
+            raise CapsuleCompositionError("unknown composition target cell")
+        selected = cells[0]
+        composed = compose_capsules(
+            tuple(part),
+            output,
+            target=CapsuleCompositionTarget(
+                resolved_plan_hash=resolved.resolved_plan_hash,
+                cell_spec_hash=selected.cell_spec_hash,
+                target_case_manifest_hash=selected.case_manifest_hash,
+                budget_policy_hash=selected.limits_hash,
+                retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+            ),
+        )
+    except (OSError, CapsuleCompositionError, ResolvedPlanError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"capsule: {composed.capsule_root}")
 
 
 @app.command("compare")

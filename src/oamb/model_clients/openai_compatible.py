@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+from dataclasses import replace
 from typing import Literal, cast
 
 import httpx
@@ -18,6 +19,7 @@ from oamb.contracts.accounting import (
     TokenUsageRecordV2,
     TokenUsageRecordV3,
 )
+from oamb.contracts.evidence import infrastructure_supplier_call_id
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
     ArtifactStorePort,
@@ -29,6 +31,7 @@ from oamb.contracts.ports import (
     ModelCandidate,
     ModelReceipt,
     ModelRequest,
+    ModelSupplierRateLimitRejection,
     RawPayloadSealRequest,
     RawReferenceHandle,
     ThinkingEffort,
@@ -40,6 +43,7 @@ from oamb.contracts.specifications import (
     ModelRoleBindingV2,
     RoleBindingStatus,
 )
+from oamb.contracts.supplier_rejection import parse_structured_supplier_rejection
 
 RuntimeModelPolicy = Literal["record", "require_match"]
 UsageProfile = Literal["strict-base-v2", "openai-details-v3"]
@@ -213,17 +217,39 @@ class OpenAICompatibleModelClient:
         raw_bytes = response.content
         raw_reference = self._seal_raw(raw_bytes)
         if not 200 <= response.status_code < 300:
+            rejection = parse_structured_supplier_rejection(
+                raw_bytes,
+                status_code=response.status_code,
+            )
+            usage_request = request
+            if rejection is not None:
+                usage_request = replace(
+                    request,
+                    attempt_id=infrastructure_supplier_call_id(
+                        request.attempt_id,
+                        request.supplier_call_ordinal,
+                        raw_reference.sha256,
+                    ),
+                )
             usage_ids = self._seal_unavailable_usage(
-                request,
+                usage_request,
                 raw_reference,
                 reason=f"supplier_http_status_{response.status_code}",
             )
+            if rejection is not None:
+                raise ModelSupplierRateLimitRejection(
+                    "model supplier returned a structured retry-safe 429 rejection",
+                    classification=rejection,
+                    raw_reference=raw_reference,
+                    raw_response_bytes=raw_bytes,
+                    usage_reference_ids=usage_ids,
+                )
             raise ModelCallFailure(
                 f"model supplier returned HTTP {response.status_code}",
                 raw_reference=raw_reference,
                 raw_response_bytes=raw_bytes,
                 usage_reference_ids=usage_ids,
-                retryable=response.status_code in {408, 429} or response.status_code >= 500,
+                retryable=response.status_code == 408 or response.status_code >= 500,
                 failure_kind="supplier_error",
                 supplier_status_code=response.status_code,
             )

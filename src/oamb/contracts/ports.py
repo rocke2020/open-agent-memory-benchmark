@@ -295,10 +295,13 @@ class ModelRequest:
     temperature: str = "0"
     top_p: str = "1"
     stop: tuple[str, ...] | None = None
+    supplier_call_ordinal: int = 1
 
     def __post_init__(self) -> None:
         if self.thinking_effort not in _SUPPORTED_THINKING_EFFORTS:
             raise ValueError("model request thinking effort must be low, high, or max")
+        if self.supplier_call_ordinal < 1:
+            raise ValueError("model request supplier call ordinal must be positive")
 
     @classmethod
     def for_attempt(
@@ -423,6 +426,45 @@ class ModelCallFailure(RuntimeError):
         self.retryable = retryable
         self.failure_kind = failure_kind
         self.supplier_status_code = supplier_status_code
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSupplierRejectionClassification:
+    origin: Literal["model_supplier"]
+    failure_kind: Literal["rate_limited"]
+    status: Literal[429]
+    acceptance: Literal["not_accepted"]
+    provider_mutation: Literal["none"]
+    retryable: Literal[True]
+    internal_retry_count: int
+
+    def __post_init__(self) -> None:
+        if self.internal_retry_count < 0:
+            raise ValueError("supplier internal retry count must be non-negative")
+
+
+class ModelSupplierRateLimitRejection(ModelCallFailure):
+    """Pinned structured proof of a retry-safe model-supplier 429 rejection."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        classification: ModelSupplierRejectionClassification,
+        raw_reference: RawReferenceHandle,
+        raw_response_bytes: bytes,
+        usage_reference_ids: tuple[str, ...],
+    ) -> None:
+        super().__init__(
+            message,
+            raw_reference=raw_reference,
+            raw_response_bytes=raw_response_bytes,
+            usage_reference_ids=usage_reference_ids,
+            retryable=True,
+            failure_kind="rate_limited",
+            supplier_status_code=429,
+        )
+        self.classification = classification
 
 
 class ModelCallUnknownOutcome(RuntimeError):

@@ -272,6 +272,66 @@ class AttemptRecordV4(StrictContract):
         return self
 
 
+def infrastructure_retry_event_id(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-infrastructure-retry-event-v1", fields])
+
+
+def infrastructure_supplier_call_id(
+    logical_attempt_id: str,
+    supplier_call_ordinal: int,
+    raw_error_ref: str,
+) -> str:
+    return canonical_sha256(
+        [
+            "oamb-infrastructure-supplier-call-v1",
+            logical_attempt_id,
+            supplier_call_ordinal,
+            raw_error_ref,
+        ]
+    )
+
+
+class InfrastructureRetryEvent(StrictContract):
+    schema_name: Literal["infrastructure_retry_event"] = "infrastructure_retry_event"
+    schema_version: Literal[1] = 1
+    retry_event_id: Sha256
+    run_id: NonEmptyStr
+    logical_attempt_id: Sha256
+    parent_kind: Literal["ingestion_plan", "case"]
+    parent_id: NonEmptyStr
+    stage: NonEmptyStr
+    supplier_call_ordinal: PositiveInt
+    supplier_call_id: Sha256
+    origin: Literal["model_supplier"]
+    failure_kind: Literal["rate_limited"]
+    status: Literal[429]
+    acceptance: Literal["not_accepted"]
+    provider_mutation: Literal["none"]
+    retryable: Literal[True]
+    internal_retry_count: NonNegativeInt
+    raw_error_ref: Sha256
+    usage_record_ids: tuple[Sha256, ...]
+    retry_policy_hash: Sha256
+    retry_scheduled: bool
+    backoff_seconds: NonNegativeInt | None
+    observed_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def event_identity_and_backoff_are_closed(self) -> Self:
+        if self.retry_scheduled != (self.backoff_seconds is not None):
+            raise ValueError("infrastructure retry schedule and backoff do not match")
+        if self.retry_scheduled and self.backoff_seconds == 0:
+            raise ValueError("scheduled infrastructure retry requires a positive backoff")
+        if len(set(self.usage_record_ids)) != len(self.usage_record_ids):
+            raise ValueError("infrastructure retry usage inventory contains duplicates")
+        expected = infrastructure_retry_event_id(
+            self.model_dump(mode="python", exclude={"retry_event_id"})
+        )
+        if self.retry_event_id != expected:
+            raise ValueError("infrastructure retry event identity does not match its fields")
+        return self
+
+
 def attempt_record_v4_hash(fields: Mapping[str, Any]) -> str:
     payload = dict(fields)
     payload.setdefault("schema_name", "attempt_record")
@@ -1234,6 +1294,110 @@ class CapsuleManifest(StrictContract):
             path == "capsule-manifest.json" or path.startswith("checkpoints/") for path in paths
         ):
             raise ValueError("capsule manifest cannot index itself or checkpoints")
+        return self
+
+
+def capsule_composition_part_binding_hash(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-capsule-composition-part-v1", fields])
+
+
+class CapsuleCompositionPartBinding(StrictContract):
+    schema_name: Literal["capsule_composition_part_binding"] = "capsule_composition_part_binding"
+    schema_version: Literal[1] = 1
+    part_binding_hash: Sha256
+    capsule_id: Sha256
+    run_id: NonEmptyStr
+    manifest_sha256: Sha256
+    partition_id: Sha256
+    embedded_root: NonEmptyStr
+    run_state: RunState
+
+    @model_validator(mode="after")
+    def binding_hash_matches_fields(self) -> Self:
+        if self.embedded_root != f"source/parts/{self.capsule_id}":
+            raise ValueError("composition part embedded root is not canonical")
+        expected = capsule_composition_part_binding_hash(
+            self.model_dump(mode="python", exclude={"part_binding_hash"})
+        )
+        if self.part_binding_hash != expected:
+            raise ValueError("composition part binding hash does not match its fields")
+        return self
+
+
+def capsule_composition_contribution_hash(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-capsule-composition-contribution-v1", fields])
+
+
+class CapsuleCompositionContribution(StrictContract):
+    schema_name: Literal["capsule_composition_contribution"] = "capsule_composition_contribution"
+    schema_version: Literal[1] = 1
+    contribution_hash: Sha256
+    source_capsule_id: Sha256
+    source_run_id: NonEmptyStr
+    ingestion_plan_id: Sha256
+    ingestion_occurrence_id: Sha256
+    case_manifest_entry_ids: tuple[Sha256, ...]
+    case_occurrence_ids: tuple[Sha256, ...]
+
+    @model_validator(mode="after")
+    def contribution_is_closed(self) -> Self:
+        if (
+            not self.case_manifest_entry_ids
+            or len(self.case_manifest_entry_ids) != len(self.case_occurrence_ids)
+            or len(set(self.case_manifest_entry_ids)) != len(self.case_manifest_entry_ids)
+            or len(set(self.case_occurrence_ids)) != len(self.case_occurrence_ids)
+        ):
+            raise ValueError("composition contribution requires paired unique cases")
+        expected = capsule_composition_contribution_hash(
+            self.model_dump(mode="python", exclude={"contribution_hash"})
+        )
+        if self.contribution_hash != expected:
+            raise ValueError("composition contribution hash does not match its fields")
+        return self
+
+
+def capsule_composition_id(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-capsule-composition-v1", fields])
+
+
+class CapsuleCompositionRecord(StrictContract):
+    schema_name: Literal["capsule_composition_record"] = "capsule_composition_record"
+    schema_version: Literal[1] = 1
+    composition_id: Sha256
+    resolved_plan_hash: Sha256
+    cell_spec_hash: Sha256
+    dataset_manifest_hash: Sha256
+    target_case_manifest_hash: Sha256
+    target_case_execution_bindings_hash: Sha256
+    budget_policy_hash: Sha256
+    retry_policy_hash: Sha256
+    execution_configuration_hash: Sha256
+    ordered_parts: tuple[CapsuleCompositionPartBinding, ...]
+    ordered_contributions: tuple[CapsuleCompositionContribution, ...]
+    exact_union_hash: Sha256
+
+    @model_validator(mode="after")
+    def composition_identity_is_canonical(self) -> Self:
+        part_ids = tuple(part.capsule_id for part in self.ordered_parts)
+        plan_ids = tuple(item.ingestion_plan_id for item in self.ordered_contributions)
+        if (
+            not part_ids
+            or part_ids != tuple(sorted(part_ids))
+            or len(set(part_ids)) != len(part_ids)
+            or not plan_ids
+            or len(set(plan_ids)) != len(plan_ids)
+        ):
+            raise ValueError("composition parts and contributions must be unique and canonical")
+        expected_union_hash = canonical_sha256(
+            ["oamb-capsule-composition-exact-union-v1", self.ordered_contributions]
+        )
+        if self.exact_union_hash != expected_union_hash:
+            raise ValueError("composition exact-union hash does not match its contributions")
+        expected_id = capsule_composition_id(
+            self.model_dump(mode="python", exclude={"composition_id"})
+        )
+        if self.composition_id != expected_id:
+            raise ValueError("capsule composition identity does not match its fields")
         return self
 
 

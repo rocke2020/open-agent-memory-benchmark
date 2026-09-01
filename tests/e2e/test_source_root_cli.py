@@ -120,6 +120,19 @@ def test_installed_source_root_commands_have_no_fake_only_or_review_surface() ->
         assert all(term not in output for term in FORBIDDEN_PUBLIC_TERMS)
 
 
+def test_installed_resume_commands_expose_case_selection_and_composition() -> None:
+    run_help = _installed_oamb("run", "--help")
+    compose_help = _installed_oamb("capsule", "compose", "--help")
+
+    assert run_help.returncode == 0, run_help.stdout + run_help.stderr
+    assert compose_help.returncode == 0, compose_help.stdout + compose_help.stderr
+    assert "--case" in run_help.stdout + run_help.stderr
+    assert "--part" in compose_help.stdout + compose_help.stderr
+    assert "--output" in compose_help.stdout + compose_help.stderr
+    assert "--plan" in compose_help.stdout + compose_help.stderr
+    assert "--cell" in compose_help.stdout + compose_help.stderr
+
+
 def test_installed_native_source_root_validates_and_builds_deterministic_offline_report(
     tmp_path: Path,
 ) -> None:

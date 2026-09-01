@@ -8,7 +8,7 @@ import math
 import multiprocessing
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from multiprocessing.connection import Connection
@@ -46,6 +46,7 @@ from oamb.contracts.evidence import (
     CaseEvaluationDisposition,
     CaseRecordV3,
     CloseErrorRecord,
+    InfrastructureRetryEvent,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
     OccurrenceClaimRecord,
@@ -56,6 +57,8 @@ from oamb.contracts.evidence import (
     budget_owner_allocation_hash,
     budget_reservation_v3_hash,
     budget_reservation_v3_id,
+    infrastructure_retry_event_id,
+    infrastructure_supplier_call_id,
 )
 from oamb.contracts.evidence import (
     BudgetOwnerAllocation as EvidenceBudgetOwnerAllocation,
@@ -87,7 +90,9 @@ from oamb.contracts.ports import (
     ModelCallCancelledUnknownOutcome,
     ModelCallUnknownOutcome,
     ModelClientPort,
+    ModelReceipt,
     ModelRequest,
+    ModelSupplierRateLimitRejection,
     NativeEvidenceBatch,
     ProjectionReceipt,
     RawPayloadSealRequest,
@@ -107,9 +112,12 @@ from oamb.contracts.reporting import (
     provider_native_profile_hash,
 )
 from oamb.contracts.specifications import (
+    INFRASTRUCTURE_RETRY_BACKOFF_SECONDS,
+    INFRASTRUCTURE_RETRY_POLICY_HASH,
     BudgetScopeKindV2,
     BudgetScopeKindV3,
     BudgetSpecV4,
+    CasePartitionSpec,
     DispatchBudgetOwnerKind,
     DispatchBudgetRoute,
     MemorySystemRuntimeBindingV2,
@@ -135,6 +143,13 @@ from oamb.runtime.budget import (
 )
 from oamb.runtime.budget import (
     BudgetOwnerAllocation as RuntimeBudgetOwnerAllocation,
+)
+from oamb.runtime.case_partition import select_partition_execution
+from oamb.runtime.infrastructure_retry import (
+    InfrastructureBackoffCancelled,
+    InfrastructureRetryController,
+    InfrastructureRetryExhausted,
+    execute_with_infrastructure_retry,
 )
 from oamb.runtime.memory_query import execute_read_only_retrieval
 from oamb.runtime.native_continuation import (
@@ -542,6 +557,7 @@ class _NativeRunRequest:
     continuation: NativeContinuation | None = None
     lease: RunLeaseRecord | None = None
     provider_lifecycle: ProviderLifecycleBridge | None = None
+    partition: CasePartitionSpec | None = None
 
 
 class _StoppableNativeProcess(Protocol):
@@ -580,6 +596,7 @@ class _NativeExecutionState:
     budget_ledger: BudgetLedger | None = None
     provider_lifecycle: ProviderLifecycleBridge | None = None
     pending_model_usage: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] | None = None
+    infrastructure_retry_controller: InfrastructureRetryController | None = None
     sequence: int = 0
 
     def timestamp(self) -> datetime:
@@ -716,6 +733,93 @@ def _scope_raw_reference(result: object) -> str | None:
     return getattr(raw_reference, "sha256", None)
 
 
+async def _infrastructure_retry_sleep(seconds: int) -> None:
+    await asyncio.sleep(seconds)
+
+
+async def _complete_model_with_infrastructure_retry(
+    state: _NativeExecutionState,
+    *,
+    prepared: _PreparedNativeAttempt,
+    model: ModelClientPort,
+    request: ModelRequest,
+) -> ModelReceipt:
+    controller = state.infrastructure_retry_controller
+    if controller is None:
+        raise RuntimeError("native model retry controller is unavailable")
+
+    async def persist_rejection(
+        rejection: ModelSupplierRateLimitRejection,
+        supplier_call_ordinal: int,
+        backoff_seconds: int | None,
+    ) -> None:
+        pending_usage = state.pending_model_usage
+        if pending_usage is not None:
+            for usage_record_id in rejection.usage_reference_ids:
+                usage_record = pending_usage.pop(usage_record_id, None)
+                if usage_record is None:
+                    raise ValueError("infrastructure rejection usage was not captured before retry")
+                _seal(state, "usage", usage_record_id, usage_record)
+        classification = rejection.classification
+        raw_error_ref = rejection.raw_reference.sha256
+        supplier_call_id = infrastructure_supplier_call_id(
+            prepared.attempt_id,
+            supplier_call_ordinal,
+            raw_error_ref,
+        )
+        fields = {
+            "schema_name": "infrastructure_retry_event",
+            "schema_version": 1,
+            "run_id": state.run_id,
+            "logical_attempt_id": prepared.attempt_id,
+            "parent_kind": prepared.parent_kind,
+            "parent_id": prepared.parent_id,
+            "stage": prepared.stage,
+            "supplier_call_ordinal": supplier_call_ordinal,
+            "supplier_call_id": supplier_call_id,
+            "origin": classification.origin,
+            "failure_kind": classification.failure_kind,
+            "status": classification.status,
+            "acceptance": classification.acceptance,
+            "provider_mutation": classification.provider_mutation,
+            "retryable": classification.retryable,
+            "internal_retry_count": classification.internal_retry_count,
+            "raw_error_ref": raw_error_ref,
+            "usage_record_ids": rejection.usage_reference_ids,
+            "retry_policy_hash": INFRASTRUCTURE_RETRY_POLICY_HASH,
+            "retry_scheduled": backoff_seconds is not None,
+            "backoff_seconds": backoff_seconds,
+            "observed_at": state.timestamp(),
+        }
+        event = InfrastructureRetryEvent.model_validate(
+            {"retry_event_id": infrastructure_retry_event_id(fields), **fields}
+        )
+        _seal(state, "infrastructure-retries", event.retry_event_id, event)
+
+        lifecycle = state.provider_lifecycle
+        if lifecycle is not None and prepared.intent is not None:
+            lifecycle.clear_attempt_after_receipt(
+                attempt_id=prepared.attempt_id,
+                expected_intent_record_hash=prepared.intent.intent_hash,
+            )
+
+    async def dispatch(supplier_call_ordinal: int) -> ModelReceipt:
+        lifecycle = state.provider_lifecycle
+        if supplier_call_ordinal > 1 and lifecycle is not None and prepared.intent is not None:
+            lifecycle.mark_attempt_dispatched(
+                attempt_id=prepared.attempt_id,
+                intent_record_hash=prepared.intent.intent_hash,
+            )
+        return await model.complete(replace(request, supplier_call_ordinal=supplier_call_ordinal))
+
+    return await execute_with_infrastructure_retry(
+        dispatch,
+        persist_rejection=persist_rejection,
+        sleep=_infrastructure_retry_sleep,
+        controller=controller,
+    )
+
+
 def _readiness_raw_reference(result: object) -> str | None:
     references = getattr(result, "evidence_references", ())
     return getattr(references[0], "sha256", None) if references else None
@@ -834,6 +938,9 @@ def _new_execution_state(
         budget_ledger=_live_budget_ledger(control) if control is not None else None,
         provider_lifecycle=request.provider_lifecycle,
         pending_model_usage={} if control is not None else None,
+        infrastructure_retry_controller=InfrastructureRetryController(
+            maximum_total_retries=len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
+        ),
         sequence=sequence,
     )
 
@@ -854,6 +961,7 @@ def run_native_vertical_slice(
     close_timeout_seconds: float = NATIVE_CLOSE_TIMEOUT_SECONDS,
     control: NativeRunControl | None = None,
     continuation: NativeContinuation | None = None,
+    partition: CasePartitionSpec | None = None,
 ) -> NativeRunArtifacts:
     """Compose one deterministic native capsule without selecting any live transport."""
 
@@ -875,6 +983,8 @@ def run_native_vertical_slice(
             judge_role_binding_id not in control.preflight_record.role_binding_ids
         ):
             raise ValueError("live native judge role is outside the preflight inventory")
+    if partition is not None and partition.run_id != run_id:
+        raise ValueError("case partition run ID does not match the requested run")
     capsule_root = Path(output_root) / run_id
     if continuation is not None:
         if control is None:
@@ -940,6 +1050,7 @@ def run_native_vertical_slice(
         continuation=continuation,
         lease=lease,
         provider_lifecycle=lifecycle,
+        partition=partition,
     )
     try:
         completed = _run_native_supervised(request)
@@ -1135,6 +1246,7 @@ async def _run_native_with_cell_deadline(
             lease=request.lease,
             provider_lifecycle=request.provider_lifecycle,
             lifecycle_sender=sender,
+            partition=getattr(request, "partition", None),
         )
 
     if request.control is None:
@@ -1471,6 +1583,7 @@ async def _run_native_vertical_slice(
     lease: RunLeaseRecord | None = None,
     provider_lifecycle: ProviderLifecycleBridge | None = None,
     lifecycle_sender: Connection | None = None,
+    partition: CasePartitionSpec | None = None,
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
     store = artifact_store_factory(capsule_root)
@@ -1478,6 +1591,16 @@ async def _run_native_vertical_slice(
     case_manifest = workload.build_case_manifest(dataset_manifest)
     ingestion_plans = workload.iter_ingestion_plans(case_manifest)
     case_plans = workload.iter_case_plans(case_manifest)
+    if partition is not None:
+        if partition.run_id != run_id:
+            raise ValueError("case partition run ID does not match the native run")
+        ingestion_plans, case_plans = select_partition_execution(
+            partition=partition,
+            dataset_manifest_hash=dataset_manifest.manifest_hash,
+            case_manifest=case_manifest,
+            ingestion_plans=ingestion_plans,
+            case_plans=case_plans,
+        )
     if not ingestion_plans or not case_plans:
         raise ValueError("native capsule requires at least one ingestion plan and case")
     request_identity = _NativeRunRequest(
@@ -1496,6 +1619,7 @@ async def _run_native_vertical_slice(
         control=control,
         lease=lease,
         provider_lifecycle=provider_lifecycle,
+        partition=partition,
     )
     lease = lease or _native_run_lease(run_id, adapter_profile_id, control=control)
     state = _new_execution_state(request_identity, store)
@@ -1524,6 +1648,8 @@ async def _run_native_vertical_slice(
     case_occurrence_ids: tuple[str, ...] = ()
     _seal(state, "specs", "dataset-manifest", dataset_manifest)
     _seal(state, "specs", "case-manifest", case_manifest)
+    if partition is not None:
+        _seal(state, "specs", partition.partition_id, partition)
     if control is not None:
         _require_live_manifest_closure(control, dataset_manifest, case_manifest)
         _seal_live_control(state, control)
@@ -1669,10 +1795,20 @@ async def _run_native_vertical_slice(
     if terminal_errors:
         diagnostic_error: BaseException | None = None
         try:
+            terminal_run_state: Literal[
+                RunState.ABORTED,
+                RunState.INFRASTRUCTURE_BLOCKED,
+            ] = (
+                RunState.INFRASTRUCTURE_BLOCKED
+                if execution_error is not None
+                and not close_errors
+                and _is_pure_infrastructure_retry_exhaustion(execution_error)
+                else RunState.ABORTED
+            )
             _seal_native_run_record(
                 state,
                 run_spec_hash=run_spec_hash,
-                run_state=RunState.ABORTED,
+                run_state=terminal_run_state,
                 ingestion_occurrence_ids=ingestion_occurrence_ids,
                 case_occurrence_ids=case_occurrence_ids,
             )
@@ -2595,7 +2731,12 @@ async def _execute_cases_serial(
         )
         answer_started_at = state.timestamp()
         try:
-            answer_receipt = await answer_model.complete(answer_request)
+            answer_receipt = await _complete_model_with_infrastructure_retry(
+                state,
+                prepared=prepared_answer,
+                model=answer_model,
+                request=answer_request,
+            )
         except BaseException as exc:
             _seal_native_failure_preserving(
                 state,
@@ -2687,7 +2828,12 @@ async def _execute_cases_serial(
             )
             judge_started_at = state.timestamp()
             try:
-                judge_receipt = await judge_model.complete(judge_request)
+                judge_receipt = await _complete_model_with_infrastructure_retry(
+                    state,
+                    prepared=prepared_judge,
+                    model=judge_model,
+                    request=judge_request,
+                )
             except BaseException as exc:
                 _seal_native_failure_preserving(
                     state,
@@ -3958,13 +4104,32 @@ def _seal_native_failure(
             return live_terminal
         if cancelled_before_dispatch:
             ledger.cancel_before_dispatch(reservation.reservation_id)
-            lifecycle.clear_attempt_after_receipt(
-                attempt_id=prepared.attempt_id,
-                expected_intent_record_hash=prepared.intent.intent_hash,
-            )
+            if not isinstance(error, InfrastructureBackoffCancelled):
+                lifecycle.clear_attempt_after_receipt(
+                    attempt_id=prepared.attempt_id,
+                    expected_intent_record_hash=prepared.intent.intent_hash,
+                )
             return live_terminal
         if raw_error_ref is None:
             raise ValueError("failed live attempt requires durable raw error evidence")
+        if _contains_infrastructure_retry_exhausted(error):
+            owner_observed = (
+                tuple(
+                    RuntimeBudgetOwnerAllocation(
+                        owner_id=allocation.owner_id,
+                        maximum=BudgetAmount.zero(),
+                    )
+                    for allocation in prepared.owner_maximums
+                )
+                if prepared.owner_maximums
+                else None
+            )
+            ledger.commit(
+                reservation.reservation_id,
+                observed=BudgetAmount.zero(),
+                owner_observed=owner_observed,
+            )
+            return live_terminal
         _seal_live_native_attempt_accounting(
             state,
             prepared,
@@ -4007,7 +4172,10 @@ def _contains_cancelled_before_dispatch(error: BaseException) -> bool:
         if id(current) in visited:
             continue
         visited.add(id(current))
-        if isinstance(current, MemorySystemCallCancelledBeforeDispatch):
+        if isinstance(
+            current,
+            (MemorySystemCallCancelledBeforeDispatch, InfrastructureBackoffCancelled),
+        ):
             return True
         for linked in (current.__cause__, current.__context__):
             if isinstance(linked, BaseException):
@@ -4026,7 +4194,11 @@ def _seal_native_run_record(
     state: _NativeExecutionState,
     *,
     run_spec_hash: str,
-    run_state: Literal[RunState.FINALIZED, RunState.ABORTED],
+    run_state: Literal[
+        RunState.FINALIZED,
+        RunState.ABORTED,
+        RunState.INFRASTRUCTURE_BLOCKED,
+    ],
     ingestion_occurrence_ids: tuple[str, ...],
     case_occurrence_ids: tuple[str, ...],
 ) -> None:
@@ -4041,6 +4213,36 @@ def _seal_native_run_record(
         case_occurrence_ids=case_occurrence_ids,
     )
     _seal(state, "run", state.run_id, record)
+
+
+def _contains_infrastructure_retry_exhausted(error: BaseException) -> bool:
+    pending = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, InfrastructureRetryExhausted):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return False
+
+
+def _is_pure_infrastructure_retry_exhaustion(error: BaseException) -> bool:
+    """Return true only when every terminal root is one safe retry exhaustion."""
+
+    if isinstance(error, InfrastructureRetryExhausted):
+        return True
+    if isinstance(error, BaseExceptionGroup):
+        return bool(error.exceptions) and all(
+            _is_pure_infrastructure_retry_exhaustion(child) for child in error.exceptions
+        )
+    return False
 
 
 def _elapsed_seconds(started_at: datetime, ended_at: datetime) -> Decimal:
@@ -4165,7 +4367,11 @@ def _verify_terminal_capsule(
     run_path = capsule_root / "source" / "run" / f"{run_id}.json"
     run_payload = read_regular_file(run_path)
     run_record = RunRecord.model_validate_json(run_payload)
-    if run_record.state not in {RunState.FINALIZED, RunState.ABORTED}:
+    if run_record.state not in {
+        RunState.FINALIZED,
+        RunState.ABORTED,
+        RunState.INFRASTRUCTURE_BLOCKED,
+    }:
         raise ValueError("terminal capsule does not contain a terminal run record")
     relative_run_path = run_path.relative_to(capsule_root).as_posix()
     expected_entry = next(

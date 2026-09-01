@@ -67,10 +67,12 @@ def _control(
     memory_system_id: str = "fixture-memory-v1",
     runtime_binding_hash: str | None = None,
     adapter_profile_id: str = "fixture-rest-v1",
+    adapter_profile_hash: str | None = None,
     answer_role_binding_id: str = "answer-binding",
     judge_role_binding_id: str | None = None,
     provider_runtime_directory: Path | None = None,
     bounded_cost: bool = False,
+    code_revision: str = "fixture-revision",
 ) -> NativeRunControl:
     role = ModelRoleBindingV2(
         binding_id=answer_role_binding_id,
@@ -268,7 +270,7 @@ def _control(
         environment_hash=_sha("environment"),
         model_role_binding_ids=tuple(item.binding_id for item in role_bindings),
         budget_id=budget.budget_id,
-        code_revision="fixture-revision",
+        code_revision=code_revision,
         normalizer_fingerprint=_sha("normalizer"),
     )
     preflight_fields = dict(
@@ -279,7 +281,7 @@ def _control(
         dataset_manifest_hash=run_spec.dataset_manifest_hash,
         subset_manifest_hash=run_spec.case_manifest_hash,
         adapter_profile_id=adapter_profile_id,
-        adapter_profile_hash=_sha("adapter-profile"),
+        adapter_profile_hash=adapter_profile_hash or _sha("adapter-profile"),
         provider_project_id="oamb-providers-fixture1",
         provider_profile_id=adapter_profile_id,
         runtime_binding_hash=run_spec.runtime_binding_hash,

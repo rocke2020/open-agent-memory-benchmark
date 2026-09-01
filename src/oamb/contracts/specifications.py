@@ -26,6 +26,16 @@ from .ids import (
     plan_manifest_entry_id,
 )
 
+INFRASTRUCTURE_RETRY_BACKOFF_SECONDS = (1, 2, 4)
+INFRASTRUCTURE_MAX_TOTAL_RETRIES = len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
+INFRASTRUCTURE_RETRY_POLICY_HASH = canonical_sha256(
+    [
+        "oamb-infrastructure-retry-policy-v1",
+        INFRASTRUCTURE_RETRY_BACKOFF_SECONDS,
+        INFRASTRUCTURE_MAX_TOTAL_RETRIES,
+    ]
+)
+
 
 class ValidationStage(StrEnum):
     EVIDENCE = "evidence"
@@ -612,6 +622,86 @@ class CaseManifest(StrictContract):
         expected_hash = case_manifest_hash(self.model_dump(mode="python"))
         if self.manifest_hash != expected_hash:
             raise ValueError("case manifest hash does not match its exact members")
+        return self
+
+
+def case_execution_binding_hash(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-case-execution-binding-v1", fields])
+
+
+class CaseExecutionBinding(StrictContract):
+    schema_name: Literal["case_execution_binding"] = "case_execution_binding"
+    schema_version: Literal[1] = 1
+    binding_hash: Sha256
+    case_manifest_entry_id: Sha256
+    prompt_binding_id: NonEmptyStr
+    output_contract_id: NonEmptyStr
+    metric_id: NonEmptyStr
+    judge_binding_id: NonEmptyStr | None
+    answer_max_output_tokens: PositiveInt
+    query_timestamp: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def identity_matches_execution_fields(self) -> Self:
+        expected = case_execution_binding_hash(
+            self.model_dump(mode="python", exclude={"binding_hash"})
+        )
+        if self.binding_hash != expected:
+            raise ValueError("case execution binding hash does not match its canonical fields")
+        return self
+
+
+def case_partition_id(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-case-partition-v1", fields])
+
+
+class CasePartitionSpec(StrictContract):
+    schema_name: Literal["case_partition_spec"] = "case_partition_spec"
+    schema_version: Literal[1] = 1
+    partition_id: Sha256
+    run_id: NonEmptyStr
+    resolved_plan_hash: Sha256
+    cell_spec_hash: Sha256
+    dataset_manifest_hash: Sha256
+    target_case_manifest_hash: Sha256
+    budget_policy_hash: Sha256
+    retry_policy_hash: Sha256
+    requested_case_manifest_entry_ids: tuple[Sha256, ...]
+    selected_ingestion_plan_ids: tuple[Sha256, ...]
+    selected_case_manifest_entry_ids: tuple[Sha256, ...]
+    target_case_execution_bindings: tuple[CaseExecutionBinding, ...]
+    target_case_execution_bindings_hash: Sha256
+
+    @model_validator(mode="after")
+    def selection_and_identity_are_closed(self) -> Self:
+        inventories = (
+            self.requested_case_manifest_entry_ids,
+            self.selected_ingestion_plan_ids,
+            self.selected_case_manifest_entry_ids,
+        )
+        if any(not items or len(set(items)) != len(items) for items in inventories):
+            raise ValueError("case partition inventories must be non-empty and unique")
+        target_case_ids = tuple(
+            binding.case_manifest_entry_id for binding in self.target_case_execution_bindings
+        )
+        if not target_case_ids or len(set(target_case_ids)) != len(target_case_ids):
+            raise ValueError("target case execution bindings must be non-empty and unique")
+        if not set(self.requested_case_manifest_entry_ids) <= set(
+            self.selected_case_manifest_entry_ids
+        ):
+            raise ValueError("requested cases must belong to the selected whole groups")
+        if not set(self.selected_case_manifest_entry_ids) <= set(target_case_ids):
+            raise ValueError("selected cases must belong to the target execution inventory")
+        expected_bindings_hash = canonical_sha256(
+            ["oamb-target-case-execution-bindings-v1", self.target_case_execution_bindings]
+        )
+        if self.target_case_execution_bindings_hash != expected_bindings_hash:
+            raise ValueError("target case execution binding hash does not match its inventory")
+        expected_partition_id = case_partition_id(
+            self.model_dump(mode="python", exclude={"partition_id"})
+        )
+        if self.partition_id != expected_partition_id:
+            raise ValueError("case partition identity does not match its canonical fields")
         return self
 
 

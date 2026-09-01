@@ -480,6 +480,40 @@ def test_live_model_factories_receive_the_resolved_model_call_timeout(
     assert [item["total_timeout_seconds"] for item in captured] == [600.0, 600.0]
 
 
+def test_unknown_live_case_partition_fails_before_native_runner_or_clients(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+    from oamb.runtime import native_run
+    from oamb.runtime.case_partition import CasePartitionSelectionError
+    from oamb.workloads.fake import GeneratedFakeWorkload
+
+    def forbidden_runner(**_kwargs: object) -> object:
+        raise AssertionError("native runner must not receive an invalid case partition")
+
+    monkeypatch.setattr(native_run, "run_native_vertical_slice", forbidden_runner)
+    monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
+    monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
+    monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: GeneratedFakeWorkload())
+    built = live.build_live_cell(
+        plan=_plan(),
+        cell_id="hindsight-lme6",
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+        provider_project_id="oamb-providers-test-live",
+        provider_evidence=_provider_evidence(),
+        environment=_environment(),
+        run_label="invalid-case-selection",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+        requested_case_manifest_entry_ids=(canonical_sha256(["unknown-live-case"]),),
+    )
+
+    with pytest.raises(CasePartitionSelectionError, match="unknown"):
+        live.execute_live_cell(built)
+
+
 def test_dangling_capsule_root_symlink_is_not_a_fresh_cell(tmp_path: Path) -> None:
     from oamb.live import LiveConfigurationError, build_live_cell
 

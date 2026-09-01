@@ -18,6 +18,7 @@ from oamb.contracts.ports import (
     ModelCallFailure,
     ModelCallUnknownOutcome,
     ModelRequest,
+    ModelSupplierRateLimitRejection,
     RawPayloadSealRequest,
     RawReferenceHandle,
     ThinkingEffort,
@@ -363,9 +364,43 @@ async def test_supplier_error_is_single_dispatch_with_exact_error_body() -> None
         await client.complete(_request())
 
     assert calls == 1
-    assert failure.value.retryable is True
+    assert failure.value.retryable is False
+    assert not isinstance(failure.value, ModelSupplierRateLimitRejection)
     assert failure.value.failure_kind == "supplier_error"
     assert failure.value.supplier_status_code == 429
+    assert store.raw[0].payload_bytes == error_body
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_structured_429_produces_retry_safe_typed_rejection() -> None:
+    error_body = json.dumps(
+        {
+            "error": {
+                "origin": "model_supplier",
+                "failure_kind": "rate_limited",
+                "status": 429,
+                "acceptance": "not_accepted",
+                "provider_mutation": "none",
+                "retryable": True,
+                "internal_retry_count": 0,
+            }
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    def handler(_request_value: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=error_body)
+
+    store = CapturingStore()
+    client = _client(store, handler)
+
+    with pytest.raises(ModelSupplierRateLimitRejection) as failure:
+        await client.complete(_request())
+
+    assert failure.value.classification.provider_mutation == "none"
+    assert failure.value.classification.internal_retry_count == 0
+    assert failure.value.usage_reference_ids
     assert store.raw[0].payload_bytes == error_body
     await client.close()
 
