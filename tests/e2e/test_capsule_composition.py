@@ -4,6 +4,9 @@ import asyncio
 import hashlib
 import json
 import multiprocessing
+import os
+import signal
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +14,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 
 import oamb.artifacts.composition as composition_module
 from oamb.artifacts.atomic import read_regular_file
@@ -24,9 +28,17 @@ from oamb.contracts.evidence import (
     CapsuleManifest,
     capsule_composition_part_binding_hash,
 )
-from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from oamb.contracts.ids import (
+    canonical_json_bytes,
+    canonical_sha256,
+    ingestion_occurrence_id,
+)
 from oamb.contracts.ports import (
     ArtifactStorePort,
+    IngestionDispatch,
+    IngestionDispatchReceipt,
+    IngestionDispatchRequest,
+    IngestionRequest,
     ModelClientPort,
     NativeEvidenceBatch,
     RetrievalRequest,
@@ -239,11 +251,15 @@ def test_composes_complementary_parts_without_changing_sources(tmp_path: Path) -
 
     forward = compose_capsules((first, second), tmp_path / "forward")
     reverse = compose_capsules((second, first), tmp_path / "reverse")
+    forward_recovery = composition_module.analyze_capsule_recovery((first, second))
+    reverse_recovery = composition_module.analyze_capsule_recovery((second, first))
 
     assert validate_source_root(forward.capsule_root).disposition == (
         ValidationDisposition.VALIDATED
     )
     assert forward.manifest.capsule_id == reverse.manifest.capsule_id
+    assert forward_recovery == reverse_recovery
+    assert forward_recovery.remaining_ingestion_plan_ids == ()
     assert _tree_digest(forward.capsule_root) == _tree_digest(reverse.capsule_root)
     assert source_hashes == (_tree_digest(first), _tree_digest(second))
     assert len(forward.composition.ordered_contributions) == 2
@@ -251,6 +267,19 @@ def test_composes_complementary_parts_without_changing_sources(tmp_path: Path) -
         sum(len(item.case_manifest_entry_ids) for item in forward.composition.ordered_contributions)
         == 4
     )
+
+
+def test_recovery_target_is_the_selected_partition_not_the_full_manifest(
+    tmp_path: Path,
+) -> None:
+    selected_part = _run_part(tmp_path, "selected-single-plan", 0)
+
+    recovery = composition_module.analyze_capsule_recovery((selected_part,))
+
+    assert len(recovery.reusable_ingestion_plan_ids) == 1
+    assert recovery.quarantined_ingestion_plan_ids == ()
+    assert recovery.remaining_ingestion_plan_ids == ()
+    assert recovery.remaining_case_manifest_entry_ids == ()
 
 
 def test_composition_rejects_part_drift_before_publishing_output(
@@ -388,6 +417,16 @@ def test_aborted_part_contributes_only_its_complete_whole_plan(tmp_path: Path) -
             answer_role_binding_id="recorded-answer-v1",
             partition=aborted_partition,
         )
+    recovery_plan = composition_module.analyze_capsule_recovery(
+        (tmp_path / "aborted-parts" / aborted_partition.run_id,)
+    )
+    assert recovery_plan.reusable_ingestion_plan_ids == (
+        manifest.ingestion_plans[0].ingestion_plan_id,
+    )
+    assert recovery_plan.remaining_ingestion_plan_ids == (failed_plan_id,)
+    assert recovery_plan.remaining_case_manifest_entry_ids == (
+        manifest.ingestion_plans[1].ordered_case_manifest_entry_ids
+    )
     recovery = run_native_vertical_slice(
         output_root=tmp_path / "aborted-parts",
         run_id=recovery_partition.run_id,
@@ -412,6 +451,282 @@ def test_aborted_part_contributes_only_its_complete_whole_plan(tmp_path: Path) -
         contribution.ingestion_plan_id
         for contribution in composed.composition.ordered_contributions
     ) == tuple(plan.ingestion_plan_id for plan in manifest.ingestion_plans)
+
+
+@pytest.mark.parametrize(
+    "stop_signal",
+    (signal.SIGINT, signal.SIGTERM),
+    ids=("sigint", "sigterm"),
+)
+def test_process_signal_drains_and_seals_completed_groups_for_fresh_scope_recovery(
+    tmp_path: Path,
+    stop_signal: signal.Signals,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    case_plans = workload.iter_case_plans(manifest)
+    run_id = "sigint-recovery-part"
+    partition = build_case_partition_spec(
+        run_id=run_id,
+        resolved_plan_hash=canonical_sha256(["sigint-recovery-plan"]),
+        cell_spec_hash=canonical_sha256(["sigint-recovery-cell"]),
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest=manifest,
+        case_plans=case_plans,
+        requested_case_manifest_entry_ids=tuple(
+            case.case_manifest_entry_id for case in manifest.cases
+        ),
+        budget_policy_hash=canonical_sha256(["sigint-recovery-budget"]),
+        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+    )
+    second_plan_id = manifest.ingestion_plans[1].ingestion_plan_id
+    started = tmp_path / "second-plan-started"
+    release = tmp_path / "release-second-plan"
+    outcome = tmp_path / "supervisor-outcome"
+
+    def run_until_interrupted() -> None:
+        class DrainableMemory(_RecordedNativeMemory):
+            def __init__(self, store: ArtifactStorePort) -> None:
+                super().__init__(store)
+                self.first_group_complete = asyncio.Event()
+                self.first_group_retrievals = 0
+
+            async def allocate_ingestion_scope(
+                self,
+                request: ScopeAllocationRequest,
+            ) -> ScopeReceipt:
+                if request.ingestion_plan_id == second_plan_id:
+                    await self.first_group_complete.wait()
+                return await super().allocate_ingestion_scope(request)
+
+            def plan_ingestion(
+                self,
+                request: IngestionRequest,
+            ) -> tuple[IngestionDispatch, ...]:
+                if self._plan_by_scope[request.scope.scope_id] != second_plan_id:
+                    return super().plan_ingestion(request)
+                return tuple(
+                    IngestionDispatch(
+                        dispatch_ordinal_1_indexed=index,
+                        operation_kind="signal-test-ingest",
+                        request_fingerprint=canonical_sha256(
+                            ["signal-test-ingest", request.scope.scope_id, index]
+                        ),
+                        ordered_source_units=(source,),
+                    )
+                    for index, source in enumerate(request.ordered_source_units, start=1)
+                )
+
+            async def ingest(
+                self,
+                request: IngestionDispatchRequest,
+            ) -> IngestionDispatchReceipt:
+                if (
+                    self._plan_by_scope[request.scope.scope_id] == second_plan_id
+                    and request.dispatch.dispatch_ordinal_1_indexed == 1
+                ):
+                    started.write_text("started", encoding="utf-8")
+                    while not release.exists():
+                        await asyncio.sleep(0.01)
+                return await super().ingest(request)
+
+            async def retrieve(self, request: RetrievalRequest) -> NativeEvidenceBatch:
+                result = await super().retrieve(request)
+                self.first_group_retrievals += 1
+                if self.first_group_retrievals == 3:
+                    self.first_group_complete.set()
+                return result
+
+        try:
+            run_native_vertical_slice(
+                output_root=tmp_path / "sigint-parts",
+                run_id=run_id,
+                adapter_profile_id="recorded-native-fixture-v1",
+                workload=workload,
+                visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+                artifact_store_factory=ArtifactStore,
+                memory_factory=lambda store, _plans: DrainableMemory(store),
+                model_factory=_RecordedNativeModel,
+                answer_role_binding_id="recorded-answer-v1",
+                partition=partition,
+            )
+        except BaseException as exc:
+            outcome.write_text(type(exc).__name__, encoding="utf-8")
+
+    process = multiprocessing.get_context("fork").Process(target=run_until_interrupted)
+    process.start()
+    deadline = time.monotonic() + 5
+    while not started.exists() and process.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert started.exists(), "second plan never reached the planted in-flight barrier"
+    assert process.pid is not None
+    os.kill(process.pid, stop_signal)
+    release.write_text("release", encoding="utf-8")
+    process.join(timeout=5)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=1)
+    assert not process.is_alive()
+    assert outcome.read_text(encoding="utf-8") == "NativeRunInterrupted"
+
+    capsule_root = tmp_path / "sigint-parts" / run_id
+    assert validate_source_root(capsule_root).disposition == ValidationDisposition.VALIDATED
+    recovery_plan = composition_module.analyze_capsule_recovery((capsule_root,))
+    assert recovery_plan.reusable_ingestion_plan_ids == (
+        manifest.ingestion_plans[0].ingestion_plan_id,
+    )
+    assert recovery_plan.remaining_ingestion_plan_ids == (second_plan_id,)
+    assert recovery_plan == composition_module.analyze_capsule_recovery((capsule_root,))
+    interrupted_second_occurrence_id = ingestion_occurrence_id(
+        run_id,
+        "fake-memory",
+        second_plan_id,
+    )
+    interrupted_second_ingests = tuple(
+        document
+        for path in (capsule_root / "source" / "attempts").glob("*.json")
+        for document in (json.loads(path.read_bytes()),)
+        if document["parent_id"] == interrupted_second_occurrence_id
+        and document["stage"] == "memory_ingest"
+    )
+    assert tuple(document["outcome"] for document in interrupted_second_ingests) == ("succeeded",)
+
+    recovery_run_id = f"{run_id}-recovery"
+    recovery_partition = build_case_partition_spec(
+        run_id=recovery_run_id,
+        resolved_plan_hash=partition.resolved_plan_hash,
+        cell_spec_hash=partition.cell_spec_hash,
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest=manifest,
+        case_plans=case_plans,
+        requested_case_manifest_entry_ids=(recovery_plan.remaining_case_manifest_entry_ids),
+        budget_policy_hash=partition.budget_policy_hash,
+        retry_policy_hash=partition.retry_policy_hash,
+    )
+    recovered = run_native_vertical_slice(
+        output_root=tmp_path / "sigint-parts",
+        run_id=recovery_run_id,
+        adapter_profile_id="recorded-native-fixture-v1",
+        workload=workload,
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=_RecordedNativeModel,
+        answer_role_binding_id="recorded-answer-v1",
+        partition=recovery_partition,
+    )
+    assert tuple(record.ingestion_plan_id for record in recovered.ingestion_plan_records) == (
+        second_plan_id,
+    )
+    interrupted_second_scope_id = canonical_sha256(
+        [
+            "oamb-fake-scope-v1",
+            interrupted_second_occurrence_id,
+            second_plan_id,
+        ]
+    )
+    assert interrupted_second_scope_id != recovered.ingestion_plan_records[0].scope_id
+
+    composed = compose_capsules(
+        (capsule_root, recovered.capsule_root),
+        tmp_path / f"{run_id}-composed",
+    )
+    assert validate_source_root(composed.capsule_root).disposition == (
+        ValidationDisposition.VALIDATED
+    )
+    assert tuple(
+        contribution.ingestion_plan_id
+        for contribution in composed.composition.ordered_contributions
+    ) == tuple(plan.ingestion_plan_id for plan in manifest.ingestion_plans)
+
+
+def test_recovery_run_derives_remaining_groups_before_loading_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import cli, live
+    from oamb.artifacts.composition import CapsuleRecoveryPlan
+    from oamb.config import doctor
+
+    plan = build_resolved_plan(load_benchmark_configuration(Path("configs/benchmark.yml")))
+    selected_cell = plan.cells[0]
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    source_part = tmp_path / "aborted-part"
+    remaining_case_id = canonical_sha256(["remaining-case"])
+    call_order: list[str] = []
+    captured: dict[str, object] = {}
+    recovery_targets: list[object] = []
+
+    def analyze(*_args: object, **_kwargs: object) -> CapsuleRecoveryPlan:
+        call_order.append("analyze")
+        recovery_targets.append(_kwargs.get("target"))
+        return CapsuleRecoveryPlan(
+            source_capsule_ids=(canonical_sha256(["source-capsule"]),),
+            source_manifest_sha256s=(canonical_sha256(["source-manifest"]),),
+            reusable_ingestion_plan_ids=(canonical_sha256(["reusable-plan"]),),
+            quarantined_ingestion_plan_ids=(canonical_sha256(["quarantined-plan"]),),
+            remaining_ingestion_plan_ids=(canonical_sha256(["remaining-plan"]),),
+            remaining_case_manifest_entry_ids=(remaining_case_id,),
+        )
+
+    def load_environment(**_kwargs: object) -> dict[str, str]:
+        call_order.append("environment")
+        return {}
+
+    def build_cell(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(composition_module, "analyze_capsule_recovery", analyze)
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "load_live_environment", load_environment)
+    monkeypatch.setattr(
+        live,
+        "load_live_provider_evidence",
+        lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
+    )
+    monkeypatch.setattr(live, "build_live_cell", build_cell)
+    full_target = object()
+
+    def composition_target(_cell: object) -> object:
+        call_order.append("target")
+        return full_target
+
+    def execute(_cells: object) -> tuple[live.LiveCellCompletion, ...]:
+        call_order.append("execute")
+        return (live.LiveCellCompletion(selected_cell.cell_id, tmp_path / "recovery-capsule"),)
+
+    monkeypatch.setattr(
+        live,
+        "live_composition_target",
+        composition_target,
+    )
+    monkeypatch.setattr(live, "execute_live_cells", execute)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "run",
+            str(resolved_plan),
+            "--output-root",
+            str(tmp_path / "output"),
+            "--cell",
+            selected_cell.cell_id,
+            "--recover-from",
+            str(source_part),
+            "--run-label",
+            "recovery-1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert call_order == ["analyze", "environment", "target", "analyze", "execute"]
+    assert recovery_targets[1] is full_target
+    assert captured["requested_case_manifest_entry_ids"] == (remaining_case_id,)
+    assert "recovery reusable groups:" in result.output
+    assert "recovery remaining groups:" in result.output
 
 
 def test_infrastructure_blocked_partition_requires_terminal_retry_evidence(
@@ -586,3 +901,44 @@ def test_composition_rejects_different_execution_configuration(tmp_path: Path) -
         compose_capsules((first, second), output)
 
     assert not output.exists()
+
+
+def test_recovery_rejects_target_execution_configuration_before_remaining_work(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    first = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-execution-config-a",
+        plan_index=0,
+        code_revision="revision-a",
+    )
+    incompatible = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-execution-config-b",
+        plan_index=1,
+        code_revision="revision-b",
+    )
+    incompatible_hash = composition_module.capsule_execution_configuration_hash(incompatible)
+    cell = plan.cells[0]
+
+    with pytest.raises(
+        CapsuleCompositionError,
+        match="requested execution configuration",
+    ):
+        composition_module.analyze_capsule_recovery(
+            (first,),
+            target=composition_module.CapsuleCompositionTarget(
+                resolved_plan_hash=plan.resolved_plan_hash,
+                cell_spec_hash=cell.cell_spec_hash,
+                target_case_manifest_hash=cell.case_manifest_hash,
+                budget_policy_hash=cell.limits_hash,
+                retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+                execution_configuration_hash=incompatible_hash,
+            ),
+        )

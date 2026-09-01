@@ -3,7 +3,8 @@
 > **TL;DR:** Open Agent Memory Benchmark (OAMB) keeps execution evidence,
 > validation, metrics, resource usage, cost, and reports separate so a partial
 > run cannot be mistaken for a score. The planned v0.1.0 comparison covers
-> Hindsight, Mem0, and OpenViking on LongMemEval only. MemoryAgentBench is
+> Hindsight, Mem0, and OpenViking on the same balanced LME-60 LongMemEval
+> manifest: ten questions from each of six question types. MemoryAgentBench is
 > deferred. The OpenViking session profile and generation-free retrieval remain
 > unverified until live preflight, execution, and capsule validation pass.
 
@@ -17,10 +18,12 @@ Linux/macOS clean-checkout CI. The current product refactor targets one generic
 `doctor → run → validate → compare → report` flow; it is not complete merely
 because the older fake path works.
 
-The v0.1 execution target is three LongMemEval cells: Hindsight, Mem0, and an
-OpenViking session/message/commit profile. MAB research artifacts do not
-constitute v0.1 support, and no OpenViking LongMemEval claim is valid before its
-new profile passes live gates.
+The v0.1 execution target is three LME-60 cells: Hindsight, Mem0, and an
+OpenViking session/message/commit profile. The same 60 questions produce 180
+provider-specific results. LME-60 is a planned balanced screen and is not yet
+implemented by the checked-in workload code. MAB research artifacts do not
+constitute v0.1 support, and no OpenViking LongMemEval claim is valid before
+its new profile passes live gates.
 
 No fixture, healthy service, non-empty response, or generated report implies a
 live provider passed, a benchmark score is valid, or a release is ready.
@@ -138,10 +141,11 @@ Start the services explicitly with:
 cd provider-services && ./bin/provider-services up
 ```
 
-The provider bundle prepares services only. v0.1 uses LongMemEval for all three
-providers, and OpenViking requires the separate session/message/commit profile;
-service health does not establish that workload support. Provider state is
-preserved. Normal tests never delete databases or execute a paid evaluation.
+The provider bundle prepares services only. v0.1 uses the same balanced LME-60
+LongMemEval manifest for all three providers, and OpenViking requires the
+separate session/message/commit profile; service health does not establish that
+workload support. Provider state is preserved. Normal tests never delete
+databases or execute a paid evaluation.
 
 ## Project policies
 

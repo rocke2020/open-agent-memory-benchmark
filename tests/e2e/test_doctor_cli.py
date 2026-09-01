@@ -34,10 +34,11 @@ def _invoke_doctor(*, config: Path, output: Path, extra: tuple[str, ...] = ()) -
 
 def _write_mutated_config(tmp_path: Path, original: str, replacement: str) -> Path:
     path = tmp_path / f"benchmark-{hashlib.sha256(replacement.encode()).hexdigest()[:8]}.yml"
-    path.write_text(
-        BENCHMARK_CONFIG_PATH.read_text(encoding="utf-8").replace(original, replacement, 1),
-        encoding="utf-8",
-    )
+    source = BENCHMARK_CONFIG_PATH.read_text(encoding="utf-8")
+    assert original in source
+    mutated = source.replace(original, replacement, 1)
+    assert mutated != source
+    path.write_text(mutated, encoding="utf-8")
     return path
 
 
@@ -294,7 +295,7 @@ def test_model_endpoint_and_concurrency_changes_change_cell_identity(tmp_path: P
 
     concurrency_config = _write_mutated_config(
         tmp_path,
-        "max_parallel_questions_per_provider: 2",
+        "max_parallel_questions_per_provider: 3",
         "max_parallel_questions_per_provider: 1",
     )
     concurrency_output = tmp_path / "concurrency"

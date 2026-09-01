@@ -11,9 +11,9 @@ profile; it is not part of this Compose project and its evidence must never be
 mixed with REST evidence.
 
 This bundle prepares exact-pinned services; it does not establish benchmark
-profile support. v0.1 targets LongMemEval only for all three providers.
-OpenViking requires a separately verified session/message/commit adapter, while
-MemoryAgentBench remains deferred.
+profile support. v0.1 targets the same balanced LME-60 LongMemEval manifest for
+all three providers. OpenViking requires a separately verified
+session/message/commit adapter, while MemoryAgentBench remains deferred.
 
 ## Fixed releases
 

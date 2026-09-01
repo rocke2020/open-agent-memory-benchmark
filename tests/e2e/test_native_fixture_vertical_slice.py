@@ -79,6 +79,7 @@ from oamb.runtime.case_partition import build_case_partition_spec
 from oamb.runtime.native_run import (
     NativeCancellationEvidenceError,
     NativeRunArtifacts,
+    NativeRunInterrupted,
     NativeRunProcessError,
     run_native_vertical_slice,
 )
@@ -914,6 +915,86 @@ def test_live_cancellation_during_retry_backoff_clears_provider_lifecycle(
     assert not (provider_runtime / "active-operation").exists()
     attempts_directory = provider_runtime / "active-provider-attempts"
     assert not attempts_directory.exists() or not tuple(attempts_directory.iterdir())
+
+
+def test_planned_stop_during_retry_backoff_starts_no_later_supplier_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    first_plan = manifest.ingestion_plans[0]
+    provider_runtime = (tmp_path / "stopped-backoff-provider-runtime").resolve()
+    control = _control(
+        run_id="native-structured-429-stopped-backoff",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
+    partition = build_case_partition_spec(
+        run_id=control.run_spec.run_id,
+        resolved_plan_hash=control.preflight_record.resolved_plan_hash,
+        cell_spec_hash=control.preflight_record.adapter_profile_hash,
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest=manifest,
+        case_plans=workload.iter_case_plans(manifest),
+        requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
+        budget_policy_hash=canonical_sha256(["stopped-backoff-budget"]),
+        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+    )
+    context = multiprocessing.get_context("fork")
+    calls = context.Value("i", 0)
+    stop_event = context.Event()
+    rejection = canonical_json_bytes(
+        {
+            "error": {
+                "origin": "model_supplier",
+                "failure_kind": "rate_limited",
+                "status": 429,
+                "acceptance": "not_accepted",
+                "provider_mutation": "none",
+                "retryable": True,
+                "internal_retry_count": 0,
+            }
+        }
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        with calls.get_lock():
+            calls.value += 1
+        return httpx.Response(429, content=rejection)
+
+    async def stop_backoff(_seconds: int) -> None:
+        stop_event.set()
+
+    monkeypatch.setattr(native_run_module, "_infrastructure_retry_sleep", stop_backoff)
+
+    with pytest.raises(NativeRunInterrupted):
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=partition.run_id,
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=_memory_factory,
+            model_factory=lambda store: _client(cast(Any, store), handler),
+            answer_role_binding_id="answer-binding",
+            control=control,
+            partition=partition,
+            stop_event=stop_event,
+        )
+
+    assert calls.value == 1
+    root = tmp_path / "capsules" / partition.run_id
+    assert validate_source_root(root).disposition == ValidationDisposition.VALIDATED
+    assert not (provider_runtime / "active-operation").exists()
 
 
 def test_native_validation_rejects_supplier_internal_retry_budget_overflow(

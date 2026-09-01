@@ -290,7 +290,7 @@ def test_checked_in_configuration_has_only_finite_positive_ceilings() -> None:
         "100.00",
         "CNY",
     )
-    assert configuration.execution.as_tuple() == (1, 3, 2, 2)
+    assert configuration.execution.as_tuple() == (1, 3, 3, 3)
 
 
 @pytest.mark.parametrize(
@@ -432,11 +432,11 @@ def test_loader_rejects_unproved_provider_runtime_model_drift(tmp_path: Path) ->
         ("max_input_tokens: 5000000", "max_input_tokens: unbounded"),
         ('max_cost: "100.00"', "max_cost: null"),
         (
-            "max_parallel_history_ingestions_per_provider: 2",
+            "max_parallel_history_ingestions_per_provider: 3",
             "max_parallel_history_ingestions_per_provider: -1",
         ),
         (
-            "max_parallel_questions_per_provider: 2",
+            "max_parallel_questions_per_provider: 3",
             "max_parallel_questions_per_provider: 0",
         ),
     ),
@@ -464,8 +464,8 @@ def test_loader_rejects_each_legacy_parallelism_key(
     legacy_key: str,
 ) -> None:
     content = _valid_configuration_yaml().replace(
-        "  max_parallel_questions_per_provider: 2\n",
-        f"  max_parallel_questions_per_provider: 2\n  {legacy_key}: 2\n",
+        "  max_parallel_questions_per_provider: 3\n",
+        f"  max_parallel_questions_per_provider: 3\n  {legacy_key}: 2\n",
         1,
     )
 
@@ -478,4 +478,4 @@ def test_configuration_is_frozen() -> None:
 
     with pytest.raises(AttributeError):
         configuration.cells = ()  # type: ignore[misc]
-    assert replace(configuration.execution).as_tuple() == (1, 3, 2, 2)
+    assert replace(configuration.execution).as_tuple() == (1, 3, 3, 3)
