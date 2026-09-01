@@ -18,6 +18,11 @@ HASH_E = "e" * 64
 HASH_F = "f" * 64
 
 PROJECT = "oamb-providers-test-alpha"
+EXPECTED_PROVIDER_MODELS = {
+    "hindsight-rest-v1": "deepseek-v4-flash",
+    "mem0-rest-v1": "deepseek-v4-flash",
+    "openviking-rest-v1": "deepseek-v4-flash",
+}
 PROFILE_FILES = {
     "hindsight-rest-v1": (
         "hindsight-health.json",
@@ -240,6 +245,7 @@ def _load(receipt_path: Path) -> tuple[ProviderServiceProfileBinding, ...]:
         expected_project=PROJECT,
         expected_project_attestation_sha256=HASH_A,
         controlled_embeddings=_controlled_embeddings(),
+        expected_provider_models=EXPECTED_PROVIDER_MODELS,
     )
 
 
@@ -366,6 +372,35 @@ def test_consumer_independently_validates_proof_store_and_builds_bindings(
         assert binding.provider_gates.runtime_identity == GateStatus.PASS
         assert binding.provider_gates.model_readiness == GateStatus.NOT_RUN
         assert binding.provider_gates.memory_conformance == GateStatus.NOT_RUN
+
+
+@pytest.mark.parametrize(
+    ("filename", "model_path"),
+    (
+        ("hindsight-model-config.json", ("model",)),
+        ("mem0-config-redacted.json", ("llm", "config", "model")),
+        ("openviking-model-config.json", ("model",)),
+    ),
+)
+def test_consumer_rejects_provider_model_proof_that_differs_from_resolved_plan(
+    tmp_path: Path,
+    filename: str,
+    model_path: tuple[str, ...],
+) -> None:
+    from oamb.config.provider_services import ProviderServiceBindingError
+
+    document = json.loads(_proof_bytes(filename))
+    target = document
+    for key in model_path[:-1]:
+        target = target[key]
+    target[model_path[-1]] = "deepseek-v4-pro"
+    receipt_path = _write_service_artifacts(
+        tmp_path,
+        payload_overrides={filename: _canonical_bytes(document)},
+    )
+
+    with pytest.raises(ProviderServiceBindingError, match="model"):
+        _load(receipt_path)
 
 
 @pytest.mark.parametrize(
@@ -792,6 +827,7 @@ def test_receipt_rejects_invalid_identity_gate_hash_and_shape(
             expected_project=expected_project,
             expected_project_attestation_sha256=expected_attestation,
             controlled_embeddings=_controlled_embeddings(),
+            expected_provider_models=EXPECTED_PROVIDER_MODELS,
         )
 
 

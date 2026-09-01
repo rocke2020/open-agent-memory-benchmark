@@ -408,6 +408,17 @@ def test_loader_rejects_invalid_model_effort_or_recipient_closure(
         _load(_write_configuration(tmp_path, content))
 
 
+def test_loader_rejects_unproved_provider_runtime_model_drift(tmp_path: Path) -> None:
+    content = _valid_configuration_yaml().replace(
+        "runtime_model: deepseek-v4-flash",
+        "runtime_model: deepseek-v4-pro",
+        1,
+    )
+
+    with pytest.raises(BenchmarkConfigurationError, match="configured and runtime model"):
+        _load(_write_configuration(tmp_path, content))
+
+
 @pytest.mark.parametrize(
     "original,replacement",
     (

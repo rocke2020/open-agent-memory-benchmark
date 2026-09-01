@@ -14,6 +14,7 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 
 from .benchmark import (
     DEEPSEEK_THINKING_EFFORT_SCALE,
+    MODEL_EXECUTION_OWNER_BY_ROLE,
     MODEL_ROLE_IDS,
     T10_CELL_IDS,
     T10_RETRIEVAL_BINDING_IDS,
@@ -578,10 +579,20 @@ def _parse_model_role(value: object) -> ModelExecutionBinding:
         or document["thinking_effort_rank_1_indexed"] != expected_rank
     ):
         raise ResolvedPlanError(f"resolved model role {role_id} effort closure is invalid")
+    configured_model = _require_text(document["configured_model"], "configured model")
+    runtime_model = _require_text(document["runtime_model"], "runtime model")
+    execution_owner = _require_text(document["execution_owner"], "execution owner")
+    expected_owner = MODEL_EXECUTION_OWNER_BY_ROLE[role_id]
+    if execution_owner != expected_owner:
+        raise ResolvedPlanError(f"resolved model role {role_id} execution owner is invalid")
+    if expected_owner == "provider_internal" and runtime_model != configured_model:
+        raise ResolvedPlanError(
+            f"resolved model role {role_id} provider-internal model identity must match"
+        )
     values = {
         "role_id": role_id,
-        "configured_model": _require_text(document["configured_model"], "configured model"),
-        "runtime_model": _require_text(document["runtime_model"], "runtime model"),
+        "configured_model": configured_model,
+        "runtime_model": runtime_model,
         "thinking_effort": cast(ThinkingEffort, effort),
         "thinking_effort_scale": expected_scale,
         "thinking_effort_rank_1_indexed": expected_rank,
@@ -590,7 +601,7 @@ def _parse_model_role(value: object) -> ModelExecutionBinding:
             document["credential_variable"], "credential variable"
         ),
         "recipient": _require_text(document["recipient"], "model recipient"),
-        "execution_owner": _require_text(document["execution_owner"], "execution owner"),
+        "execution_owner": execution_owner,
         "proof_kind": _require_text(document["proof_kind"], "model proof kind"),
         "proof_reference": _require_text(document["proof_reference"], "model proof reference"),
         "usage_coverage": _require_text(document["usage_coverage"], "usage coverage"),
