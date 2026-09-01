@@ -231,6 +231,18 @@ class ServiceBundleContractTests(unittest.TestCase):
             "OAMB_MEM0_INSPECTOR_API_KEY",
         ):
             self.assertRegex(example, rf"(?m)^{name}=.*$")
+        for name in (
+            "OAMB_HINDSIGHT_LLM_MODEL",
+            "OAMB_MEM0_LLM_MODEL",
+            "OAMB_OPENVIKING_VLM_MODEL",
+        ):
+            self.assertRegex(example, rf"(?m)^{name}=deepseek-v4-flash$")
+        for name in (
+            "OAMB_HINDSIGHT_LLM_BASE_URL",
+            "OAMB_MEM0_LLM_BASE_URL",
+            "OAMB_OPENVIKING_VLM_BASE_URL",
+        ):
+            self.assertRegex(example, rf"(?m)^{name}=change-me$")
         self.assertNotRegex(example, r"sk-[A-Za-z0-9]{12,}")
 
 

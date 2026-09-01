@@ -229,6 +229,7 @@ def run_command(
             base_environment=os.environ,
         )
         provider_project, evidence_by_provider = load_live_provider_evidence(
+            plan=plan,
             provider_runtime_directory=provider_runtime,
             environment=environment,
         )

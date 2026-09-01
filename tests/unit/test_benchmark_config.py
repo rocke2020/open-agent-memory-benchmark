@@ -105,8 +105,8 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
     ) == (
         (
             "hindsight_extraction",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
@@ -120,8 +120,8 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "mem0_extraction",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
@@ -135,8 +135,8 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "openviking_semantic_understanding",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
@@ -379,6 +379,17 @@ def test_loader_rejects_invalid_model_effort_or_recipient_closure(
 ) -> None:
     content = _valid_configuration_yaml().replace(original, replacement, 1)
     with pytest.raises(BenchmarkConfigurationError):
+        _load(_write_configuration(tmp_path, content))
+
+
+def test_loader_rejects_unproved_provider_runtime_model_drift(tmp_path: Path) -> None:
+    content = _valid_configuration_yaml().replace(
+        "runtime_model: deepseek-v4-flash",
+        "runtime_model: deepseek-v4-pro",
+        1,
+    )
+
+    with pytest.raises(BenchmarkConfigurationError, match="configured and runtime model"):
         _load(_write_configuration(tmp_path, content))
 
 

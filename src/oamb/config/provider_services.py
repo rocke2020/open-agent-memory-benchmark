@@ -262,6 +262,22 @@ def _require_embedding_mapping(
     return dict(value)
 
 
+def _require_provider_model_mapping(value: Mapping[str, object]) -> dict[str, str]:
+    if set(value) != set(_DEFAULT_REST_PROFILE_IDS):
+        raise ProviderServiceBindingError(
+            "expected provider models must name exactly the three REST profiles"
+        )
+    models: dict[str, str] = {}
+    for profile_id in _DEFAULT_REST_PROFILE_IDS:
+        model = value[profile_id]
+        if not isinstance(model, str) or not model:
+            raise ProviderServiceBindingError(
+                f"expected provider model is missing for {profile_id}"
+            )
+        models[profile_id] = model
+    return models
+
+
 def _read_regular_proof_file(path: Path, label: str, *, trusted_root: Path) -> bytes:
     path = path.absolute()
     trusted_root = trusted_root.absolute()
@@ -439,10 +455,15 @@ def _parse_secret_free_proof(content: bytes, *, filename: str) -> object:
 
 
 def _semantic_error(filename: str) -> ProviderServiceBindingError:
-    return ProviderServiceBindingError(f"provider proof semantic check failed: {filename}")
+    return ProviderServiceBindingError(f"provider proof semantic/model check failed: {filename}")
 
 
-def _validate_proof_semantics(filename: str, value: object) -> None:
+def _validate_proof_semantics(
+    filename: str,
+    value: object,
+    *,
+    expected_model: str,
+) -> None:
     if not isinstance(value, dict):
         raise _semantic_error(filename)
     valid = False
@@ -451,11 +472,7 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
     elif filename == "hindsight-version.json":
         valid = value.get("api_version") == "0.9.2" and isinstance(value.get("features"), dict)
     elif filename == "hindsight-model-config.json":
-        valid = (
-            isinstance(value.get("model"), str)
-            and bool(value["model"])
-            and value.get("reasoning_effort") == "low"
-        )
+        valid = value.get("model") == expected_model and value.get("reasoning_effort") == "low"
     elif filename == "mem0-openapi.json":
         paths = value.get("paths")
         valid = isinstance(paths, dict) and all(path in paths for path in ("/memories", "/search"))
@@ -481,6 +498,7 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
             and isinstance(embedder_config, dict)
             and embedder_config.get("embedding_dims") == 1024
             and isinstance(llm_config, dict)
+            and llm_config.get("model") == expected_model
             and llm_config.get("reasoning_effort") == "low"
             and llm_config.get("is_reasoning_model") is True
             and value.get("reranker") is None
@@ -517,8 +535,7 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
     elif filename == "openviking-model-config.json":
         valid = (
             value.get("provider") == "openai"
-            and isinstance(value.get("model"), str)
-            and bool(value["model"])
+            and value.get("model") == expected_model
             and value.get("reasoning_effort") == "low"
         )
     if not valid:
@@ -529,6 +546,8 @@ def _validate_profile_proof_store(
     receipt_path: Path,
     profile: ExactAdapterProfile,
     manifest_hash: str,
+    *,
+    expected_model: str,
 ) -> None:
     proof_store = receipt_path.parent / "proofs"
     manifest_path = proof_store / "manifests" / f"{manifest_hash}.json"
@@ -589,7 +608,7 @@ def _validate_profile_proof_store(
             raise ProviderServiceBindingError("provider proof blob byte count does not match")
         filename = str(entry["relative_path"])
         proof = _parse_secret_free_proof(blob_bytes, filename=filename)
-        _validate_proof_semantics(filename, proof)
+        _validate_proof_semantics(filename, proof, expected_model=expected_model)
 
 
 def _parse_canonical_receipt(content: bytes) -> dict[str, Any]:
@@ -653,6 +672,7 @@ def load_provider_service_bindings(
     expected_project: str,
     expected_project_attestation_sha256: str,
     controlled_embeddings: Mapping[str, ControlledEmbeddingDescriptor],
+    expected_provider_models: Mapping[str, str],
 ) -> tuple[ProviderServiceProfileBinding, ...]:
     content = _read_regular_proof_file(
         receipt_path,
@@ -686,6 +706,7 @@ def load_provider_service_bindings(
         controlled_embeddings,
         "controlled embedding descriptors",
     )
+    provider_models = _require_provider_model_mapping(expected_provider_models)
     bindings: list[ProviderServiceProfileBinding] = []
     for exact_profile, profile_record in zip(
         DEFAULT_REST_PROFILES,
@@ -701,6 +722,7 @@ def load_provider_service_bindings(
             receipt_path,
             exact_profile,
             proof_manifest_sha256,
+            expected_model=provider_models[profile_id],
         )
         embedding = embeddings[profile_id]
         if not isinstance(embedding, ControlledEmbeddingDescriptor):

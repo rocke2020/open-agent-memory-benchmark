@@ -120,15 +120,19 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
     document = json.loads((output / "resolved-plan.json").read_bytes())
     assert tuple(item["role_id"] for item in document["model_roles"]) == EXPECTED_ROLE_IDS
     assert tuple(
-        (item["thinking_effort"], item["thinking_effort_rank_1_indexed"])
+        (
+            item["configured_model"],
+            item["thinking_effort"],
+            item["thinking_effort_rank_1_indexed"],
+        )
         for item in document["model_roles"]
     ) == (
-        ("low", 1),
-        ("low", 1),
-        ("low", 1),
-        ("low", 1),
-        ("high", 2),
-        ("not_applicable", None),
+        ("deepseek-v4-flash", "low", 1),
+        ("deepseek-v4-flash", "low", 1),
+        ("deepseek-v4-flash", "low", 1),
+        ("deepseek-v4-pro", "low", 1),
+        ("deepseek-v4-flash", "high", 2),
+        ("qwen3-embedding:0.6b", "not_applicable", None),
     )
     assert document["retrieval"]["generation"] == "disabled"
     assert tuple(
@@ -190,7 +194,7 @@ def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) 
     plan = load_resolved_plan_for_run(plan_path)
 
     assert plan.comparison_id == "t10-lme6"
-    assert plan.model_roles[0].configured_model == "deepseek-v4-pro"
+    assert plan.model_roles[0].configured_model == "deepseek-v4-flash"
     with pytest.raises(FrozenInstanceError):
         plan.comparison_id = "changed"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
@@ -234,6 +238,43 @@ def test_plan_loader_rejects_cross_cell_substitution_with_rehashed_plan(tmp_path
 
     with pytest.raises(ResolvedPlanError, match="cell order"):
         load_resolved_plan_for_run(substituted)
+
+
+@pytest.mark.parametrize(
+    ("role_mutation", "error"),
+    (
+        ({"runtime_model": "deepseek-v4-pro"}, "provider-internal model identity"),
+        ({"execution_owner": "harness"}, "execution owner"),
+    ),
+)
+def test_plan_loader_rejects_rehashed_provider_internal_identity_drift(
+    tmp_path: Path,
+    role_mutation: dict[str, str],
+    error: str,
+) -> None:
+    output = tmp_path / "comparison"
+    result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
+    assert result.exit_code == 0, result.output
+    document = json.loads((output / "resolved-plan.json").read_bytes())
+    role = document["model_roles"][0]
+    role.update(role_mutation)
+    role_payload = dict(role)
+    role_payload.pop("binding_hash")
+    role["binding_hash"] = canonical_sha256(
+        ["oamb-model-execution-binding-initial-v1", role_payload]
+    )
+    for cell in document["cells"]:
+        for binding in cell["model_role_binding_hashes"]:
+            if binding[0] == role["role_id"]:
+                binding[1] = role["binding_hash"]
+        cell_payload = dict(cell)
+        cell_payload.pop("cell_spec_hash")
+        cell["cell_spec_hash"] = canonical_sha256(["oamb-cell-spec-initial-v1", cell_payload])
+    drifted = tmp_path / "provider-runtime-drifted.json"
+    drifted.write_bytes(_rehash_plan(document))
+
+    with pytest.raises(ResolvedPlanError, match=error):
+        load_resolved_plan_for_run(drifted)
 
 
 def test_model_endpoint_and_concurrency_changes_change_cell_identity(tmp_path: Path) -> None:

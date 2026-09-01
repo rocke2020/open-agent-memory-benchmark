@@ -162,6 +162,7 @@ def load_live_environment(
 
 def load_live_provider_evidence(
     *,
+    plan: ResolvedPlan,
     provider_runtime_directory: Path,
     environment: Mapping[str, str],
 ) -> tuple[str, dict[str, SourceEvidenceBinding]]:
@@ -213,6 +214,13 @@ def load_live_provider_evidence(
         expected_project=provider_project,
         expected_project_attestation_sha256=attestation_hash,
         controlled_embeddings={profile_id: embedding for profile_id in profile_ids},
+        expected_provider_models={
+            "hindsight-rest-v1": _model_plan(plan, "hindsight_extraction").configured_model,
+            "mem0-rest-v1": _model_plan(plan, "mem0_extraction").configured_model,
+            "openviking-rest-v1": _model_plan(
+                plan, "openviking_semantic_understanding"
+            ).configured_model,
+        },
     )
     evidence_by_provider: dict[str, SourceEvidenceBinding] = {}
     for binding in bindings:

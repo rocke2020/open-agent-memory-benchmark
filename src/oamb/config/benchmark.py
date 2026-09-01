@@ -102,7 +102,7 @@ _EXPECTED_EFFORTS: dict[ModelRoleId, ThinkingEffort] = {
     "judge": "high",
     "embedding": "not_applicable",
 }
-_EXPECTED_EXECUTION_OWNERS: dict[ModelRoleId, ExecutionOwner] = {
+MODEL_EXECUTION_OWNER_BY_ROLE: dict[ModelRoleId, ExecutionOwner] = {
     "hindsight_extraction": "provider_internal",
     "mem0_extraction": "provider_internal",
     "openviking_semantic_understanding": "provider_internal",
@@ -526,8 +526,13 @@ def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfigura
         document["credential_variable"], role_id=role_id
     )
     owner = document["execution_owner"]
-    if owner != _EXPECTED_EXECUTION_OWNERS[role_id]:
+    if owner != MODEL_EXECUTION_OWNER_BY_ROLE[role_id]:
         raise BenchmarkConfigurationError(f"model role {role_id} has the wrong execution owner")
+    if owner == "provider_internal" and runtime_model != model:
+        raise BenchmarkConfigurationError(
+            f"model role {role_id} requires the same configured and runtime model "
+            "because provider proof exposes one model identity"
+        )
     proof_kind = _require_text(document["proof_kind"], f"model role {role_id} proof kind")
     expected_proof_kind = (
         "model_dimension_probe"
@@ -701,6 +706,7 @@ __all__ = [
     "ExecutionLimits",
     "GenerativeThinkingEffort",
     "MODEL_ROLE_IDS",
+    "MODEL_EXECUTION_OWNER_BY_ROLE",
     "ModelRoleConfiguration",
     "ModelRoleConfigurations",
     "ModelRoleId",

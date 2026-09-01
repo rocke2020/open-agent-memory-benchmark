@@ -99,11 +99,16 @@ Mem0 image is reused only when its full build-input fingerprint also matches.
 `up` reports only container liveness. `verify --services` additionally proves
 exact API versions/routes, storage reachability, Mem0 configuration persistence
 across a normal restart, and an OpenViking user-bound key without benchmark-
-memory writes. `verify --model-readiness` is a potentially billable probe: it
-checks the common 1,024-dimension embedding
-response, every configured indexing/extraction/semantic-understanding, answer,
-and judge role, and OpenViking `/ready`. v0.1 has no retrieval-generation role.
-The readiness command must not run concurrently with a benchmark.
+memory writes. `verify --model-readiness` is a potentially billable endpoint-
+readiness probe: it checks the common 1,024-dimension embedding response, a
+minimal chat response from every configured indexing/extraction/semantic-
+understanding model endpoint, and OpenViking `/ready`. It does not load or probe
+the harness answer/judge binding, execute a provider-native extraction path,
+validate structured extracted memory, or prove the absence of a fallback model.
+The target Flash T10 therefore requires a separate bounded fresh-scope
+extraction-conformance probe for each provider before benchmark dispatch. v0.1
+has no retrieval-generation role. Neither probe may run concurrently with a
+benchmark.
 
 Model-readiness billing is explicitly `unavailable`, never zero. Its budget
 must reserve at least five calls and 240 seconds, set
