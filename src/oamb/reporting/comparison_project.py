@@ -23,6 +23,9 @@ from oamb.artifacts.atomic import read_regular_file, sha256_file
 from oamb.artifacts.capsule import publish_with_last_marker, verify_published_directory
 from oamb.artifacts.composition import inspect_embedded_composition
 from oamb.artifacts.validation.composition import declares_composition
+from oamb.artifacts.validation.openviking_session_evidence import (
+    reconstruct_openviking_session_indexing_usage,
+)
 from oamb.artifacts.validation.retrieval_request import (
     retrieval_request_proves_generation_free,
 )
@@ -31,6 +34,7 @@ from oamb.config.doctor import CellSpec, ModelExecutionBinding, ResolvedPlan
 from oamb.contracts.evidence import CapsuleManifest, ValidationResult
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.states import ValidationDisposition
+from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
 
 REPORT_EXPORT_NAME = "report.json"
 REPORT_HTML_NAME = "report.html"
@@ -782,14 +786,18 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
         },
         "retrieval_binding_id": snapshot.cell.retrieval_binding_id,
         "observed_time": _observed_time(snapshot),
-        "accounting": _accounting_document(snapshot),
+        "accounting": _accounting_document(plan, snapshot),
         "limitations": limitations,
     }
 
 
-def _accounting_document(snapshot: _CellSnapshot) -> dict[str, object]:
+def _accounting_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, object]:
     token_stages = {
-        label: _token_stage_document(snapshot.token_usage, stage)
+        label: (
+            _indexing_token_stage_document(plan, snapshot)
+            if label == "indexing"
+            else _token_stage_document(snapshot.token_usage, stage)
+        )
         for label, stage in TOKEN_REPORT_STAGES
     }
     resource_document = _resource_document(snapshot.resources)
@@ -829,6 +837,103 @@ def _accounting_document(snapshot: _CellSnapshot) -> dict[str, object]:
             "cost": cost_document["billing_coverage"]["status"],
         },
     }
+
+
+def _indexing_token_stage_document(
+    plan: ResolvedPlan,
+    snapshot: _CellSnapshot,
+) -> dict[str, Any]:
+    producer_roles = tuple(
+        item for item in plan.model_roles if item.role_id == snapshot.cell.producer_role_id
+    )
+    if len(producer_roles) != 1:
+        raise ComparisonProjectError("cell requires exactly one producer model role")
+    producer_binding_id = producer_roles[0].binding_hash
+
+    logical_attempt_ids: list[str] = []
+    for ingestion_plan in snapshot.ingestion_plans:
+        attempt_ids = ingestion_plan.get("ordered_dispatch_attempt_ids")
+        if not isinstance(attempt_ids, list) or any(
+            not isinstance(attempt_id, str) or not attempt_id for attempt_id in attempt_ids
+        ):
+            raise ComparisonProjectError(
+                "ingestion plan requires ordered logical dispatch attempt IDs"
+            )
+        logical_attempt_ids.extend(attempt_ids)
+    if len(set(logical_attempt_ids)) != len(logical_attempt_ids):
+        raise ComparisonProjectError("logical indexing dispatch attempt is duplicated")
+
+    model_usage_by_attempt: dict[str, list[dict[str, Any]]] = {
+        attempt_id: [] for attempt_id in logical_attempt_ids
+    }
+    operation_usage_by_attempt: dict[str, list[dict[str, Any]]] = {
+        attempt_id: [] for attempt_id in logical_attempt_ids
+    }
+    for record in snapshot.token_usage:
+        attempt_id = record.get("attempt_id")
+        if record.get("stage") != "memory_ingest" or not isinstance(attempt_id, str):
+            continue
+        if attempt_id not in model_usage_by_attempt:
+            continue
+        if (
+            record.get("budget_owner_kind") == "model_role"
+            and record.get("budget_owner_id") == producer_binding_id
+        ):
+            model_usage_by_attempt[attempt_id].append(record)
+        elif record.get("budget_owner_kind") == "provider_operation":
+            operation_usage_by_attempt[attempt_id].append(record)
+
+    selected: list[dict[str, Any]] = []
+    for attempt_id in logical_attempt_ids:
+        model_records = model_usage_by_attempt[attempt_id]
+        operation_records = operation_usage_by_attempt[attempt_id]
+        if len(model_records) == 1:
+            selected.append(model_records[0])
+        elif not model_records and len(operation_records) == 1:
+            selected.append(operation_records[0])
+        else:
+            raise ComparisonProjectError(
+                "indexing producer usage requires exactly one record per logical dispatch"
+            )
+    if (
+        snapshot.cell.adapter_profile_id == OPENVIKING_SESSION_PROFILE_ID
+        and selected
+        and all(item.get("proof_status") == "unavailable" for item in selected)
+    ):
+        try:
+            recovered = tuple(
+                usage
+                for ingestion_plan in snapshot.ingestion_plans
+                for usage in reconstruct_openviking_session_indexing_usage(
+                    raw_payloads=snapshot.raw_payloads,
+                    plan=ingestion_plan,
+                )
+            )
+        except ValueError as exc:
+            raise ComparisonProjectError("OpenViking indexing usage evidence is invalid") from exc
+        if tuple(item.attempt_id for item in recovered) != tuple(logical_attempt_ids):
+            raise ComparisonProjectError("OpenViking indexing usage ledger does not close")
+        selected = [
+            {
+                "attempt_id": item.attempt_id,
+                "stage": "memory_ingest",
+                "budget_owner_kind": "model_role",
+                "budget_owner_id": producer_binding_id,
+                "input_tokens": item.prompt_tokens,
+                "visible_output_tokens": item.completion_tokens,
+                "supplier_reported_total_tokens": item.total_tokens,
+                "cached_input_tokens": item.cached_tokens,
+                "reasoning_tokens": item.reasoning_tokens,
+                "covered_dimensions": TOKEN_DIMENSIONS,
+                "unavailable_dimensions": (),
+                "proof_status": "measured_complete",
+                "billing_complete": False,
+                "measurement_source": "sealed_openviking_task_snapshot",
+                "raw_response_ref": item.raw_response_ref,
+            }
+            for item in recovered
+        ]
+    return _token_stage_document(tuple(selected), "memory_ingest")
 
 
 def _answer_visible_context_document(snapshot: _CellSnapshot) -> dict[str, object]:
@@ -2024,8 +2129,10 @@ def _omitted_measurements_note(
 
 def _indexing_measurement_note(cells: tuple[Mapping[str, Any], ...]) -> str:
     parts: list[str] = []
+    reasoning_parts: list[str] = []
     for item in cells:
-        coverage = item["accounting"]["tokens"]["indexing"]["supplier_usage_coverage"]
+        indexing = item["accounting"]["tokens"]["indexing"]
+        coverage = indexing["supplier_usage_coverage"]
         measured = coverage["measured_record_count"]
         records = coverage["record_count"]
         prefix = f"{item['provider_id']}: {measured}/{records} metered"
@@ -2036,10 +2143,30 @@ def _indexing_measurement_note(cells: tuple[Mapping[str, Any], ...]) -> str:
                 f"{prefix}; the displayed total sums only those metered records and is incomplete"
             )
         else:
-            parts.append(f"{prefix}; the displayed total covers all records")
+            parts.append(f"{prefix}; the displayed total covers all producer records")
+        totals = indexing["totals"]
+        supplier_total = totals["supplier_reported_total_tokens"]
+        reasoning = totals["reasoning_tokens"]
+        if supplier_total["value"] != "unavailable":
+            if reasoning["value"] == "unavailable":
+                reasoning_parts.append(
+                    f"{item['provider_id']} reasoning breakdown is unavailable, not zero; "
+                    f"{_number_text(supplier_total['value'])} is the measured supplier total, "
+                    "with no inferred reasoning added, so the measurement remains partial"
+                )
+            else:
+                reasoning_parts.append(
+                    f"{item['provider_id']} reasoning: {_number_text(reasoning['value'])}, "
+                    "already included in its total"
+                )
     return (
-        '<p class="muted">Indexing token meter coverage counts sealed supplier-usage '
-        f"records, not source units. {_escape('; '.join(parts))}.</p>"
+        '<p class="muted"><strong>Indexing token definition:</strong> Indexing tokens are '
+        "supplier-reported total tokens for successful logical producer records "
+        "(provider-defined input plus output). Reasoning is included once only when it is "
+        "inside that supplier total; a reasoning subset is never added again. If reasoning "
+        "is unavailable, the report does not infer or add it. Embedding and failed physical "
+        f"attempts are excluded. Meter coverage: {_escape('; '.join(parts))}. "
+        f"Reasoning coverage: {_escape('; '.join(reasoning_parts))}.</p>"
     )
 
 

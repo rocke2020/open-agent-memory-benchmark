@@ -27,6 +27,119 @@ class OpenVikingSessionPlanEvidence:
     state_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class OpenVikingSessionIndexingUsage:
+    attempt_id: str
+    raw_response_ref: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cached_tokens: int
+    reasoning_tokens: int
+
+
+def reconstruct_openviking_session_indexing_usage(
+    *,
+    raw_payloads: Mapping[str, bytes],
+    plan: Mapping[str, Any],
+) -> tuple[OpenVikingSessionIndexingUsage, ...]:
+    if plan.get("adapter_profile_id") != OPENVIKING_SESSION_PROFILE_ID:
+        raise ValueError("OpenViking indexing usage has the wrong adapter profile")
+    attempt_ids = _ordered_text(plan, "ordered_dispatch_attempt_ids")
+    source_ids = _ordered_text(plan, "ordered_source_unit_ids")
+    readiness_refs = _ordered_text(plan, "readiness_evidence_refs")
+    if (
+        not attempt_ids
+        or len(attempt_ids) != len(source_ids)
+        or len(set(attempt_ids)) != len(attempt_ids)
+        or len(set(source_ids)) != len(source_ids)
+    ):
+        raise ValueError("OpenViking indexing usage dispatch ledger is invalid")
+
+    expected = {
+        _session_id(source_id): attempt_id
+        for source_id, attempt_id in zip(source_ids, attempt_ids, strict=True)
+    }
+    accepted: dict[str, set[tuple[str, str]]] = {session_id: set() for session_id in expected}
+    completed: dict[str, OpenVikingSessionIndexingUsage] = {}
+    completed_identities: dict[str, tuple[str, str]] = {}
+    task_ids: set[str] = set()
+    for reference in dict.fromkeys(readiness_refs):
+        payload = _payload(raw_payloads, reference)
+        if hashlib.sha256(payload).hexdigest() != reference:
+            raise ValueError("OpenViking indexing usage raw identity does not close")
+        try:
+            document = json.loads(payload)
+        except (UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        result = document.get("result")
+        if isinstance(result, dict) and result.get("status") == "accepted":
+            session_id = result.get("session_id")
+            if session_id not in expected:
+                continue
+            task_id = result.get("task_id")
+            archive_uri = result.get("archive_uri")
+            if (
+                document.get("status") != "ok"
+                or any(
+                    document.get(field) is not None for field in ("error", "telemetry", "profile")
+                )
+                or result.get("archived") is not True
+                or not isinstance(task_id, str)
+                or not task_id
+                or not isinstance(archive_uri, str)
+                or not archive_uri
+            ):
+                raise ValueError("OpenViking indexing usage commit identity does not close")
+            accepted[session_id].add((task_id, archive_uri))
+            continue
+        if (
+            not isinstance(result, dict)
+            or result.get("task_type") != "session_commit"
+            or result.get("status") != "completed"
+        ):
+            continue
+        task_id = result.get("task_id")
+        task_result = result.get("result")
+        session_id = result.get("resource_id")
+        archive_uri = task_result.get("archive_uri") if isinstance(task_result, dict) else None
+        if (
+            document.get("status") != "ok"
+            or any(document.get(field) is not None for field in ("error", "telemetry", "profile"))
+            or not isinstance(task_id, str)
+            or not task_id
+            or not isinstance(task_result, dict)
+            or not isinstance(session_id, str)
+            or task_result.get("session_id") != session_id
+            or not isinstance(archive_uri, str)
+            or not archive_uri
+            or session_id not in expected
+        ):
+            raise ValueError("OpenViking indexing usage task identity does not close")
+        if task_id in task_ids or session_id in completed:
+            raise ValueError("OpenViking indexing usage has conflicting completed snapshots")
+        task_ids.add(task_id)
+        usage = _task_indexing_usage(
+            task_result.get("token_usage"),
+            attempt_id=expected[session_id],
+            raw_response_ref=reference,
+        )
+        completed[session_id] = usage
+        completed_identities[session_id] = (task_id, archive_uri)
+
+    expected_sessions = tuple(_session_id(source_id) for source_id in source_ids)
+    if set(completed) != set(expected_sessions):
+        raise ValueError("OpenViking indexing usage is missing a completed snapshot")
+    if any(
+        completed_identities[session_id] not in accepted[session_id]
+        for session_id in expected_sessions
+    ):
+        raise ValueError("OpenViking indexing usage task is not bound to its accepted commit")
+    return tuple(completed[session_id] for session_id in expected_sessions)
+
+
 def reconstruct_openviking_session_plan(
     *,
     raw_payloads: Mapping[str, bytes],
@@ -208,6 +321,62 @@ def _session_id(source_unit_id: str) -> str:
     return "oamb-" + hashlib.sha256(b"session\0" + source_unit_id.encode("utf-8")).hexdigest()
 
 
+def _ordered_text(plan: Mapping[str, Any], field: str) -> tuple[str, ...]:
+    value = plan.get(field)
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise ValueError(f"OpenViking indexing usage {field} is invalid")
+    return tuple(value)
+
+
+def _task_indexing_usage(
+    value: object,
+    *,
+    attempt_id: str,
+    raw_response_ref: str,
+) -> OpenVikingSessionIndexingUsage:
+    if not isinstance(value, dict):
+        raise ValueError("OpenViking indexing usage snapshot is absent")
+    llm = value.get("llm")
+    embedding = value.get("embedding")
+    total = value.get("total")
+    if not isinstance(llm, dict) or not isinstance(embedding, dict) or not isinstance(total, dict):
+        raise ValueError("OpenViking indexing usage snapshot is malformed")
+    prompt_tokens = _non_negative_integer(llm, "prompt_tokens")
+    completion_tokens = _non_negative_integer(llm, "completion_tokens")
+    llm_total_tokens = _non_negative_integer(llm, "total_tokens")
+    cached_tokens = _non_negative_integer(llm, "cached_tokens")
+    reasoning_tokens = _non_negative_integer(llm, "reasoning_tokens")
+    embedding_tokens = _non_negative_integer(embedding, "total_tokens")
+    combined_tokens = _non_negative_integer(total, "total_tokens")
+    combined_cached_tokens = _non_negative_integer(total, "cached_tokens")
+    combined_reasoning_tokens = _non_negative_integer(total, "reasoning_tokens")
+    if (
+        prompt_tokens + completion_tokens != llm_total_tokens
+        or llm_total_tokens + embedding_tokens != combined_tokens
+        or cached_tokens != combined_cached_tokens
+        or reasoning_tokens != combined_reasoning_tokens
+        or cached_tokens > prompt_tokens
+        or reasoning_tokens > completion_tokens
+    ):
+        raise ValueError("OpenViking indexing usage token equations do not close")
+    return OpenVikingSessionIndexingUsage(
+        attempt_id=attempt_id,
+        raw_response_ref=raw_response_ref,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=llm_total_tokens,
+        cached_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
+    )
+
+
+def _non_negative_integer(value: Mapping[str, Any], field: str) -> int:
+    item = value.get(field)
+    if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+        raise ValueError(f"OpenViking indexing usage {field} is invalid")
+    return item
+
+
 def _payload(raw_payloads: Mapping[str, bytes], reference: str | None) -> bytes:
     if reference is None or reference not in raw_payloads:
         raise ValueError("OpenViking session raw evidence is absent")
@@ -225,7 +394,9 @@ def _object(payload: bytes) -> dict[str, Any]:
 
 
 __all__ = [
+    "OpenVikingSessionIndexingUsage",
     "OpenVikingSessionPlanEvidence",
+    "reconstruct_openviking_session_indexing_usage",
     "reconstruct_openviking_session_candidates",
     "reconstruct_openviking_session_plan",
     "reconstruct_openviking_session_projection",
