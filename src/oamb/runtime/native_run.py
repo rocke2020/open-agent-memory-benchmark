@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import math
 import multiprocessing
+import signal
+import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -13,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Literal, Protocol, TypeAlias, TypeVar
+from typing import Any, Literal, Protocol, TypeAlias, TypeVar
 
 from oamb.artifacts.atomic import atomic_write_bytes, read_regular_file
 from oamb.contracts.accounting import (
@@ -190,6 +192,10 @@ class NativeRunProcessError(RuntimeError):
 
 class NativeRunProcessTerminationError(RuntimeError):
     """The supervised native composition survived terminate and kill bounds."""
+
+
+class NativeRunInterrupted(RuntimeError):
+    """A planned process signal stopped admission after accepted work drained."""
 
 
 class NativeCancellationEvidenceError(asyncio.CancelledError):
@@ -475,6 +481,7 @@ _NativeErrorCategory: TypeAlias = Literal[
     "memory_unknown",
     "model_cancelled_unknown",
     "model_unknown",
+    "interrupted",
     "runtime",
     "system_exit",
     "timeout",
@@ -558,6 +565,13 @@ class _NativeRunRequest:
     lease: RunLeaseRecord | None = None
     provider_lifecycle: ProviderLifecycleBridge | None = None
     partition: CasePartitionSpec | None = None
+    stop_event: _NativeStopSignal | None = None
+
+
+class _NativeStopSignal(Protocol):
+    def is_set(self) -> bool: ...
+
+    def set(self) -> None: ...
 
 
 class _StoppableNativeProcess(Protocol):
@@ -597,6 +611,7 @@ class _NativeExecutionState:
     provider_lifecycle: ProviderLifecycleBridge | None = None
     pending_model_usage: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] | None = None
     infrastructure_retry_controller: InfrastructureRetryController | None = None
+    stop_event: _NativeStopSignal | None = None
     sequence: int = 0
 
     def timestamp(self) -> datetime:
@@ -804,6 +819,8 @@ async def _complete_model_with_infrastructure_retry(
             )
 
     async def dispatch(supplier_call_ordinal: int) -> ModelReceipt:
+        if supplier_call_ordinal > 1:
+            _raise_if_native_stop_requested(state)
         lifecycle = state.provider_lifecycle
         if supplier_call_ordinal > 1 and lifecycle is not None and prepared.intent is not None:
             lifecycle.mark_attempt_dispatched(
@@ -941,6 +958,7 @@ def _new_execution_state(
         infrastructure_retry_controller=InfrastructureRetryController(
             maximum_total_retries=len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
         ),
+        stop_event=request.stop_event,
         sequence=sequence,
     )
 
@@ -962,6 +980,7 @@ def run_native_vertical_slice(
     control: NativeRunControl | None = None,
     continuation: NativeContinuation | None = None,
     partition: CasePartitionSpec | None = None,
+    stop_event: _NativeStopSignal | None = None,
 ) -> NativeRunArtifacts:
     """Compose one deterministic native capsule without selecting any live transport."""
 
@@ -1051,6 +1070,7 @@ def run_native_vertical_slice(
         lease=lease,
         provider_lifecycle=lifecycle,
         partition=partition,
+        stop_event=stop_event,
     )
     try:
         completed = _run_native_supervised(request)
@@ -1093,21 +1113,40 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
             "native composition requires an operating-system fork boundary"
         ) from exc
     receiver, sender = context.Pipe(duplex=False)
+    stop_event = request.stop_event if request.stop_event is not None else context.Event()
+    supervised_request = replace(request, stop_event=stop_event)
     process = context.Process(
         target=_native_process_entry,
-        args=(request, sender),
+        args=(supervised_request, sender),
         name=f"oamb-native-{request.run_id}",
         daemon=False,
     )
     started = False
+    previous_signal_handlers: dict[signal.Signals, Any] = {}
+    stop_signal_count = [0]
     active_close: _NativeCloseStarted | None = None
     latest_progress: _NativeRunProgress | None = None
     close_deadline: float | None = None
     try:
+        previous_signal_handlers = _install_native_stop_handlers(
+            stop_event,
+            stop_signal_count,
+        )
         process.start()
         started = True
         sender.close()
         while True:
+            if stop_signal_count[0] > 1:
+                _retire_native_process(process)
+                error = NativeRunProcessError(
+                    "native run force-stopped after a repeated process signal"
+                )
+                _raise_after_process_abort(
+                    supervised_request,
+                    latest_progress,
+                    active_close,
+                    error,
+                )
             poll_seconds = NATIVE_PROCESS_POLL_SECONDS
             if close_deadline is not None:
                 poll_seconds = min(
@@ -1123,7 +1162,12 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
                         "native composition process closed its result channel "
                         f"with status {process.exitcode}"
                     )
-                    _raise_after_process_abort(request, latest_progress, active_close, error)
+                    _raise_after_process_abort(
+                        supervised_request,
+                        latest_progress,
+                        active_close,
+                        error,
+                    )
                 if isinstance(message, _NativeRunProgress):
                     latest_progress = message
                     continue
@@ -1158,7 +1202,7 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
                         _join_completed_native_process(process)
                     except NativeRunProcessError as join_error:
                         _raise_after_process_abort(
-                            request,
+                            supervised_request,
                             latest_progress,
                             active_close,
                             join_error,
@@ -1169,7 +1213,7 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
                         _join_completed_native_process(process)
                     except NativeRunProcessError as error:
                         _raise_after_process_abort(
-                            request,
+                            supervised_request,
                             latest_progress,
                             active_close,
                             error,
@@ -1180,7 +1224,10 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
                 if active_close is None:
                     raise AssertionError("native close deadline has no active client")
                 _retire_native_process(process)
-                timeout_errors = _seal_supervised_close_abort(request, active_close)
+                timeout_errors = _seal_supervised_close_abort(
+                    supervised_request,
+                    active_close,
+                )
                 if len(timeout_errors) == 1:
                     raise timeout_errors[0]
                 raise BaseExceptionGroup(
@@ -1193,12 +1240,13 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
                     f"native composition process exited with status {process.exitcode}"
                 )
                 _raise_after_process_abort(
-                    request,
+                    supervised_request,
                     latest_progress,
                     active_close,
                     process_error,
                 )
     finally:
+        _restore_native_stop_handlers(previous_signal_handlers)
         try:
             receiver.close()
         finally:
@@ -1212,7 +1260,32 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
             process.close()
 
 
+def _install_native_stop_handlers(
+    stop_event: _NativeStopSignal,
+    stop_signal_count: list[int],
+) -> dict[signal.Signals, Any]:
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        stop_signal_count[0] += 1
+        stop_event.set()
+
+    previous: dict[signal.Signals, Any] = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_stop)
+    return previous
+
+
+def _restore_native_stop_handlers(previous: dict[signal.Signals, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
 def _native_process_entry(request: _NativeRunRequest, sender: Connection) -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
         ready = asyncio.run(_run_native_with_cell_deadline(request, sender))
     except BaseException as exc:
@@ -1247,6 +1320,7 @@ async def _run_native_with_cell_deadline(
             provider_lifecycle=request.provider_lifecycle,
             lifecycle_sender=sender,
             partition=getattr(request, "partition", None),
+            stop_event=getattr(request, "stop_event", None),
         )
 
     if request.control is None:
@@ -1322,8 +1396,11 @@ def _native_error_envelope(error: BaseException) -> _NativeErrorEnvelope:
         wrapped_dispatch_error = _wrapped_dispatch_error(error)
         if wrapped_dispatch_error is not None and wrapped_dispatch_error is not error:
             return _native_error_envelope(wrapped_dispatch_error)
-    if isinstance(error, MemorySystemCallCancelledBeforeDispatch):
-        category: _NativeErrorCategory = "memory_cancelled_before_dispatch"
+    category: _NativeErrorCategory
+    if isinstance(error, NativeRunInterrupted):
+        category = "interrupted"
+    elif isinstance(error, MemorySystemCallCancelledBeforeDispatch):
+        category = "memory_cancelled_before_dispatch"
     elif isinstance(error, MemorySystemCallCancelledUnknownOutcome):
         category = "memory_cancelled_unknown"
     elif isinstance(error, ModelCallCancelledUnknownOutcome):
@@ -1409,6 +1486,8 @@ def _restore_native_error(envelope: _NativeErrorEnvelope) -> BaseException:
             envelope.message,
             failure_kind=envelope.failure_kind or "unknown_outcome",
         )
+    if envelope.category == "interrupted":
+        return NativeRunInterrupted(envelope.message)
     if envelope.category == "cancelled":
         return asyncio.CancelledError(envelope.message)
     if envelope.category == "assertion":
@@ -1584,6 +1663,7 @@ async def _run_native_vertical_slice(
     provider_lifecycle: ProviderLifecycleBridge | None = None,
     lifecycle_sender: Connection | None = None,
     partition: CasePartitionSpec | None = None,
+    stop_event: _NativeStopSignal | None = None,
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
     store = artifact_store_factory(capsule_root)
@@ -1620,6 +1700,7 @@ async def _run_native_vertical_slice(
         lease=lease,
         provider_lifecycle=provider_lifecycle,
         partition=partition,
+        stop_event=stop_event,
     )
     lease = lease or _native_run_lease(run_id, adapter_profile_id, control=control)
     state = _new_execution_state(request_identity, store)
@@ -1966,10 +2047,10 @@ async def _execute_history_question_pipeline(
         operation: Callable[[], Awaitable[_LiveDispatchResult]],
     ) -> tuple[bool, _LiveDispatchResult | None]:
         nonlocal admission_stopped
-        if admission_stopped:
+        if admission_stopped or _native_stop_requested(state):
             return False, None
         await permits.acquire()
-        if admission_stopped:
+        if admission_stopped or _native_stop_requested(state):
             permits.release()
             return False, None
         try:
@@ -2064,6 +2145,13 @@ async def _execute_history_question_pipeline(
         )
     )
     _raise_pipeline_errors(history_results)
+    if _native_stop_requested(state) and (
+        any(record is None for record in plan_records)
+        or any(record is None for record in case_records)
+    ):
+        raise NativeRunInterrupted(
+            "native run stopped admission and drained every accepted operation"
+        )
     if any(record is None for record in plan_records):
         raise AssertionError("pipeline did not produce every admitted history record")
     if any(record is None for record in case_records):
@@ -2072,6 +2160,11 @@ async def _execute_history_question_pipeline(
         tuple(record for record in plan_records if record is not None),
         tuple(record for record in case_records if record is not None),
     )
+
+
+def _native_stop_requested(state: object) -> bool:
+    stop_event = getattr(state, "stop_event", None)
+    return stop_event is not None and stop_event.is_set()
 
 
 async def _capture_pipeline_outcome(
@@ -2239,6 +2332,7 @@ async def _execute_ingestion_plans_serial(
             item.accounting.cost_record_id for item in imported_dispatches
         ]
         for dispatch in dispatches[len(imported_dispatches) :]:
+            _raise_if_native_stop_requested(state)
             retry_of_attempt_id: str | None = None
             if (
                 continuation is not None
@@ -2326,6 +2420,7 @@ async def _execute_ingestion_plans_serial(
             dispatch_attempt_ids.append(dispatch_attempt_id)
             dispatch_receipts.append(receipt)
 
+        _raise_if_native_stop_requested(state)
         ingestion_receipt = IngestionReceipt(
             ingestion_occurrence_id=occurrence_id,
             accepted_source_unit_ids=tuple(
@@ -2377,6 +2472,7 @@ async def _execute_ingestion_plans_serial(
             )
             readiness = readiness_result
             plan_artifacts.append(readiness_artifacts)
+            _raise_if_native_stop_requested(state)
             projection_result, projection_artifacts = await _execute_live_memory_dispatch(
                 state,
                 parent_kind="ingestion_plan",
@@ -2394,6 +2490,7 @@ async def _execute_ingestion_plans_serial(
             plan_artifacts.append(projection_artifacts)
         else:
             readiness = await memory.wait_ready(readiness_request)
+            _raise_if_native_stop_requested(state)
             projection = await memory.project(scope)
         if not readiness.ready:
             raise ValueError("native fixture ingestion did not reach readiness")
@@ -2475,6 +2572,11 @@ async def _execute_ingestion_plans_serial(
         _seal(state, "ingestion-plans", occurrence_id, record)
         records.append(record)
     return tuple(records), scopes
+
+
+def _raise_if_native_stop_requested(state: object) -> None:
+    if _native_stop_requested(state):
+        raise NativeRunInterrupted("native run stopped before admitting another provider operation")
 
 
 @dataclass(slots=True)
@@ -4104,7 +4206,7 @@ def _seal_native_failure(
             return live_terminal
         if cancelled_before_dispatch:
             ledger.cancel_before_dispatch(reservation.reservation_id)
-            if not isinstance(error, InfrastructureBackoffCancelled):
+            if not isinstance(error, (InfrastructureBackoffCancelled, NativeRunInterrupted)):
                 lifecycle.clear_attempt_after_receipt(
                     attempt_id=prepared.attempt_id,
                     expected_intent_record_hash=prepared.intent.intent_hash,
@@ -4174,7 +4276,11 @@ def _contains_cancelled_before_dispatch(error: BaseException) -> bool:
         visited.add(id(current))
         if isinstance(
             current,
-            (MemorySystemCallCancelledBeforeDispatch, InfrastructureBackoffCancelled),
+            (
+                MemorySystemCallCancelledBeforeDispatch,
+                InfrastructureBackoffCancelled,
+                NativeRunInterrupted,
+            ),
         ):
             return True
         for linked in (current.__cause__, current.__context__):

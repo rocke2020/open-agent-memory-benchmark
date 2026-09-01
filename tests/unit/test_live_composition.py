@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
+import signal
+import time
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -15,6 +18,7 @@ from oamb.config.doctor import ResolvedPlan, build_resolved_plan
 from oamb.contracts.evidence import RunRecord
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.specifications import (
+    CasePartitionSpec,
     RunPreflightRecord,
     SourceEvidenceBinding,
     SourceEvidenceKind,
@@ -268,7 +272,7 @@ def test_continuation_rejects_resolved_plan_drift_before_creating_target(
     mutated_config = tmp_path / "benchmark.yml"
     mutated_config.write_text(
         BENCHMARK_CONFIG.read_text(encoding="utf-8").replace(
-            "max_parallel_questions_per_provider: 2",
+            "max_parallel_questions_per_provider: 3",
             "max_parallel_questions_per_provider: 1",
             1,
         ),
@@ -319,8 +323,8 @@ def test_continuation_accepts_the_exact_frozen_plan_and_runtime_binding(
     assert continued.run_id == base.name
     assert continued.capsule_root == tmp_path / "continuation" / base.name
     assert continued.continuation is not None
-    assert continued.control.max_parallel_history_ingestions == 2
-    assert continued.control.max_parallel_questions == 2
+    assert continued.control.max_parallel_history_ingestions == 3
+    assert continued.control.max_parallel_questions == 3
 
 
 @pytest.mark.parametrize("drift", ["environment", "provider_evidence"])
@@ -390,6 +394,7 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
 ) -> None:
     from oamb import live
     from oamb.runtime import native_run
+    from oamb.workloads.fake import GeneratedFakeWorkload
 
     captured: dict[str, object] = {}
 
@@ -407,7 +412,11 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
     monkeypatch.setattr(native_run, "run_native_vertical_slice", record_memory_factory)
     monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
     monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
-    monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: object())
+    monkeypatch.setattr(
+        live,
+        "LongMemEvalWorkload",
+        lambda _bundle: GeneratedFakeWorkload(),
+    )
     built = live.build_live_cell(
         plan=_plan(),
         cell_id=cell_id,
@@ -436,6 +445,7 @@ def test_live_model_factories_receive_the_resolved_model_call_timeout(
     from oamb import live
     from oamb.model_clients import openai_compatible
     from oamb.runtime import native_run
+    from oamb.workloads.fake import GeneratedFakeWorkload
 
     captured: list[dict[str, object]] = []
 
@@ -460,7 +470,11 @@ def test_live_model_factories_receive_the_resolved_model_call_timeout(
     monkeypatch.setattr(native_run, "run_native_vertical_slice", record_model_factories)
     monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
     monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
-    monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: object())
+    monkeypatch.setattr(
+        live,
+        "LongMemEvalWorkload",
+        lambda _bundle: GeneratedFakeWorkload(),
+    )
     built = live.build_live_cell(
         plan=_plan(),
         cell_id="hindsight-lme6",
@@ -512,6 +526,51 @@ def test_unknown_live_case_partition_fails_before_native_runner_or_clients(
 
     with pytest.raises(CasePartitionSelectionError, match="unknown"):
         live.execute_live_cell(built)
+
+
+def test_default_live_cell_persists_the_full_case_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+    from oamb.runtime import native_run
+    from oamb.workloads.fake import GeneratedFakeWorkload
+
+    workload = GeneratedFakeWorkload()
+    captured: dict[str, object] = {}
+
+    def record_partition(**kwargs: object) -> object:
+        captured["partition"] = kwargs["partition"]
+        return SimpleNamespace(capsule_root=tmp_path / "capsule")
+
+    monkeypatch.setattr(native_run, "run_native_vertical_slice", record_partition)
+    monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
+    monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
+    monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: workload)
+    built = live.build_live_cell(
+        plan=_plan(),
+        cell_id="hindsight-lme6",
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+        provider_project_id="oamb-providers-test-live",
+        provider_evidence=_provider_evidence(),
+        environment=_environment(),
+        run_label="full-partition",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+    )
+
+    live.execute_live_cell(built)
+
+    partition = captured["partition"]
+    manifest = workload.build_case_manifest(workload.resolve_sources())
+    assert isinstance(partition, CasePartitionSpec)
+    assert partition.requested_case_manifest_entry_ids == tuple(
+        case.case_manifest_entry_id for case in manifest.cases
+    )
+    assert partition.selected_ingestion_plan_ids == tuple(
+        plan.ingestion_plan_id for plan in manifest.ingestion_plans
+    )
 
 
 def test_dangling_capsule_root_symlink_is_not_a_fresh_cell(tmp_path: Path) -> None:
@@ -666,7 +725,7 @@ def test_three_isolated_live_cells_are_dispatched_in_parallel(
     started = context.Value("i", 0)
     all_started = context.Event()
 
-    def execute(cell: live.LiveCell) -> object:
+    def execute(cell: live.LiveCell, **_kwargs: Any) -> object:
         with started.get_lock():
             started.value += 1
             if started.value == 3:
@@ -684,6 +743,94 @@ def test_three_isolated_live_cells_are_dispatched_in_parallel(
     assert tuple(item.capsule_root for item in completed) == tuple(
         cell.capsule_root for cell in cells
     )
+
+
+def test_parallel_live_cells_drain_after_root_sigterm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+
+    cells = tuple(
+        live.build_live_cell(
+            plan=_plan(),
+            cell_id=cell_id,
+            output_root=tmp_path / "capsules",
+            provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+            provider_project_id="oamb-providers-test-live",
+            provider_evidence=_provider_evidence(),
+            environment=_environment(),
+            run_label="root-sigterm",
+            observed_at=NOW,
+            code_revision="source-tree-test",
+        )
+        for cell_id in ("hindsight-lme6", "mem0-lme6", "openviking-lme6")
+    )
+    context = multiprocessing.get_context("fork")
+    started = context.Value("i", 0)
+    all_started = context.Event()
+    drained = context.Value("i", 0)
+
+    def execute(cell: live.LiveCell, *, stop_event: Any | None = None) -> object:
+        with started.get_lock():
+            started.value += 1
+            if started.value == len(cells):
+                all_started.set()
+        deadline = time.monotonic() + 3
+        while stop_event is None or not stop_event.is_set():
+            if time.monotonic() >= deadline or os.getppid() == 1:
+                raise RuntimeError("root stop signal was not forwarded")
+            time.sleep(0.01)
+        with drained.get_lock():
+            drained.value += 1
+        return SimpleNamespace(capsule_root=cell.capsule_root)
+
+    monkeypatch.setattr(live, "execute_live_cell", execute)
+
+    def supervise() -> None:
+        completed = live.execute_live_cells(cells)
+        assert len(completed) == len(cells)
+
+    supervisor = context.Process(target=supervise)
+    supervisor.start()
+    assert all_started.wait(timeout=2), "parallel cells did not reach the planted barrier"
+    assert supervisor.pid is not None
+    os.kill(supervisor.pid, signal.SIGTERM)
+    supervisor.join(timeout=5)
+    if supervisor.is_alive():
+        supervisor.terminate()
+        supervisor.join(timeout=1)
+
+    assert supervisor.exitcode == 0
+    assert drained.value == len(cells)
+
+
+def test_single_live_cell_rejects_mismatched_completion_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+
+    cell = live.build_live_cell(
+        plan=_plan(),
+        cell_id="hindsight-lme6",
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+        provider_project_id="oamb-providers-test-live",
+        provider_evidence=_provider_evidence(),
+        environment=_environment(),
+        run_label="mismatched-single-cell",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+    )
+    monkeypatch.setattr(
+        live,
+        "execute_live_cell",
+        lambda _cell, **_kwargs: SimpleNamespace(capsule_root=tmp_path / "wrong"),
+    )
+
+    with pytest.raises(live.LiveCellExecutionError, match="mismatched completion identity"):
+        live.execute_live_cells((cell,))
 
 
 def test_partial_cell_admission_failure_settles_the_started_worker(
@@ -753,6 +900,9 @@ def test_partial_cell_admission_failure_settles_the_started_worker(
         def __init__(self) -> None:
             self.pending_receiver: FakeConnection | None = None
             self.processes: list[FakeProcess] = []
+
+        def Event(self) -> Any:
+            return SimpleNamespace(set=lambda: None, is_set=lambda: False)
 
         def Pipe(self, *, duplex: bool) -> tuple[FakeConnection, FakeConnection]:
             assert duplex is False

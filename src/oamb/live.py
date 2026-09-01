@@ -6,7 +6,9 @@ import hashlib
 import json
 import multiprocessing
 import os
+import signal
 import socket
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -15,6 +17,10 @@ from decimal import Decimal
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from oamb.artifacts.composition import CapsuleCompositionTarget
 
 from oamb.config.benchmark import ModelRoleId
 from oamb.config.doctor import CellSpec, ModelExecutionBinding, ResolvedPlan
@@ -24,6 +30,9 @@ from oamb.contracts.specifications import (
     BindingKind,
     BudgetScopeKindV3,
     BudgetSpecV4,
+    CaseManifest,
+    CasePartitionSpec,
+    DatasetManifest,
     DispatchBudgetOwnerKind,
     DispatchBudgetRoute,
     ExecutionOwner,
@@ -241,11 +250,79 @@ def load_live_provider_evidence(
     return provider_project, evidence_by_provider
 
 
-def execute_live_cell(cell: LiveCell) -> NativeRunArtifacts:
+def _resolve_live_partition(
+    cell: LiveCell,
+) -> tuple[LongMemEvalWorkload, DatasetManifest, CaseManifest, CasePartitionSpec]:
+    from oamb.contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
+    from oamb.runtime.case_partition import build_case_partition_spec
+
+    source_path = cell.dataset_path
+    if not source_path.is_absolute():
+        source_path = Path.cwd() / source_path
+    workload = LongMemEvalWorkload(build_lme6_bundle(build_lme30_bundle(source_path)))
+    dataset_manifest = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset_manifest)
+    requested_case_ids = cell.requested_case_manifest_entry_ids or tuple(
+        case.case_manifest_entry_id for case in case_manifest.cases
+    )
+    partition = build_case_partition_spec(
+        run_id=cell.run_id,
+        resolved_plan_hash=cell.plan.resolved_plan_hash,
+        cell_spec_hash=cell.cell.cell_spec_hash,
+        dataset_manifest_hash=dataset_manifest.manifest_hash,
+        case_manifest=case_manifest,
+        case_plans=workload.iter_case_plans(case_manifest),
+        requested_case_manifest_entry_ids=requested_case_ids,
+        budget_policy_hash=cell.cell.limits_hash,
+        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+    )
+    return workload, dataset_manifest, case_manifest, partition
+
+
+def live_composition_target(cell: LiveCell) -> CapsuleCompositionTarget:
+    """Derive the full execution target before constructing any live client."""
+
+    from oamb.artifacts.composition import (
+        CapsuleCompositionTarget,
+        build_composition_execution_configuration_hash,
+    )
+
+    _workload, dataset_manifest, case_manifest, partition = _resolve_live_partition(cell)
+    runtime_bindings = (
+        (
+            cell.control.run_spec.memory_system_id,
+            cell.cell.adapter_profile_id,
+            cell.control.run_spec.runtime_binding_hash,
+        ),
+    )
+    execution_hash = build_composition_execution_configuration_hash(
+        partition=partition,
+        case_manifest=case_manifest,
+        dataset_manifest=dataset_manifest,
+        runtime_bindings=runtime_bindings,
+        run_spec=cell.control.run_spec,
+        preflight=cell.control.preflight_record,
+        budget=cell.control.budget,
+        role_bindings=cell.control.role_bindings,
+    )
+    return CapsuleCompositionTarget(
+        resolved_plan_hash=partition.resolved_plan_hash,
+        cell_spec_hash=partition.cell_spec_hash,
+        target_case_manifest_hash=partition.target_case_manifest_hash,
+        budget_policy_hash=partition.budget_policy_hash,
+        retry_policy_hash=partition.retry_policy_hash,
+        execution_configuration_hash=execution_hash,
+    )
+
+
+def execute_live_cell(
+    cell: LiveCell,
+    *,
+    stop_event: Any | None = None,
+) -> NativeRunArtifacts:
     """Run one already-closed cell through the generic native vertical slice."""
 
     from oamb.artifacts.store import ArtifactStore
-    from oamb.contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
     from oamb.memory_systems.hindsight.adapter import HindsightAdapter
     from oamb.memory_systems.mem0.adapter import Mem0RestAdapter
     from oamb.memory_systems.openviking.session_adapter import (
@@ -253,34 +330,13 @@ def execute_live_cell(cell: LiveCell) -> NativeRunArtifacts:
         maximum_task_polls_for_timeout,
     )
     from oamb.model_clients.openai_compatible import OpenAICompatibleModelClient
-    from oamb.runtime.case_partition import build_case_partition_spec
     from oamb.runtime.native_run import run_native_vertical_slice
 
-    source_path = cell.dataset_path
-    if not source_path.is_absolute():
-        source_path = Path.cwd() / source_path
-    bundle = build_lme6_bundle(build_lme30_bundle(source_path))
-    workload = LongMemEvalWorkload(bundle)
-    partition = None
-    if cell.requested_case_manifest_entry_ids:
-        dataset_manifest = workload.resolve_sources()
-        case_manifest = workload.build_case_manifest(dataset_manifest)
-        partition = build_case_partition_spec(
-            run_id=cell.run_id,
-            resolved_plan_hash=cell.plan.resolved_plan_hash,
-            cell_spec_hash=cell.cell.cell_spec_hash,
-            dataset_manifest_hash=dataset_manifest.manifest_hash,
-            case_manifest=case_manifest,
-            case_plans=workload.iter_case_plans(case_manifest),
-            requested_case_manifest_entry_ids=cell.requested_case_manifest_entry_ids,
-            budget_policy_hash=cell.cell.limits_hash,
-            retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-        )
+    workload, _dataset_manifest, case_manifest, partition = _resolve_live_partition(cell)
     continuation = None
     if cell.continuation is not None:
         from oamb.runtime.native_continuation import load_openviking_continuation
 
-        case_manifest = workload.build_case_manifest(workload.resolve_sources())
         continuation = load_openviking_continuation(
             cell.continuation,
             plans=workload.iter_ingestion_plans(case_manifest),
@@ -374,6 +430,7 @@ def execute_live_cell(cell: LiveCell) -> NativeRunArtifacts:
         control=cell.control,
         continuation=continuation,
         partition=partition,
+        stop_event=stop_event,
     )
 
 
@@ -400,10 +457,37 @@ def execute_live_cells(cells: tuple[LiveCell, ...]) -> tuple[LiveCellCompletion,
         if len(set(values)) != len(values):
             raise LiveConfigurationError(f"parallel live cells require distinct {label}")
 
+    if len(cells) == 1:
+        cell = cells[0]
+        try:
+            completed = execute_live_cell(cell)
+        except BaseException as exc:
+            raise LiveCellExecutionError(
+                f"cell {cell.cell.cell_id} failed with {type(exc).__name__}: {exc}"
+            ) from exc
+        if completed.capsule_root != cell.capsule_root:
+            raise LiveCellExecutionError(
+                f"cell {cell.cell.cell_id} returned a mismatched completion identity"
+            )
+        return (LiveCellCompletion(cell.cell.cell_id, completed.capsule_root),)
+
     context = multiprocessing.get_context("fork")
+    stop_events = tuple(context.Event() for _cell in cells)
+    previous_signal_handlers = _install_live_stop_handlers(stop_events)
+    try:
+        return _execute_parallel_live_cells(cells, context, stop_events)
+    finally:
+        _restore_live_stop_handlers(previous_signal_handlers)
+
+
+def _execute_parallel_live_cells(
+    cells: tuple[LiveCell, ...],
+    context: Any,
+    stop_events: tuple[Any, ...],
+) -> tuple[LiveCellCompletion, ...]:
     workers: list[tuple[LiveCell, BaseProcess, Connection]] = []
     errors: list[BaseException] = []
-    for cell in cells:
+    for cell, stop_event in zip(cells, stop_events, strict=True):
         receiver: Connection | None = None
         sender: Connection | None = None
         created_process: BaseProcess | None = None
@@ -411,7 +495,7 @@ def execute_live_cells(cells: tuple[LiveCell, ...]) -> tuple[LiveCellCompletion,
             receiver, sender = context.Pipe(duplex=False)
             created_process = context.Process(
                 target=_execute_live_cell_worker,
-                args=(cell, sender),
+                args=(cell, sender, stop_event),
                 name=f"oamb-cell-{cell.cell.provider_id}",
                 daemon=False,
             )
@@ -510,9 +594,35 @@ def execute_live_cells(cells: tuple[LiveCell, ...]) -> tuple[LiveCellCompletion,
     return tuple(completions[cell.cell.cell_id] for cell in cells)
 
 
-def _execute_live_cell_worker(cell: LiveCell, sender: Connection) -> None:
+def _install_live_stop_handlers(
+    stop_events: tuple[Any, ...],
+) -> dict[signal.Signals, Any]:
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        for stop_event in stop_events:
+            stop_event.set()
+
+    previous: dict[signal.Signals, Any] = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_stop)
+    return previous
+
+
+def _restore_live_stop_handlers(previous: dict[signal.Signals, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+def _execute_live_cell_worker(
+    cell: LiveCell,
+    sender: Connection,
+    stop_event: Any,
+) -> None:
     try:
-        completed = execute_live_cell(cell)
+        completed = execute_live_cell(cell, stop_event=stop_event)
         sender.send(("completed", cell.cell.cell_id, str(completed.capsule_root)))
     except BaseException as exc:
         sender.send(("failed", cell.cell.cell_id, type(exc).__name__, str(exc)))

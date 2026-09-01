@@ -182,6 +182,13 @@ def run_command(
             help="Aborted OpenViking capsule whose confirmed work must be reused.",
         ),
     ] = None,
+    recover_from: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--recover-from",
+            help="Validated immutable part; repeat to derive only remaining whole groups.",
+        ),
+    ] = None,
     provider_runtime: Annotated[
         Path,
         typer.Option("--provider-runtime", help="Verified provider runtime directory."),
@@ -203,18 +210,25 @@ def run_command(
 
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
-        if case:
-            raise typer.BadParameter("--case requires a live resolved plan")
+        if case or recover_from:
+            raise typer.BadParameter("--case and --recover-from require a live resolved plan")
         _run_fake_resolved_plan(resolved_plan, scenario=scenario)
         return
 
+    from .artifacts.composition import (
+        CapsuleCompositionError,
+        CapsuleCompositionTarget,
+        analyze_capsule_recovery,
+    )
     from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
+    from .contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
     from .live import (
         LiveCellExecutionError,
         LiveConfigurationError,
         build_live_cell,
         build_live_continuation_cell,
         execute_live_cells,
+        live_composition_target,
         load_live_environment,
         load_live_provider_evidence,
         select_live_cells,
@@ -228,8 +242,36 @@ def run_command(
         raise typer.BadParameter("--continue-from and --run-label are mutually exclusive")
     if continue_from is not None and case:
         raise typer.BadParameter("--continue-from and --case are mutually exclusive")
+    if recover_from and continue_from is not None:
+        raise typer.BadParameter("--recover-from and --continue-from are mutually exclusive")
+    if recover_from and case:
+        raise typer.BadParameter("--recover-from and --case are mutually exclusive")
     try:
         plan = load_resolved_plan_for_run(resolved_plan)
+        selected_cells = select_live_cells(plan, tuple(cell or ()))
+        if case and len(selected_cells) != 1:
+            raise LiveConfigurationError("case partition requires exactly one selected cell")
+        recovery_case_ids: tuple[str, ...] = ()
+        recovery = None
+        if recover_from:
+            if len(selected_cells) != 1:
+                raise LiveConfigurationError("recovery requires exactly one selected cell")
+            recovery_cell = selected_cells[0]
+            recovery = analyze_capsule_recovery(
+                tuple(recover_from),
+                target=CapsuleCompositionTarget(
+                    resolved_plan_hash=plan.resolved_plan_hash,
+                    cell_spec_hash=recovery_cell.cell_spec_hash,
+                    target_case_manifest_hash=recovery_cell.case_manifest_hash,
+                    budget_policy_hash=recovery_cell.limits_hash,
+                    retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+                ),
+            )
+            if not recovery.remaining_case_manifest_entry_ids:
+                raise LiveConfigurationError(
+                    "recovery parts already contain every target whole group; compose them"
+                )
+            recovery_case_ids = recovery.remaining_case_manifest_entry_ids
         environment = load_live_environment(
             provider_env_path=provider_env,
             model_env_path=model_env,
@@ -241,9 +283,6 @@ def run_command(
             provider_runtime_directory=provider_runtime,
             environment=environment,
         )
-        selected_cells = select_live_cells(plan, tuple(cell or ()))
-        if case and len(selected_cells) != 1:
-            raise LiveConfigurationError("case partition requires exactly one selected cell")
         code_revision = _live_source_revision()
         observed_at = datetime.now(UTC)
         built_cells = []
@@ -278,9 +317,26 @@ def run_command(
                         run_label=run_label,
                         observed_at=observed_at,
                         code_revision=code_revision,
-                        requested_case_manifest_entry_ids=tuple(case or ()),
+                        requested_case_manifest_entry_ids=(recovery_case_ids or tuple(case or ())),
                     )
                 )
+        if recover_from:
+            if len(built_cells) != 1:
+                raise AssertionError("recovery live cell inventory is not singular")
+            recovery = analyze_capsule_recovery(
+                tuple(recover_from),
+                target=live_composition_target(built_cells[0]),
+            )
+            typer.echo(
+                "recovery reusable groups: " + ",".join(recovery.reusable_ingestion_plan_ids)
+            )
+            typer.echo(
+                "recovery quarantined groups: " + ",".join(recovery.quarantined_ingestion_plan_ids)
+            )
+            typer.echo(
+                "recovery remaining groups: " + ",".join(recovery.remaining_ingestion_plan_ids)
+            )
+            typer.echo("recovery source manifests: " + ",".join(recovery.source_manifest_sha256s))
         for completed in execute_live_cells(tuple(built_cells)):
             typer.echo(f"cell {completed.cell_id}: {completed.capsule_root}")
     except (
@@ -288,6 +344,7 @@ def run_command(
         LiveCellExecutionError,
         LiveConfigurationError,
         ResolvedPlanError,
+        CapsuleCompositionError,
         ValueError,
     ) as exc:
         raise typer.BadParameter(str(exc)) from exc

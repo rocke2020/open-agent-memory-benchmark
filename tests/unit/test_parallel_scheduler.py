@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -689,6 +690,107 @@ def test_source_writes_are_serial_within_history_and_overlap_across_histories(
         assert case_records == ()
 
     asyncio.run(scenario())
+
+    async def stop_between_dispatches() -> None:
+        plan = make_plan("stop")
+        stopped_memory = ObservedSourceMemory(ArtifactStore(tmp_path / "stopped-raw"))
+        stop_event = asyncio.Event()
+        stopped_state = native_run._NativeExecutionState(
+            store=ArtifactStore(tmp_path / "stopped-state"),
+            run_id=canonical_sha256(["stopped-run"]),
+            lease_record_hash=canonical_sha256(["stopped-lease"]),
+            close_timeout_seconds=1,
+            stop_event=cast(Any, stop_event),
+        )
+        run = asyncio.create_task(
+            serial_ingest(
+                state=stopped_state,
+                memory=stopped_memory,
+                plans=(plan,),
+                case_plans=(),
+                memory_system_id="fake-memory",
+                runtime_binding_hash=canonical_sha256(["runtime"]),
+                adapter_profile_id="fake-memory-v1",
+            )
+        )
+        await asyncio.wait_for(stopped_memory.both_first_started.wait(), timeout=1)
+        stop_event.set()
+        stopped_memory.release_first.set()
+        with pytest.raises(native_run.NativeRunInterrupted):
+            await run
+        assert stopped_memory.calls[plan.ingestion_plan_id] == [1]
+
+    asyncio.run(stop_between_dispatches())
+
+
+def test_native_stop_handlers_are_installed_before_child_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.runtime import native_run
+
+    call_order: list[str] = []
+
+    class FakeConnection:
+        def close(self) -> None:
+            pass
+
+    class FakeEvent:
+        def is_set(self) -> bool:
+            return False
+
+        def set(self) -> None:
+            pass
+
+    class FakeProcess:
+        pid = None
+
+        def start(self) -> None:
+            call_order.append("start")
+            assert call_order == ["install", "start"]
+            raise RuntimeError("planted start failure")
+
+        def close(self) -> None:
+            pass
+
+    class FakeContext:
+        def Pipe(self, *, duplex: bool) -> tuple[FakeConnection, FakeConnection]:
+            assert duplex is False
+            return FakeConnection(), FakeConnection()
+
+        def Event(self) -> FakeEvent:
+            return FakeEvent()
+
+        def Process(self, **_kwargs: Any) -> FakeProcess:
+            return FakeProcess()
+
+    def install(_event: object, _count: object) -> dict[object, object]:
+        call_order.append("install")
+        return {}
+
+    monkeypatch.setattr(multiprocessing, "get_context", lambda _method: FakeContext())
+    monkeypatch.setattr(native_run, "_install_native_stop_handlers", install)
+    monkeypatch.setattr(native_run, "_restore_native_stop_handlers", lambda _previous: None)
+    request = native_run._NativeRunRequest(
+        output_root=tmp_path,
+        run_id="handler-install-order",
+        adapter_profile_id="recorded-native-fixture-v1",
+        workload=cast(Any, object()),
+        visible_evidence_policy=cast(Any, object()),
+        artifact_store_factory=cast(Any, object()),
+        memory_factory=cast(Any, object()),
+        model_factory=cast(Any, object()),
+        answer_role_binding_id="answer",
+        judge_model_factory=None,
+        judge_role_binding_id=None,
+        close_timeout_seconds=1,
+        control=None,
+    )
+
+    with pytest.raises(RuntimeError, match="planted start failure"):
+        native_run._run_native_supervised(request)
+
+    assert call_order == ["install", "start"]
 
 
 def test_limits_one_and_two_return_the_same_canonical_semantics(

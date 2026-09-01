@@ -63,12 +63,25 @@ class CapsuleCompositionArtifacts:
 
 
 @dataclass(frozen=True, slots=True)
+class CapsuleRecoveryPlan:
+    """Deterministic whole-group reuse and fresh-scope recovery selection."""
+
+    source_capsule_ids: tuple[str, ...]
+    source_manifest_sha256s: tuple[str, ...]
+    reusable_ingestion_plan_ids: tuple[str, ...]
+    quarantined_ingestion_plan_ids: tuple[str, ...]
+    remaining_ingestion_plan_ids: tuple[str, ...]
+    remaining_case_manifest_entry_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CapsuleCompositionTarget:
     resolved_plan_hash: str
     cell_spec_hash: str
     target_case_manifest_hash: str
     budget_policy_hash: str
     retry_policy_hash: str
+    execution_configuration_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +162,57 @@ def compose_capsules(
     )
     ArtifactStore(output).seal_capsule(manifest)
     return CapsuleCompositionArtifacts(output, manifest, composition)
+
+
+def analyze_capsule_recovery(
+    part_roots: tuple[Path, ...],
+    *,
+    target: CapsuleCompositionTarget | None = None,
+) -> CapsuleRecoveryPlan:
+    """Validate immutable parts and derive the target-order fresh-scope complement."""
+
+    if not part_roots:
+        raise CapsuleCompositionError("missing recovery parts")
+    resolved_roots = tuple(Path(root).resolve(strict=True) for root in part_roots)
+    if len(set(resolved_roots)) != len(resolved_roots):
+        raise CapsuleCompositionError("duplicate recovery part")
+    parts = tuple(_load_part(root) for root in resolved_roots)
+    if len({part.manifest.capsule_id for part in parts}) != len(parts):
+        raise CapsuleCompositionError("duplicate recovery capsule")
+    _require_compatible_parts(parts, target=target)
+    contributions_by_plan = _contributions_by_plan(parts)
+    first = parts[0]
+    selected = {plan_id for part in parts for plan_id in part.partition.selected_ingestion_plan_ids}
+    target_plans = tuple(
+        plan for plan in first.case_manifest.ingestion_plans if plan.ingestion_plan_id in selected
+    )
+    target_plan_ids = tuple(plan.ingestion_plan_id for plan in target_plans)
+    if selected != set(target_plan_ids):
+        raise CapsuleCompositionError("unknown selected recovery group")
+    if not set(contributions_by_plan) <= set(target_plan_ids):
+        raise CapsuleCompositionError("unknown recovery contribution")
+    reusable = tuple(plan_id for plan_id in target_plan_ids if plan_id in contributions_by_plan)
+    quarantined = tuple(
+        plan_id
+        for plan_id in target_plan_ids
+        if plan_id in selected and plan_id not in contributions_by_plan
+    )
+    remaining_plans = tuple(
+        plan for plan in target_plans if plan.ingestion_plan_id not in contributions_by_plan
+    )
+    ordered_parts = tuple(sorted(parts, key=lambda part: part.manifest.capsule_id))
+    return CapsuleRecoveryPlan(
+        source_capsule_ids=tuple(part.manifest.capsule_id for part in ordered_parts),
+        source_manifest_sha256s=tuple(
+            hashlib.sha256(part.manifest_bytes).hexdigest() for part in ordered_parts
+        ),
+        reusable_ingestion_plan_ids=reusable,
+        quarantined_ingestion_plan_ids=quarantined,
+        remaining_ingestion_plan_ids=tuple(plan.ingestion_plan_id for plan in remaining_plans),
+        remaining_case_manifest_entry_ids=tuple(
+            case_id for plan in remaining_plans for case_id in plan.ordered_case_manifest_entry_ids
+        ),
+    )
 
 
 def load_composition_record(root: Path) -> CapsuleCompositionRecord:
@@ -254,18 +318,11 @@ def _load_part(root: Path) -> _PartSnapshot:
 
 def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecord:
     first = parts[0]
-    compatibility = _compatibility_key(first)
-    if any(_compatibility_key(part) != compatibility for part in parts[1:]):
-        raise CapsuleCompositionError("incompatible composition parts")
+    compatibility = _require_compatible_parts(parts)
     part_bindings = tuple(
         sorted((_part_binding(part) for part in parts), key=lambda item: item.capsule_id)
     )
-    contributions_by_plan: dict[str, CapsuleCompositionContribution] = {}
-    for part in parts:
-        for contribution in _terminal_contributions(part):
-            if contribution.ingestion_plan_id in contributions_by_plan:
-                raise CapsuleCompositionError("overlap between composition contributions")
-            contributions_by_plan[contribution.ingestion_plan_id] = contribution
+    contributions_by_plan = _contributions_by_plan(parts)
     target_plan_ids = tuple(plan.ingestion_plan_id for plan in first.case_manifest.ingestion_plans)
     missing = tuple(plan_id for plan_id in target_plan_ids if plan_id not in contributions_by_plan)
     if missing:
@@ -297,8 +354,47 @@ def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecor
     )
 
 
+def _require_compatible_parts(
+    parts: tuple[_PartSnapshot, ...],
+    *,
+    target: CapsuleCompositionTarget | None = None,
+) -> str:
+    first = parts[0]
+    compatibility = _compatibility_key(first)
+    if any(_compatibility_key(part) != compatibility for part in parts[1:]):
+        raise CapsuleCompositionError("incompatible composition parts")
+    if target is not None and (
+        first.partition.resolved_plan_hash != target.resolved_plan_hash
+        or first.partition.cell_spec_hash != target.cell_spec_hash
+        or first.partition.target_case_manifest_hash != target.target_case_manifest_hash
+        or first.partition.budget_policy_hash != target.budget_policy_hash
+        or first.partition.retry_policy_hash != target.retry_policy_hash
+    ):
+        raise CapsuleCompositionError("recovery parts do not match the requested target")
+    if (
+        target is not None
+        and target.execution_configuration_hash is not None
+        and compatibility != target.execution_configuration_hash
+    ):
+        raise CapsuleCompositionError(
+            "recovery parts do not match the requested execution configuration"
+        )
+    return compatibility
+
+
+def _contributions_by_plan(
+    parts: tuple[_PartSnapshot, ...],
+) -> dict[str, CapsuleCompositionContribution]:
+    contributions: dict[str, CapsuleCompositionContribution] = {}
+    for part in parts:
+        for contribution in _terminal_contributions(part):
+            if contribution.ingestion_plan_id in contributions:
+                raise CapsuleCompositionError("overlap between composition contributions")
+            contributions[contribution.ingestion_plan_id] = contribution
+    return contributions
+
+
 def _compatibility_key(part: _PartSnapshot) -> str:
-    partition = part.partition
     runtime_bindings = tuple(
         (
             plan.memory_system_id,
@@ -307,14 +403,50 @@ def _compatibility_key(part: _PartSnapshot) -> str:
         )
         for plan in part.plans
     )
+    if part.run_spec is not None and part.preflight is not None:
+        controlled_runtime_binding = (
+            part.run_spec.memory_system_id,
+            part.preflight.adapter_profile_id,
+            part.run_spec.runtime_binding_hash,
+        )
+        if runtime_bindings and any(
+            runtime_binding != controlled_runtime_binding for runtime_binding in runtime_bindings
+        ):
+            raise CapsuleCompositionError("runtime binding inventory is inconsistent")
+        runtime_bindings = (controlled_runtime_binding,)
+    return build_composition_execution_configuration_hash(
+        partition=part.partition,
+        case_manifest=part.case_manifest,
+        dataset_manifest=part.dataset_manifest,
+        runtime_bindings=runtime_bindings,
+        run_spec=part.run_spec,
+        preflight=part.preflight,
+        budget=part.budget,
+        role_bindings=part.role_bindings,
+    )
+
+
+def build_composition_execution_configuration_hash(
+    *,
+    partition: CasePartitionSpec,
+    case_manifest: CaseManifest,
+    dataset_manifest: DatasetManifest,
+    runtime_bindings: tuple[tuple[str, str, str], ...],
+    run_spec: RunSpec | None,
+    preflight: RunPreflightRecord | RunPreflightRecordV2 | None,
+    budget: BudgetSpecV4 | None,
+    role_bindings: tuple[ModelRoleBindingV2, ...],
+) -> str:
     live_configuration: object = "fixture"
-    if part.run_spec is not None and part.preflight is not None and part.budget is not None:
+    control_records = (run_spec, preflight, budget)
+    if all(record is not None for record in control_records):
+        assert run_spec is not None and preflight is not None and budget is not None
         live_configuration = {
-            "run_spec": part.run_spec.model_dump(
+            "run_spec": run_spec.model_dump(
                 mode="python",
                 exclude={"run_id", "budget_id"},
             ),
-            "preflight": part.preflight.model_dump(
+            "preflight": preflight.model_dump(
                 mode="python",
                 exclude={
                     "preflight_record_hash",
@@ -326,15 +458,17 @@ def _compatibility_key(part: _PartSnapshot) -> str:
                     "artifact_durability_proof_hash",
                 },
             ),
-            "budget": part.budget.model_dump(
+            "budget": budget.model_dump(
                 mode="python",
                 exclude={"budget_id", "budget_hash", "scope_id"},
             ),
             "role_bindings": tuple(
                 binding.model_dump(mode="python")
-                for binding in sorted(part.role_bindings, key=lambda item: item.binding_id)
+                for binding in sorted(role_bindings, key=lambda item: item.binding_id)
             ),
         }
+    elif any(record is not None for record in control_records):
+        raise CapsuleCompositionError("execution configuration control inventory is incomplete")
     return canonical_sha256(
         [
             "oamb-composition-execution-configuration-v1",
@@ -346,12 +480,18 @@ def _compatibility_key(part: _PartSnapshot) -> str:
             partition.target_case_execution_bindings_hash,
             partition.budget_policy_hash,
             partition.retry_policy_hash,
-            part.case_manifest,
-            part.dataset_manifest,
+            case_manifest,
+            dataset_manifest,
             tuple(dict.fromkeys(runtime_bindings)),
             live_configuration,
         ]
     )
+
+
+def capsule_execution_configuration_hash(root: Path) -> str:
+    """Reopen one validated immutable capsule and return its composition key."""
+
+    return _compatibility_key(_load_part(Path(root).resolve(strict=True)))
 
 
 def _part_binding(part: _PartSnapshot) -> CapsuleCompositionPartBinding:
@@ -493,6 +633,8 @@ __all__ = [
     "CapsuleCompositionArtifacts",
     "CapsuleCompositionError",
     "CapsuleCompositionTarget",
+    "build_composition_execution_configuration_hash",
+    "capsule_execution_configuration_hash",
     "compose_capsules",
     "inspect_embedded_composition",
     "load_composition_record",
