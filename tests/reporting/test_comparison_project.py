@@ -63,6 +63,7 @@ def _write_cell_root(
     case_manifest_hash: str = SHA_B,
     include_accounting: bool = False,
     include_case_content: bool = False,
+    indexing_usage_mode: str = "complete",
 ) -> ValidationResult:
     cell = plan.cells[cell_index]
     run_id = f"run-{cell.cell_id}"
@@ -293,7 +294,21 @@ def _write_cell_root(
         )
 
     if include_accounting:
-        records.extend(_accounting_records(run_id, started_at))
+        producer_binding_id = next(
+            item.binding_hash for item in plan.model_roles if item.role_id == cell.producer_role_id
+        )
+        embedding_binding_id = next(
+            item.binding_hash for item in plan.model_roles if item.role_id == cell.embedding_role_id
+        )
+        records.extend(
+            _accounting_records(
+                run_id,
+                started_at,
+                producer_binding_id=producer_binding_id,
+                embedding_binding_id=embedding_binding_id,
+                indexing_usage_mode=indexing_usage_mode,
+            )
+        )
 
     entries: list[dict[str, object]] = []
     for ordinal, (record_kind, relative_path, document) in enumerate(records, start=1):
@@ -344,13 +359,19 @@ def _write_cell_root(
 def _accounting_records(
     run_id: str,
     started_at: datetime,
+    *,
+    producer_binding_id: str,
+    embedding_binding_id: str,
+    indexing_usage_mode: str,
 ) -> tuple[tuple[str, str, dict[str, object]], ...]:
     attempt_ids = {
         "indexing": "a" * 64,
+        "indexing_failed": "1" * 64,
+        "indexing_retry": "2" * 64,
         "retrieval": "b" * 64,
         "answer": "c" * 64,
         "judge": "d" * 64,
-        "retry": "e" * 64,
+        "judge_retry": "e" * 64,
     }
     attempts = tuple(
         (
@@ -368,21 +389,55 @@ def _accounting_records(
                 "ended_at": (started_at + timedelta(milliseconds=100)).isoformat(),
                 "outcome": outcome,
                 "retry_of_attempt_id": retry_of,
+                "index_contribution": (
+                    "final" if stage == "memory_ingest" and outcome == "succeeded" else "none"
+                ),
                 "raw_response_ref": "f" * 64,
             },
         )
         for attempt_id, stage, outcome, retry_of in (
             (attempt_ids["indexing"], "memory_ingest", "succeeded", None),
+            (attempt_ids["indexing_failed"], "memory_ingest", "failed", None),
+            (
+                attempt_ids["indexing_retry"],
+                "memory_ingest",
+                "succeeded",
+                attempt_ids["indexing_failed"],
+            ),
             (attempt_ids["retrieval"], "memory_query", "succeeded", None),
             (attempt_ids["judge"], "judge", "failed", None),
-            (attempt_ids["retry"], "judge", "succeeded", attempt_ids["judge"]),
+            (
+                attempt_ids["judge_retry"],
+                "judge",
+                "succeeded",
+                attempt_ids["judge"],
+            ),
         )
+    )
+
+    ingestion_plan = (
+        "ingestion_plan_record",
+        "source/ingestion-plans/plan-1.json",
+        {
+            "schema_name": "ingestion_plan_record",
+            "schema_version": 2,
+            "ingestion_plan_id": "plan-1",
+            "ingestion_occurrence_id": "plan-1",
+            "state": "sealed",
+            "ordered_dispatch_attempt_ids": [
+                attempt_ids["indexing"],
+                attempt_ids["indexing_retry"],
+            ],
+        },
     )
 
     def usage(
         label: str,
+        attempt_key: str,
         stage: str,
         *,
+        owner_kind: str = "model_role",
+        owner_id: str,
         values: tuple[int | None, int | None, int | None, int | None, int | None],
         proof_status: str,
         billing_complete: bool,
@@ -403,10 +458,10 @@ def _accounting_records(
                 "schema_name": "token_usage_record",
                 "schema_version": 5,
                 "usage_record_id": canonical_sha256(["usage", run_id, label]),
-                "attempt_id": attempt_ids[label],
+                "attempt_id": attempt_ids[attempt_key],
                 "stage": stage,
-                "budget_owner_kind": "model_role",
-                "budget_owner_id": f"{label}-role",
+                "budget_owner_kind": owner_kind,
+                "budget_owner_id": owner_id,
                 "input_tokens": values[0],
                 "visible_output_tokens": values[1],
                 "supplier_reported_total_tokens": values[2],
@@ -420,17 +475,66 @@ def _accounting_records(
             },
         )
 
-    usage_records = (
+    usage_records: tuple[tuple[str, str, dict[str, object]], ...] = (
         usage(
+            "indexing-producer",
             "indexing",
             "memory_ingest",
+            owner_id=producer_binding_id,
             values=(100, 20, 120, None, None),
             proof_status="measured_partial",
             billing_complete=False,
         ),
         usage(
+            "indexing-embedding",
+            "indexing",
+            "memory_ingest",
+            owner_id=embedding_binding_id,
+            values=(1000, 200, 1200, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        ),
+        usage(
+            "indexing-failed-producer",
+            "indexing_failed",
+            "memory_ingest",
+            owner_id=producer_binding_id,
+            values=(10000, 2000, 12000, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        ),
+        usage(
+            "indexing-failed-embedding",
+            "indexing_failed",
+            "memory_ingest",
+            owner_id=embedding_binding_id,
+            values=(100000, 20000, 120000, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        ),
+        usage(
+            "indexing-retry-producer",
+            "indexing_retry",
+            "memory_ingest",
+            owner_id=producer_binding_id,
+            values=(180, 40, 220, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        ),
+        usage(
+            "indexing-retry-embedding",
+            "indexing_retry",
+            "memory_ingest",
+            owner_id=embedding_binding_id,
+            values=(1800, 400, 2200, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        ),
+        usage(
+            "retrieval",
             "retrieval",
             "memory_query",
+            owner_id="retrieval-role",
             values=(None, None, None, None, None),
             proof_status="unavailable",
             billing_complete=False,
@@ -438,6 +542,8 @@ def _accounting_records(
         usage(
             "answer",
             "answer",
+            "answer",
+            owner_id="answer-role",
             values=(50, 5, 57, 0, 2),
             proof_status="measured_complete",
             billing_complete=True,
@@ -445,11 +551,81 @@ def _accounting_records(
         usage(
             "judge",
             "judge",
+            "judge",
+            owner_id="judge-role",
             values=(None, None, None, None, None),
             proof_status="unavailable",
             billing_complete=False,
         ),
     )
+    operation_usage_records = (
+        usage(
+            "indexing-operation",
+            "indexing",
+            "memory_ingest",
+            owner_kind="provider_operation",
+            owner_id="memory_ingest-operation",
+            values=(7, 3, 10, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        ),
+        usage(
+            "indexing-retry-operation",
+            "indexing_retry",
+            "memory_ingest",
+            owner_kind="provider_operation",
+            owner_id="memory_ingest-operation",
+            values=(11, 4, 15, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        ),
+    )
+    if indexing_usage_mode == "missing":
+        usage_records = tuple(
+            item
+            for item in usage_records
+            if item[2]["attempt_id"] != attempt_ids["indexing_retry"]
+            or item[2]["budget_owner_id"] != producer_binding_id
+        )
+    elif indexing_usage_mode == "duplicate":
+        duplicate = usage(
+            "indexing-retry-producer-duplicate",
+            "indexing_retry",
+            "memory_ingest",
+            owner_id=producer_binding_id,
+            values=(1, 1, 2, None, None),
+            proof_status="measured_partial",
+            billing_complete=False,
+        )
+        usage_records = (*usage_records, duplicate)
+    elif indexing_usage_mode in {"operation_fallback", "operation_duplicate"}:
+        usage_records = tuple(
+            item
+            for item in usage_records
+            if item[2]["budget_owner_id"] != producer_binding_id
+            or item[2]["attempt_id"]
+            not in {
+                attempt_ids["indexing"],
+                attempt_ids["indexing_retry"],
+            }
+        )
+        usage_records = (*usage_records, *operation_usage_records)
+        if indexing_usage_mode == "operation_duplicate":
+            duplicate = usage(
+                "indexing-retry-operation-duplicate",
+                "indexing_retry",
+                "memory_ingest",
+                owner_kind="provider_operation",
+                owner_id="memory_ingest-operation",
+                values=(1, 1, 2, None, None),
+                proof_status="measured_partial",
+                billing_complete=False,
+            )
+            usage_records = (*usage_records, duplicate)
+    elif indexing_usage_mode == "model_and_operation":
+        usage_records = (*usage_records, *operation_usage_records)
+    elif indexing_usage_mode != "complete":
+        raise ValueError("unknown indexing usage mode")
     resources = (
         (
             "resource_usage_record",
@@ -512,7 +688,7 @@ def _accounting_records(
             },
         ),
     )
-    return attempts + usage_records + resources + costs
+    return (ingestion_plan, *attempts, *usage_records, *resources, *costs)
 
 
 def _sources(tmp_path: Path, plan: ResolvedPlan) -> dict[str, ValidatedCellRoot]:
@@ -528,6 +704,180 @@ def _sources(tmp_path: Path, plan: ResolvedPlan) -> dict[str, ValidatedCellRoot]
         )
         sources[cell.cell_id] = ValidatedCellRoot(root=root, validation_result=validation)
     return sources
+
+
+def _sources_with_accounting_mode(
+    tmp_path: Path,
+    plan: ResolvedPlan,
+    indexing_usage_mode: str,
+) -> dict[str, ValidatedCellRoot]:
+    sources = _sources(tmp_path, plan)
+    target_cell = plan.cells[0]
+    target_root = tmp_path / f"accounting-{indexing_usage_mode}" / target_cell.cell_id
+    target_validation = _write_cell_root(
+        target_root,
+        plan,
+        cell_index=0,
+        metric_numerators=(1, 1, 1, 1, 0, 0),
+        include_accounting=True,
+        indexing_usage_mode=indexing_usage_mode,
+    )
+    sources[target_cell.cell_id] = ValidatedCellRoot(
+        root=target_root,
+        validation_result=target_validation,
+    )
+    return sources
+
+
+def _openviking_indexing_snapshot(
+    plan: ResolvedPlan,
+    *,
+    raw_mode: str = "complete",
+    canonical_measured: bool = False,
+) -> SimpleNamespace:
+    cell = plan.cells[2]
+    attempt_ids = ("a" * 64, "2" * 64)
+    source_ids = ("source-one", "source-two")
+    values = ((11, 3, 14, 2, 1, 7, 21), (17, 5, 22, 4, 3, 9, 31))
+    raw_payloads: dict[str, bytes] = {}
+    readiness_refs: list[str] = []
+
+    def add_completed_task(
+        source_id: str,
+        usage_values: tuple[int, int, int, int, int, int, int],
+        *,
+        task_suffix: str,
+        accepted_task_suffix: str | None = None,
+    ) -> str:
+        prompt, completion, llm_total, cached, reasoning, embedding, combined = usage_values
+        session_id = "oamb-" + hashlib.sha256(b"session\0" + source_id.encode("utf-8")).hexdigest()
+        archive_uri = f"viking://user/test/sessions/{session_id}/history/archive_001"
+        accepted_payload = canonical_json_bytes(
+            {
+                "status": "ok",
+                "result": {
+                    "session_id": session_id,
+                    "status": "accepted",
+                    "task_id": f"task-{accepted_task_suffix or task_suffix}",
+                    "archive_uri": archive_uri,
+                    "archived": True,
+                },
+                "error": None,
+                "telemetry": None,
+                "profile": None,
+            }
+        )
+        accepted_reference = hashlib.sha256(accepted_payload).hexdigest()
+        raw_payloads[accepted_reference] = accepted_payload
+        readiness_refs.append(accepted_reference)
+        payload = canonical_json_bytes(
+            {
+                "status": "ok",
+                "result": {
+                    "task_id": f"task-{task_suffix}",
+                    "task_type": "session_commit",
+                    "status": "completed",
+                    "resource_id": session_id,
+                    "result": {
+                        "session_id": session_id,
+                        "archive_uri": archive_uri,
+                        "token_usage": {
+                            "llm": {
+                                "prompt_tokens": prompt,
+                                "completion_tokens": completion,
+                                "total_tokens": llm_total,
+                                "cached_tokens": cached,
+                                "reasoning_tokens": reasoning,
+                            },
+                            "embedding": {"total_tokens": embedding},
+                            "total": {
+                                "total_tokens": combined,
+                                "cached_tokens": cached,
+                                "reasoning_tokens": reasoning,
+                            },
+                        },
+                    },
+                },
+                "error": None,
+                "telemetry": None,
+                "profile": None,
+            }
+        )
+        reference = hashlib.sha256(payload).hexdigest()
+        raw_payloads[reference] = payload
+        readiness_refs.append(reference)
+        return reference
+
+    first_ref = add_completed_task(
+        source_ids[0],
+        values[0],
+        task_suffix="one",
+        accepted_task_suffix=("one-mismatch" if raw_mode == "mismatched_commit_task" else None),
+    )
+    if raw_mode == "same_ref_repeated":
+        readiness_refs.append(first_ref)
+    if raw_mode == "conflicting_snapshot":
+        add_completed_task(source_ids[0], values[0], task_suffix="one-conflict")
+    if raw_mode != "missing_snapshot":
+        second_values = values[1]
+        if raw_mode == "broken_equation":
+            second_values = (17, 5, 23, 4, 3, 9, 32)
+        add_completed_task(source_ids[1], second_values, task_suffix="two")
+    if raw_mode == "unknown_session":
+        add_completed_task("unknown-source", values[1], task_suffix="unknown")
+
+    producer_binding_id = next(
+        item.binding_hash for item in plan.model_roles if item.role_id == cell.producer_role_id
+    )
+    usage_records = tuple(
+        {
+            "attempt_id": attempt_id,
+            "stage": "memory_ingest",
+            "budget_owner_kind": "model_role",
+            "budget_owner_id": producer_binding_id,
+            "input_tokens": total - output if canonical_measured else None,
+            "visible_output_tokens": output if canonical_measured else None,
+            "supplier_reported_total_tokens": total if canonical_measured else None,
+            "cached_input_tokens": None,
+            "reasoning_tokens": None,
+            "covered_dimensions": (
+                (
+                    "input_tokens",
+                    "visible_output_tokens",
+                    "supplier_reported_total_tokens",
+                )
+                if canonical_measured
+                else ()
+            ),
+            "unavailable_dimensions": (
+                ("cached_input_tokens", "reasoning_tokens")
+                if canonical_measured
+                else (
+                    "input_tokens",
+                    "visible_output_tokens",
+                    "supplier_reported_total_tokens",
+                    "cached_input_tokens",
+                    "reasoning_tokens",
+                )
+            ),
+            "proof_status": "measured_partial" if canonical_measured else "unavailable",
+            "billing_complete": False,
+        }
+        for attempt_id, total, output in zip(attempt_ids, (120, 220), (20, 40), strict=True)
+    )
+    return SimpleNamespace(
+        cell=cell,
+        ingestion_plans=(
+            {
+                "adapter_profile_id": cell.adapter_profile_id,
+                "ordered_dispatch_attempt_ids": list(attempt_ids),
+                "ordered_source_unit_ids": list(source_ids),
+                "readiness_evidence_refs": readiness_refs,
+            },
+        ),
+        token_usage=usage_records,
+        raw_payloads=raw_payloads,
+    )
 
 
 def _content_sources(tmp_path: Path, plan: ResolvedPlan) -> dict[str, ValidatedCellRoot]:
@@ -691,28 +1041,34 @@ def test_project_reports_separated_accounting_and_preserves_unavailable_measurem
     accounting = export["cells"][0]["accounting"]
 
     assert accounting["attempts"] == {
-        "attempt_count": 16,
+        "attempt_count": 18,
         "budget_exceeded_count": 0,
         "cancelled_count": 0,
-        "failed_count": 1,
+        "failed_count": 2,
         "measurement_coverage": "complete",
-        "retry_count": 1,
-        "succeeded_count": 15,
+        "retry_count": 2,
+        "succeeded_count": 16,
         "unknown_outcome_count": 0,
     }
     assert set(accounting["tokens"]) == {"indexing", "retrieval", "answer", "judge"}
     assert accounting["tokens"]["indexing"]["supplier_usage_coverage"] == {
         "billing_complete_record_count": 0,
-        "measured_record_count": 1,
-        "record_count": 1,
+        "measured_record_count": 2,
+        "record_count": 2,
         "status": "measured_partial",
         "unavailable_record_count": 0,
     }
     assert accounting["tokens"]["indexing"]["totals"]["input_tokens"] == {
-        "measured_record_count": 1,
+        "measured_record_count": 2,
         "status": "measured_complete",
         "unavailable_record_count": 0,
-        "value": 100,
+        "value": 280,
+    }
+    assert accounting["tokens"]["indexing"]["totals"]["supplier_reported_total_tokens"] == {
+        "measured_record_count": 2,
+        "status": "measured_complete",
+        "unavailable_record_count": 0,
+        "value": 340,
     }
     assert accounting["tokens"]["retrieval"]["totals"]["input_tokens"] == {
         "measured_record_count": 0,
@@ -788,7 +1144,15 @@ def test_project_reports_separated_accounting_and_preserves_unavailable_measurem
 def test_indexing_measurement_note_explains_partial_and_unavailable_coverage() -> None:
     from oamb.reporting import comparison_project
 
-    def cell(provider_id: str, measured: int, records: int, status: str) -> dict[str, object]:
+    def cell(
+        provider_id: str,
+        measured: int,
+        records: int,
+        status: str,
+        *,
+        total_tokens: int | None,
+        reasoning_tokens: int | None,
+    ) -> dict[str, object]:
         return {
             "provider_id": provider_id,
             "accounting": {
@@ -798,7 +1162,31 @@ def test_indexing_measurement_note_explains_partial_and_unavailable_coverage() -
                             "measured_record_count": measured,
                             "record_count": records,
                             "status": status,
-                        }
+                        },
+                        "totals": {
+                            "supplier_reported_total_tokens": {
+                                "status": (
+                                    "measured_complete"
+                                    if total_tokens is not None
+                                    else "unavailable"
+                                ),
+                                "value": total_tokens
+                                if total_tokens is not None
+                                else "unavailable",
+                            },
+                            "reasoning_tokens": {
+                                "status": (
+                                    "measured_complete"
+                                    if reasoning_tokens is not None
+                                    else "unavailable"
+                                ),
+                                "value": (
+                                    reasoning_tokens
+                                    if reasoning_tokens is not None
+                                    else "unavailable"
+                                ),
+                            },
+                        },
                     }
                 }
             },
@@ -806,18 +1194,186 @@ def test_indexing_measurement_note_explains_partial_and_unavailable_coverage() -
 
     note = comparison_project._indexing_measurement_note(
         (
-            cell("hindsight", 300, 600, "measured_partial"),
-            cell("mem0", 0, 600, "unavailable"),
-            cell("openviking", 0, 602, "unavailable"),
+            cell(
+                "hindsight",
+                300,
+                300,
+                "measured_partial",
+                total_tokens=5_764_508,
+                reasoning_tokens=None,
+            ),
+            cell(
+                "mem0",
+                0,
+                300,
+                "unavailable",
+                total_tokens=None,
+                reasoning_tokens=None,
+            ),
+            cell(
+                "openviking",
+                300,
+                300,
+                "measured_complete",
+                total_tokens=6_876_300,
+                reasoning_tokens=1_436_612,
+            ),
         )
     )
 
-    assert "sealed supplier-usage records, not source units" in note
-    assert "hindsight: 300/600 metered" in note
-    assert "displayed total sums only those metered records and is incomplete" in note
-    assert "mem0: 0/600 metered" in note
-    assert "openviking: 0/602 metered" in note
-    assert note.count("unavailable, not zero") == 2
+    assert "supplier-reported total tokens" in note
+    assert "provider-defined input plus output" in note
+    assert "Reasoning is included once only when it is inside that supplier total" in note
+    assert "reasoning subset is never added again" in note
+    assert "reasoning is unavailable, the report does not infer or add it" in note
+    assert "successful logical producer records" in note
+    assert "Embedding and failed physical attempts are excluded" in note
+    assert "hindsight: 300/300 metered" in note
+    assert "displayed total covers all producer records" in note
+    assert "hindsight reasoning breakdown is unavailable, not zero" in note
+    assert "5,764,508 is the measured supplier total, with no inferred reasoning added" in note
+    assert "measurement remains partial" in note
+    assert "mem0: 0/300 metered" in note
+    assert "openviking: 300/300 metered" in note
+    assert "openviking reasoning: 1,436,612, already included in its total" in note
+    assert "300/600" not in note
+    assert "0/600" not in note
+    assert "0/602" not in note
+    assert note.count("supplier token totals are unavailable, not zero") == 1
+
+
+@pytest.mark.parametrize(
+    "indexing_usage_mode",
+    ("missing", "duplicate", "operation_duplicate"),
+)
+def test_indexing_headline_rejects_missing_or_duplicate_producer_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    indexing_usage_mode: str,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    sources = _sources_with_accounting_mode(tmp_path, plan, indexing_usage_mode)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+
+    with pytest.raises(comparison_project.ComparisonProjectError, match="producer usage"):
+        comparison_project.build_comparison_project(
+            plan,
+            sources,
+            output_root=tmp_path / f"report-{indexing_usage_mode}",
+        )
+
+
+@pytest.mark.parametrize(
+    ("indexing_usage_mode", "expected_total"),
+    (("operation_fallback", 25), ("model_and_operation", 340)),
+)
+def test_indexing_headline_uses_unique_operation_fallback_but_prefers_model_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    indexing_usage_mode: str,
+    expected_total: int,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    sources = _sources_with_accounting_mode(tmp_path, plan, indexing_usage_mode)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / f"report-{indexing_usage_mode}",
+    )
+    export = json.loads(built.export_path.read_bytes())
+    indexing = export["cells"][0]["accounting"]["tokens"]["indexing"]
+
+    assert indexing["supplier_usage_coverage"]["record_count"] == 2
+    assert indexing["supplier_usage_coverage"]["measured_record_count"] == 2
+    assert indexing["totals"]["supplier_reported_total_tokens"]["value"] == expected_total
+
+
+@pytest.mark.parametrize("raw_mode", ("complete", "same_ref_repeated"))
+def test_openviking_indexing_headline_recovers_sealed_task_llm_usage(
+    tmp_path: Path,
+    raw_mode: str,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    snapshot = _openviking_indexing_snapshot(plan, raw_mode=raw_mode)
+
+    indexing = comparison_project._indexing_token_stage_document(plan, cast(Any, snapshot))
+
+    assert indexing["supplier_usage_coverage"] == {
+        "billing_complete_record_count": 0,
+        "measured_record_count": 2,
+        "record_count": 2,
+        "status": "measured_complete",
+        "unavailable_record_count": 0,
+    }
+    assert indexing["totals"]["input_tokens"]["value"] == 28
+    assert indexing["totals"]["visible_output_tokens"]["value"] == 8
+    assert indexing["totals"]["supplier_reported_total_tokens"]["value"] == 36
+    assert indexing["totals"]["cached_input_tokens"]["value"] == 6
+    assert indexing["totals"]["reasoning_tokens"]["value"] == 4
+
+
+@pytest.mark.parametrize(
+    "raw_mode",
+    (
+        "missing_snapshot",
+        "conflicting_snapshot",
+        "unknown_session",
+        "broken_equation",
+        "mismatched_commit_task",
+    ),
+)
+def test_openviking_indexing_headline_rejects_incomplete_or_inconsistent_task_usage(
+    tmp_path: Path,
+    raw_mode: str,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    snapshot = _openviking_indexing_snapshot(plan, raw_mode=raw_mode)
+
+    with pytest.raises(
+        comparison_project.ComparisonProjectError,
+        match="OpenViking indexing usage",
+    ):
+        comparison_project._indexing_token_stage_document(plan, cast(Any, snapshot))
+
+
+def test_openviking_indexing_headline_prefers_measured_canonical_usage(
+    tmp_path: Path,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    snapshot = _openviking_indexing_snapshot(
+        plan,
+        raw_mode="broken_equation",
+        canonical_measured=True,
+    )
+
+    indexing = comparison_project._indexing_token_stage_document(plan, cast(Any, snapshot))
+
+    assert indexing["supplier_usage_coverage"]["status"] == "measured_partial"
+    assert indexing["totals"]["supplier_reported_total_tokens"]["value"] == 340
 
 
 def test_project_revalidates_roots_rejects_manifest_drift_and_builds_offline_deterministically(
