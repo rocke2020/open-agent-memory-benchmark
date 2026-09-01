@@ -5,8 +5,10 @@
 > inputs and reject bytes that do not match their pinned SHA-256 values.
 
 MemoryAgentBench remains downloadable, pinned research input but is deferred
-from v0.1.0. The active release comparison uses LongMemEval only; retaining MAB
-bytes and provenance does not create a MAB cell or support claim.
+from v0.1.0. The planned release comparison uses the balanced LME-60 selection
+from LongMemEval S: ten questions from each of six types, with the same ordered
+60-question manifest for every provider. Retaining MAB bytes and provenance
+does not create a MAB cell or support claim.
 
 OAMB does not treat benchmark data as project-owned source code. Every dataset
 binding must identify its authoritative source, exact revision, file hashes,

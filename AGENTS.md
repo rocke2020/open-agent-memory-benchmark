@@ -5,8 +5,10 @@ This file provides context for AI coding assistants (Claude Code, Codex, etc.)
 
 Open Agent Memory Benchmark (OAMB) is a clean-room Python package for
 reproducible, evidence-first comparisons of self-hosted memory systems. The
-v0.1 comparison reaches Hindsight, Mem0, and the OpenViking session profile
-through REST APIs on LongMemEval only. MemoryAgentBench is deferred. Mem0's
+planned v0.1 comparison reaches Hindsight, Mem0, and the OpenViking session
+profile through REST APIs on the balanced LME-60 LongMemEval selection: the
+same ten questions from each of six question types for all three providers.
+MemoryAgentBench is deferred. Mem0's
 optional Python SDK is a separate, non-default profile whose evidence can never
 substitute for REST evidence.
 
@@ -147,9 +149,10 @@ public, non-rerunnable evidence exists and users must reopen it.
   `FINALIZED` does not mean `VALIDATED`, and `VALIDATED` does not mean a high
   score.
 - Preserve provider-returned retrieval order. OAMB owns no reranker.
-- v0.1.0 compares Hindsight, Mem0, and the OpenViking session profile on
-  LongMemEval only. MemoryAgentBench is deferred and cannot satisfy a v0.1
-  execution or release gate.
+- v0.1.0 compares Hindsight, Mem0, and the OpenViking session profile on the
+  same balanced LME-60 manifest. Its 60 unique questions produce 180
+  provider-specific results. MemoryAgentBench is deferred and cannot satisfy
+  a v0.1 execution or release gate.
 - Retrieval generation is disabled. Query embedding remains allowed, but
   Hindsight `reflect`, Mem0 generative reranking/search processing, OpenViking
   session-intent search, query planning/rewriting, and any other generative

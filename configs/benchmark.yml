@@ -175,7 +175,7 @@ execution:
   max_parallel_providers_per_dataset: 3
   # Keep one history active per provider because extraction shares a bounded
   # upstream model route. Sources inside the history remain chronological.
-  max_parallel_history_ingestions_per_provider: 2
+  max_parallel_history_ingestions_per_provider: 3
   # A ready history releases its questions immediately. This permit covers
   # retrieval, answer, judge, evaluation, and terminal question evidence.
-  max_parallel_questions_per_provider: 2
+  max_parallel_questions_per_provider: 3
