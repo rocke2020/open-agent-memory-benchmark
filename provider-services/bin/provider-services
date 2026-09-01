@@ -15,6 +15,7 @@ LIFECYCLE_LOCK_HELD=false
 OPENVIKING_QUIESCED=false
 MODEL_READINESS_RESERVED_CALLS=5
 MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS=240
+TARGET_PROVIDER_MODEL=deepseek-v4-flash
 
 # Public, tracked values only.
 . "$VERSIONS_FILE"
@@ -98,6 +99,17 @@ check_project_name() {
         die "OAMB_PROVIDER_PROJECT must be a unique oamb-providers-* identifier"
 }
 
+check_provider_model_profile() {
+    for variable in \
+        OAMB_HINDSIGHT_LLM_MODEL \
+        OAMB_MEM0_LLM_MODEL \
+        OAMB_OPENVIKING_VLM_MODEL
+    do
+        [ "$(env_value "$variable")" = "$TARGET_PROVIDER_MODEL" ] || \
+            die "$variable must be $TARGET_PROVIDER_MODEL"
+    done
+}
+
 project_resources() {
     project=$1
     {
@@ -172,6 +184,7 @@ doctor_full() {
     do
         require_env_value "$name"
     done
+    check_provider_model_profile
     check_project_name
     check_project_ownership
     [ "$(env_value OAMB_HINDSIGHT_LLM_PROVIDER)" = "openai" ] || \
@@ -347,7 +360,8 @@ verify_services() {
     compose exec -T hindsight python -c \
         'import json,os; print(json.dumps({"model":os.environ["HINDSIGHT_API_LLM_MODEL"],"reasoning_effort":os.environ["HINDSIGHT_API_LLM_REASONING_EFFORT"]},sort_keys=True,separators=(",",":")))' \
         > "$proof_dir/hindsight-model-config.json"
-    jq -e '.reasoning_effort == "low" and (.model | type == "string" and length > 0)' \
+    jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
+        '.model == $target_model and .reasoning_effort == "low"' \
         "$proof_dir/hindsight-model-config.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
         "http://127.0.0.1:$mem0_port/openapi.json" > "$proof_dir/mem0-openapi.json"
@@ -370,7 +384,9 @@ verify_services() {
     jq -e '.count == 0 and .points == [] and .next_cursor == null' \
         "$proof_dir/mem0-empty-projection.json" >/dev/null
     cp "$RUNTIME_DIR/mem0-config-redacted.json" "$proof_dir/mem0-config-redacted.json"
-    jq -e '.llm.config.reasoning_effort == "low" and
+    jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
+          '.llm.config.model == $target_model and
+           .llm.config.reasoning_effort == "low" and
            .llm.config.is_reasoning_model == true' \
         "$proof_dir/mem0-config-redacted.json" >/dev/null
     "$ROOT/openviking/bootstrap.sh" "$ROOT" "$ENV_FILE" \
@@ -378,8 +394,9 @@ verify_services() {
     compose exec -T openviking python -c \
         'import json; from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton; c=OpenVikingConfigSingleton.get_instance().vlm; print(json.dumps({"model":c.model,"provider":c.provider,"reasoning_effort":c.extra_request_body.get("reasoning_effort")},sort_keys=True,separators=(",",":")))' \
         > "$proof_dir/openviking-model-config.json"
-    jq -e '.reasoning_effort == "low" and .provider == "openai" and
-           (.model | type == "string" and length > 0)' \
+    jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
+          '.model == $target_model and .reasoning_effort == "low" and
+           .provider == "openai"' \
         "$proof_dir/openviking-model-config.json" >/dev/null
     trap 'restore_openviking_on_exit $?' 0
     OPENVIKING_QUIESCED=true

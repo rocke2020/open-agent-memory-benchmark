@@ -133,6 +133,7 @@ _PROFILE_KEYS = frozenset(
 _PROOF_MANIFEST_KEYS = frozenset({"schema_name", "schema_version", "profile_id", "files"})
 _PROOF_FILE_KEYS = frozenset({"relative_path", "sha256", "byte_count"})
 _PROJECT_PATTERN = re.compile(r"^oamb-providers-[a-z0-9-]{8,48}$")
+_TARGET_PROVIDER_MODEL = "deepseek-v4-flash"
 _OPENAPI_SENSITIVE_SCHEMA_KEYS = frozenset(
     {
         "$ref",
@@ -452,9 +453,7 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
         valid = value.get("api_version") == "0.9.2" and isinstance(value.get("features"), dict)
     elif filename == "hindsight-model-config.json":
         valid = (
-            isinstance(value.get("model"), str)
-            and bool(value["model"])
-            and value.get("reasoning_effort") == "low"
+            value.get("model") == _TARGET_PROVIDER_MODEL and value.get("reasoning_effort") == "low"
         )
     elif filename == "mem0-openapi.json":
         paths = value.get("paths")
@@ -481,6 +480,7 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
             and isinstance(embedder_config, dict)
             and embedder_config.get("embedding_dims") == 1024
             and isinstance(llm_config, dict)
+            and llm_config.get("model") == _TARGET_PROVIDER_MODEL
             and llm_config.get("reasoning_effort") == "low"
             and llm_config.get("is_reasoning_model") is True
             and value.get("reranker") is None
@@ -517,8 +517,7 @@ def _validate_proof_semantics(filename: str, value: object) -> None:
     elif filename == "openviking-model-config.json":
         valid = (
             value.get("provider") == "openai"
-            and isinstance(value.get("model"), str)
-            and bool(value["model"])
+            and value.get("model") == _TARGET_PROVIDER_MODEL
             and value.get("reasoning_effort") == "low"
         )
     if not valid:

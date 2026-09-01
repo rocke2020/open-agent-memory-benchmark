@@ -65,7 +65,7 @@ def _proof_bytes(filename: str) -> bytes:
         "hindsight-health.json": {"database": "connected", "status": "healthy"},
         "hindsight-version.json": {"api_version": "0.9.2", "features": {}},
         "hindsight-model-config.json": {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "reasoning_effort": "low",
         },
         "mem0-openapi.json": {
@@ -79,6 +79,7 @@ def _proof_bytes(filename: str) -> bytes:
             "llm": {
                 "config": {
                     "is_reasoning_model": True,
+                    "model": "deepseek-v4-flash",
                     "reasoning_effort": "low",
                 }
             },
@@ -112,7 +113,7 @@ def _proof_bytes(filename: str) -> bytes:
             "status": "ok",
         },
         "openviking-model-config.json": {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "provider": "openai",
             "reasoning_effort": "low",
         },
@@ -672,6 +673,34 @@ def test_consumer_rejects_self_consistent_but_semantically_failed_proofs(
 ) -> None:
     from oamb.config.provider_services import ProviderServiceBindingError
 
+    receipt_path = _write_service_artifacts(
+        tmp_path,
+        payload_overrides={filename: _canonical_bytes(document)},
+    )
+
+    with pytest.raises(ProviderServiceBindingError, match="semantic"):
+        _load(receipt_path)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "hindsight-model-config.json",
+        "mem0-config-redacted.json",
+        "openviking-model-config.json",
+    ),
+)
+def test_consumer_rejects_pro_runtime_model_proofs(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    from oamb.config.provider_services import ProviderServiceBindingError
+
+    document = json.loads(_proof_bytes(filename))
+    if filename == "mem0-config-redacted.json":
+        document["llm"]["config"]["model"] = "deepseek-v4-pro"
+    else:
+        document["model"] = "deepseek-v4-pro"
     receipt_path = _write_service_artifacts(
         tmp_path,
         payload_overrides={filename: _canonical_bytes(document)},

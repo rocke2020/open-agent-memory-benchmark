@@ -102,6 +102,14 @@ _EXPECTED_EFFORTS: dict[ModelRoleId, ThinkingEffort] = {
     "judge": "high",
     "embedding": "not_applicable",
 }
+_EXPECTED_MODELS: dict[ModelRoleId, str] = {
+    "hindsight_extraction": "deepseek-v4-flash",
+    "mem0_extraction": "deepseek-v4-flash",
+    "openviking_semantic_understanding": "deepseek-v4-flash",
+    "answer": "deepseek-v4-pro",
+    "judge": "deepseek-v4-flash",
+    "embedding": "qwen3-embedding:0.6b",
+}
 _EXPECTED_EXECUTION_OWNERS: dict[ModelRoleId, ExecutionOwner] = {
     "hindsight_extraction": "provider_internal",
     "mem0_extraction": "provider_internal",
@@ -514,11 +522,11 @@ def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfigura
         raise BenchmarkConfigurationError(
             f"model role {role_id} does not match the T10 effort profile"
         )
-    if role_id == "embedding":
-        if model != "qwen3-embedding:0.6b" or runtime_model != model:
-            raise BenchmarkConfigurationError("embedding requires the exact qwen3 model binding")
-    elif not model.startswith("deepseek-") or not runtime_model.startswith("deepseek-"):
-        raise BenchmarkConfigurationError(f"model role {role_id} requires a DeepSeek model")
+    expected_model = _EXPECTED_MODELS[role_id]
+    if model != expected_model or runtime_model != expected_model:
+        raise BenchmarkConfigurationError(
+            f"model role {role_id} does not match the T10 model profile"
+        )
     endpoint_variable = _require_environment_reference(
         document["endpoint_variable"], f"model role {role_id} endpoint"
     )

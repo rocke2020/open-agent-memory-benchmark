@@ -167,8 +167,9 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "comparison: t10-lme6" in result.output
     assert "cells: 3" in result.output
     assert "retrieval generation: disabled" in result.output
-    assert "deepseek-v4-pro / low (rank 1/3)" in result.output
-    assert "deepseek-v4-flash / high (rank 2/3)" in result.output
+    assert "model hindsight_extraction: deepseek-v4-flash / low (rank 1/3)" in result.output
+    assert "model answer: deepseek-v4-pro / low (rank 1/3)" in result.output
+    assert "model judge: deepseek-v4-flash / high (rank 2/3)" in result.output
     assert "recipient=deepseek-api" in result.output
     assert "credential values: [REDACTED]" in result.output
     assert "api_key" not in result.output.lower()
@@ -190,7 +191,7 @@ def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) 
     plan = load_resolved_plan_for_run(plan_path)
 
     assert plan.comparison_id == "t10-lme6"
-    assert plan.model_roles[0].configured_model == "deepseek-v4-pro"
+    assert plan.model_roles[0].configured_model == "deepseek-v4-flash"
     with pytest.raises(FrozenInstanceError):
         plan.comparison_id = "changed"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):

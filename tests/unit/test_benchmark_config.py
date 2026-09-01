@@ -105,8 +105,8 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
     ) == (
         (
             "hindsight_extraction",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
@@ -120,8 +120,8 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "mem0_extraction",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
@@ -135,8 +135,8 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "openviking_semantic_understanding",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
@@ -194,6 +194,32 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
             "classified",
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "role_id,target_model,drifted_model",
+    (
+        ("hindsight_extraction", "deepseek-v4-flash", "deepseek-v4-pro"),
+        ("mem0_extraction", "deepseek-v4-flash", "deepseek-v4-pro"),
+        ("openviking_semantic_understanding", "deepseek-v4-flash", "deepseek-v4-pro"),
+        ("answer", "deepseek-v4-pro", "deepseek-v4-flash"),
+        ("judge", "deepseek-v4-flash", "deepseek-v4-pro"),
+    ),
+)
+def test_loader_rejects_drift_from_target_generative_model_profile(
+    tmp_path: Path,
+    role_id: str,
+    target_model: str,
+    drifted_model: str,
+) -> None:
+    target_binding = f"  {role_id}:\n    model: {target_model}\n    runtime_model: {target_model}\n"
+    drifted_binding = (
+        f"  {role_id}:\n    model: {drifted_model}\n    runtime_model: {drifted_model}\n"
+    )
+    content = _valid_configuration_yaml().replace(target_binding, drifted_binding, 1)
+
+    with pytest.raises(BenchmarkConfigurationError, match="model profile"):
+        _load(_write_configuration(tmp_path, content))
 
 
 def test_checked_in_configuration_freezes_generation_free_retrieval_bindings() -> None:

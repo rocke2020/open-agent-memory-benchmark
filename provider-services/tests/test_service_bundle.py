@@ -206,6 +206,9 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn('reasoning_effort: "low"', operator)
         self.assertIn("hindsight-model-config.json", operator)
         self.assertIn("openviking-model-config.json", operator)
+        self.assertEqual(operator.count('--arg target_model "$TARGET_PROVIDER_MODEL"'), 3)
+        self.assertEqual(operator.count("'.model == $target_model"), 2)
+        self.assertIn(".llm.config.model == $target_model", operator)
 
     def test_bootstrap_treats_dotenv_as_data(self) -> None:
         for script_name in ("mem0/bootstrap.sh", "openviking/bootstrap.sh"):
@@ -223,6 +226,9 @@ class ServiceBundleContractTests(unittest.TestCase):
 
     def test_example_env_has_placeholders_not_credentials(self) -> None:
         example = self.read(".env.example")
+        values = dict(
+            line.split("=", 1) for line in example.splitlines() if line and not line.startswith("#")
+        )
         for name in (
             "OAMB_PROVIDER_PROJECT",
             "OAMB_HINDSIGHT_LLM_API_KEY",
@@ -232,6 +238,9 @@ class ServiceBundleContractTests(unittest.TestCase):
         ):
             self.assertRegex(example, rf"(?m)^{name}=.*$")
         self.assertNotRegex(example, r"sk-[A-Za-z0-9]{12,}")
+        self.assertEqual(values["OAMB_HINDSIGHT_LLM_MODEL"], "deepseek-v4-flash")
+        self.assertEqual(values["OAMB_MEM0_LLM_MODEL"], "deepseek-v4-flash")
+        self.assertEqual(values["OAMB_OPENVIKING_VLM_MODEL"], "deepseek-v4-flash")
 
 
 if __name__ == "__main__":
