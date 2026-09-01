@@ -67,6 +67,7 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertNotRegex(probe, r"(?i)(api_key|credential|secret)")
         self.assertNotRegex(compose, r"(?m)^\s*image:\s*\S*:latest(?:\s|$)")
         self.assertIn('HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true"', compose)
+        self.assertRegex(compose, r"(?m)^    shm_size: 1gb$")
         self.assertNotIn('"5432:', compose)
         self.assertNotIn('"6333:', compose)
         for port in ("18888", "18889", "16333", "19330"):
