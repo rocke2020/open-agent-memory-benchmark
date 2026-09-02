@@ -17,17 +17,20 @@ PROFILE_FILES = {
         "hindsight-health.json",
         "hindsight-version.json",
         "hindsight-model-config.json",
+        "hindsight-retry-config.json",
     ),
     "mem0-rest-v1": (
         "mem0-openapi.json",
         "mem0-empty-projection.json",
         "mem0-config-redacted.json",
+        "mem0-retry-config.json",
     ),
     "openviking-rest-v1": (
         "openviking-health.json",
         "openviking-auth-identity.json",
         "openviking-storage.json",
         "openviking-model-config.json",
+        "openviking-retry-config.json",
     ),
 }
 

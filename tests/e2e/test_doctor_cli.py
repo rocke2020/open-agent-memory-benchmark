@@ -14,7 +14,8 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
-EXPECTED_CELL_IDS = ("hindsight-lme6", "mem0-lme6", "openviking-lme6")
+LME6_CONFIG_PATH = REPOSITORY_ROOT / "tests/fixtures/configs/t10-lme6.yml"
+EXPECTED_CELL_IDS = ("hindsight-lme60", "mem0-lme60", "openviking-lme60")
 EXPECTED_ROLE_IDS = (
     "hindsight_extraction",
     "mem0_extraction",
@@ -102,9 +103,13 @@ def test_doctor_writes_one_canonical_plan_with_three_ordered_cell_specs(tmp_path
     ).encode("utf-8")
     assert document["schema_name"] == "resolved_plan"
     assert document["schema_version"] == 1
-    assert document["comparison_id"] == "t10-lme6"
-    assert document["dataset"]["workload_id"] == "lme30-native-smoke-plus-v1"
-    assert document["dataset"]["selection"] == "lme6"
+    assert document["comparison_id"] == "v0.1-lme60"
+    assert document["dataset"]["workload_id"] == "lme60-balanced-v1"
+    assert document["dataset"]["selection"] == "lme60"
+    assert document["decision"] == {
+        "maximum_exact_mcnemar_p_value": "0.05",
+        "minimum_accuracy_delta": "0.05",
+    }
     assert tuple(cell["cell_id"] for cell in document["cells"]) == EXPECTED_CELL_IDS
     assert tuple(cell["ordinal_1_indexed"] for cell in document["cells"]) == (1, 2, 3)
     assert all(len(cell["cell_spec_hash"]) == 64 for cell in document["cells"])
@@ -125,15 +130,16 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
             item["configured_model"],
             item["thinking_effort"],
             item["thinking_effort_rank_1_indexed"],
+            item["maximum_output_tokens_per_call"],
         )
         for item in document["model_roles"]
     ) == (
-        ("deepseek-v4-flash", "low", 1),
-        ("deepseek-v4-flash", "low", 1),
-        ("deepseek-v4-flash", "low", 1),
-        ("deepseek-v4-pro", "low", 1),
-        ("deepseek-v4-flash", "high", 2),
-        ("qwen3-embedding:0.6b", "not_applicable", None),
+        ("deepseek-v4-flash", "low", 1, None),
+        ("deepseek-v4-flash", "low", 1, None),
+        ("deepseek-v4-flash", "low", 1, None),
+        ("deepseek-v4-pro", "low", 1, 8192),
+        ("deepseek-v4-flash", "high", 2, 1024),
+        ("qwen3-embedding:0.6b", "not_applicable", None, None),
     )
     assert document["retrieval"]["generation"] == "disabled"
     assert tuple(
@@ -145,22 +151,55 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         ("openviking", "/api/v1/search/find", "no_session_id_on_find"),
     )
     assert "rerank=false" not in (output / "resolved-plan.json").read_text(encoding="utf-8")
-    assert document["limits"] == {
-        "currency": "CNY",
-        "max_attempts_per_case": 2,
-        "max_cost": "100.00",
-        "max_input_tokens": 5_000_000,
-        "max_output_tokens": 1_200_000,
-        "max_peak_memory_bytes": 8_589_934_592,
-        "max_budgeted_attempts": 1000,
-        "max_recall_context_tokens_per_case": 32_768,
-        "max_storage_bytes": 10_737_418_240,
-        "memory_operation_timeout_seconds": 900,
-        "model_call_timeout_seconds": 600,
-        "total_wall_time_seconds": 310_500,
+    assert document["execution"] == {
+        "comparison_max_operation_attempt_count": 10_641,
+        "comparison_max_owner_authorization_count": 27_777,
+        "max_parallel_datasets": 1,
+        "max_parallel_history_ingestions_per_provider": 2,
+        "max_parallel_providers_per_dataset": 3,
+        "max_parallel_questions_per_provider": 2,
+        "max_retries_per_operation": 2,
+        "operation_timeout_seconds": 900,
+        "per_cell_base_operation_count": 3_307,
+        "per_cell_base_owner_authorization_count": 9_019,
+        "per_cell_max_operation_attempt_count": 3_547,
+        "per_cell_max_owner_authorization_count": 9_259,
+        "per_cell_retry_eligible_operation_count": 120,
     }
     assert all(cell["recipient"] for cell in document["cells"])
     assert all(role["recipient"] for role in document["model_roles"])
+
+
+def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
+    output = tmp_path / "lme6"
+
+    result = _invoke_doctor(config=LME6_CONFIG_PATH, output=output)
+
+    assert result.exit_code == 0, result.output
+    document = json.loads((output / "resolved-plan.json").read_bytes())
+    assert document["comparison_id"] == "t10-lme6"
+    assert document["dataset"]["selection"] == "lme6"
+    assert document["decision"] is None
+    assert document["execution"] == {
+        "comparison_max_operation_attempt_count": 1_119,
+        "comparison_max_owner_authorization_count": 2_937,
+        "max_parallel_datasets": 1,
+        "max_parallel_history_ingestions_per_provider": 3,
+        "max_parallel_providers_per_dataset": 3,
+        "max_parallel_questions_per_provider": 3,
+        "max_retries_per_operation": 2,
+        "operation_timeout_seconds": 900,
+        "per_cell_base_operation_count": 349,
+        "per_cell_base_owner_authorization_count": 955,
+        "per_cell_max_operation_attempt_count": 373,
+        "per_cell_max_owner_authorization_count": 979,
+        "per_cell_retry_eligible_operation_count": 12,
+    }
+    assert tuple(cell["cell_id"] for cell in document["cells"]) == (
+        "hindsight-lme6",
+        "mem0-lme6",
+        "openviking-lme6",
+    )
 
 
 def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
@@ -169,16 +208,20 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
 
     assert result.exit_code == 0, result.output
-    assert "comparison: t10-lme6" in result.output
+    assert "comparison: v0.1-lme60" in result.output
     assert "cells: 3" in result.output
     assert "retrieval generation: disabled" in result.output
     assert "model hindsight_extraction: deepseek-v4-flash / low (rank 1/3)" in result.output
     assert "model answer: deepseek-v4-pro / low (rank 1/3)" in result.output
     assert "model judge: deepseek-v4-flash / high (rank 2/3)" in result.output
     assert "recipient=deepseek-api" in result.output
+    assert "decision: accuracy delta >= 0.05 and exact McNemar p <= 0.05" in result.output
+    assert "evaluation controls: retries=2; operation timeout=900s" in result.output
+    assert "per-cell authorization: 3547 calls; 9259 owner allocations" in result.output
+    assert "three-cell authorization: 10641 calls; 27777 owner allocations" in result.output
     assert "credential values: [REDACTED]" in result.output
     assert "api_key" not in result.output.lower()
-    assert "authorization:" not in result.output.lower()
+    assert "authorization: bearer" not in result.output.lower()
 
 
 def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) -> None:
@@ -195,7 +238,8 @@ def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) 
     )
     plan = load_resolved_plan_for_run(plan_path)
 
-    assert plan.comparison_id == "t10-lme6"
+    assert plan.comparison_id == "v0.1-lme60"
+    assert plan.decision is not None
     assert plan.model_roles[0].configured_model == "deepseek-v4-flash"
     with pytest.raises(FrozenInstanceError):
         plan.comparison_id = "changed"  # type: ignore[misc]
@@ -247,11 +291,12 @@ def test_plan_loader_rejects_cross_cell_substitution_with_rehashed_plan(tmp_path
     (
         ({"runtime_model": "deepseek-v4-pro"}, "provider-internal model identity"),
         ({"execution_owner": "harness"}, "execution owner"),
+        ({"maximum_output_tokens_per_call": 1}, "protocol output binding"),
     ),
 )
 def test_plan_loader_rejects_rehashed_provider_internal_identity_drift(
     tmp_path: Path,
-    role_mutation: dict[str, str],
+    role_mutation: dict[str, object],
     error: str,
 ) -> None:
     output = tmp_path / "comparison"
@@ -279,7 +324,7 @@ def test_plan_loader_rejects_rehashed_provider_internal_identity_drift(
         load_resolved_plan_for_run(drifted)
 
 
-def test_model_endpoint_and_concurrency_changes_change_cell_identity(tmp_path: Path) -> None:
+def test_model_endpoint_and_evaluation_control_changes_change_cell_identity(tmp_path: Path) -> None:
     first_output = tmp_path / "first"
     assert _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=first_output).exit_code == 0
     original = json.loads((first_output / "resolved-plan.json").read_bytes())
@@ -293,19 +338,19 @@ def test_model_endpoint_and_concurrency_changes_change_cell_identity(tmp_path: P
     assert _invoke_doctor(config=model_config, output=model_output).exit_code == 0
     model_changed = json.loads((model_output / "resolved-plan.json").read_bytes())
 
-    concurrency_config = _write_mutated_config(
+    control_config = _write_mutated_config(
         tmp_path,
-        "max_parallel_questions_per_provider: 3",
-        "max_parallel_questions_per_provider: 1",
+        "max_retries_per_operation: 2",
+        "max_retries_per_operation: 1",
     )
-    concurrency_output = tmp_path / "concurrency"
-    assert _invoke_doctor(config=concurrency_config, output=concurrency_output).exit_code == 0
-    concurrency_changed = json.loads((concurrency_output / "resolved-plan.json").read_bytes())
+    control_output = tmp_path / "control"
+    assert _invoke_doctor(config=control_config, output=control_output).exit_code == 0
+    control_changed = json.loads((control_output / "resolved-plan.json").read_bytes())
 
     assert tuple(cell["cell_spec_hash"] for cell in model_changed["cells"]) != tuple(
         cell["cell_spec_hash"] for cell in original["cells"]
     )
-    assert tuple(cell["cell_spec_hash"] for cell in concurrency_changed["cells"]) != tuple(
+    assert tuple(cell["cell_spec_hash"] for cell in control_changed["cells"]) != tuple(
         cell["cell_spec_hash"] for cell in original["cells"]
     )
 
@@ -313,7 +358,7 @@ def test_model_endpoint_and_concurrency_changes_change_cell_identity(tmp_path: P
 def test_doctor_rejects_mab_or_invalid_retrieval_without_output(tmp_path: Path) -> None:
     for original, replacement in (
         (
-            "workload_id: lme30-native-smoke-plus-v1",
+            "workload_id: lme60-balanced-v1",
             "workload_id: memoryagentbench",
         ),
         ("generation: disabled", "generation: enabled"),

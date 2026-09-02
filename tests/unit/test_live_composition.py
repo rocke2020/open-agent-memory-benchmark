@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import multiprocessing
 import os
 import signal
@@ -27,12 +29,17 @@ from oamb.contracts.states import ResumeDisposition, RunState
 from oamb.runtime.source_records import seal_source_contract
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-BENCHMARK_CONFIG = REPOSITORY_ROOT / "configs" / "benchmark.yml"
+BENCHMARK_CONFIG = REPOSITORY_ROOT / "tests/fixtures/configs/t10-lme6.yml"
+LME60_BENCHMARK_CONFIG = REPOSITORY_ROOT / "configs" / "benchmark.yml"
 NOW = datetime(2026, 8, 30, 10, 0, tzinfo=UTC)
 
 
 def _plan() -> ResolvedPlan:
     return build_resolved_plan(load_benchmark_configuration(BENCHMARK_CONFIG))
+
+
+def _lme60_plan() -> ResolvedPlan:
+    return build_resolved_plan(load_benchmark_configuration(LME60_BENCHMARK_CONFIG))
 
 
 def _provider_evidence() -> SourceEvidenceBinding:
@@ -272,8 +279,8 @@ def test_continuation_rejects_resolved_plan_drift_before_creating_target(
     mutated_config = tmp_path / "benchmark.yml"
     mutated_config.write_text(
         BENCHMARK_CONFIG.read_text(encoding="utf-8").replace(
-            "max_parallel_questions_per_provider: 3",
-            "max_parallel_questions_per_provider: 1",
+            "max_retries_per_operation: 2",
+            "max_retries_per_operation: 1",
             1,
         ),
         encoding="utf-8",
@@ -410,8 +417,7 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
 
     monkeypatch.setattr(import_module(adapter_module), adapter_name, RecordingAdapter)
     monkeypatch.setattr(native_run, "run_native_vertical_slice", record_memory_factory)
-    monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
-    monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
+    monkeypatch.setattr(live, "build_longmemeval_bundle", lambda _path, _selection: object())
     monkeypatch.setattr(
         live,
         "LongMemEvalWorkload",
@@ -468,8 +474,7 @@ def test_live_model_factories_receive_the_resolved_model_call_timeout(
         RecordingModelClient,
     )
     monkeypatch.setattr(native_run, "run_native_vertical_slice", record_model_factories)
-    monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
-    monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
+    monkeypatch.setattr(live, "build_longmemeval_bundle", lambda _path, _selection: object())
     monkeypatch.setattr(
         live,
         "LongMemEvalWorkload",
@@ -490,8 +495,8 @@ def test_live_model_factories_receive_the_resolved_model_call_timeout(
 
     live.execute_live_cell(built)
 
-    assert [item["read_timeout_seconds"] for item in captured] == [600.0, 600.0]
-    assert [item["total_timeout_seconds"] for item in captured] == [600.0, 600.0]
+    assert [item["read_timeout_seconds"] for item in captured] == [900.0, 900.0]
+    assert [item["total_timeout_seconds"] for item in captured] == [900.0, 900.0]
 
 
 def test_unknown_live_case_partition_fails_before_native_runner_or_clients(
@@ -507,8 +512,7 @@ def test_unknown_live_case_partition_fails_before_native_runner_or_clients(
         raise AssertionError("native runner must not receive an invalid case partition")
 
     monkeypatch.setattr(native_run, "run_native_vertical_slice", forbidden_runner)
-    monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
-    monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
+    monkeypatch.setattr(live, "build_longmemeval_bundle", lambda _path, _selection: object())
     monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: GeneratedFakeWorkload())
     built = live.build_live_cell(
         plan=_plan(),
@@ -544,8 +548,7 @@ def test_default_live_cell_persists_the_full_case_partition(
         return SimpleNamespace(capsule_root=tmp_path / "capsule")
 
     monkeypatch.setattr(native_run, "run_native_vertical_slice", record_partition)
-    monkeypatch.setattr(live, "build_lme30_bundle", lambda _path: object())
-    monkeypatch.setattr(live, "build_lme6_bundle", lambda _bundle: object())
+    monkeypatch.setattr(live, "build_longmemeval_bundle", lambda _path, _selection: object())
     monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: workload)
     built = live.build_live_cell(
         plan=_plan(),
@@ -645,14 +648,14 @@ def test_lme6_budget_accepts_the_complete_owner_allocation_matrix(
         "pre_query_projection": 900,
         "memory_query": 900,
         "post_query_projection": 900,
-        "answer": 600,
-        "judge": 600,
+        "answer": 900,
+        "judge": 900,
     }
 
     reservation_ordinal = 0
     for stage, count in dispatch_counts.items():
         route = built.control.require_budget_route(stage=stage)
-        maximum_output_tokens = 8192 if stage == "answer" else 10 if stage == "judge" else 0
+        maximum_output_tokens = 8192 if stage == "answer" else 1024 if stage == "judge" else 0
         for _ in range(count):
             reservation_ordinal += 1
             _evidence, allocations, maximum = _reservation_allocations_for_route(
@@ -685,6 +688,123 @@ def test_lme6_budget_accepts_the_complete_owner_allocation_matrix(
     assert snapshot.committed.output_tokens >= 6 * 8192
 
 
+@pytest.mark.parametrize(
+    ("cell_id", "producer_role_id"),
+    (
+        ("hindsight-lme60", "hindsight_extraction"),
+        ("mem0-lme60", "mem0_extraction"),
+        ("openviking-lme60", "openviking_semantic_understanding"),
+    ),
+)
+def test_lme60_cells_use_their_frozen_workload_and_producer_role(
+    tmp_path: Path,
+    cell_id: str,
+    producer_role_id: str,
+) -> None:
+    from oamb.live import build_live_cell
+
+    built = build_live_cell(
+        plan=_lme60_plan(),
+        cell_id=cell_id,
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+        provider_project_id="oamb-providers-test-live",
+        provider_evidence=_provider_evidence(),
+        environment=_environment(),
+        run_label="lme60-cell-closure",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+    )
+
+    assert built.role_ids == (producer_role_id, "embedding", "answer", "judge")
+    assert built.control.run_spec.workload_id == "lme60-balanced-v1"
+    assert built.control.run_spec.case_manifest_hash == (
+        "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
+    )
+    assert built.control.budget.max_attempts == 9_259
+    assert built.control.max_retries_per_operation == 2
+    attempts_by_binding = {
+        ceiling.role_binding_id: ceiling.max_attempts
+        for ceiling in built.control.budget.role_ceilings
+    }
+    binding_by_role = dict(zip(built.role_ids, built.control.role_bindings, strict=True))
+    assert attempts_by_binding == {
+        binding_by_role[producer_role_id].binding_id: 2_826,
+        binding_by_role["embedding"].binding_id: 2_886,
+        binding_by_role["answer"].binding_id: 180,
+        binding_by_role["judge"].binding_id: 180,
+    }
+
+
+def test_lme60_budget_accepts_all_9019_owner_allocations(tmp_path: Path) -> None:
+    from oamb.live import build_live_cell
+    from oamb.runtime.budget import BudgetOwnerAllocation, ReservationRequest
+    from oamb.runtime.native_run import (
+        _live_budget_ledger,
+        _reservation_allocations_for_route,
+    )
+
+    built = build_live_cell(
+        plan=_lme60_plan(),
+        cell_id="hindsight-lme60",
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+        provider_project_id="oamb-providers-test-live",
+        provider_evidence=_provider_evidence(),
+        environment=_environment(),
+        run_label="lme60-budget-closure",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+    )
+    ledger = _live_budget_ledger(built.control)
+    dispatch_counts = {
+        "runtime_resolve": 1,
+        "scope_allocate": 60,
+        "memory_ingest": 2_826,
+        "memory_readiness": 60,
+        "memory_projection": 60,
+        "pre_query_projection": 60,
+        "memory_query": 60,
+        "post_query_projection": 60,
+        "answer": 60,
+        "judge": 60,
+    }
+
+    reservation_ordinal = 0
+    for stage, count in dispatch_counts.items():
+        route = built.control.require_budget_route(stage=stage)
+        maximum_output_tokens = 8192 if stage == "answer" else 1024 if stage == "judge" else 0
+        for _ in range(count):
+            reservation_ordinal += 1
+            _evidence, allocations, maximum = _reservation_allocations_for_route(
+                built.control.budget,
+                route,
+                maximum_output_tokens=maximum_output_tokens,
+            )
+            owner_allocations = tuple(
+                BudgetOwnerAllocation(item.owner_id, item.maximum) for item in allocations
+            )
+            reservation_id = f"lme60-reservation-{reservation_ordinal}"
+            ledger.reserve(
+                ReservationRequest(
+                    reservation_id=reservation_id,
+                    maximum=maximum,
+                    owner_allocations=owner_allocations,
+                )
+            )
+            ledger.commit(
+                reservation_id,
+                observed=maximum,
+                owner_observed=owner_allocations,
+            )
+
+    snapshot = ledger.snapshot()
+    assert sum(dispatch_counts.values()) == 3_307
+    assert snapshot.reserved.attempts == 0
+    assert snapshot.committed.attempts == 9_019
+    assert snapshot.committed.attempts <= built.control.budget.max_attempts
+
+
 def test_unknown_or_out_of_order_cell_selection_is_rejected() -> None:
     from oamb.live import LiveConfigurationError, select_live_cells
 
@@ -698,6 +818,365 @@ def test_unknown_or_out_of_order_cell_selection_is_rejected() -> None:
         select_live_cells(plan, ("mem0-lme6", "hindsight-lme6"))
     with pytest.raises(LiveConfigurationError, match="unknown"):
         select_live_cells(plan, ("not-a-cell",))
+
+
+def test_public_question_selector_resolves_frozen_raw_id_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+
+    first_case_id = canonical_sha256(["first-case"])
+    second_case_id = canonical_sha256(["second-case"])
+    bundle = SimpleNamespace(
+        case_manifest=SimpleNamespace(
+            cases=(
+                SimpleNamespace(
+                    raw_question_id="72e3ee87",
+                    case_manifest_entry_id=first_case_id,
+                ),
+                SimpleNamespace(
+                    raw_question_id="22d2cb42",
+                    case_manifest_entry_id=second_case_id,
+                ),
+            )
+        )
+    )
+    observed: list[tuple[Path, str]] = []
+
+    def build(path: Path, selection: str) -> object:
+        observed.append((path, selection))
+        return bundle
+
+    monkeypatch.setattr(live, "build_longmemeval_bundle", build)
+
+    assert live.resolve_live_question_case_ids(
+        _lme60_plan(),
+        Path("dataset.json"),
+        ("72e3ee87",),
+    ) == (first_case_id,)
+    assert observed == [(Path("dataset.json"), "lme60")]
+    with pytest.raises(live.LiveConfigurationError, match="unknown frozen question"):
+        live.resolve_live_question_case_ids(
+            _lme60_plan(),
+            Path("dataset.json"),
+            ("not-frozen",),
+        )
+    with pytest.raises(live.LiveConfigurationError, match="duplicate"):
+        live.resolve_live_question_case_ids(
+            _lme60_plan(),
+            Path("dataset.json"),
+            ("72e3ee87", "72e3ee87"),
+        )
+
+
+def test_live_model_env_file_overrides_process_aliases(
+    tmp_path: Path,
+) -> None:
+    from oamb import live
+
+    provider_env = tmp_path / "provider.env"
+    provider_env.write_text(
+        "\n".join(f"{name}={value}" for name, value in _environment().items()) + "\n",
+        encoding="utf-8",
+    )
+    model_env = tmp_path / "model.env"
+    model_env.write_text(
+        "DEEPSEEK_BASE_URL=https://file-model.example/v1\nDEEPSEEK_API_KEY=file-answer-key\n",
+        encoding="utf-8",
+    )
+
+    environment = live.load_live_environment(
+        provider_env_path=provider_env,
+        model_env_path=model_env,
+        provider_runtime_directory=tmp_path / "runtime",
+        base_environment={
+            "OAMB_DEEPSEEK_BASE_URL": "https://process-model.example/v1",
+            "OAMB_DEEPSEEK_API_KEY": "process-answer-key",
+        },
+    )
+
+    assert environment["OAMB_DEEPSEEK_BASE_URL"] == "https://file-model.example/v1"
+    assert environment["OAMB_DEEPSEEK_API_KEY"] == "file-answer-key"
+
+
+def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
+    tmp_path: Path,
+) -> None:
+    from oamb import live
+    from oamb.config.benchmark import MODEL_ROLE_IDS
+
+    plan = _lme60_plan()
+    environment = _environment()
+    runtime = tmp_path / "runtime"
+    receipts = runtime / "service-verification-receipts"
+    receipts.mkdir(parents=True)
+    service_receipt = {"provider_project": "oamb-providers-readiness-test"}
+    service_bytes = json.dumps(service_receipt).encode()
+    service_path = receipts / "service.json"
+    service_path.write_bytes(service_bytes)
+    attempt = {
+        "schema_version": "oamb-provider-model-readiness-attempt-v1",
+        "provider_project": "oamb-providers-readiness-test",
+        "resolved_plan_hash": plan.resolved_plan_hash,
+        "started_at_utc": "2026-09-02T00:00:00Z",
+        "calls_reserved": 7,
+        "calls_dispatched": 7,
+        "operation_timeout_seconds": 900,
+        "attempts": [
+            {
+                "role": role,
+                "status": "succeeded",
+                "dispatched_at_utc": "2026-09-02T00:00:00Z",
+                "completed_at_utc": "2026-09-02T00:00:01Z",
+            }
+            for role in (
+                "embedding",
+                "hindsight_extraction",
+                "mem0_extraction",
+                "openviking_semantic_understanding",
+                "answer",
+                "judge",
+                "openviking-ready",
+            )
+        ],
+        "billing_complete": False,
+        "cost_usd": None,
+        "memory_state_created": False,
+    }
+    attempt_bytes = json.dumps(attempt).encode()
+    (runtime / "model-readiness-attempt.json").write_bytes(attempt_bytes)
+    receipt = {
+        "schema_version": "oamb-provider-model-readiness-receipt-v1",
+        "provider_project": "oamb-providers-readiness-test",
+        "resolved_plan_hash": plan.resolved_plan_hash,
+        "service_verification_receipt_sha256": hashlib.sha256(service_bytes).hexdigest(),
+        "attempt_sha256": hashlib.sha256(attempt_bytes).hexdigest(),
+        "completed_at_utc": "2026-09-02T00:00:02Z",
+        "operation_timeout_seconds": 900,
+        "model_calls_dispatched": 7,
+        "role_ids": list(MODEL_ROLE_IDS),
+        "provider_internal_retries": 0,
+        "environment_hash": live.live_readiness_environment_hash(plan, environment),
+        "billing_complete": False,
+        "cost_usd": None,
+        "memory_state_created": False,
+    }
+    receipt_path = runtime / "model-readiness-receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    live.validate_live_readiness_receipt(
+        plan=plan,
+        provider_runtime_directory=runtime,
+        environment=environment,
+    )
+
+    drifted_environment = {**environment, "OAMB_DEEPSEEK_API_KEY": "different-answer-key"}
+    with pytest.raises(live.LiveConfigurationError, match="environment"):
+        live.validate_live_readiness_receipt(
+            plan=plan,
+            provider_runtime_directory=runtime,
+            environment=drifted_environment,
+        )
+
+    receipt["provider_internal_retries"] = 1
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(live.LiveConfigurationError, match="resolved plan"):
+        live.validate_live_readiness_receipt(
+            plan=plan,
+            provider_runtime_directory=runtime,
+            environment=environment,
+        )
+
+
+def test_bounded_profile_evidence_closes_one_same_question_per_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+    from oamb.artifacts.validation import source_root
+    from oamb.contracts.evidence import CapsuleManifest, ValidationResult
+    from oamb.contracts.states import ValidationDisposition
+
+    plan = _lme60_plan()
+    first_case_id = canonical_sha256(["bounded-first-case"])
+    second_case_id = canonical_sha256(["bounded-second-case"])
+    bundle = SimpleNamespace(
+        case_manifest=SimpleNamespace(
+            cases=(
+                SimpleNamespace(
+                    raw_question_id="72e3ee87",
+                    case_manifest_entry_id=first_case_id,
+                ),
+                SimpleNamespace(
+                    raw_question_id="22d2cb42",
+                    case_manifest_entry_id=second_case_id,
+                ),
+            )
+        )
+    )
+    monkeypatch.setattr(live, "build_longmemeval_bundle", lambda *_args: bundle)
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "model-readiness-receipt.json").write_text(
+        '{"schema_version":"fixture"}', encoding="utf-8"
+    )
+    roots: dict[str, Path] = {}
+    validation_paths: dict[str, Path] = {}
+    validations_by_root: dict[Path, ValidationResult] = {}
+    service_evidence = {
+        cell.provider_id: SourceEvidenceBinding(
+            binding_id=canonical_sha256(["service-binding", cell.provider_id]),
+            source_kind=SourceEvidenceKind.PROVIDER_SERVICE,
+            source_identity=f"oamb-providers-test:{cell.adapter_profile_id}",
+            source_root_hash=canonical_sha256(["service-root", cell.provider_id]),
+            validation_result_hash=canonical_sha256(["service-validation", cell.provider_id]),
+            source_schema_versions=("provider_service_evidence_manifest@1",),
+        )
+        for cell in plan.cells
+    }
+    environment = _environment()
+
+    for cell in plan.cells:
+        root = tmp_path / cell.cell_id
+        roots[cell.cell_id] = root
+        run_id = f"bounded-{cell.provider_id}"
+        run_spec_hash = canonical_sha256(["run-spec", run_id])
+        source_manifest_hash = canonical_sha256(["source-manifest", run_id])
+        manifest = CapsuleManifest(
+            capsule_id=canonical_sha256(["capsule", run_id]),
+            run_id=run_id,
+            run_spec_hash=run_spec_hash,
+            source_entries=(),
+            source_manifest_hash=source_manifest_hash,
+        )
+        built = live.build_live_cell(
+            plan=plan,
+            cell_id=cell.cell_id,
+            output_root=tmp_path / "bounded-capsules",
+            provider_runtime_directory=runtime.resolve(),
+            provider_project_id="oamb-providers-test",
+            provider_evidence=service_evidence[cell.provider_id],
+            environment=environment,
+            run_label=f"bounded-{cell.provider_id}",
+            observed_at=NOW,
+            code_revision="source-tree-test",
+        )
+        files = {
+            "capsule-manifest.json": manifest.model_dump(mode="json"),
+            "source/specs/run-preflight.json": {
+                "resolved_plan_hash": plan.resolved_plan_hash,
+                "adapter_profile_hash": cell.cell_spec_hash,
+                "adapter_profile_id": cell.adapter_profile_id,
+                "provider_project_id": "oamb-providers-test",
+                "provider_profile_evidence": service_evidence[cell.provider_id].model_dump(
+                    mode="json"
+                ),
+                "redacted_endpoint_fingerprints": list(
+                    built.control.preflight_record.redacted_endpoint_fingerprints
+                ),
+            },
+            "source/specs/run-spec.json": {
+                "run_id": run_id,
+                "memory_system_id": cell.provider_id,
+                "workload_id": cell.workload_id,
+                "environment_hash": built.control.run_spec.environment_hash,
+            },
+            "source/specs/case-partition.json": {
+                "schema_name": "case_partition_spec",
+                "requested_case_manifest_entry_ids": [first_case_id],
+            },
+            f"source/run/{run_id}.json": {"state": "finalized"},
+            "source/cases/case.json": {
+                "state": "completed",
+                "case_manifest_entry_id": first_case_id,
+            },
+        }
+        for relative_path, document in files.items():
+            path = root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(document), encoding="utf-8")
+        validation = ValidationResult(
+            validation_profile_id="oamb-lme60-native-evidence-v1",
+            target_hash=source_manifest_hash,
+            disposition=ValidationDisposition.VALIDATED,
+            required_rule_ids=("fixture.valid",),
+            executed_rule_ids=("fixture.valid",),
+            passed_rule_ids=("fixture.valid",),
+            failed_rule_ids=(),
+            not_applicable_rule_ids=(),
+            missing_rule_ids=(),
+            implementation_versions=("fixture.valid@1",),
+            issues=(),
+        )
+        validation_path = tmp_path / f"{cell.cell_id}-validation.json"
+        validation_path.write_text(validation.model_dump_json(), encoding="utf-8")
+        validation_paths[cell.cell_id] = validation_path
+        validations_by_root[root] = validation
+
+    monkeypatch.setattr(
+        source_root,
+        "validate_source_root",
+        lambda root: validations_by_root[Path(root)],
+    )
+
+    question_id, derived = live.build_bounded_profile_evidence(
+        plan=plan,
+        dataset_path=tmp_path / "dataset.json",
+        provider_runtime_directory=runtime,
+        capsule_roots=roots,
+        validation_paths=validation_paths,
+        service_evidence_by_provider=service_evidence,
+        environment=environment,
+    )
+
+    assert question_id == "72e3ee87"
+    assert set(derived) == {"hindsight", "mem0", "openviking"}
+    assert all(
+        "bounded_provider_profile_evidence@1" in item.source_schema_versions
+        for item in derived.values()
+    )
+
+    with pytest.raises(live.LiveConfigurationError, match="environment"):
+        live.build_bounded_profile_evidence(
+            plan=plan,
+            dataset_path=tmp_path / "dataset.json",
+            provider_runtime_directory=runtime,
+            capsule_roots=roots,
+            validation_paths=validation_paths,
+            service_evidence_by_provider=service_evidence,
+            environment={**environment, "OAMB_DEEPSEEK_API_KEY": "drifted-answer-key"},
+        )
+
+    mem0_partition = roots["mem0-lme60"] / "source/specs/case-partition.json"
+    mem0_partition.write_text(
+        json.dumps(
+            {
+                "schema_name": "case_partition_spec",
+                "requested_case_manifest_entry_ids": [second_case_id],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (roots["mem0-lme60"] / "source/cases/case.json").write_text(
+        json.dumps(
+            {
+                "state": "completed",
+                "case_manifest_entry_id": second_case_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(live.LiveConfigurationError, match="same frozen question"):
+        live.build_bounded_profile_evidence(
+            plan=plan,
+            dataset_path=tmp_path / "dataset.json",
+            provider_runtime_directory=runtime,
+            capsule_roots=roots,
+            validation_paths=validation_paths,
+            service_evidence_by_provider=service_evidence,
+            environment=environment,
+        )
 
 
 def test_three_isolated_live_cells_are_dispatched_in_parallel(
@@ -920,8 +1399,18 @@ def test_partial_cell_admission_failure_settles_the_started_worker(
     context = FakeContext()
     monkeypatch.setattr(multiprocessing, "get_context", lambda _method: context)
 
-    with pytest.raises(live.LiveCellExecutionError, match="planted start failure"):
+    with pytest.raises(
+        live.LiveCellExecutionError,
+        match="planted start failure",
+    ) as caught:
         live.execute_live_cells(cells)
+
+    assert tuple(outcome.status for outcome in caught.value.outcomes) == (
+        "completed",
+        "failed",
+        "not_started",
+    )
+    assert caught.value.outcomes[0].capsule_root == cells[0].capsule_root
 
     assert len(context.processes) == 2
     assert context.processes[0].started is True
@@ -929,3 +1418,37 @@ def test_partial_cell_admission_failure_settles_the_started_worker(
     assert context.processes[0].closed is True
     assert context.processes[1].started is False
     assert context.processes[1].closed is True
+
+
+def test_complete_lme60_composition_requires_bounded_profile_evidence() -> None:
+    from oamb.artifacts import composition
+
+    service_only = SimpleNamespace(
+        provider_profile_evidence=SimpleNamespace(
+            source_schema_versions=("provider_service_evidence_manifest@1",)
+        )
+    )
+    bounded = SimpleNamespace(
+        provider_profile_evidence=SimpleNamespace(
+            source_schema_versions=(
+                "provider_service_evidence_manifest@1",
+                "bounded_provider_profile_evidence@1",
+            )
+        )
+    )
+    base_part = SimpleNamespace(
+        case_manifest=SimpleNamespace(workload_id="lme60-balanced-v1"),
+        preflight=service_only,
+    )
+    bounded_part = SimpleNamespace(
+        case_manifest=SimpleNamespace(workload_id="lme60-balanced-v1"),
+        preflight=bounded,
+    )
+
+    with pytest.raises(
+        composition.CapsuleCompositionError,
+        match="bounded provider profile evidence",
+    ):
+        composition.require_complete_lme60_bounded_profile((base_part,))
+
+    composition.require_complete_lme60_bounded_profile((bounded_part,))

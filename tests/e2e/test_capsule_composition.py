@@ -225,7 +225,7 @@ def _run_controlled(
             case_manifest=manifest,
             case_plans=workload.iter_case_plans(manifest),
             requested_case_manifest_entry_ids=(selected_plan.ordered_case_manifest_entry_ids[0],),
-            budget_policy_hash=cell.limits_hash,
+            budget_policy_hash=cell.authorization_hash,
             retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
         )
     completed = run_native_vertical_slice(
@@ -681,11 +681,20 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
 
     monkeypatch.setattr(composition_module, "analyze_capsule_recovery", analyze)
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
     monkeypatch.setattr(live, "load_live_environment", load_environment)
     monkeypatch.setattr(
         live,
         "load_live_provider_evidence",
         lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
+    )
+    monkeypatch.setattr(
+        live,
+        "build_bounded_profile_evidence",
+        lambda **_kwargs: (
+            "72e3ee87",
+            {cell.provider_id: object() for cell in plan.cells},
+        ),
     )
     monkeypatch.setattr(live, "build_live_cell", build_cell)
     full_target = object()
@@ -705,21 +714,28 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
     )
     monkeypatch.setattr(live, "execute_live_cells", execute)
 
-    result = CliRunner().invoke(
-        cli.app,
-        [
-            "run",
-            str(resolved_plan),
-            "--output-root",
-            str(tmp_path / "output"),
-            "--cell",
-            selected_cell.cell_id,
-            "--recover-from",
-            str(source_part),
-            "--run-label",
-            "recovery-1",
-        ],
-    )
+    arguments = [
+        "run",
+        str(resolved_plan),
+        "--output-root",
+        str(tmp_path / "output"),
+        "--cell",
+        selected_cell.cell_id,
+        "--recover-from",
+        str(source_part),
+        "--run-label",
+        "recovery-1",
+    ]
+    for cell in plan.cells:
+        arguments.extend(
+            (
+                "--bounded-capsule",
+                f"{cell.cell_id}={tmp_path / f'{cell.cell_id}-bounded'}",
+                "--bounded-validation",
+                f"{cell.cell_id}={tmp_path / f'{cell.cell_id}-validation.json'}",
+            )
+        )
+    result = CliRunner().invoke(cli.app, arguments)
 
     assert result.exit_code == 0, result.output
     assert call_order == ["analyze", "environment", "target", "analyze", "execute"]
@@ -937,7 +953,7 @@ def test_recovery_rejects_target_execution_configuration_before_remaining_work(
                 resolved_plan_hash=plan.resolved_plan_hash,
                 cell_spec_hash=cell.cell_spec_hash,
                 target_case_manifest_hash=cell.case_manifest_hash,
-                budget_policy_hash=cell.limits_hash,
+                budget_policy_hash=cell.authorization_hash,
                 retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
                 execution_configuration_hash=incompatible_hash,
             ),

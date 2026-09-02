@@ -34,6 +34,11 @@ from oamb.workloads.longmemeval import (
     LME30_EXPECTED_QUESTION_IDS,
     LME30_EXPECTED_SESSION_COUNT,
     LME30_WORKLOAD_ID,
+    LME60_CASE_MANIFEST_HASH,
+    LME60_EXPECTED_QUESTION_IDS,
+    LME60_EXPECTED_SESSION_COUNT,
+    LME60_MANIFEST_ID,
+    LME60_WORKLOAD_ID,
     LME_ANSWER_OUTPUT_CONTRACT_ID,
     LME_ANSWER_PROMPT_PACK_ID,
     LME_DATASET_ID,
@@ -47,6 +52,7 @@ from oamb.workloads.longmemeval import (
     LME_SOURCE_LICENSE_ID,
     LME_SOURCE_NAME,
     LME_SOURCE_SHA256,
+    QUESTION_TYPES,
     LongMemEvalBundle,
     render_lme_session_document,
 )
@@ -131,7 +137,7 @@ def _lme_source_manifest_rule(target: Any) -> tuple[ValidationIssue, ...]:
     exact = bool(
         _canonical_dataset_manifest(dataset) == expected_dataset
         and _canonical_case_manifest(target.case_manifest) is not None
-        and target.case_manifest.workload_id == LME30_WORKLOAD_ID
+        and target.case_manifest.workload_id in {LME30_WORKLOAD_ID, LME60_WORKLOAD_ID}
         and _lme_runtime_sources_close(target)
     )
     return () if exact else (_issue(rule_id, dataset.manifest_hash, "lme-source-drift"),)
@@ -249,6 +255,48 @@ def _lme30_denominator_rule(target: Any) -> tuple[ValidationIssue, ...]:
         ()
         if exact
         else (_issue(rule_id, target.case_manifest.manifest_hash, "lme30-denominator-drift"),)
+    )
+
+
+def _lme60_selector_membership_rule(target: Any) -> tuple[ValidationIssue, ...]:
+    rule_id = "workload.lme60.selector-membership.v1"
+    if not isinstance(target, LongMemEvalBundle):
+        return _wrong_target(rule_id)
+    exact = bool(
+        target.case_manifest.manifest_id == LME60_MANIFEST_ID
+        and target.case_manifest.workload_id == LME60_WORKLOAD_ID
+        and target.case_manifest.manifest_hash == LME60_CASE_MANIFEST_HASH
+        and tuple(row.question_id for row in target.selected_rows) == LME60_EXPECTED_QUESTION_IDS
+        and all(
+            all(
+                row.question_type == question_type
+                for row in target.selected_rows[index * 10 : (index + 1) * 10]
+            )
+            for index, question_type in enumerate(QUESTION_TYPES)
+        )
+    )
+    return (
+        ()
+        if exact
+        else (_issue(rule_id, target.case_manifest.manifest_hash, "lme60-selector-drift"),)
+    )
+
+
+def _lme60_denominator_rule(target: Any) -> tuple[ValidationIssue, ...]:
+    rule_id = "workload.lme60.denominator.v1"
+    if not isinstance(target, LongMemEvalBundle):
+        return _wrong_target(rule_id)
+    exact = bool(
+        len(target.case_manifest.logical_contexts) == 60
+        and len(target.case_manifest.ingestion_plans) == 60
+        and len(target.case_manifest.cases) == 60
+        and sum(plan.intended_source_count for plan in target.ingestion_plans)
+        == LME60_EXPECTED_SESSION_COUNT
+    )
+    return (
+        ()
+        if exact
+        else (_issue(rule_id, target.case_manifest.manifest_hash, "lme60-denominator-drift"),)
     )
 
 
@@ -638,7 +686,7 @@ def _lme_runtime_sources_close(target: LongMemEvalBundle) -> bool:
                 canonical_sha256(
                     [
                         "oamb-lme-source-unit-v1",
-                        LME30_WORKLOAD_ID,
+                        target.case_manifest.workload_id,
                         row.question_id,
                         session.session_id,
                         ordinal,
@@ -806,6 +854,8 @@ WORKLOAD_RULES: tuple[ValidationRule, ...] = (
     ValidationRule("workload.lme6.denominator.v1", 1, _lme6_denominator_rule),
     ValidationRule("workload.lme30.selector-coverage.v1", 1, _lme30_selector_coverage_rule),
     ValidationRule("workload.lme30.denominator.v1", 1, _lme30_denominator_rule),
+    ValidationRule("workload.lme60.selector-membership.v1", 1, _lme60_selector_membership_rule),
+    ValidationRule("workload.lme60.denominator.v1", 1, _lme60_denominator_rule),
     ValidationRule("workload.mab.source-manifest.v1", 1, _mab_source_manifest_rule),
     ValidationRule("workload.mab.prompt-answer-parser.v1", 1, _mab_prompt_answer_parser_rule),
     ValidationRule("workload.mab.metric-strata.v1", 1, _mab_metric_strata_rule),

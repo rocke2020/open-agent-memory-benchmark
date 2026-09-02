@@ -46,6 +46,7 @@ class OperatorDoctorTests(unittest.TestCase):
             "compose.yaml",
             "lib/env.sh",
             "lib/lifecycle.sh",
+            "retry-guard/sitecustomize.py",
             "versions.env",
         ):
             target = bundle / relative_path

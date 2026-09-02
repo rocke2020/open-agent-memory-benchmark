@@ -288,6 +288,7 @@ class NativeRunControl:
     comparison_control_basis: RunComparisonControlBasisRecord | None = None
     max_parallel_history_ingestions: int = 1
     max_parallel_questions: int = 1
+    max_retries_per_operation: int = len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
     provider_lifecycle_coordination_directory: Path | None = None
 
     def __post_init__(self) -> None:
@@ -334,6 +335,8 @@ class NativeRunControl:
             < 1
         ):
             raise ValueError("live native concurrency limits must be positive")
+        if self.max_retries_per_operation < 0:
+            raise ValueError("live native retry limit must be non-negative")
         comparison_records = (
             self.runtime_binding,
             self.workload_control,
@@ -610,7 +613,6 @@ class _NativeExecutionState:
     budget_ledger: BudgetLedger | None = None
     provider_lifecycle: ProviderLifecycleBridge | None = None
     pending_model_usage: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] | None = None
-    infrastructure_retry_controller: InfrastructureRetryController | None = None
     stop_event: _NativeStopSignal | None = None
     sequence: int = 0
 
@@ -759,9 +761,12 @@ async def _complete_model_with_infrastructure_retry(
     model: ModelClientPort,
     request: ModelRequest,
 ) -> ModelReceipt:
-    controller = state.infrastructure_retry_controller
-    if controller is None:
-        raise RuntimeError("native model retry controller is unavailable")
+    maximum_retries = (
+        state.control.max_retries_per_operation
+        if state.control is not None
+        else len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
+    )
+    controller = InfrastructureRetryController(maximum_total_retries=maximum_retries)
 
     async def persist_rejection(
         rejection: ModelSupplierRateLimitRejection,
@@ -955,9 +960,6 @@ def _new_execution_state(
         budget_ledger=_live_budget_ledger(control) if control is not None else None,
         provider_lifecycle=request.provider_lifecycle,
         pending_model_usage={} if control is not None else None,
-        infrastructure_retry_controller=InfrastructureRetryController(
-            maximum_total_retries=len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
-        ),
         stop_event=request.stop_event,
         sequence=sequence,
     )

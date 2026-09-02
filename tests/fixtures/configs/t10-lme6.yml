@@ -1,18 +1,18 @@
-# One complete v0.1 LME-60 comparison. Secrets are referenced by environment-variable
+# Internal LME-6 regression fixture. Secrets are referenced by environment-variable
 # name only; this file never contains credential or endpoint values.
-comparison: v0.1-lme60
+comparison: t10-lme6
 
 dataset:
   dataset_id: longmemeval-s-cleaned
-  workload_id: lme60-balanced-v1
-  selection: lme60
+  workload_id: lme30-native-smoke-plus-v1
+  selection: lme6
   path: datasets/longmemeval-cleaned/longmemeval_s_cleaned.json
   revision: 98d7416c24c778c2fee6e6f3006e7a073259d48f
   source_sha256: d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442
-  case_manifest_hash: 90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80
+  case_manifest_hash: 3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4
 
 cells:
-  - cell_id: hindsight-lme60
+  - cell_id: hindsight-lme6
     provider_id: hindsight
     adapter_profile_id: hindsight-rest-v1
     endpoint_variable: OAMB_HINDSIGHT_BASE_URL
@@ -23,7 +23,7 @@ cells:
     answer_role: answer
     judge_role: judge
     retrieval_binding: hindsight
-  - cell_id: mem0-lme60
+  - cell_id: mem0-lme6
     provider_id: mem0
     adapter_profile_id: mem0-rest-v1
     endpoint_variable: OAMB_MEM0_BASE_URL
@@ -34,7 +34,7 @@ cells:
     answer_role: answer
     judge_role: judge
     retrieval_binding: mem0
-  - cell_id: openviking-lme60
+  - cell_id: openviking-lme6
     provider_id: openviking
     adapter_profile_id: openviking-session-rest-v1
     endpoint_variable: OAMB_OPENVIKING_BASE_URL
@@ -147,11 +147,5 @@ retrieval:
       proof_kind: source_verified_endpoint_and_complete_outbound_trace
 
 execution:
-  # Each eligible operation owns its own retry count; zero means one initial call.
   max_retries_per_operation: 2
-  # Covers one external attempt, including provider task polling.
   operation_timeout_seconds: 900
-
-decision:
-  minimum_accuracy_delta: "0.05"
-  maximum_exact_mcnemar_p_value: "0.05"

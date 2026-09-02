@@ -798,7 +798,7 @@ def test_native_model_429_exhaustion_is_infrastructure_blocked(
         return None
 
     monkeypatch.setattr(native_run_module, "_infrastructure_retry_sleep", no_wait)
-    with pytest.raises(RuntimeError, match="retry policy exhausted"):
+    with pytest.raises(RuntimeError, match="operation retry limit exhausted"):
         run_native_vertical_slice(
             output_root=tmp_path / "capsules",
             run_id=partition.run_id,
@@ -1035,7 +1035,7 @@ def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
             calls.value += 1
         return httpx.Response(429, content=rejection)
 
-    with pytest.raises(RuntimeError, match="global retry budget exhausted"):
+    with pytest.raises(RuntimeError, match="operation retry limit exhausted"):
         run_native_vertical_slice(
             output_root=tmp_path / "capsules",
             run_id=partition.run_id,

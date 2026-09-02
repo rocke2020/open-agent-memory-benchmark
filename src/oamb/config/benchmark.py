@@ -42,26 +42,57 @@ DEEPSEEK_THINKING_EFFORT_SCALE: tuple[GenerativeThinkingEffort, ...] = (
 T10_CELL_IDS = ("hindsight-lme6", "mem0-lme6", "openviking-lme6")
 T10_RETRIEVAL_BINDING_IDS = ("hindsight", "mem0", "openviking")
 
-_EXPECTED_DATASET = {
+_DATASET_COMMON = {
     "dataset_id": "longmemeval-s-cleaned",
-    "workload_id": "lme30-native-smoke-plus-v1",
-    "selection": "lme6",
     "path": "datasets/longmemeval-cleaned/longmemeval_s_cleaned.json",
     "revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
     "source_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
-    "case_manifest_hash": "3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4",
 }
-_EXPECTED_CELLS = (
-    ("hindsight-lme6", "hindsight", "hindsight-rest-v1", "hindsight_extraction", "hindsight"),
-    ("mem0-lme6", "mem0", "mem0-rest-v1", "mem0_extraction", "mem0"),
-    (
-        "openviking-lme6",
-        "openviking",
-        "openviking-session-rest-v1",
-        "openviking_semantic_understanding",
-        "openviking",
-    ),
-)
+_EXPECTED_DATASETS = {
+    "lme6": {
+        **_DATASET_COMMON,
+        "workload_id": "lme30-native-smoke-plus-v1",
+        "selection": "lme6",
+        "case_manifest_hash": "3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4",
+    },
+    "lme60": {
+        **_DATASET_COMMON,
+        "workload_id": "lme60-balanced-v1",
+        "selection": "lme60",
+        "case_manifest_hash": "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80",
+    },
+}
+
+
+def _expected_cells(selection: str) -> tuple[tuple[str, str, str, str, str], ...]:
+    suffix = "lme6" if selection == "lme6" else "lme60"
+    return (
+        (
+            f"hindsight-{suffix}",
+            "hindsight",
+            "hindsight-rest-v1",
+            "hindsight_extraction",
+            "hindsight",
+        ),
+        (f"mem0-{suffix}", "mem0", "mem0-rest-v1", "mem0_extraction", "mem0"),
+        (
+            f"openviking-{suffix}",
+            "openviking",
+            "openviking-session-rest-v1",
+            "openviking_semantic_understanding",
+            "openviking",
+        ),
+    )
+
+
+def expected_cell_ids_for_selection(selection: str) -> tuple[str, ...]:
+    """Return the closed cell inventory for a supported workload selection."""
+
+    if selection not in _EXPECTED_DATASETS:
+        raise BenchmarkConfigurationError(f"unsupported dataset selection: {selection}")
+    return tuple(cell[0] for cell in _expected_cells(selection))
+
+
 _EXPECTED_RETRIEVAL_BINDINGS = (
     (
         "hindsight",
@@ -118,11 +149,13 @@ MODEL_EXECUTION_OWNER_BY_ROLE: dict[ModelRoleId, ExecutionOwner] = {
     "judge": "harness",
     "embedding": "provider_internal",
 }
-
-_TOP_LEVEL_KEYS = frozenset(
-    {"comparison", "dataset", "cells", "models", "retrieval", "limits", "execution"}
+_REQUIRED_TOP_LEVEL_KEYS = frozenset(
+    {"comparison", "dataset", "cells", "models", "retrieval", "execution"}
 )
-_DATASET_KEYS = frozenset(_EXPECTED_DATASET)
+_OPTIONAL_TOP_LEVEL_KEYS = frozenset({"decision"})
+_DATASET_KEYS = frozenset(_DATASET_COMMON) | frozenset(
+    {"workload_id", "selection", "case_manifest_hash"}
+)
 _CELL_KEYS = frozenset(
     {
         "cell_id",
@@ -152,6 +185,7 @@ _MODEL_KEYS = frozenset(
         "usage_coverage",
     }
 )
+_DECISION_KEYS = frozenset({"minimum_accuracy_delta", "maximum_exact_mcnemar_p_value"})
 _RETRIEVAL_KEYS = frozenset({"generation", "bindings"})
 _RETRIEVAL_BINDING_KEYS = frozenset(
     {
@@ -165,33 +199,8 @@ _RETRIEVAL_BINDING_KEYS = frozenset(
         "proof_kind",
     }
 )
-_LIMIT_KEYS = frozenset(
-    {
-        "max_attempts_per_case",
-        "max_budgeted_attempts",
-        "memory_operation_timeout_seconds",
-        "model_call_timeout_seconds",
-        "total_wall_time_seconds",
-        "max_input_tokens",
-        "max_output_tokens",
-        "max_recall_context_tokens_per_case",
-        "max_storage_bytes",
-        "max_peak_memory_bytes",
-        "max_cost",
-        "currency",
-    }
-)
-_EXECUTION_KEYS = frozenset(
-    {
-        "max_parallel_datasets",
-        "max_parallel_providers_per_dataset",
-        "max_parallel_history_ingestions_per_provider",
-        "max_parallel_questions_per_provider",
-    }
-)
+_EXECUTION_KEYS = frozenset({"max_retries_per_operation", "operation_timeout_seconds"})
 _ENVIRONMENT_REFERENCE = re.compile(r"OAMB_[A-Z0-9_]+")
-_CURRENCY = re.compile(r"[A-Z]{3}")
-_COST = re.compile(r"(?:0|[1-9][0-9]*)\.[0-9]{2}")
 
 
 class BenchmarkConfigurationError(ValueError):
@@ -324,53 +333,18 @@ class RetrievalConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
-class RunLimits:
-    max_attempts_per_case: int
-    max_budgeted_attempts: int
-    memory_operation_timeout_seconds: int
-    model_call_timeout_seconds: int
-    total_wall_time_seconds: int
-    max_input_tokens: int
-    max_output_tokens: int
-    max_recall_context_tokens_per_case: int
-    max_storage_bytes: int
-    max_peak_memory_bytes: int
-    max_cost: str
-    currency: str
+class EvaluationControls:
+    max_retries_per_operation: int
+    operation_timeout_seconds: int
 
-    def as_tuple(
-        self,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, str, str]:
-        return (
-            self.max_attempts_per_case,
-            self.max_budgeted_attempts,
-            self.memory_operation_timeout_seconds,
-            self.model_call_timeout_seconds,
-            self.total_wall_time_seconds,
-            self.max_input_tokens,
-            self.max_output_tokens,
-            self.max_recall_context_tokens_per_case,
-            self.max_storage_bytes,
-            self.max_peak_memory_bytes,
-            self.max_cost,
-            self.currency,
-        )
+    def as_tuple(self) -> tuple[int, int]:
+        return (self.max_retries_per_operation, self.operation_timeout_seconds)
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionLimits:
-    max_parallel_datasets: int
-    max_parallel_providers_per_dataset: int
-    max_parallel_history_ingestions_per_provider: int
-    max_parallel_questions_per_provider: int
-
-    def as_tuple(self) -> tuple[int, int, int, int]:
-        return (
-            self.max_parallel_datasets,
-            self.max_parallel_providers_per_dataset,
-            self.max_parallel_history_ingestions_per_provider,
-            self.max_parallel_questions_per_provider,
-        )
+class DecisionConfiguration:
+    minimum_accuracy_delta: str
+    maximum_exact_mcnemar_p_value: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,8 +354,8 @@ class BenchmarkConfiguration:
     cells: tuple[CellConfiguration, ...]
     models: ModelRoleConfigurations
     retrieval: RetrievalConfiguration
-    limits: RunLimits
-    execution: ExecutionLimits
+    evaluation_controls: EvaluationControls
+    decision: DecisionConfiguration | None
 
 
 def load_benchmark_configuration(path: Path) -> BenchmarkConfiguration:
@@ -400,31 +374,42 @@ def load_benchmark_configuration(path: Path) -> BenchmarkConfiguration:
 
 
 def _parse_benchmark_configuration(document: object) -> BenchmarkConfiguration:
-    root = _require_exact_mapping(document, _TOP_LEVEL_KEYS, "benchmark configuration")
+    root = _require_mapping_with_optional_keys(
+        document,
+        required_keys=_REQUIRED_TOP_LEVEL_KEYS,
+        optional_keys=_OPTIONAL_TOP_LEVEL_KEYS,
+        label="benchmark configuration",
+    )
     comparison_id = _require_text(root["comparison"], "comparison")
     dataset = _parse_dataset(root["dataset"])
     models = _parse_model_roles(root["models"])
     retrieval = _parse_retrieval(root["retrieval"])
-    cells = _parse_cells(root["cells"], models=models, retrieval=retrieval)
-    limits = _parse_limits(root["limits"])
-    execution = _parse_execution_limits(root["execution"])
+    cells = _parse_cells(
+        root["cells"],
+        selection=dataset.selection,
+        models=models,
+        retrieval=retrieval,
+    )
+    evaluation_controls = _parse_evaluation_controls(root["execution"])
+    decision = _parse_decision(root.get("decision"), selection=dataset.selection)
     return BenchmarkConfiguration(
         comparison_id=comparison_id,
         dataset=dataset,
         cells=cells,
         models=models,
         retrieval=retrieval,
-        limits=limits,
-        execution=execution,
+        evaluation_controls=evaluation_controls,
+        decision=decision,
     )
 
 
 def _parse_dataset(value: object) -> DatasetConfiguration:
     document = _require_exact_mapping(value, _DATASET_KEYS, "dataset")
     parsed = {key: _require_text(document[key], f"dataset {key}") for key in _DATASET_KEYS}
-    if parsed != _EXPECTED_DATASET:
+    selection = parsed["selection"]
+    if selection not in _EXPECTED_DATASETS or parsed != _EXPECTED_DATASETS[selection]:
         raise BenchmarkConfigurationError(
-            "v0.1 T10 selects only the pinned LongMemEval LME-6 dataset"
+            "dataset does not match a pinned v0.1 LongMemEval profile"
         )
     return DatasetConfiguration(**parsed)
 
@@ -432,6 +417,7 @@ def _parse_dataset(value: object) -> DatasetConfiguration:
 def _parse_cells(
     value: object,
     *,
+    selection: str,
     models: ModelRoleConfigurations,
     retrieval: RetrievalConfiguration,
 ) -> tuple[CellConfiguration, ...]:
@@ -481,9 +467,10 @@ def _parse_cells(
         )
         for cell in cells
     )
-    if actual != _EXPECTED_CELLS:
+    if actual != _expected_cells(selection):
         raise BenchmarkConfigurationError(
-            "cells must be the ordered Hindsight, Mem0, and OpenViking-session LME-6 profiles"
+            "cells must be the ordered Hindsight, Mem0, and OpenViking-session profiles "
+            f"for {selection}"
         )
     retrieval_by_id = {binding.binding_id: binding for binding in retrieval.bindings}
     for cell in cells:
@@ -623,35 +610,40 @@ def _parse_retrieval(value: object) -> RetrievalConfiguration:
     return RetrievalConfiguration(generation="disabled", bindings=tuple(bindings))
 
 
-def _parse_limits(value: object) -> RunLimits:
-    document = _require_exact_mapping(value, _LIMIT_KEYS, "limits")
-    integers = {
-        key: _require_positive_integer(document[key], f"limit {key}")
-        for key in _LIMIT_KEYS
-        if key not in {"max_cost", "currency"}
-    }
-    max_cost = document["max_cost"]
-    if type(max_cost) is not str or _COST.fullmatch(max_cost) is None:
-        raise BenchmarkConfigurationError("limit max_cost must be a finite decimal string")
-    try:
-        parsed_cost = Decimal(max_cost)
-    except InvalidOperation as exc:
-        raise BenchmarkConfigurationError("limit max_cost is invalid") from exc
-    if not parsed_cost.is_finite() or parsed_cost <= 0:
-        raise BenchmarkConfigurationError("limit max_cost must be finite and positive")
-    currency = document["currency"]
-    if type(currency) is not str or _CURRENCY.fullmatch(currency) is None:
-        raise BenchmarkConfigurationError("limit currency must be a three-letter code")
-    return RunLimits(**integers, max_cost=max_cost, currency=currency)
-
-
-def _parse_execution_limits(value: object) -> ExecutionLimits:
+def _parse_evaluation_controls(value: object) -> EvaluationControls:
     document = _require_exact_mapping(value, _EXECUTION_KEYS, "execution")
-    limits = {
-        key: _require_positive_integer(document[key], f"execution limit {key}")
-        for key in _EXECUTION_KEYS
+    retries = _require_non_negative_integer(
+        document["max_retries_per_operation"],
+        "execution max_retries_per_operation",
+    )
+    timeout = _require_positive_integer(
+        document["operation_timeout_seconds"],
+        "execution operation_timeout_seconds",
+    )
+    return EvaluationControls(
+        max_retries_per_operation=retries,
+        operation_timeout_seconds=timeout,
+    )
+
+
+def _parse_decision(value: object, *, selection: str) -> DecisionConfiguration | None:
+    if selection == "lme6":
+        if value is not None:
+            raise BenchmarkConfigurationError("decision must be absent for descriptive LME-6")
+        return None
+    if value is None:
+        raise BenchmarkConfigurationError("decision is required for LME-60")
+    document = _require_exact_mapping(value, _DECISION_KEYS, "decision")
+    values = {
+        key: _require_probability_string(document[key], f"decision {key}") for key in _DECISION_KEYS
     }
-    return ExecutionLimits(**limits)
+    expected = {
+        "minimum_accuracy_delta": "0.05",
+        "maximum_exact_mcnemar_p_value": "0.05",
+    }
+    if values != expected:
+        raise BenchmarkConfigurationError("decision does not match the frozen LME-60 policy")
+    return DecisionConfiguration(**values)
 
 
 def _require_role_id(value: object, label: str) -> ModelRoleId:
@@ -686,6 +678,24 @@ def _require_positive_integer(value: object, label: str) -> int:
     return value
 
 
+def _require_non_negative_integer(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise BenchmarkConfigurationError(f"{label} must be a non-negative finite integer")
+    return value
+
+
+def _require_probability_string(value: object, label: str) -> str:
+    if type(value) is not str:
+        raise BenchmarkConfigurationError(f"{label} must be a decimal string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise BenchmarkConfigurationError(f"{label} must be a decimal string") from exc
+    if not parsed.is_finite() or parsed <= 0 or parsed > 1:
+        raise BenchmarkConfigurationError(f"{label} must be within (0, 1]")
+    return value
+
+
 def _require_sequence(value: object, label: str) -> list[object]:
     if not isinstance(value, list) or not value:
         raise BenchmarkConfigurationError(f"{label} must be a non-empty sequence")
@@ -709,13 +719,35 @@ def _require_exact_mapping(
     return cast(Mapping[str, object], value)
 
 
+def _require_mapping_with_optional_keys(
+    value: object,
+    *,
+    required_keys: frozenset[str],
+    optional_keys: frozenset[str],
+    label: str,
+) -> Mapping[str, object]:
+    if not isinstance(value, dict) or any(type(key) is not str for key in value):
+        raise BenchmarkConfigurationError(f"{label} must be a mapping with text keys")
+    document = cast(dict[str, object], value)
+    actual_keys = frozenset(document)
+    missing = required_keys - actual_keys
+    extra = actual_keys - required_keys - optional_keys
+    if missing or extra:
+        raise BenchmarkConfigurationError(
+            f"{label} keys do not match (missing: {', '.join(sorted(missing)) or 'none'}; "
+            f"extra: {', '.join(sorted(extra)) or 'none'})"
+        )
+    return document
+
+
 __all__ = [
     "BenchmarkConfiguration",
     "BenchmarkConfigurationError",
     "CellConfiguration",
     "DEEPSEEK_THINKING_EFFORT_SCALE",
     "DatasetConfiguration",
-    "ExecutionLimits",
+    "DecisionConfiguration",
+    "EvaluationControls",
     "GenerativeThinkingEffort",
     "MODEL_ROLE_IDS",
     "MODEL_EXECUTION_OWNER_BY_ROLE",
@@ -724,9 +756,9 @@ __all__ = [
     "ModelRoleId",
     "RetrievalBindingConfiguration",
     "RetrievalConfiguration",
-    "RunLimits",
     "T10_CELL_IDS",
     "T10_RETRIEVAL_BINDING_IDS",
     "ThinkingEffort",
+    "expected_cell_ids_for_selection",
     "load_benchmark_configuration",
 ]

@@ -12,7 +12,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from html.parser import HTMLParser
 from itertools import combinations
@@ -62,6 +62,8 @@ RESOURCE_REPORT_DIMENSIONS = (
     ("peak_memory_bytes", "peak_memory_bytes", "bytes", "maximum"),
     ("storage_bytes", "storage_bytes", "bytes", "terminal_snapshot"),
 )
+WILSON_95_Z = Decimal("1.959963984540054")
+SIX_DECIMAL_PLACES = Decimal("0.000001")
 VISIBLE_EVIDENCE_KEYS = frozenset(
     {
         "provider_evidence_identity",
@@ -205,6 +207,11 @@ def build_comparison_project(
             "observed time is local run evidence and is not an environment-independent latency score",
         ]
     )
+    accuracy_decision = _report_accuracy_decision(
+        plan,
+        cell_documents,
+        comparison_documents,
+    )
     export_body: dict[str, Any] = {
         "schema_name": "comparison_project_report",
         "schema_version": 1,
@@ -227,6 +234,15 @@ def build_comparison_project(
         "cells": cell_documents,
         "questions": question_documents,
         "comparisons": comparison_documents,
+        "decision": (
+            None
+            if plan.decision is None
+            else {
+                "maximum_exact_mcnemar_p_value": (plan.decision.maximum_exact_mcnemar_p_value),
+                "minimum_accuracy_delta": plan.decision.minimum_accuracy_delta,
+            }
+        ),
+        "accuracy_decision": accuracy_decision,
         "models": tuple(_model_document(item) for item in plan.model_roles),
         "retrieval_generation": plan.retrieval.generation,
         "retrieval": tuple(
@@ -445,7 +461,7 @@ def _load_composed_cell_snapshot(
         composition.resolved_plan_hash != plan.resolved_plan_hash
         or composition.cell_spec_hash != cell.cell_spec_hash
         or composition.target_case_manifest_hash != cell.case_manifest_hash
-        or composition.budget_policy_hash != cell.limits_hash
+        or composition.budget_policy_hash != cell.authorization_hash
     ):
         raise ComparisonProjectError(f"cell {cell.cell_id} composition binding does not close")
 
@@ -753,7 +769,7 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
                 "resume source part states "
                 f"{','.join(nonfinal)}; only terminal-success whole-plan groups contributed"
             )
-    return {
+    document: dict[str, Any] = {
         "cell_id": snapshot.cell.cell_id,
         "cell_spec_hash": snapshot.cell.cell_spec_hash,
         "provider_id": snapshot.cell.provider_id,
@@ -763,6 +779,7 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
         "validation_result_hash": snapshot.validation_hash,
         "case_count": len(snapshot.cases),
         "metric_id": metric_ids[0] if metric_ids else "unavailable",
+        "completed_case_count": sum(item.get("state") == "completed" for item in snapshot.cases),
         "judged_case_count": len(judged),
         "judged_numerator": numerator,
         "judged_denominator": denominator,
@@ -788,6 +805,98 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
         "observed_time": _observed_time(snapshot),
         "accounting": _accounting_document(plan, snapshot),
         "limitations": limitations,
+    }
+    if plan.dataset.selection == "lme60":
+        document["accuracy"] = _accuracy_document(plan, snapshot)
+    return document
+
+
+def _accuracy_document(
+    plan: ResolvedPlan,
+    snapshot: _CellSnapshot,
+) -> dict[str, object]:
+    if plan.dataset.selection != "lme60":
+        raise ComparisonProjectError("question-type accuracy is defined only for LME-60")
+    from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS, QUESTION_TYPES
+
+    manifest_cases = snapshot.case_manifest.get("cases")
+    if not isinstance(manifest_cases, list) or len(manifest_cases) != 60:
+        raise ComparisonProjectError("LME-60 accuracy requires the exact 60-case manifest")
+    manifest_case_ids = tuple(
+        _required_text(item, "case_manifest_entry_id") for item in manifest_cases
+    )
+    raw_question_ids = tuple(_required_text(item, "raw_question_id") for item in manifest_cases)
+    if raw_question_ids != LME60_EXPECTED_QUESTION_IDS:
+        raise ComparisonProjectError("LME-60 accuracy question-type mapping drifted")
+    cases_by_id = _unique_by(snapshot.cases, "case_manifest_entry_id", "accuracy case")
+    if set(cases_by_id) != set(manifest_case_ids):
+        raise ComparisonProjectError("LME-60 accuracy case coverage differs from the manifest")
+    ordered_cases = tuple(cases_by_id[case_id] for case_id in manifest_case_ids)
+    by_question_type = tuple(
+        {
+            "question_type": question_type,
+            **_accuracy_slice(ordered_cases[index * 10 : (index + 1) * 10]),
+        }
+        for index, question_type in enumerate(QUESTION_TYPES)
+    )
+    return {
+        "all_60": _accuracy_slice(ordered_cases),
+        "by_question_type": by_question_type,
+    }
+
+
+def _accuracy_slice(cases: tuple[dict[str, Any], ...]) -> dict[str, object]:
+    judged = tuple(item for item in cases if item.get("evaluation_disposition") == "judged")
+    outcomes = tuple(_binary_accuracy_outcome(item) for item in judged)
+    if any(item is None for item in outcomes):
+        raise ComparisonProjectError("LME-60 judged accuracy requires binary 0/1 evidence")
+    numerator = sum(item is True for item in outcomes)
+    return _wilson_accuracy_document(numerator, len(outcomes))
+
+
+def _wilson_accuracy_document(numerator: int, denominator: int) -> dict[str, object]:
+    if (
+        isinstance(numerator, bool)
+        or not isinstance(numerator, int)
+        or isinstance(denominator, bool)
+        or not isinstance(denominator, int)
+        or numerator < 0
+        or denominator < 0
+        or numerator > denominator
+    ):
+        raise ComparisonProjectError("Wilson accuracy requires 0 <= numerator <= denominator")
+    if denominator == 0:
+        return {
+            "numerator": numerator,
+            "denominator": denominator,
+            "wilson_95": "unavailable",
+        }
+    with localcontext() as context:
+        context.prec = 60
+        count = Decimal(denominator)
+        proportion = Decimal(numerator) / count
+        z_squared = WILSON_95_Z * WILSON_95_Z
+        center = proportion + z_squared / (Decimal(2) * count)
+        spread = WILSON_95_Z * context.sqrt(
+            proportion * (Decimal(1) - proportion) / count
+            + z_squared / (Decimal(4) * count * count)
+        )
+        divisor = Decimal(1) + z_squared / count
+        lower = ((center - spread) / divisor).quantize(
+            SIX_DECIMAL_PLACES,
+            rounding=ROUND_HALF_UP,
+        )
+        upper = ((center + spread) / divisor).quantize(
+            SIX_DECIMAL_PLACES,
+            rounding=ROUND_HALF_UP,
+        )
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "wilson_95": {
+            "lower": format(lower, "f"),
+            "upper": format(upper, "f"),
+        },
     }
 
 
@@ -1162,7 +1271,7 @@ def _load_local_question_content(
     dataset_source: Path,
     case_manifest_bytes: bytes,
 ) -> tuple[dict[str, object], ...]:
-    from oamb.workloads.longmemeval import build_lme6_bundle, build_lme30_bundle
+    from oamb.workloads.longmemeval import build_longmemeval_bundle
 
     try:
         before_hash = sha256_file(dataset_source)
@@ -1171,15 +1280,7 @@ def _load_local_question_content(
     if before_hash != plan.dataset.source_sha256:
         raise ComparisonProjectError("dataset source hash differs from the resolved plan")
     try:
-        full = build_lme30_bundle(dataset_source)
-        if plan.dataset.selection == "lme6":
-            bundle = build_lme6_bundle(full)
-        elif plan.dataset.selection == "lme30":
-            bundle = full
-        else:
-            raise ComparisonProjectError(
-                "question-detail report supports only the frozen LongMemEval selections"
-            )
+        bundle = build_longmemeval_bundle(dataset_source, plan.dataset.selection)
     except ComparisonProjectError:
         raise
     except (OSError, TypeError, ValueError) as exc:
@@ -1512,6 +1613,12 @@ def _pair_document(
     ):
         comparable = False
         limitations.append("pair lacks complete judged case coverage")
+    if (
+        left.get("completed_case_count") != left["case_count"]
+        or right.get("completed_case_count") != right["case_count"]
+    ):
+        comparable = False
+        limitations.append("pair lacks complete terminal case coverage")
     left_denominator = _required_int(left, "judged_denominator")
     right_denominator = _required_int(right, "judged_denominator")
     if not left_denominator or not right_denominator:
@@ -1525,6 +1632,19 @@ def _pair_document(
         signed_delta = {"numerator": delta.numerator, "denominator": delta.denominator}
     else:
         signed_delta = "unavailable"
+    paired_accuracy = _paired_accuracy_document(left, right)
+    if paired_accuracy == "unavailable":
+        comparable = False
+        limitations.append("pair lacks complete matched binary accuracy evidence")
+        signed_delta = "unavailable"
+    accuracy_decision = _pair_accuracy_decision(
+        plan.decision,
+        left,
+        right,
+        comparable=comparable,
+        signed_delta=signed_delta,
+        paired_accuracy=paired_accuracy,
+    )
     body: dict[str, object] = {
         "schema_name": "pairwise_comparison",
         "schema_version": 1,
@@ -1549,6 +1669,8 @@ def _pair_document(
             "denominator": right["judged_denominator"],
         },
         "signed_delta": signed_delta,
+        "paired_accuracy": paired_accuracy,
+        "accuracy_decision": accuracy_decision,
         "comparable": comparable,
         "limitations": limitations,
     }
@@ -1556,6 +1678,268 @@ def _pair_document(
         **body,
         "comparison_id": canonical_sha256(["oamb-pairwise-comparison-initial-v1", body]),
     }
+
+
+def _paired_accuracy_document(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> dict[str, object] | str:
+    left_results = left.get("results")
+    right_results = right.get("results")
+    if not isinstance(left_results, (list, tuple)) or not isinstance(right_results, (list, tuple)):
+        return "unavailable"
+    try:
+        left_by_id = _unique_by(tuple(left_results), "case_manifest_entry_id", "left pair case")
+        right_by_id = _unique_by(tuple(right_results), "case_manifest_entry_id", "right pair case")
+    except ComparisonProjectError:
+        return "unavailable"
+    if set(left_by_id) != set(right_by_id) or len(left_by_id) != left.get("case_count"):
+        return "unavailable"
+    left_only = 0
+    right_only = 0
+    for case_id, left_result in left_by_id.items():
+        left_outcome = _binary_accuracy_outcome(left_result)
+        right_outcome = _binary_accuracy_outcome(right_by_id[case_id])
+        if left_outcome is None or right_outcome is None:
+            return "unavailable"
+        left_only += int(left_outcome and not right_outcome)
+        right_only += int(right_outcome and not left_outcome)
+    return {
+        "left_correct_right_wrong": left_only,
+        "left_wrong_right_correct": right_only,
+        "exact_mcnemar_two_sided": _exact_mcnemar_document(left_only, right_only),
+    }
+
+
+def _binary_accuracy_outcome(case: Mapping[str, Any]) -> bool | None:
+    numerator = case.get("metric_numerator")
+    denominator = case.get("metric_denominator")
+    if (
+        case.get("state") != "completed"
+        or case.get("evaluation_disposition") != "judged"
+        or isinstance(numerator, bool)
+        or not isinstance(numerator, int)
+        or numerator not in {0, 1}
+        or isinstance(denominator, bool)
+        or denominator != 1
+    ):
+        return None
+    return numerator == 1
+
+
+def _exact_mcnemar_document(left_only: int, right_only: int) -> dict[str, object]:
+    if (
+        isinstance(left_only, bool)
+        or not isinstance(left_only, int)
+        or left_only < 0
+        or isinstance(right_only, bool)
+        or not isinstance(right_only, int)
+        or right_only < 0
+    ):
+        raise ComparisonProjectError("McNemar discordant counts must be non-negative integers")
+    discordant = left_only + right_only
+    if discordant == 0:
+        probability = Fraction(1, 1)
+    else:
+        tail = sum(math.comb(discordant, index) for index in range(min(left_only, right_only) + 1))
+        probability = min(Fraction(1, 1), Fraction(2 * tail, 2**discordant))
+    display = (Decimal(probability.numerator) / Decimal(probability.denominator)).quantize(
+        SIX_DECIMAL_PLACES,
+        rounding=ROUND_HALF_UP,
+    )
+    return {
+        "numerator": probability.numerator,
+        "denominator": probability.denominator,
+        "display": format(display, "f"),
+    }
+
+
+def _pair_accuracy_decision(
+    decision: object,
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    *,
+    comparable: bool,
+    signed_delta: Mapping[str, int] | str,
+    paired_accuracy: Mapping[str, object] | str,
+) -> dict[str, object]:
+    thresholds = _decision_thresholds(decision)
+    if thresholds is None:
+        return _accuracy_decision_document(
+            status="no_clear_accuracy_leader",
+            leader=None,
+            thresholds=None,
+            failed_predicates=("decision_policy_complete",),
+        )
+    minimum_delta, maximum_p_value, threshold_text = thresholds
+    failed: list[str] = []
+    if not comparable:
+        failed.append("complete_equal_coverage")
+    delta = _fraction_value(signed_delta)
+    if delta is None or abs(delta) < minimum_delta:
+        failed.append("minimum_accuracy_delta")
+    probability: Fraction | None = None
+    if isinstance(paired_accuracy, Mapping):
+        exact = paired_accuracy.get("exact_mcnemar_two_sided")
+        probability = _fraction_value(exact)
+    if probability is None or probability > maximum_p_value:
+        failed.append("maximum_exact_mcnemar_p_value")
+    if failed or delta is None or delta == 0:
+        return _accuracy_decision_document(
+            status="no_clear_accuracy_leader",
+            leader=None,
+            thresholds=threshold_text,
+            failed_predicates=tuple(failed),
+        )
+    leader = left if delta > 0 else right
+    return _accuracy_decision_document(
+        status="observed_accuracy_leader",
+        leader=leader,
+        thresholds=threshold_text,
+        failed_predicates=(),
+    )
+
+
+def _decision_thresholds(
+    decision: object,
+) -> tuple[Fraction, Fraction, tuple[str, str]] | None:
+    if isinstance(decision, Mapping):
+        minimum_text = decision.get("minimum_accuracy_delta")
+        maximum_text = decision.get("maximum_exact_mcnemar_p_value")
+    else:
+        minimum_text = getattr(decision, "minimum_accuracy_delta", None)
+        maximum_text = getattr(decision, "maximum_exact_mcnemar_p_value", None)
+    if not isinstance(minimum_text, str) or not isinstance(maximum_text, str):
+        return None
+    try:
+        minimum = Decimal(minimum_text)
+        maximum = Decimal(maximum_text)
+    except InvalidOperation:
+        return None
+    if (
+        not minimum.is_finite()
+        or not maximum.is_finite()
+        or not (0 <= minimum <= 1)
+        or not (0 <= maximum <= 1)
+    ):
+        return None
+    return Fraction(minimum), Fraction(maximum), (minimum_text, maximum_text)
+
+
+def _accuracy_decision_document(
+    *,
+    status: str,
+    leader: Mapping[str, Any] | None,
+    thresholds: tuple[str, str] | None,
+    failed_predicates: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "status": status,
+        "leader_cell_id": None if leader is None else leader["cell_id"],
+        "leader_provider_id": None if leader is None else leader["provider_id"],
+        "minimum_accuracy_delta": "unavailable" if thresholds is None else thresholds[0],
+        "maximum_exact_mcnemar_p_value": ("unavailable" if thresholds is None else thresholds[1]),
+        "failed_predicates": failed_predicates,
+    }
+
+
+def _fraction_value(value: object) -> Fraction | None:
+    if not isinstance(value, Mapping):
+        return None
+    numerator = value.get("numerator")
+    denominator = value.get("denominator")
+    if (
+        isinstance(numerator, bool)
+        or not isinstance(numerator, int)
+        or isinstance(denominator, bool)
+        or not isinstance(denominator, int)
+        or denominator <= 0
+    ):
+        return None
+    return Fraction(numerator, denominator)
+
+
+def _report_accuracy_decision(
+    plan: ResolvedPlan,
+    cells: tuple[dict[str, Any], ...],
+    comparisons: tuple[dict[str, Any], ...],
+) -> dict[str, object]:
+    return _report_accuracy_decision_from_inputs(
+        plan.decision,
+        plan.dataset.selection,
+        cells,
+        comparisons,
+    )
+
+
+def _report_accuracy_decision_from_inputs(
+    decision: object,
+    selection: str,
+    cells: tuple[dict[str, Any], ...],
+    comparisons: tuple[dict[str, Any], ...],
+) -> dict[str, object]:
+    thresholds = _decision_thresholds(decision)
+    if thresholds is None:
+        return _accuracy_decision_document(
+            status="no_clear_accuracy_leader",
+            leader=None,
+            thresholds=None,
+            failed_predicates=("decision_policy_complete",),
+        )
+    threshold_text = thresholds[2]
+    expected_case_count = _expected_case_count(selection)
+    complete = expected_case_count is not None and all(
+        cell.get("case_count") == expected_case_count
+        and cell.get("completed_case_count") == expected_case_count
+        and cell.get("judged_case_count") == expected_case_count
+        and cell.get("judged_denominator") == expected_case_count
+        for cell in cells
+    )
+    if not complete:
+        return _accuracy_decision_document(
+            status="no_clear_accuracy_leader",
+            leader=None,
+            thresholds=threshold_text,
+            failed_predicates=("complete_equal_coverage",),
+        )
+    scores = tuple(
+        Fraction(_required_int(cell, "judged_numerator"), _required_int(cell, "judged_denominator"))
+        for cell in cells
+    )
+    highest = max(scores)
+    leaders = tuple(cell for cell, score in zip(cells, scores, strict=True) if score == highest)
+    if len(leaders) != 1:
+        return _accuracy_decision_document(
+            status="no_clear_accuracy_leader",
+            leader=None,
+            thresholds=threshold_text,
+            failed_predicates=("unique_highest_accuracy",),
+        )
+    candidate = leaders[0]
+    candidate_pairs = tuple(
+        comparison
+        for comparison in comparisons
+        if candidate["cell_id"] in {comparison.get("left_cell_id"), comparison.get("right_cell_id")}
+    )
+    clears_all_pairs = len(candidate_pairs) == len(cells) - 1 and all(
+        isinstance(comparison.get("accuracy_decision"), Mapping)
+        and comparison["accuracy_decision"].get("status") == "observed_accuracy_leader"
+        and comparison["accuracy_decision"].get("leader_cell_id") == candidate["cell_id"]
+        for comparison in candidate_pairs
+    )
+    if not clears_all_pairs:
+        return _accuracy_decision_document(
+            status="no_clear_accuracy_leader",
+            leader=None,
+            thresholds=threshold_text,
+            failed_predicates=("all_pairwise_thresholds",),
+        )
+    return _accuracy_decision_document(
+        status="observed_accuracy_leader",
+        leader=candidate,
+        thresholds=threshold_text,
+        failed_predicates=(),
+    )
 
 
 def _observed_time(snapshot: _CellSnapshot) -> dict[str, object]:
@@ -1864,6 +2248,8 @@ def _validate_comparison_export(
         if any(item.get("display_state") not in allowed_states for item in results):
             raise ComparisonProjectError("comparison export question state is invalid")
 
+    _validate_accuracy_export(export)
+
     html_bytes = payloads[REPORT_HTML_NAME]
     try:
         rendered = html_bytes.decode("utf-8", errors="strict")
@@ -1889,6 +2275,110 @@ def _validate_comparison_export(
         raise ComparisonProjectError("comparison export JSON download target is invalid")
 
 
+def _validate_accuracy_export(export: Mapping[str, Any]) -> None:
+    dataset = export.get("dataset")
+    raw_cells = export.get("cells")
+    raw_comparisons = export.get("comparisons")
+    if (
+        not isinstance(dataset, Mapping)
+        or not isinstance(dataset.get("selection"), str)
+        or not isinstance(raw_cells, (list, tuple))
+        or not isinstance(raw_comparisons, (list, tuple))
+        or any(not isinstance(item, dict) for item in raw_cells)
+        or any(not isinstance(item, dict) for item in raw_comparisons)
+    ):
+        raise ComparisonProjectError("comparison export accuracy evidence shape is invalid")
+    selection = str(dataset["selection"])
+    cells = tuple(raw_cells)
+    comparisons = tuple(raw_comparisons)
+    decision = export.get("decision")
+
+    if selection == "lme60":
+        from oamb.workloads.longmemeval import QUESTION_TYPES
+
+        if _decision_thresholds(decision) is None:
+            raise ComparisonProjectError(
+                "comparison export accuracy evidence lacks decision policy"
+            )
+        for cell in cells:
+            results = cell.get("results")
+            accuracy = cell.get("accuracy")
+            if (
+                not isinstance(results, (list, tuple))
+                or len(results) != 60
+                or any(not isinstance(item, dict) for item in results)
+                or not isinstance(accuracy, Mapping)
+            ):
+                raise ComparisonProjectError(
+                    "comparison export accuracy evidence lacks LME-60 coverage"
+                )
+            ordered_results = tuple(results)
+            expected_all = _accuracy_slice(ordered_results)
+            if canonical_json_bytes(accuracy.get("all_60")) != canonical_json_bytes(expected_all):
+                raise ComparisonProjectError(
+                    "comparison export accuracy evidence Wilson interval drifted"
+                )
+            by_question_type = accuracy.get("by_question_type")
+            expected_by_question_type = tuple(
+                {
+                    "question_type": question_type,
+                    **_accuracy_slice(ordered_results[index * 10 : (index + 1) * 10]),
+                }
+                for index, question_type in enumerate(QUESTION_TYPES)
+            )
+            if canonical_json_bytes(by_question_type) != canonical_json_bytes(
+                expected_by_question_type
+            ):
+                raise ComparisonProjectError(
+                    "comparison export accuracy evidence question-type strata drifted"
+                )
+
+    cells_by_id = {cell.get("cell_id"): cell for cell in cells}
+    if len(cells_by_id) != len(cells) or None in cells_by_id:
+        raise ComparisonProjectError("comparison export accuracy evidence cell identity drifted")
+    for comparison in comparisons:
+        left = cells_by_id.get(comparison.get("left_cell_id"))
+        right = cells_by_id.get(comparison.get("right_cell_id"))
+        if left is None or right is None:
+            raise ComparisonProjectError(
+                "comparison export accuracy evidence pair identity drifted"
+            )
+        expected_paired = _paired_accuracy_document(left, right)
+        if canonical_json_bytes(comparison.get("paired_accuracy")) != canonical_json_bytes(
+            expected_paired
+        ):
+            raise ComparisonProjectError("comparison export accuracy evidence McNemar drifted")
+        comparable = comparison.get("comparable")
+        if not isinstance(comparable, bool):
+            raise ComparisonProjectError(
+                "comparison export accuracy evidence comparability drifted"
+            )
+        expected_decision = _pair_accuracy_decision(
+            decision,
+            left,
+            right,
+            comparable=comparable,
+            signed_delta=comparison.get("signed_delta", "unavailable"),
+            paired_accuracy=expected_paired,
+        )
+        if canonical_json_bytes(comparison.get("accuracy_decision")) != canonical_json_bytes(
+            expected_decision
+        ):
+            raise ComparisonProjectError(
+                "comparison export accuracy evidence pair decision drifted"
+            )
+    expected_report_decision = _report_accuracy_decision_from_inputs(
+        decision,
+        selection,
+        cells,
+        comparisons,
+    )
+    if canonical_json_bytes(export.get("accuracy_decision")) != canonical_json_bytes(
+        expected_report_decision
+    ):
+        raise ComparisonProjectError("comparison export accuracy evidence leader decision drifted")
+
+
 def _render_html(export: Mapping[str, Any]) -> bytes:
     cells = export["cells"]
     comparisons = export["comparisons"]
@@ -1896,12 +2386,14 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
     retrieval = export["retrieval"]
     questions = export["questions"]
     limitations = export["limitations"]
+    accuracy_decision = export["accuracy_decision"]
     assert isinstance(cells, tuple)
     assert isinstance(comparisons, tuple)
     assert isinstance(models, tuple)
     assert isinstance(retrieval, tuple)
     assert isinstance(questions, tuple)
     assert isinstance(limitations, tuple)
+    assert isinstance(accuracy_decision, Mapping)
     cell_rows = "".join(_provider_summary_row(item) for item in cells)
     secondary_accounting = _secondary_accounting_html(cells)
     comparison_rows = "".join(
@@ -1909,6 +2401,9 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
         f"<td>{_escape(item['left_provider_id'])}</td>"
         f"<td>{_escape(item['right_provider_id'])}</td>"
         f"<td>{_escape(_delta_text(item['signed_delta']))}</td>"
+        f"<td>{_escape(_discordance_text(item['paired_accuracy']))}</td>"
+        f"<td>{_escape(_mcnemar_text(item['paired_accuracy']))}</td>"
+        f"<td>{_escape(_pair_decision_text(item['accuracy_decision']))}</td>"
         "</tr>"
         for item in comparisons
         if item["comparable"] is True
@@ -1943,6 +2438,8 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
     provider_headings = "".join(f"<th>{_escape(item['provider_id'])}</th>" for item in cells)
     limitation_items = "".join(f"<li>{_escape(item)}</li>" for item in limitations)
     dataset_notice = _dataset_notice(export["dataset_details"])
+    accuracy_by_type = _accuracy_by_type_html(cells)
+    accuracy_decision_text = _report_accuracy_decision_text(accuracy_decision)
     style = """
 :root { color-scheme: light dark; --bg:#fff; --fg:#17202a; --muted:#5d6d7e; --panel:#f5f7f9; --border:#ccd1d1; --warning-bg:#fff3cd; --warning-fg:#664d03; --pre-bg:#f1f3f5; --good-bg:#d1e7dd; --good-fg:#0f5132; --bad-bg:#f8d7da; --bad-fg:#842029; }
 @media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#edf2f7; --muted:#aab4bf; --panel:#1b2026; --border:#47515c; --warning-bg:#4b3b00; --warning-fg:#ffe69c; --pre-bg:#0b0d10; --good-bg:#123c2d; --good-fg:#a3e9c4; --bad-bg:#4a1d24; --bad-fg:#ffb3bd; } }
@@ -1992,9 +2489,11 @@ a { color:inherit; }
 {dataset_notice}
 <p class="muted">Report ID: <code>{_escape(export["report_id"])}</code></p>
 <section><h2>Provider decision summary</h2><p class="metric-key"><strong>Four decision metrics:</strong> Accuracy · Ctx tokens · Indexing tokens · Index / recall latency</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Ctx tokens are the exact retrieval context shown to the answer model.</p>
+<p><strong>{_escape(accuracy_decision_text)}</strong></p>
 <div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Judged accuracy</th><th>Ctx tokens</th><th>Indexing tokens</th><th>Index-ready latency (s)</th><th>Recall latency (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
 {_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Ctx tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Index-ready latency spans first ingest through readiness per isolated context; recall latency is the provider memory-query request. Both show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
-<section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
+{accuracy_by_type}
+<section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points. Exact McNemar p uses the matched discordant outcomes.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th><th>Discordant A/B</th><th>Exact McNemar p</th><th>Decision</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
 <section><h2>Question results</h2><p>Each row shows one frozen question across all providers; expand the evidence-backed details below when available.</p><div class="table-wrap"><table><thead><tr><th>Question</th><th>Type</th>{provider_headings}</tr></thead><tbody>{question_rows}</tbody></table></div>{question_details}</section>
 <section><h2>Model and thinking-effort bindings</h2><p>For generative roles, effort follows <code>low &lt; high &lt; max</code>; embedding is not applicable. Runtime models were verified against this comparison's frozen configured bindings before dispatch; any mismatch fails the run. The complete bindings remain in report.json.</p><div class="table-wrap"><table><thead><tr><th>Role</th><th>Runtime</th><th>Effort</th><th>Proof</th></tr></thead><tbody>{model_rows}</tbody></table></div></section>
 <section><h2>Generation-free retrieval</h2><div class="table-wrap"><table><thead><tr><th>Provider</th><th>Route</th><th>Disabled setting</th><th>Runtime proof</th></tr></thead><tbody>{retrieval_rows}</tbody></table></div></section>
@@ -2046,7 +2545,133 @@ def _accuracy_text(item: Mapping[str, Any]) -> str:
         Decimal("0.1"),
         rounding=ROUND_HALF_UP,
     )
-    return f"{numerator}/{denominator} ({format(percentage, 'f')}%); {coverage}"
+    accuracy = item.get("accuracy")
+    all_60 = accuracy.get("all_60") if isinstance(accuracy, Mapping) else None
+    interval = _wilson_interval_text(all_60)
+    interval_suffix = f"; {interval}" if interval != "unavailable" else ""
+    return f"{numerator}/{denominator} ({format(percentage, 'f')}%{interval_suffix}); {coverage}"
+
+
+def _accuracy_by_type_html(cells: tuple[Mapping[str, Any], ...]) -> str:
+    if not cells:
+        return ""
+    by_type_values: list[tuple[Any, ...]] = []
+    for cell in cells:
+        accuracy = cell.get("accuracy")
+        if not isinstance(accuracy, Mapping):
+            return ""
+        records = accuracy.get("by_question_type")
+        if not isinstance(records, tuple):
+            return ""
+        by_type_values.append(records)
+    by_type = tuple(by_type_values)
+    first = by_type[0]
+    if not first or any(len(item) != len(first) for item in by_type):
+        return ""
+    headings = "".join(f"<th>{_escape(cell['provider_id'])}</th>" for cell in cells)
+    rows: list[str] = []
+    for index, first_record in enumerate(first):
+        if not isinstance(first_record, Mapping):
+            return ""
+        question_type = first_record.get("question_type")
+        records = tuple(item[index] for item in by_type)
+        if not isinstance(question_type, str) or any(
+            not isinstance(record, Mapping) or record.get("question_type") != question_type
+            for record in records
+        ):
+            return ""
+        values = "".join(f"<td>{_escape(_accuracy_record_text(record))}</td>" for record in records)
+        rows.append(f"<tr><td>{_escape(question_type)}</td>{values}</tr>")
+    return (
+        "<section><h2>Accuracy by question type</h2>"
+        "<p>Each LME-60 stratum contains ten frozen questions. Intervals are 95% Wilson "
+        'score intervals.</p><div class="table-wrap"><table><thead><tr>'
+        f"<th>Question type</th>{headings}</tr></thead><tbody>{''.join(rows)}"
+        "</tbody></table></div></section>"
+    )
+
+
+def _accuracy_record_text(record: Mapping[str, object]) -> str:
+    numerator = record.get("numerator")
+    denominator = record.get("denominator")
+    if (
+        isinstance(numerator, bool)
+        or not isinstance(numerator, int)
+        or isinstance(denominator, bool)
+        or not isinstance(denominator, int)
+        or denominator <= 0
+    ):
+        return "unavailable"
+    percentage = (Decimal(numerator) * Decimal(100) / Decimal(denominator)).quantize(
+        Decimal("0.1"),
+        rounding=ROUND_HALF_UP,
+    )
+    return (
+        f"{numerator}/{denominator} ({format(percentage, 'f')}%); {_wilson_interval_text(record)}"
+    )
+
+
+def _wilson_interval_text(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return "unavailable"
+    interval = value.get("wilson_95")
+    if not isinstance(interval, Mapping):
+        return "unavailable"
+    lower = _decimal_value(interval.get("lower"))
+    upper = _decimal_value(interval.get("upper"))
+    if lower is None or upper is None:
+        return "unavailable"
+    lower_percentage = (lower * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    upper_percentage = (upper * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return f"95% Wilson {format(lower_percentage, 'f')}%–{format(upper_percentage, 'f')}%"
+
+
+def _discordance_text(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return "unavailable"
+    left_only = value.get("left_correct_right_wrong")
+    right_only = value.get("left_wrong_right_correct")
+    if not isinstance(left_only, int) or not isinstance(right_only, int):
+        return "unavailable"
+    return f"{left_only}/{right_only}"
+
+
+def _mcnemar_text(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return "unavailable"
+    exact = value.get("exact_mcnemar_two_sided")
+    if not isinstance(exact, Mapping):
+        return "unavailable"
+    display = exact.get("display")
+    numerator = exact.get("numerator")
+    denominator = exact.get("denominator")
+    if (
+        not isinstance(display, str)
+        or not isinstance(numerator, int)
+        or not isinstance(denominator, int)
+    ):
+        return "unavailable"
+    return f"{display} ({numerator}/{denominator})"
+
+
+def _pair_decision_text(value: object) -> str:
+    if not isinstance(value, Mapping) or value.get("status") != "observed_accuracy_leader":
+        return "No clear accuracy leader"
+    provider = value.get("leader_provider_id")
+    return (
+        f"Observed leader: {provider}" if isinstance(provider, str) else "No clear accuracy leader"
+    )
+
+
+def _report_accuracy_decision_text(value: Mapping[str, Any]) -> str:
+    if value.get("status") != "observed_accuracy_leader":
+        return "No clear accuracy leader. See pair evidence and failed predicates."
+    provider = value.get("leader_provider_id")
+    return (
+        f"Observed accuracy leader: {provider}."
+        if isinstance(provider, str)
+        else ("No clear accuracy leader.")
+    )
 
 
 def _context_text(item: Mapping[str, Any]) -> str:
@@ -2339,6 +2964,8 @@ def _expected_case_count(selection: str) -> int | None:
         return 6
     if selection == "lme30":
         return 30
+    if selection == "lme60":
+        return 60
     return None
 
 

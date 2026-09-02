@@ -14,6 +14,7 @@ from oamb.config.benchmark import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
+LME6_CONFIG_PATH = REPOSITORY_ROOT / "tests/fixtures/configs/t10-lme6.yml"
 
 EXPECTED_ROLE_IDS = (
     "hindsight_extraction",
@@ -23,7 +24,7 @@ EXPECTED_ROLE_IDS = (
     "judge",
     "embedding",
 )
-EXPECTED_CELL_IDS = ("hindsight-lme6", "mem0-lme6", "openviking-lme6")
+EXPECTED_CELL_IDS = ("hindsight-lme60", "mem0-lme60", "openviking-lme60")
 EXPECTED_DEEPSEEK_EFFORT_SCALE = ("low", "high", "max")
 
 
@@ -41,10 +42,10 @@ def _load(path: Path) -> BenchmarkConfiguration:
     return load_benchmark_configuration(path)
 
 
-def test_checked_in_configuration_selects_one_lme6_three_provider_comparison() -> None:
+def test_checked_in_configuration_selects_one_lme60_three_provider_comparison() -> None:
     configuration = _load(BENCHMARK_CONFIG_PATH)
 
-    assert configuration.comparison_id == "t10-lme6"
+    assert configuration.comparison_id == "v0.1-lme60"
     assert (
         configuration.dataset.dataset_id,
         configuration.dataset.workload_id,
@@ -55,12 +56,12 @@ def test_checked_in_configuration_selects_one_lme6_three_provider_comparison() -
         configuration.dataset.case_manifest_hash,
     ) == (
         "longmemeval-s-cleaned",
-        "lme30-native-smoke-plus-v1",
-        "lme6",
+        "lme60-balanced-v1",
+        "lme60",
         "datasets/longmemeval-cleaned/longmemeval_s_cleaned.json",
         "98d7416c24c778c2fee6e6f3006e7a073259d48f",
         "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
-        "3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4",
+        "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80",
     )
     assert tuple(cell.cell_id for cell in configuration.cells) == EXPECTED_CELL_IDS
     assert tuple(
@@ -79,6 +80,24 @@ def test_checked_in_configuration_selects_one_lme6_three_provider_comparison() -
         (cell.embedding_role, cell.answer_role, cell.judge_role) == ("embedding", "answer", "judge")
         for cell in configuration.cells
     )
+    assert configuration.decision is not None
+    assert configuration.decision.minimum_accuracy_delta == "0.05"
+    assert configuration.decision.maximum_exact_mcnemar_p_value == "0.05"
+
+
+def test_preserved_lme6_configuration_keeps_original_selection_and_concurrency() -> None:
+    configuration = _load(LME6_CONFIG_PATH)
+
+    assert configuration.comparison_id == "t10-lme6"
+    assert configuration.dataset.selection == "lme6"
+    assert configuration.dataset.workload_id == "lme30-native-smoke-plus-v1"
+    assert tuple(cell.cell_id for cell in configuration.cells) == (
+        "hindsight-lme6",
+        "mem0-lme6",
+        "openviking-lme6",
+    )
+    assert configuration.evaluation_controls.as_tuple() == (2, 900)
+    assert configuration.decision is None
 
 
 def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> None:
@@ -273,31 +292,19 @@ def test_checked_in_configuration_freezes_generation_free_retrieval_bindings() -
     assert "rerank=false" not in _valid_configuration_yaml()
 
 
-def test_checked_in_configuration_has_only_finite_positive_ceilings() -> None:
+def test_checked_in_configuration_has_only_two_finite_evaluation_controls() -> None:
     configuration = _load(BENCHMARK_CONFIG_PATH)
 
-    assert configuration.limits.as_tuple() == (
-        2,
-        1000,
-        900,
-        600,
-        310_500,
-        5_000_000,
-        1_200_000,
-        32_768,
-        10_737_418_240,
-        8_589_934_592,
-        "100.00",
-        "CNY",
-    )
-    assert configuration.execution.as_tuple() == (1, 3, 3, 3)
+    assert configuration.evaluation_controls.as_tuple() == (2, 900)
 
 
 @pytest.mark.parametrize(
     "mutator",
     (
-        lambda text: text.replace("comparison: t10-lme6\n", "", 1),
-        lambda text: text.replace("comparison: t10-lme6\n", "comparison: t10-lme6\nextra: x\n", 1),
+        lambda text: text.replace("comparison: v0.1-lme60\n", "", 1),
+        lambda text: text.replace(
+            "comparison: v0.1-lme60\n", "comparison: v0.1-lme60\nextra: x\n", 1
+        ),
         lambda text: text.replace(
             "  judge:\n",
             "  unknown_role:\n    model: x\n  judge:\n",
@@ -329,8 +336,8 @@ def test_loader_rejects_missing_or_unknown_keys(
             1,
         ),
         lambda text: text.replace(
-            "  max_parallel_datasets: 1\n",
-            "  max_parallel_datasets: 1\n  max_parallel_datasets: 2\n",
+            "  operation_timeout_seconds: 900\n",
+            "  operation_timeout_seconds: 900\n  operation_timeout_seconds: 901\n",
             1,
         ),
     ),
@@ -347,7 +354,7 @@ def test_loader_rejects_duplicate_yaml_keys(
     "original,replacement",
     (
         (
-            "  workload_id: lme30-native-smoke-plus-v1",
+            "  workload_id: lme60-balanced-v1",
             "  workload_id: memoryagentbench",
         ),
         ("  dataset_id: longmemeval-s-cleaned", "  dataset_id: memoryagentbench-mab5"),
@@ -422,26 +429,13 @@ def test_loader_rejects_unproved_provider_runtime_model_drift(tmp_path: Path) ->
 @pytest.mark.parametrize(
     "original,replacement",
     (
-        ("max_attempts_per_case: 2", "max_attempts_per_case: 0"),
-        ("max_budgeted_attempts: 1000", "max_budgeted_attempts: null"),
-        (
-            "memory_operation_timeout_seconds: 900",
-            "memory_operation_timeout_seconds: .inf",
-        ),
-        ("model_call_timeout_seconds: 600", "model_call_timeout_seconds: 0"),
-        ("max_input_tokens: 5000000", "max_input_tokens: unbounded"),
-        ('max_cost: "100.00"', "max_cost: null"),
-        (
-            "max_parallel_history_ingestions_per_provider: 3",
-            "max_parallel_history_ingestions_per_provider: -1",
-        ),
-        (
-            "max_parallel_questions_per_provider: 3",
-            "max_parallel_questions_per_provider: 0",
-        ),
+        ("max_retries_per_operation: 2", "max_retries_per_operation: -1"),
+        ("max_retries_per_operation: 2", "max_retries_per_operation: null"),
+        ("operation_timeout_seconds: 900", "operation_timeout_seconds: 0"),
+        ("operation_timeout_seconds: 900", "operation_timeout_seconds: .inf"),
     ),
 )
-def test_loader_rejects_missing_nonfinite_or_unbounded_ceilings(
+def test_loader_rejects_invalid_evaluation_controls(
     tmp_path: Path,
     original: str,
     replacement: str,
@@ -452,20 +446,31 @@ def test_loader_rejects_missing_nonfinite_or_unbounded_ceilings(
 
 
 @pytest.mark.parametrize(
-    "legacy_key",
+    "legacy_line",
     (
-        "max_parallel_ingestion_plans_per_provider",
-        "max_parallel_cases_per_provider",
-        "max_parallel_model_calls_per_role",
+        "  max_attempts_per_case: 2\n",
+        "  max_budgeted_attempts: 10000\n",
+        "  total_wall_time_seconds: 2940300\n",
+        "  max_input_tokens: 70000000\n",
+        "  max_output_tokens: 47000000\n",
+        "  max_recall_context_tokens_per_case: 32768\n",
+        "  max_storage_bytes: 10737418240\n",
+        "  max_peak_memory_bytes: 8589934592\n",
+        '  max_cost: "100.00"\n',
+        "  currency: CNY\n",
+        "  max_parallel_datasets: 1\n",
+        "  max_parallel_providers_per_dataset: 3\n",
+        "  max_parallel_history_ingestions_per_provider: 2\n",
+        "  max_parallel_questions_per_provider: 2\n",
     ),
 )
-def test_loader_rejects_each_legacy_parallelism_key(
+def test_loader_rejects_each_removed_ceiling_or_concurrency_key(
     tmp_path: Path,
-    legacy_key: str,
+    legacy_line: str,
 ) -> None:
     content = _valid_configuration_yaml().replace(
-        "  max_parallel_questions_per_provider: 3\n",
-        f"  max_parallel_questions_per_provider: 3\n  {legacy_key}: 2\n",
+        "  operation_timeout_seconds: 900\n",
+        f"  operation_timeout_seconds: 900\n{legacy_line}",
         1,
     )
 
@@ -473,9 +478,43 @@ def test_loader_rejects_each_legacy_parallelism_key(
         _load(_write_configuration(tmp_path, content))
 
 
+def test_loader_accepts_zero_retries_as_one_initial_attempt(tmp_path: Path) -> None:
+    content = _valid_configuration_yaml().replace(
+        "max_retries_per_operation: 2",
+        "max_retries_per_operation: 0",
+        1,
+    )
+
+    configuration = _load(_write_configuration(tmp_path, content))
+
+    assert configuration.evaluation_controls.as_tuple() == (0, 900)
+
+
 def test_configuration_is_frozen() -> None:
     configuration = _load(BENCHMARK_CONFIG_PATH)
 
     with pytest.raises(AttributeError):
         configuration.cells = ()  # type: ignore[misc]
-    assert replace(configuration.execution).as_tuple() == (1, 3, 3, 3)
+    assert replace(configuration.evaluation_controls).as_tuple() == (2, 900)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        ('minimum_accuracy_delta: "0.05"', 'minimum_accuracy_delta: "0.00"'),
+        (
+            'maximum_exact_mcnemar_p_value: "0.05"',
+            'maximum_exact_mcnemar_p_value: "1.01"',
+        ),
+        ("  maximum_exact_mcnemar_p_value:", "  unknown_decision_key:"),
+    ),
+)
+def test_loader_rejects_invalid_or_unknown_lme60_decision_policy(
+    tmp_path: Path,
+    original: str,
+    replacement: str,
+) -> None:
+    content = _valid_configuration_yaml().replace(original, replacement, 1)
+
+    with pytest.raises(BenchmarkConfigurationError, match="decision"):
+        _load(_write_configuration(tmp_path, content))

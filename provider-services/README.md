@@ -1,9 +1,9 @@
 # OAMB provider API services
 
-> **TL;DR:** This bundle prepares exact-pinned local REST services for the Open
-> Agent Memory Benchmark (OAMB). It does not run LongMemEval, prove provider
-> workload support, or prove generation-free retrieval; those require the
-> benchmark runner, runtime evidence, and capsule validation.
+This bundle prepares exact-pinned local REST services for the Open Agent Memory
+Benchmark (OAMB). It does not run LongMemEval, prove provider workload support,
+or prove generation-free retrieval; those require the benchmark runner, runtime
+evidence, and capsule validation.
 
 The default transport-matched boundary calls Hindsight, Mem0, and OpenViking
 through local REST APIs. Mem0's Python SDK is an optional, separately identified
@@ -78,7 +78,8 @@ chmod 600 .env
 ./bin/provider-services up
 ./bin/provider-services verify --services
 ./bin/provider-services verify --model-readiness \
-  --budget /path/to/budget.json
+  --resolved-plan /path/to/resolved-plan.json \
+  --model-env /path/to/.env
 ./bin/provider-services status
 ```
 
@@ -101,22 +102,23 @@ exact API versions/routes, storage reachability, Mem0 configuration persistence
 across a normal restart, and an OpenViking user-bound key without benchmark-
 memory writes. `verify --model-readiness` is a potentially billable endpoint-
 readiness probe: it checks the common 1,024-dimension embedding response, a
-minimal chat response from every configured indexing/extraction/semantic-
-understanding model endpoint, and OpenViking `/ready`. It does not load or probe
-the harness answer/judge binding, execute a provider-native extraction path,
-validate structured extracted memory, or prove the absence of a fallback model.
-The target Flash T10 therefore requires a separate bounded fresh-scope
-extraction-conformance probe for each provider before benchmark dispatch. v0.1
-has no retrieval-generation role. Neither probe may run concurrently with a
+minimal chat response from all three provider producer roles plus the harness
+answer and judge roles, and OpenViking `/ready`. Service verification also
+proves that provider-internal model/task retries are zero. It does not execute a
+provider-native extraction path, validate structured extracted memory, or prove
+the absence of a fallback model. A separate bounded fresh-scope question run is
+therefore required for each provider before broad benchmark dispatch. v0.1 has
+no retrieval-generation role. Neither probe may run concurrently with a
 benchmark.
 
-Model-readiness billing is explicitly `unavailable`, never zero. Its budget
-must reserve at least five calls and 240 seconds, set
-`cost_metering="unavailable"`, and set `max_total_cost_usd=null`. Before the
-first dispatch the command creates one project-bound attempt and records each
-dispatch before sending it. A failure cannot reuse the project; the operator
-preserves the attempt ledger and starts a new project. The final receipt keeps
-`billing_complete=false` and `cost_usd=null`.
+Model-readiness billing is explicitly `unavailable`, never zero. The command
+loads the immutable resolved plan, uses its per-operation timeout, and probes
+the three provider producer roles, controlled embedding, harness answer,
+harness judge, and OpenViking readiness once each. Before the first dispatch it
+creates one project-bound attempt and records each dispatch before sending it.
+A failure cannot reuse the project; the operator preserves the attempt ledger
+and starts a new project. The final receipt keeps `billing_complete=false` and
+`cost_usd=null`.
 
 The runner and lifecycle commands share one atomic local protocol. Before
 creating `.runtime/active-operation`, a runner or conformance owner must acquire
@@ -150,8 +152,9 @@ proven disabled, and OpenViking `/api/v1/search/find` with
 prove these runtime settings.
 
 OpenViking `/ready` performs a real embedding request and is intentionally not
-a periodic healthcheck; model-readiness verification invokes it only under a
-project-bound budget and records that boundary separately from service health.
+a periodic healthcheck; model-readiness verification invokes it only under the
+resolved plan's per-operation timeout and records that boundary separately from
+service health.
 
 ## API endpoints
 

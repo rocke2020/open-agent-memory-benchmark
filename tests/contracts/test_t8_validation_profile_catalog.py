@@ -26,6 +26,7 @@ TARGET_HASH = "a" * 64
 
 EXPECTED_PROFILE_IDS = (
     "oamb-t8-workload-lme6-v1",
+    "oamb-t8-workload-lme60-v1",
     "oamb-t8-workload-mab5-v1",
     "oamb-t8-workload-lme30-v1",
     "oamb-t8-workload-mab65-v1",
@@ -67,6 +68,11 @@ EXPECTED_RULE_IDS_BY_PROFILE = {
         *LME_COMMON_RULE_IDS,
         "workload.lme6.selector-membership.v1",
         "workload.lme6.denominator.v1",
+    ),
+    "oamb-t8-workload-lme60-v1": (
+        *LME_COMMON_RULE_IDS,
+        "workload.lme60.selector-membership.v1",
+        "workload.lme60.denominator.v1",
     ),
     "oamb-t8-workload-mab5-v1": (
         *MAB_COMMON_RULE_IDS,

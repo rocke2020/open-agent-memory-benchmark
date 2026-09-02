@@ -28,17 +28,20 @@ PROFILE_FILES = {
         "hindsight-health.json",
         "hindsight-version.json",
         "hindsight-model-config.json",
+        "hindsight-retry-config.json",
     ),
     "mem0-rest-v1": (
         "mem0-openapi.json",
         "mem0-empty-projection.json",
         "mem0-config-redacted.json",
+        "mem0-retry-config.json",
     ),
     "openviking-rest-v1": (
         "openviking-health.json",
         "openviking-auth-identity.json",
         "openviking-storage.json",
         "openviking-model-config.json",
+        "openviking-retry-config.json",
     ),
 }
 
@@ -73,6 +76,12 @@ def _proof_bytes(filename: str) -> bytes:
             "model": "deepseek-v4-flash",
             "reasoning_effort": "low",
         },
+        "hindsight-retry-config.json": {
+            "llm_max_retries": 0,
+            "openai_sdk_max_retries": 0,
+            "retain_llm_max_retries": 0,
+            "worker_max_retries": 0,
+        },
         "mem0-openapi.json": {
             "components": {"schemas": {"Login": {"properties": {"password": {"type": "string"}}}}},
             "paths": {"/memories": {}, "/search": {}},
@@ -95,6 +104,7 @@ def _proof_bytes(filename: str) -> bytes:
             },
             "version": "v1.1",
         },
+        "mem0-retry-config.json": {"openai_sdk_max_retries": 0},
         "openviking-health.json": {
             "auth_mode": "api_key",
             "healthy": True,
@@ -121,6 +131,12 @@ def _proof_bytes(filename: str) -> bytes:
             "model": "deepseek-v4-flash",
             "provider": "openai",
             "reasoning_effort": "low",
+        },
+        "openviking-retry-config.json": {
+            "embedding_max_retries": 0,
+            "memory_extraction_max_retries": 0,
+            "openai_sdk_max_retries": 0,
+            "vlm_max_retries": 0,
         },
     }
     return _canonical_bytes(documents.get(filename, {"filename": filename, "status": "ok"}))

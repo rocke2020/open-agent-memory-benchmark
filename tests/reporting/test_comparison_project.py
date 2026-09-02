@@ -29,6 +29,16 @@ CASE_COUNT = 6
 
 
 def _plan(tmp_path: Path) -> ResolvedPlan:
+    configuration = load_benchmark_configuration(Path("tests/fixtures/configs/t10-lme6.yml"))
+    dataset = replace(
+        configuration.dataset,
+        source_sha256=SHA_A,
+        case_manifest_hash=SHA_B,
+    )
+    return build_resolved_plan(replace(configuration, dataset=dataset))
+
+
+def _lme60_plan() -> ResolvedPlan:
     configuration = load_benchmark_configuration(Path("configs/benchmark.yml"))
     dataset = replace(
         configuration.dataset,
@@ -64,12 +74,20 @@ def _write_cell_root(
     include_accounting: bool = False,
     include_case_content: bool = False,
     indexing_usage_mode: str = "complete",
+    raw_question_ids: tuple[str, ...] | None = None,
 ) -> ValidationResult:
     cell = plan.cells[cell_index]
     run_id = f"run-{cell.cell_id}"
     started_at = datetime(2026, 8, 30, 0, 0, tzinfo=UTC) + timedelta(minutes=cell_index)
-    case_ids = tuple(f"{index:064x}" for index in range(1, CASE_COUNT + 1))
-    case_occurrence_ids = tuple(f"{index + 100 + cell_index * 10:064x}" for index in range(1, 7))
+    case_count = len(metric_numerators)
+    case_ids = tuple(f"{index:064x}" for index in range(1, case_count + 1))
+    case_occurrence_ids = tuple(
+        f"{index + 100 + cell_index * 10:064x}" for index in range(1, case_count + 1)
+    )
+    question_ids = raw_question_ids or tuple(
+        f"question-{index}" for index in range(1, case_count + 1)
+    )
+    assert len(question_ids) == case_count
     records: list[tuple[str, str, dict[str, object]]] = [
         (
             "run_spec",
@@ -120,7 +138,7 @@ def _write_cell_root(
                         "case_manifest_entry_id": case_id,
                         "question_bytes_sha256": f"{index + 200:064x}",
                         "answer_value_sha256": [f"{index + 300:064x}"],
-                        "raw_question_id": f"question-{index + 1}",
+                        "raw_question_id": question_ids[index],
                     }
                     for index, case_id in enumerate(case_ids)
                 ],
@@ -701,6 +719,27 @@ def _sources(tmp_path: Path, plan: ResolvedPlan) -> dict[str, ValidatedCellRoot]
             plan,
             cell_index=index,
             metric_numerators=numerators[index],
+        )
+        sources[cell.cell_id] = ValidatedCellRoot(root=root, validation_result=validation)
+    return sources
+
+
+def _lme60_sources(
+    tmp_path: Path,
+    plan: ResolvedPlan,
+    outcome_sets: tuple[tuple[int, ...], ...],
+) -> dict[str, ValidatedCellRoot]:
+    from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
+
+    sources: dict[str, ValidatedCellRoot] = {}
+    for index, (cell, outcomes) in enumerate(zip(plan.cells, outcome_sets, strict=True)):
+        root = tmp_path / "lme60-capsules" / cell.cell_id
+        validation = _write_cell_root(
+            root,
+            plan,
+            cell_index=index,
+            metric_numerators=outcomes,
+            raw_question_ids=LME60_EXPECTED_QUESTION_IDS,
         )
         sources[cell.cell_id] = ValidatedCellRoot(root=root, validation_result=validation)
     return sources
@@ -1705,6 +1744,362 @@ def test_accuracy_text_keeps_exact_denominator_and_human_percentage() -> None:
         )
         == "4/5 (80.0%); judged 5/6 cases"
     )
+
+
+@pytest.mark.parametrize(
+    ("numerator", "denominator", "lower", "upper"),
+    (
+        (0, 10, "0.000000", "0.277533"),
+        (10, 10, "0.722467", "1.000000"),
+        (30, 60, "0.377350", "0.622650"),
+    ),
+)
+def test_wilson_accuracy_uses_the_frozen_95_percent_interval(
+    numerator: int,
+    denominator: int,
+    lower: str,
+    upper: str,
+) -> None:
+    from oamb.reporting.comparison_project import _wilson_accuracy_document
+
+    assert _wilson_accuracy_document(numerator, denominator) == {
+        "numerator": numerator,
+        "denominator": denominator,
+        "wilson_95": {
+            "lower": lower,
+            "upper": upper,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("left_only", "right_only", "exact_numerator", "exact_denominator", "display"),
+    (
+        (0, 0, 1, 1, "1.000000"),
+        (6, 0, 1, 32, "0.031250"),
+        (4, 1, 3, 8, "0.375000"),
+        (1, 1, 1, 1, "1.000000"),
+    ),
+)
+def test_exact_mcnemar_preserves_the_reduced_fraction_and_half_up_display(
+    left_only: int,
+    right_only: int,
+    exact_numerator: int,
+    exact_denominator: int,
+    display: str,
+) -> None:
+    from oamb.reporting.comparison_project import _exact_mcnemar_document
+
+    assert _exact_mcnemar_document(left_only, right_only) == {
+        "numerator": exact_numerator,
+        "denominator": exact_denominator,
+        "display": display,
+    }
+
+
+def _lme60_results(outcomes: tuple[int, ...]) -> tuple[dict[str, object], ...]:
+    assert len(outcomes) == 60
+    return tuple(
+        {
+            "case_manifest_entry_id": f"{index:064x}",
+            "state": "completed",
+            "evaluation_disposition": "judged",
+            "metric_id": "longmemeval-judge",
+            "metric_numerator": outcome,
+            "metric_denominator": 1,
+        }
+        for index, outcome in enumerate(outcomes, start=1)
+    )
+
+
+def _lme60_cell_document(
+    plan: ResolvedPlan,
+    cell_index: int,
+    outcomes: tuple[int, ...],
+) -> dict[str, object]:
+    cell = plan.cells[cell_index]
+    return {
+        "cell_id": cell.cell_id,
+        "provider_id": cell.provider_id,
+        "case_count": 60,
+        "metric_id": "longmemeval-judge",
+        "completed_case_count": 60,
+        "judged_case_count": 60,
+        "judged_numerator": sum(outcomes),
+        "judged_denominator": 60,
+        "results": _lme60_results(outcomes),
+    }
+
+
+def test_lme60_accuracy_reports_all_60_and_six_frozen_question_types() -> None:
+    from oamb.reporting.comparison_project import _accuracy_document
+    from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS, QUESTION_TYPES
+
+    plan = _lme60_plan()
+    outcomes = (
+        (0,) * 10 + (1,) * 10 + (0, 1) * 5 + (1, 0) * 5 + (1,) * 6 + (0,) * 4 + (0,) * 6 + (1,) * 4
+    )
+    manifest_cases = [
+        {
+            "case_manifest_entry_id": f"{index:064x}",
+            "raw_question_id": question_id,
+        }
+        for index, question_id in enumerate(LME60_EXPECTED_QUESTION_IDS, start=1)
+    ]
+    snapshot = SimpleNamespace(
+        cases=tuple(reversed(_lme60_results(outcomes))),
+        case_manifest={"cases": manifest_cases},
+    )
+
+    accuracy = _accuracy_document(plan, cast(Any, snapshot))
+    by_question_type = cast(tuple[dict[str, object], ...], accuracy["by_question_type"])
+
+    assert accuracy["all_60"] == {
+        "numerator": 30,
+        "denominator": 60,
+        "wilson_95": {"lower": "0.377350", "upper": "0.622650"},
+    }
+    assert tuple(item["question_type"] for item in by_question_type) == QUESTION_TYPES
+    assert [
+        (item["numerator"], item["denominator"], item["wilson_95"]) for item in by_question_type
+    ] == [
+        (0, 10, {"lower": "0.000000", "upper": "0.277533"}),
+        (10, 10, {"lower": "0.722467", "upper": "1.000000"}),
+        (5, 10, {"lower": "0.236593", "upper": "0.763407"}),
+        (5, 10, {"lower": "0.236593", "upper": "0.763407"}),
+        (6, 10, {"lower": "0.312674", "upper": "0.831820"}),
+        (4, 10, {"lower": "0.168180", "upper": "0.687326"}),
+    ]
+
+
+def test_pairwise_lme60_uses_matched_cases_when_completion_order_reverses() -> None:
+    from oamb.reporting.comparison_project import _pair_document
+
+    plan = _lme60_plan()
+    left = _lme60_cell_document(plan, 0, (1,) * 36 + (0,) * 24)
+    right = _lme60_cell_document(plan, 1, (1,) * 30 + (0,) * 30)
+    right["results"] = tuple(reversed(cast(tuple[dict[str, object], ...], right["results"])))
+
+    comparison = _pair_document(plan, cast(Any, left), cast(Any, right))
+
+    assert comparison["paired_accuracy"] == {
+        "left_correct_right_wrong": 6,
+        "left_wrong_right_correct": 0,
+        "exact_mcnemar_two_sided": {
+            "numerator": 1,
+            "denominator": 32,
+            "display": "0.031250",
+        },
+    }
+    assert comparison["accuracy_decision"] == {
+        "status": "observed_accuracy_leader",
+        "leader_cell_id": plan.cells[0].cell_id,
+        "leader_provider_id": plan.cells[0].provider_id,
+        "minimum_accuracy_delta": "0.05",
+        "maximum_exact_mcnemar_p_value": "0.05",
+        "failed_predicates": (),
+    }
+
+
+@pytest.mark.parametrize(
+    ("left_correct", "right_correct", "mutate", "missing_field", "failed_predicate"),
+    (
+        (36, 30, "incomplete", None, "complete_equal_coverage"),
+        (32, 30, None, None, "minimum_accuracy_delta"),
+        (33, 30, None, None, "maximum_exact_mcnemar_p_value"),
+        (36, 30, None, "minimum_accuracy_delta", "decision_policy_complete"),
+        (36, 30, None, "maximum_exact_mcnemar_p_value", "decision_policy_complete"),
+    ),
+)
+def test_lme60_accuracy_leader_fails_closed_for_each_required_predicate(
+    left_correct: int,
+    right_correct: int,
+    mutate: str | None,
+    missing_field: str | None,
+    failed_predicate: str,
+) -> None:
+    from oamb.reporting.comparison_project import _pair_document
+
+    plan = _lme60_plan()
+    if missing_field == "minimum_accuracy_delta":
+        plan = replace(
+            plan,
+            decision=cast(Any, SimpleNamespace(maximum_exact_mcnemar_p_value="0.05")),
+        )
+    elif missing_field == "maximum_exact_mcnemar_p_value":
+        plan = replace(
+            plan,
+            decision=cast(Any, SimpleNamespace(minimum_accuracy_delta="0.05")),
+        )
+    left = _lme60_cell_document(plan, 0, (1,) * left_correct + (0,) * (60 - left_correct))
+    right = _lme60_cell_document(plan, 1, (1,) * right_correct + (0,) * (60 - right_correct))
+    if mutate == "incomplete":
+        results = list(cast(tuple[dict[str, object], ...], left["results"]))
+        results[-1] = {**results[-1], "state": "failed", "evaluation_disposition": "unjudged"}
+        left["results"] = tuple(results)
+        left["completed_case_count"] = 59
+        left["judged_case_count"] = 59
+        left["judged_denominator"] = 59
+
+    comparison = _pair_document(plan, cast(Any, left), cast(Any, right))
+
+    assert comparison["accuracy_decision"]["status"] == "no_clear_accuracy_leader"
+    assert failed_predicate in comparison["accuracy_decision"]["failed_predicates"]
+
+
+def test_report_names_one_accuracy_leader_only_after_it_clears_every_provider_pair() -> None:
+    from itertools import combinations
+
+    from oamb.reporting.comparison_project import _pair_document, _report_accuracy_decision
+
+    plan = _lme60_plan()
+    cells = (
+        _lme60_cell_document(plan, 0, (1,) * 36 + (0,) * 24),
+        _lme60_cell_document(plan, 1, (1,) * 30 + (0,) * 30),
+        _lme60_cell_document(plan, 2, (1,) * 24 + (0,) * 36),
+    )
+    comparisons = tuple(
+        _pair_document(plan, cast(Any, left), cast(Any, right))
+        for left, right in combinations(cells, 2)
+    )
+
+    assert _report_accuracy_decision(plan, cast(Any, cells), comparisons) == {
+        "status": "observed_accuracy_leader",
+        "leader_cell_id": plan.cells[0].cell_id,
+        "leader_provider_id": plan.cells[0].provider_id,
+        "minimum_accuracy_delta": "0.05",
+        "maximum_exact_mcnemar_p_value": "0.05",
+        "failed_predicates": (),
+    }
+
+    blocked_cells = (
+        cells[0],
+        _lme60_cell_document(plan, 1, (1,) * 33 + (0,) * 27),
+        cells[2],
+    )
+    blocked_pairs = tuple(
+        _pair_document(plan, cast(Any, left), cast(Any, right))
+        for left, right in combinations(blocked_cells, 2)
+    )
+    assert _report_accuracy_decision(plan, cast(Any, blocked_cells), blocked_pairs)["status"] == (
+        "no_clear_accuracy_leader"
+    )
+
+
+def test_lme60_project_exports_accuracy_evidence_and_renders_the_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _lme60_plan()
+    outcome_sets = (
+        (1,) * 36 + (0,) * 24,
+        (1,) * 30 + (0,) * 30,
+        (1,) * 24 + (0,) * 36,
+    )
+    sources = _lme60_sources(tmp_path, plan, outcome_sets)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / "lme60-report",
+    )
+    export = json.loads(built.export_path.read_bytes())
+    rendered = built.html_path.read_text(encoding="utf-8")
+
+    assert export["cells"][0]["accuracy"]["all_60"]["wilson_95"] == {
+        "lower": "0.473661",
+        "upper": "0.714305",
+    }
+    assert len(export["cells"][0]["accuracy"]["by_question_type"]) == 6
+    assert export["comparisons"][0]["paired_accuracy"]["exact_mcnemar_two_sided"] == {
+        "numerator": 1,
+        "denominator": 32,
+        "display": "0.031250",
+    }
+    assert export["accuracy_decision"]["status"] == "observed_accuracy_leader"
+    assert export["accuracy_decision"]["leader_provider_id"] == plan.cells[0].provider_id
+    assert "95% Wilson" in rendered
+    assert "Exact McNemar p" in rendered
+    assert "Observed accuracy leader" in rendered
+    assert "Accuracy by question type" in rendered
+
+
+@pytest.mark.parametrize("mutation", ("wilson", "mcnemar", "leader"))
+def test_lme60_export_validation_rejects_derived_accuracy_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _lme60_plan()
+    outcome_sets = (
+        (1,) * 36 + (0,) * 24,
+        (1,) * 30 + (0,) * 30,
+        (1,) * 24 + (0,) * 36,
+    )
+    sources = _lme60_sources(tmp_path, plan, outcome_sets)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / "valid-lme60-report",
+    )
+    mutated = json.loads(built.export_path.read_bytes())
+    if mutation == "wilson":
+        mutated["cells"][0]["accuracy"]["all_60"]["wilson_95"]["lower"] = "0.000000"
+    elif mutation == "mcnemar":
+        mutated["comparisons"][0]["paired_accuracy"]["exact_mcnemar_two_sided"]["numerator"] = 2
+    else:
+        mutated["accuracy_decision"]["leader_provider_id"] = plan.cells[1].provider_id
+
+    with pytest.raises(comparison_project.ComparisonProjectError, match="accuracy evidence"):
+        comparison_project._validate_accuracy_export(mutated)
+
+
+def test_lme6_report_remains_descriptive_without_an_accuracy_leader_policy() -> None:
+    from oamb.reporting.comparison_project import _pair_document
+
+    plan = _plan(Path("."))
+    left = {
+        **_lme60_cell_document(_lme60_plan(), 0, (1,) * 36 + (0,) * 24),
+        "cell_id": plan.cells[0].cell_id,
+        "provider_id": plan.cells[0].provider_id,
+        "case_count": 6,
+        "completed_case_count": 6,
+        "judged_case_count": 6,
+        "judged_numerator": 4,
+        "judged_denominator": 6,
+        "results": _lme60_results((1, 1, 1, 1, 0, 0) + (0,) * 54)[:6],
+    }
+    right = {
+        **left,
+        "cell_id": plan.cells[1].cell_id,
+        "provider_id": plan.cells[1].provider_id,
+        "judged_numerator": 3,
+        "results": _lme60_results((1, 1, 1, 0, 0, 0) + (0,) * 54)[:6],
+    }
+
+    comparison = _pair_document(plan, cast(Any, left), cast(Any, right))
+
+    assert comparison["paired_accuracy"]["left_correct_right_wrong"] == 1
+    assert comparison["accuracy_decision"]["status"] == "no_clear_accuracy_leader"
+    assert comparison["accuracy_decision"]["failed_predicates"] == ("decision_policy_complete",)
 
 
 def test_provider_headline_exposes_partial_context_and_latency_coverage() -> None:

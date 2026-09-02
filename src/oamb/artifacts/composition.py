@@ -10,6 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from oamb.artifacts.atomic import atomic_write_bytes, read_regular_file, sha256_file
+from oamb.artifacts.lme60_gate import has_bounded_provider_profile_evidence
 from oamb.artifacts.store import ArtifactStore
 from oamb.artifacts.validation.native import validate_partition_capsule
 from oamb.contracts.evidence import (
@@ -47,6 +48,7 @@ from oamb.contracts.states import (
     RunState,
     ValidationDisposition,
 )
+from oamb.workloads.longmemeval import LME60_WORKLOAD_ID
 
 COMPOSITION_VALIDATION_PROFILE_ID = "oamb-capsule-composition-v1"
 
@@ -317,6 +319,7 @@ def _load_part(root: Path) -> _PartSnapshot:
 
 
 def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecord:
+    require_complete_lme60_bounded_profile(parts)
     first = parts[0]
     compatibility = _require_compatible_parts(parts)
     part_bindings = tuple(
@@ -352,6 +355,23 @@ def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecor
     return CapsuleCompositionRecord.model_validate(
         {"composition_id": capsule_composition_id(fields), **fields}
     )
+
+
+def require_complete_lme60_bounded_profile(parts: tuple[object, ...]) -> None:
+    """Reject a complete LME-60 composition whose parts predate bounded proof."""
+
+    if not parts:
+        raise CapsuleCompositionError("missing composition parts")
+    first_manifest = getattr(parts[0], "case_manifest", None)
+    if getattr(first_manifest, "workload_id", None) != LME60_WORKLOAD_ID:
+        return
+    if any(
+        not has_bounded_provider_profile_evidence(getattr(part, "preflight", None))
+        for part in parts
+    ):
+        raise CapsuleCompositionError(
+            "complete LME-60 composition requires bounded provider profile evidence"
+        )
 
 
 def _require_compatible_parts(
@@ -638,4 +658,5 @@ __all__ = [
     "compose_capsules",
     "inspect_embedded_composition",
     "load_composition_record",
+    "require_complete_lme60_bounded_profile",
 ]

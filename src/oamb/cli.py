@@ -66,6 +66,29 @@ def doctor_command(
     typer.echo(f"comparison: {plan.comparison_id}")
     typer.echo(f"cells: {len(plan.cells)}")
     typer.echo(f"retrieval generation: {plan.retrieval.generation}")
+    typer.echo(
+        "evaluation controls: "
+        f"retries={plan.execution.max_retries_per_operation}; "
+        f"operation timeout={plan.execution.operation_timeout_seconds}s"
+    )
+    typer.echo(
+        "per-cell authorization: "
+        f"{plan.execution.per_cell_max_operation_attempt_count} calls; "
+        f"{plan.execution.per_cell_max_owner_authorization_count} owner allocations"
+    )
+    typer.echo(
+        "three-cell authorization: "
+        f"{plan.execution.comparison_max_operation_attempt_count} calls; "
+        f"{plan.execution.comparison_max_owner_authorization_count} owner allocations"
+    )
+    if plan.decision is None:
+        typer.echo("decision: descriptive only")
+    else:
+        typer.echo(
+            "decision: accuracy delta >= "
+            f"{plan.decision.minimum_accuracy_delta} and exact McNemar p <= "
+            f"{plan.decision.maximum_exact_mcnemar_p_value}"
+        )
     for role in plan.model_roles:
         rank = (
             "not applicable"
@@ -163,6 +186,13 @@ def run_command(
         Path | None,
         typer.Option("--output-root", help="Create-only live capsule parent."),
     ] = None,
+    result_map: Annotated[
+        Path | None,
+        typer.Option(
+            "--result-map",
+            help="Create-only JSON map from completed cell IDs to capsule roots.",
+        ),
+    ] = None,
     cell: Annotated[
         list[str] | None,
         typer.Option("--cell", help="Ordered frozen cell ID; repeat to select multiple."),
@@ -170,6 +200,27 @@ def run_command(
     case: Annotated[
         list[str] | None,
         typer.Option("--case", help="Ordered case ID; repeat to select whole case-plan groups."),
+    ] = None,
+    question: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--question",
+            help="Frozen public question ID; repeat in manifest order.",
+        ),
+    ] = None,
+    bounded_capsule: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--bounded-capsule",
+            help="CELL_ID=validated one-question capsule; repeat for all cells.",
+        ),
+    ] = None,
+    bounded_validation: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--bounded-validation",
+            help="CELL_ID=fresh validation JSON for --bounded-capsule.",
+        ),
     ] = None,
     run_label: Annotated[
         str | None,
@@ -210,8 +261,11 @@ def run_command(
 
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
-        if case or recover_from:
-            raise typer.BadParameter("--case and --recover-from require a live resolved plan")
+        if case or question or bounded_capsule or bounded_validation or recover_from or result_map:
+            raise typer.BadParameter(
+                "partition, bounded-proof, recovery, and result-map options require a live "
+                "resolved plan"
+            )
         _run_fake_resolved_plan(resolved_plan, scenario=scenario)
         return
 
@@ -224,15 +278,20 @@ def run_command(
     from .contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
     from .live import (
         LiveCellExecutionError,
+        LiveCellOutcome,
         LiveConfigurationError,
+        build_bounded_profile_evidence,
         build_live_cell,
         build_live_continuation_cell,
         execute_live_cells,
         live_composition_target,
         load_live_environment,
         load_live_provider_evidence,
+        resolve_live_question_case_ids,
         select_live_cells,
+        validate_live_readiness_receipt,
     )
+    from .workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
 
     if output_root is None:
         raise typer.BadParameter("live run requires --output-root")
@@ -242,15 +301,31 @@ def run_command(
         raise typer.BadParameter("--continue-from and --run-label are mutually exclusive")
     if continue_from is not None and case:
         raise typer.BadParameter("--continue-from and --case are mutually exclusive")
+    if continue_from is not None and question:
+        raise typer.BadParameter("--continue-from and --question are mutually exclusive")
     if recover_from and continue_from is not None:
         raise typer.BadParameter("--recover-from and --continue-from are mutually exclusive")
     if recover_from and case:
         raise typer.BadParameter("--recover-from and --case are mutually exclusive")
+    if recover_from and question:
+        raise typer.BadParameter("--recover-from and --question are mutually exclusive")
+    if result_map is not None and (result_map.exists() or result_map.is_symlink()):
+        raise typer.BadParameter("result map already exists")
     try:
         plan = load_resolved_plan_for_run(resolved_plan)
         selected_cells = select_live_cells(plan, tuple(cell or ()))
-        if case and len(selected_cells) != 1:
-            raise LiveConfigurationError("case partition requires exactly one selected cell")
+        if case and question:
+            raise LiveConfigurationError("--case and --question are mutually exclusive")
+        selected_case_ids = tuple(case or ())
+        if question:
+            dataset_path = Path(plan.dataset.path)
+            if not dataset_path.is_absolute():
+                dataset_path = Path.cwd() / dataset_path
+            selected_case_ids = resolve_live_question_case_ids(
+                plan,
+                dataset_path,
+                tuple(question),
+            )
         recovery_case_ids: tuple[str, ...] = ()
         recovery = None
         if recover_from:
@@ -263,7 +338,7 @@ def run_command(
                     resolved_plan_hash=plan.resolved_plan_hash,
                     cell_spec_hash=recovery_cell.cell_spec_hash,
                     target_case_manifest_hash=recovery_cell.case_manifest_hash,
-                    budget_policy_hash=recovery_cell.limits_hash,
+                    budget_policy_hash=recovery_cell.authorization_hash,
                     retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
                 ),
             )
@@ -272,17 +347,78 @@ def run_command(
                     "recovery parts already contain every target whole group; compose them"
                 )
             recovery_case_ids = recovery.remaining_case_manifest_entry_ids
+        lme60_requires_bounded_proof = False
+        full_lme60 = False
+        if plan.dataset.selection == "lme60":
+            target_case_count = len(LME60_EXPECTED_QUESTION_IDS)
+            effective_case_count = (
+                target_case_count
+                if continue_from is not None or recover_from or not selected_case_ids
+                else len(selected_case_ids)
+            )
+            bounded_producer = bool(
+                continue_from is None
+                and not recover_from
+                and effective_case_count == 1
+                and len(selected_cells) == 1
+            )
+            lme60_requires_bounded_proof = not bounded_producer
+            full_lme60 = bool(
+                continue_from is None
+                and not recover_from
+                and effective_case_count == target_case_count
+            )
+            if lme60_requires_bounded_proof and (not bounded_capsule or not bounded_validation):
+                if not selected_case_ids and continue_from is None and not recover_from:
+                    raise LiveConfigurationError(
+                        "full LME-60 requires three bounded capsules and validations"
+                    )
+                raise LiveConfigurationError(
+                    "LME-60 multi-case or recovery run requires bounded proofs"
+                )
+            if bounded_producer and (bounded_capsule or bounded_validation):
+                raise LiveConfigurationError(
+                    "one-case LME-60 proof producers cannot consume bounded proofs"
+                )
+            if full_lme60 and selected_cells != plan.cells:
+                raise LiveConfigurationError("full LME-60 requires all three frozen cells")
+        elif bounded_capsule or bounded_validation:
+            raise LiveConfigurationError("bounded proof options apply only to LME-60")
+        if (case or question) and not full_lme60 and len(selected_cells) != 1:
+            raise LiveConfigurationError(
+                "case or question partition requires exactly one selected cell"
+            )
         environment = load_live_environment(
             provider_env_path=provider_env,
             model_env_path=model_env,
             provider_runtime_directory=provider_runtime,
             base_environment=os.environ,
         )
+        if plan.dataset.selection == "lme60":
+            validate_live_readiness_receipt(
+                plan=plan,
+                provider_runtime_directory=provider_runtime,
+                environment=environment,
+            )
         provider_project, evidence_by_provider = load_live_provider_evidence(
             plan=plan,
             provider_runtime_directory=provider_runtime,
             environment=environment,
         )
+        if lme60_requires_bounded_proof:
+            dataset_path = Path(plan.dataset.path)
+            if not dataset_path.is_absolute():
+                dataset_path = Path.cwd() / dataset_path
+            bounded_question, evidence_by_provider = build_bounded_profile_evidence(
+                plan=plan,
+                dataset_path=dataset_path,
+                provider_runtime_directory=provider_runtime,
+                capsule_roots=_named_paths(bounded_capsule or [], label="bounded capsule"),
+                validation_paths=_named_paths(bounded_validation or [], label="bounded validation"),
+                service_evidence_by_provider=evidence_by_provider,
+                environment=environment,
+            )
+            typer.echo(f"bounded provider proof: {bounded_question}")
         code_revision = _live_source_revision()
         observed_at = datetime.now(UTC)
         built_cells = []
@@ -317,7 +453,7 @@ def run_command(
                         run_label=run_label,
                         observed_at=observed_at,
                         code_revision=code_revision,
-                        requested_case_manifest_entry_ids=(recovery_case_ids or tuple(case or ())),
+                        requested_case_manifest_entry_ids=(recovery_case_ids or selected_case_ids),
                     )
                 )
         if recover_from:
@@ -337,14 +473,100 @@ def run_command(
                 "recovery remaining groups: " + ",".join(recovery.remaining_ingestion_plan_ids)
             )
             typer.echo("recovery source manifests: " + ",".join(recovery.source_manifest_sha256s))
-        for completed in execute_live_cells(tuple(built_cells)):
-            typer.echo(f"cell {completed.cell_id}: {completed.capsule_root}")
+
+        def emit_outcomes(
+            outcomes: tuple[LiveCellOutcome, ...],
+            *,
+            error: bool,
+        ) -> None:
+            for outcome in outcomes:
+                root = (
+                    ""
+                    if outcome.capsule_root is None
+                    else f" capsule_root={outcome.capsule_root.resolve()}"
+                )
+                detail = "" if outcome.detail is None else f" detail={outcome.detail}"
+                typer.echo(
+                    f"cell outcome: {outcome.cell_id} status={outcome.status}{root}{detail}",
+                    err=error,
+                )
+
+        def publish_result_map(
+            outcomes: tuple[LiveCellOutcome, ...],
+            *,
+            failed: bool,
+        ) -> None:
+            if result_map is None:
+                return
+            result_document = {
+                "schema_name": "live_run_result_map",
+                "schema_version": 1,
+                "resolved_plan_hash": plan.resolved_plan_hash,
+                "status": "failed" if failed else "completed",
+                "capsule_roots": {
+                    outcome.cell_id: str(outcome.capsule_root.resolve())
+                    for outcome in outcomes
+                    if outcome.status == "completed" and outcome.capsule_root is not None
+                },
+                "cells": [
+                    {
+                        "cell_id": outcome.cell_id,
+                        "status": outcome.status,
+                        "capsule_root": (
+                            None
+                            if outcome.capsule_root is None
+                            else str(outcome.capsule_root.resolve())
+                        ),
+                        "detail": outcome.detail,
+                    }
+                    for outcome in outcomes
+                ],
+            }
+            atomic_write_bytes(
+                result_map,
+                canonical_json_bytes(result_document),
+                trusted_root=result_map.parent,
+            )
+            typer.echo(f"result map: {result_map}")
+
+        try:
+            completed_cells = execute_live_cells(tuple(built_cells))
+        except LiveCellExecutionError as execution_error:
+            outcomes = execution_error.outcomes
+            if not outcomes:
+                outcomes = tuple(
+                    LiveCellOutcome(
+                        cell.cell.cell_id,
+                        "failed",
+                        cell.capsule_root if cell.capsule_root.exists() else None,
+                        str(execution_error),
+                    )
+                    for cell in built_cells
+                )
+            emit_outcomes(outcomes, error=True)
+            try:
+                publish_result_map(outcomes, failed=True)
+            except Exception as publication_error:
+                raise LiveCellExecutionError(
+                    f"{execution_error}; result map publication failed with "
+                    f"{type(publication_error).__name__}: {publication_error}",
+                    outcomes=outcomes,
+                    errors=(*execution_error.errors, publication_error),
+                ) from execution_error
+            raise
+        outcomes = tuple(
+            LiveCellOutcome(completed.cell_id, "completed", completed.capsule_root, None)
+            for completed in completed_cells
+        )
+        emit_outcomes(outcomes, error=False)
+        publish_result_map(outcomes, failed=False)
     except (
         KeyError,
         LiveCellExecutionError,
         LiveConfigurationError,
         ResolvedPlanError,
         CapsuleCompositionError,
+        OSError,
         ValueError,
     ) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -494,7 +716,7 @@ def capsule_compose(
                 resolved_plan_hash=resolved.resolved_plan_hash,
                 cell_spec_hash=selected.cell_spec_hash,
                 target_case_manifest_hash=selected.case_manifest_hash,
-                budget_policy_hash=selected.limits_hash,
+                budget_policy_hash=selected.authorization_hash,
                 retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
             ),
         )

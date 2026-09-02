@@ -57,6 +57,13 @@ T8_WORKLOAD_RULE_INVENTORIES: dict[str, tuple[tuple[str, int], ...]] = {
         ("workload.lme6.selector-membership.v1", 1),
         ("workload.lme6.denominator.v1", 1),
     ),
+    "lme60-balanced-v1": (
+        ("workload.lme.source-manifest.v1", 1),
+        ("workload.lme.prompt-answer-parser.v1", 1),
+        ("workload.lme.judge-metric.v1", 1),
+        ("workload.lme60.selector-membership.v1", 1),
+        ("workload.lme60.denominator.v1", 1),
+    ),
     "mab5-live-smoke-v1": (
         ("workload.mab.source-manifest.v1", 1),
         ("workload.mab.prompt-answer-parser.v1", 1),
@@ -262,6 +269,12 @@ def t8_profile_catalog() -> dict[str, ClosedProfileDefinition]:
             stage=ValidationStage.EVIDENCE,
             rule_inventory=T8_WORKLOAD_RULE_INVENTORIES["lme6-live-smoke-v1"],
             applicability=("component=workload", "workload=lme6-live-smoke-v1"),
+        ),
+        _closed_profile(
+            profile_id="oamb-t8-workload-lme60-v1",
+            stage=ValidationStage.EVIDENCE,
+            rule_inventory=T8_WORKLOAD_RULE_INVENTORIES["lme60-balanced-v1"],
+            applicability=("component=workload", "workload=lme60-balanced-v1"),
         ),
         _closed_profile(
             profile_id="oamb-t8-workload-mab5-v1",

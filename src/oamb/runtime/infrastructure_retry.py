@@ -16,7 +16,7 @@ _Result = TypeVar("_Result")
 
 
 class InfrastructureRetryExhausted(RuntimeError):
-    """A safe rejection could not be retried within the frozen global policy."""
+    """A safe rejection could not be retried within its operation limit."""
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class InfrastructureBackoffCancelled(asyncio.CancelledError):
 
 
 class InfrastructureRetryController:
-    """One run-scoped atomic owner for the total infrastructure retry budget."""
+    """One logical operation's independent infrastructure retry counter."""
 
     def __init__(self, *, maximum_total_retries: int) -> None:
         if maximum_total_retries < 0:
@@ -59,6 +59,14 @@ class InfrastructureRetryController:
         return self._consumed
 
 
+def _backoff_seconds(retry_ordinal: int) -> int:
+    seed_index = retry_ordinal - 1
+    if seed_index < len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS):
+        return INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[seed_index]
+    additional_doublings = seed_index - len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS) + 1
+    return INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[-1] << additional_doublings
+
+
 async def execute_with_infrastructure_retry(
     call: Callable[[int], Awaitable[_Result]],
     *,
@@ -77,17 +85,13 @@ async def execute_with_infrastructure_retry(
             return await call(call_ordinal)
         except ModelSupplierRateLimitRejection as rejection:
             backoff: int | None = None
-            reason = "retry policy exhausted"
-            if call_ordinal <= len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS):
-                units = 1 + rejection.classification.internal_retry_count
-                if await controller.reserve(units):
-                    backoff = INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[call_ordinal - 1]
-                else:
-                    reason = "global retry budget exhausted"
+            units = 1 + rejection.classification.internal_retry_count
+            if await controller.reserve(units):
+                backoff = _backoff_seconds(call_ordinal)
             await persist_rejection(rejection, call_ordinal, backoff)
             if backoff is None:
                 raise InfrastructureRetryExhausted(
-                    reason,
+                    "operation retry limit exhausted",
                     last_rejection=rejection,
                 ) from rejection
             try:

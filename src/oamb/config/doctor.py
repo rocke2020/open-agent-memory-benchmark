@@ -11,22 +11,32 @@ from typing import cast
 
 from oamb.artifacts.atomic import read_regular_file
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from oamb.workloads.longmemeval import (
+    LME6_EXPECTED_QUESTION_IDS,
+    LME6_EXPECTED_SESSION_COUNT,
+    LME60_EXPECTED_QUESTION_IDS,
+    LME60_EXPECTED_SESSION_COUNT,
+)
+from oamb.workloads.metrics import (
+    LME_ANSWER_MAX_OUTPUT_TOKENS,
+    LME_JUDGE_MAX_OUTPUT_TOKENS,
+)
 
 from .benchmark import (
     DEEPSEEK_THINKING_EFFORT_SCALE,
     MODEL_EXECUTION_OWNER_BY_ROLE,
     MODEL_ROLE_IDS,
-    T10_CELL_IDS,
     T10_RETRIEVAL_BINDING_IDS,
     BenchmarkConfiguration,
     CellConfiguration,
-    ExecutionLimits,
+    DecisionConfiguration,
+    EvaluationControls,
     GenerativeThinkingEffort,
     ModelRoleConfiguration,
     ModelRoleId,
     RetrievalBindingConfiguration,
-    RunLimits,
     ThinkingEffort,
+    expected_cell_ids_for_selection,
 )
 
 _SCHEMA_NAME = "resolved_plan"
@@ -35,8 +45,8 @@ _PLAN_HASH_DOMAIN = "oamb-resolved-plan-initial-v1"
 _MODEL_BINDING_HASH_DOMAIN = "oamb-model-execution-binding-initial-v1"
 _RETRIEVAL_BINDING_HASH_DOMAIN = "oamb-retrieval-binding-initial-v1"
 _CELL_SPEC_HASH_DOMAIN = "oamb-cell-spec-initial-v1"
-_LIMITS_HASH_DOMAIN = "oamb-run-limits-initial-v1"
-_EXECUTION_HASH_DOMAIN = "oamb-execution-limits-initial-v1"
+_EXECUTION_HASH_DOMAIN = "oamb-resolved-execution-initial-v1"
+_AUTHORIZATION_HASH_DOMAIN = "oamb-operation-authorization-initial-v1"
 
 _ROOT_KEYS = frozenset(
     {
@@ -47,8 +57,8 @@ _ROOT_KEYS = frozenset(
         "dataset",
         "model_roles",
         "retrieval",
-        "limits",
         "execution",
+        "decision",
         "cells",
     }
 )
@@ -79,12 +89,12 @@ _MODEL_ROLE_KEYS = frozenset(
         "proof_kind",
         "proof_reference",
         "usage_coverage",
-        "max_input_tokens",
-        "max_output_tokens",
+        "maximum_output_tokens_per_call",
         "temperature",
         "top_p",
     }
 )
+_DECISION_KEYS = frozenset({"minimum_accuracy_delta", "maximum_exact_mcnemar_p_value"})
 _RETRIEVAL_KEYS = frozenset({"generation", "bindings"})
 _RETRIEVAL_BINDING_KEYS = frozenset(
     {
@@ -99,25 +109,20 @@ _RETRIEVAL_BINDING_KEYS = frozenset(
         "proof_kind",
     }
 )
-_LIMIT_KEYS = (
-    "max_attempts_per_case",
-    "max_budgeted_attempts",
-    "memory_operation_timeout_seconds",
-    "model_call_timeout_seconds",
-    "total_wall_time_seconds",
-    "max_input_tokens",
-    "max_output_tokens",
-    "max_recall_context_tokens_per_case",
-    "max_storage_bytes",
-    "max_peak_memory_bytes",
-    "max_cost",
-    "currency",
-)
 _EXECUTION_KEYS = (
+    "max_retries_per_operation",
+    "operation_timeout_seconds",
     "max_parallel_datasets",
     "max_parallel_providers_per_dataset",
     "max_parallel_history_ingestions_per_provider",
     "max_parallel_questions_per_provider",
+    "per_cell_base_operation_count",
+    "per_cell_retry_eligible_operation_count",
+    "per_cell_max_operation_attempt_count",
+    "per_cell_base_owner_authorization_count",
+    "per_cell_max_owner_authorization_count",
+    "comparison_max_operation_attempt_count",
+    "comparison_max_owner_authorization_count",
 )
 _CELL_KEYS = frozenset(
     {
@@ -141,7 +146,7 @@ _CELL_KEYS = frozenset(
         "model_role_binding_hashes",
         "retrieval_binding_id",
         "retrieval_binding_hash",
-        "limits_hash",
+        "authorization_hash",
         "execution_hash",
     }
 )
@@ -179,8 +184,7 @@ class ModelExecutionBinding:
     proof_kind: str
     proof_reference: str
     usage_coverage: str
-    max_input_tokens: int
-    max_output_tokens: int
+    maximum_output_tokens_per_call: int | None
     temperature: str
     top_p: str
 
@@ -214,6 +218,31 @@ class ResolvedRetrieval:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedExecution:
+    max_retries_per_operation: int
+    operation_timeout_seconds: int
+    max_parallel_datasets: int
+    max_parallel_providers_per_dataset: int
+    max_parallel_history_ingestions_per_provider: int
+    max_parallel_questions_per_provider: int
+    per_cell_base_operation_count: int
+    per_cell_retry_eligible_operation_count: int
+    per_cell_max_operation_attempt_count: int
+    per_cell_base_owner_authorization_count: int
+    per_cell_max_owner_authorization_count: int
+    comparison_max_operation_attempt_count: int
+    comparison_max_owner_authorization_count: int
+
+    def as_tuple(self) -> tuple[int, int, int, int]:
+        return (
+            self.max_parallel_datasets,
+            self.max_parallel_providers_per_dataset,
+            self.max_parallel_history_ingestions_per_provider,
+            self.max_parallel_questions_per_provider,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CellSpec:
     cell_spec_hash: str
     ordinal_1_indexed: int
@@ -235,7 +264,7 @@ class CellSpec:
     model_role_binding_hashes: tuple[tuple[ModelRoleId, str], ...]
     retrieval_binding_id: str
     retrieval_binding_hash: str
-    limits_hash: str
+    authorization_hash: str
     execution_hash: str
 
 
@@ -248,8 +277,8 @@ class ResolvedPlan:
     dataset: ResolvedDataset
     model_roles: tuple[ModelExecutionBinding, ...]
     retrieval: ResolvedRetrieval
-    limits: RunLimits
-    execution: ExecutionLimits
+    execution: ResolvedExecution
+    decision: DecisionConfiguration | None
     cells: tuple[CellSpec, ...]
 
 
@@ -266,7 +295,7 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
         case_manifest_hash=configuration.dataset.case_manifest_hash,
     )
     model_roles = tuple(
-        _build_model_binding(role_id, role, configuration.limits)
+        _build_model_binding(role_id, role)
         for role_id, role in configuration.models.ordered_items()
     )
     retrieval_bindings = tuple(
@@ -278,10 +307,14 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
     )
     roles_by_id = {role.role_id: role for role in model_roles}
     retrieval_by_id = {binding.binding_id: binding for binding in retrieval_bindings}
-    limits_hash = canonical_sha256([_LIMITS_HASH_DOMAIN, _limits_document(configuration.limits)])
-    execution_hash = canonical_sha256(
-        [_EXECUTION_HASH_DOMAIN, _execution_document(configuration.execution)]
+    execution = _resolve_execution(
+        configuration.dataset.selection,
+        configuration.evaluation_controls,
     )
+    authorization_hash = canonical_sha256(
+        [_AUTHORIZATION_HASH_DOMAIN, _authorization_document(execution)]
+    )
+    execution_hash = canonical_sha256([_EXECUTION_HASH_DOMAIN, _execution_document(execution)])
     cells = tuple(
         _build_cell_spec(
             ordinal=ordinal,
@@ -289,7 +322,7 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
             dataset=dataset,
             roles_by_id=roles_by_id,
             retrieval_by_id=retrieval_by_id,
-            limits_hash=limits_hash,
+            authorization_hash=authorization_hash,
             execution_hash=execution_hash,
         )
         for ordinal, cell in enumerate(configuration.cells, start=1)
@@ -299,8 +332,8 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
         dataset=dataset,
         model_roles=model_roles,
         retrieval=retrieval,
-        limits=configuration.limits,
-        execution=configuration.execution,
+        execution=execution,
+        decision=configuration.decision,
         cells=cells,
     )
     return ResolvedPlan(
@@ -311,8 +344,8 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
         dataset=dataset,
         model_roles=model_roles,
         retrieval=retrieval,
-        limits=configuration.limits,
-        execution=configuration.execution,
+        execution=execution,
+        decision=configuration.decision,
         cells=cells,
     )
 
@@ -325,8 +358,8 @@ def resolved_plan_bytes(plan: ResolvedPlan) -> bytes:
         dataset=plan.dataset,
         model_roles=plan.model_roles,
         retrieval=plan.retrieval,
-        limits=plan.limits,
         execution=plan.execution,
+        decision=plan.decision,
         cells=plan.cells,
     )
     document["resolved_plan_hash"] = plan.resolved_plan_hash
@@ -356,14 +389,13 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
     dataset = _parse_dataset(root["dataset"])
     model_roles = _parse_model_roles(root["model_roles"])
     retrieval = _parse_retrieval(root["retrieval"])
-    limits = _parse_limits(root["limits"])
-    execution = _parse_execution(root["execution"])
+    execution = _parse_execution(root["execution"], selection=dataset.selection)
+    decision = _parse_decision(root["decision"], selection=dataset.selection)
     cells = _parse_cells(
         root["cells"],
         dataset=dataset,
         model_roles=model_roles,
         retrieval=retrieval,
-        limits=limits,
         execution=execution,
     )
     payload = _payload(
@@ -371,8 +403,8 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
         dataset=dataset,
         model_roles=model_roles,
         retrieval=retrieval,
-        limits=limits,
         execution=execution,
+        decision=decision,
         cells=cells,
     )
     plan_hash = root["resolved_plan_hash"]
@@ -386,14 +418,14 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
         dataset=dataset,
         model_roles=model_roles,
         retrieval=retrieval,
-        limits=limits,
         execution=execution,
+        decision=decision,
         cells=cells,
     )
 
 
 def _build_model_binding(
-    role_id: ModelRoleId, role: ModelRoleConfiguration, limits: RunLimits
+    role_id: ModelRoleId, role: ModelRoleConfiguration
 ) -> ModelExecutionBinding:
     values = {
         "role_id": role_id,
@@ -409,8 +441,7 @@ def _build_model_binding(
         "proof_kind": role.proof_kind,
         "proof_reference": role.proof_reference,
         "usage_coverage": role.usage_coverage,
-        "max_input_tokens": limits.max_input_tokens,
-        "max_output_tokens": limits.max_output_tokens,
+        "maximum_output_tokens_per_call": _maximum_output_tokens_per_call(role_id),
         "temperature": "not_applicable" if role_id == "embedding" else "0",
         "top_p": "not_applicable" if role_id == "embedding" else "1",
     }
@@ -446,7 +477,7 @@ def _build_cell_spec(
     dataset: ResolvedDataset,
     roles_by_id: Mapping[ModelRoleId, ModelExecutionBinding],
     retrieval_by_id: Mapping[str, ResolvedRetrievalBinding],
-    limits_hash: str,
+    authorization_hash: str,
     execution_hash: str,
 ) -> CellSpec:
     role_ids = (
@@ -478,7 +509,7 @@ def _build_cell_spec(
         ),
         "retrieval_binding_id": retrieval.binding_id,
         "retrieval_binding_hash": retrieval.binding_hash,
-        "limits_hash": limits_hash,
+        "authorization_hash": authorization_hash,
         "execution_hash": execution_hash,
     }
     return CellSpec(
@@ -493,8 +524,8 @@ def _payload(
     dataset: ResolvedDataset,
     model_roles: tuple[ModelExecutionBinding, ...],
     retrieval: ResolvedRetrieval,
-    limits: RunLimits,
-    execution: ExecutionLimits,
+    execution: ResolvedExecution,
+    decision: DecisionConfiguration | None,
     cells: tuple[CellSpec, ...],
 ) -> dict[str, object]:
     return {
@@ -507,8 +538,8 @@ def _payload(
             "generation": retrieval.generation,
             "bindings": [_retrieval_binding_document(binding) for binding in retrieval.bindings],
         },
-        "limits": _limits_document(limits),
         "execution": _execution_document(execution),
+        "decision": None if decision is None else _decision_document(decision),
         "cells": [_cell_document(cell) for cell in cells],
     }
 
@@ -529,12 +560,77 @@ def _cell_document(cell: CellSpec) -> dict[str, object]:
     return {key: getattr(cell, key) for key in sorted(_CELL_KEYS)}
 
 
-def _limits_document(limits: RunLimits) -> dict[str, object]:
-    return {key: getattr(limits, key) for key in _LIMIT_KEYS}
-
-
-def _execution_document(execution: ExecutionLimits) -> dict[str, object]:
+def _execution_document(execution: ResolvedExecution) -> dict[str, object]:
     return {key: getattr(execution, key) for key in _EXECUTION_KEYS}
+
+
+def _authorization_document(execution: ResolvedExecution) -> dict[str, object]:
+    return {
+        key: getattr(execution, key)
+        for key in (
+            "max_retries_per_operation",
+            "operation_timeout_seconds",
+            "per_cell_base_operation_count",
+            "per_cell_retry_eligible_operation_count",
+            "per_cell_max_operation_attempt_count",
+            "per_cell_base_owner_authorization_count",
+            "per_cell_max_owner_authorization_count",
+        )
+    }
+
+
+def _decision_document(decision: DecisionConfiguration) -> dict[str, object]:
+    return {key: getattr(decision, key) for key in sorted(_DECISION_KEYS)}
+
+
+def _maximum_output_tokens_per_call(role_id: ModelRoleId) -> int | None:
+    if role_id == "answer":
+        return LME_ANSWER_MAX_OUTPUT_TOKENS
+    if role_id == "judge":
+        return LME_JUDGE_MAX_OUTPUT_TOKENS
+    return None
+
+
+def _resolve_execution(
+    selection: str,
+    controls: EvaluationControls,
+) -> ResolvedExecution:
+    if selection == "lme6":
+        case_count = len(LME6_EXPECTED_QUESTION_IDS)
+        source_count = LME6_EXPECTED_SESSION_COUNT
+        history_concurrency = 3
+        question_concurrency = 3
+    elif selection == "lme60":
+        case_count = len(LME60_EXPECTED_QUESTION_IDS)
+        source_count = LME60_EXPECTED_SESSION_COUNT
+        history_concurrency = 2
+        question_concurrency = 2
+    else:
+        raise ResolvedPlanError(f"unsupported resolved execution selection: {selection}")
+    base_operations = 1 + source_count + 8 * case_count
+    retry_eligible_operations = 2 * case_count
+    base_owner_authorizations = base_operations + 2 * source_count + case_count
+    maximum_operations = (
+        base_operations + retry_eligible_operations * controls.max_retries_per_operation
+    )
+    maximum_owner_authorizations = (
+        base_owner_authorizations + retry_eligible_operations * controls.max_retries_per_operation
+    )
+    return ResolvedExecution(
+        max_retries_per_operation=controls.max_retries_per_operation,
+        operation_timeout_seconds=controls.operation_timeout_seconds,
+        max_parallel_datasets=1,
+        max_parallel_providers_per_dataset=3,
+        max_parallel_history_ingestions_per_provider=history_concurrency,
+        max_parallel_questions_per_provider=question_concurrency,
+        per_cell_base_operation_count=base_operations,
+        per_cell_retry_eligible_operation_count=retry_eligible_operations,
+        per_cell_max_operation_attempt_count=maximum_operations,
+        per_cell_base_owner_authorization_count=base_owner_authorizations,
+        per_cell_max_owner_authorization_count=maximum_owner_authorizations,
+        comparison_max_operation_attempt_count=maximum_operations * 3,
+        comparison_max_owner_authorization_count=maximum_owner_authorizations * 3,
+    )
 
 
 def _plan_hash(payload: Mapping[str, object]) -> str:
@@ -589,6 +685,9 @@ def _parse_model_role(value: object) -> ModelExecutionBinding:
         raise ResolvedPlanError(
             f"resolved model role {role_id} provider-internal model identity must match"
         )
+    maximum_output_tokens_per_call = document["maximum_output_tokens_per_call"]
+    if maximum_output_tokens_per_call != _maximum_output_tokens_per_call(role_id):
+        raise ResolvedPlanError(f"resolved model role {role_id} protocol output binding is invalid")
     values = {
         "role_id": role_id,
         "configured_model": configured_model,
@@ -605,12 +704,7 @@ def _parse_model_role(value: object) -> ModelExecutionBinding:
         "proof_kind": _require_text(document["proof_kind"], "model proof kind"),
         "proof_reference": _require_text(document["proof_reference"], "model proof reference"),
         "usage_coverage": _require_text(document["usage_coverage"], "usage coverage"),
-        "max_input_tokens": _require_positive_integer(
-            document["max_input_tokens"], "model input ceiling"
-        ),
-        "max_output_tokens": _require_positive_integer(
-            document["max_output_tokens"], "model output ceiling"
-        ),
+        "maximum_output_tokens_per_call": maximum_output_tokens_per_call,
         "temperature": _require_text(document["temperature"], "model temperature"),
         "top_p": _require_text(document["top_p"], "model top_p"),
     }
@@ -663,28 +757,40 @@ def _parse_retrieval_binding(value: object) -> ResolvedRetrievalBinding:
     )
 
 
-def _parse_limits(value: object) -> RunLimits:
-    document = _require_exact_mapping(value, frozenset(_LIMIT_KEYS), "resolved limits")
-    integer_values = {
-        key: _require_positive_integer(document[key], f"resolved limit {key}")
-        for key in _LIMIT_KEYS
-        if key not in {"max_cost", "currency"}
-    }
-    return RunLimits(
-        **integer_values,
-        max_cost=_require_text(document["max_cost"], "resolved max cost"),
-        currency=_require_text(document["currency"], "resolved currency"),
-    )
-
-
-def _parse_execution(value: object) -> ExecutionLimits:
+def _parse_execution(value: object, *, selection: str) -> ResolvedExecution:
     document = _require_exact_mapping(value, frozenset(_EXECUTION_KEYS), "resolved execution")
-    return ExecutionLimits(
-        **{
-            key: _require_positive_integer(document[key], f"resolved execution {key}")
-            for key in _EXECUTION_KEYS
-        }
+    controls = EvaluationControls(
+        max_retries_per_operation=_require_non_negative_integer(
+            document["max_retries_per_operation"],
+            "resolved execution max retries",
+        ),
+        operation_timeout_seconds=_require_positive_integer(
+            document["operation_timeout_seconds"],
+            "resolved execution operation timeout",
+        ),
     )
+    expected = _resolve_execution(selection, controls)
+    if dict(document) != _execution_document(expected):
+        raise ResolvedPlanError("resolved execution derivation is invalid")
+    return expected
+
+
+def _parse_decision(value: object, *, selection: str) -> DecisionConfiguration | None:
+    if selection == "lme6":
+        if value is not None:
+            raise ResolvedPlanError("resolved LME-6 decision must be null")
+        return None
+    document = _require_exact_mapping(value, _DECISION_KEYS, "resolved decision")
+    values = {
+        key: _require_text(document[key], f"resolved decision {key}") for key in _DECISION_KEYS
+    }
+    expected = {
+        "minimum_accuracy_delta": "0.05",
+        "maximum_exact_mcnemar_p_value": "0.05",
+    }
+    if values != expected:
+        raise ResolvedPlanError("resolved decision does not match the LME-60 policy")
+    return DecisionConfiguration(**values)
 
 
 def _parse_cells(
@@ -693,19 +799,20 @@ def _parse_cells(
     dataset: ResolvedDataset,
     model_roles: tuple[ModelExecutionBinding, ...],
     retrieval: ResolvedRetrieval,
-    limits: RunLimits,
-    execution: ExecutionLimits,
+    execution: ResolvedExecution,
 ) -> tuple[CellSpec, ...]:
     if not isinstance(value, list):
         raise ResolvedPlanError("resolved cells must be a list")
     roles_by_id = {role.role_id: role for role in model_roles}
     retrieval_by_id = {binding.binding_id: binding for binding in retrieval.bindings}
-    limits_hash = canonical_sha256([_LIMITS_HASH_DOMAIN, _limits_document(limits)])
+    authorization_hash = canonical_sha256(
+        [_AUTHORIZATION_HASH_DOMAIN, _authorization_document(execution)]
+    )
     execution_hash = canonical_sha256([_EXECUTION_HASH_DOMAIN, _execution_document(execution)])
     cells = tuple(_parse_cell(item) for item in value)
-    if tuple(cell.cell_id for cell in cells) != T10_CELL_IDS or tuple(
-        cell.ordinal_1_indexed for cell in cells
-    ) != (1, 2, 3):
+    if tuple(cell.cell_id for cell in cells) != expected_cell_ids_for_selection(
+        dataset.selection
+    ) or tuple(cell.ordinal_1_indexed for cell in cells) != (1, 2, 3):
         raise ResolvedPlanError("resolved cell order is invalid")
     for cell in cells:
         expected_roles = (
@@ -725,7 +832,7 @@ def _parse_cells(
             or cell.retrieval_binding_id not in retrieval_by_id
             or cell.retrieval_binding_hash
             != retrieval_by_id[cell.retrieval_binding_id].binding_hash
-            or cell.limits_hash != limits_hash
+            or cell.authorization_hash != authorization_hash
             or cell.execution_hash != execution_hash
         ):
             raise ResolvedPlanError(f"resolved cell {cell.cell_id} cross-binding is invalid")
@@ -792,7 +899,9 @@ def _parse_cell(value: object) -> CellSpec:
         "retrieval_binding_hash": _require_sha256(
             document["retrieval_binding_hash"], "resolved retrieval binding hash"
         ),
-        "limits_hash": _require_sha256(document["limits_hash"], "resolved limits hash"),
+        "authorization_hash": _require_sha256(
+            document["authorization_hash"], "resolved authorization hash"
+        ),
         "execution_hash": _require_sha256(document["execution_hash"], "resolved execution hash"),
     }
     cell_hash = document["cell_spec_hash"]
@@ -812,6 +921,12 @@ def _require_text(value: object, label: str) -> str:
 def _require_positive_integer(value: object, label: str) -> int:
     if type(value) is not int or value <= 0:
         raise ResolvedPlanError(f"{label} must be a positive integer")
+    return value
+
+
+def _require_non_negative_integer(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ResolvedPlanError(f"{label} must be a non-negative integer")
     return value
 
 
@@ -849,8 +964,10 @@ def _reject_json_constant(value: str) -> object:
 
 __all__ = [
     "CellSpec",
+    "DecisionConfiguration",
     "ModelExecutionBinding",
     "ResolvedDataset",
+    "ResolvedExecution",
     "ResolvedModelRole",
     "ResolvedPlan",
     "ResolvedPlanError",

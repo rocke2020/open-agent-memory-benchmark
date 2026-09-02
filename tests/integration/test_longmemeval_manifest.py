@@ -53,6 +53,68 @@ EXPECTED_LME6_IDS = (
     "6b168ec8",
     "a3045048",
 )
+EXPECTED_LME60_IDS = (
+    "72e3ee87",
+    "22d2cb42",
+    "e61a7584",
+    "eace081b",
+    "8fb83627",
+    "f685340e_abs",
+    "07741c44",
+    "f685340e",
+    "89941a93",
+    "031748ae_abs",
+    "21d02d0d",
+    "gpt4_a56e767c",
+    "gpt4_15e38248",
+    "4bc144e2",
+    "157a136e",
+    "8e91e7d9",
+    "gpt4_59c863d7",
+    "2ce6a0f2",
+    "ba358f49",
+    "cc06de0d",
+    "e3fc4d6e",
+    "41275add",
+    "fca762bc",
+    "488d3006",
+    "8cf51dda",
+    "352ab8bd",
+    "3e321797",
+    "eaca4986",
+    "f523d9fe",
+    "71a3fd6b",
+    "32260d93",
+    "1d4e3b97",
+    "0a34ad58",
+    "07b6f563",
+    "d6233ab6",
+    "1c0ddc50",
+    "b0479f84",
+    "caf03d32",
+    "d24813b1",
+    "75832dbd",
+    "6b168ec8",
+    "bc8a6e93_abs",
+    "ccb36322",
+    "8e9d538c",
+    "c14c00dd",
+    "7527f7e2",
+    "c960da58",
+    "6f9b354f",
+    "86b68151",
+    "caf9ead2",
+    "a3045048",
+    "gpt4_ec93e27f",
+    "gpt4_8279ba03",
+    "gpt4_4edbafa2",
+    "b46e15ed",
+    "gpt4_18c2b244",
+    "dcfa8644",
+    "gpt4_c27434e8_abs",
+    "gpt4_fa19884d",
+    "a3838d2b",
+)
 
 
 def require_longmemeval() -> ModuleType:
@@ -116,6 +178,51 @@ def test_real_pinned_source_builds_exact_lme30_and_lme6_manifests() -> None:
 
 
 @pytest.mark.skipif(not SOURCE.exists(), reason="download the pinned LongMemEval S dataset")
+def test_real_pinned_source_builds_exact_balanced_lme60_manifest() -> None:
+    lme = require_longmemeval()
+
+    bundle = lme.build_lme60_bundle(SOURCE)
+    permuted = lme.select_lme60(tuple(reversed(lme.load_longmemeval_rows(SOURCE))))
+
+    assert tuple(row.question_id for row in bundle.selected_rows) == EXPECTED_LME60_IDS
+    assert tuple(row.question_id for row in permuted) == EXPECTED_LME60_IDS
+    assert bundle.case_manifest.workload_id == "lme60-balanced-v1"
+    assert bundle.case_manifest.manifest_id == "lme60-balanced-v1-manifest-v1"
+    assert (
+        bundle.case_manifest.manifest_hash
+        == "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
+    )
+    assert len(bundle.case_manifest.logical_contexts) == 60
+    assert len(bundle.case_manifest.ingestion_plans) == 60
+    assert len(bundle.case_manifest.cases) == 60
+    assert sum(plan.intended_source_count for plan in bundle.ingestion_plans) == 2_826
+    assert sum(len(row.answer_session_ids) for row in bundle.selected_rows) == 103
+    assert {
+        question_type: sum(row.question_type == question_type for row in bundle.selected_rows)
+        for question_type in lme.QUESTION_TYPES
+    } == {question_type: 10 for question_type in lme.QUESTION_TYPES}
+    assert bundle.label_mismatch_question_ids == (
+        "22d2cb42",
+        "eace081b",
+        "f685340e_abs",
+        "031748ae_abs",
+        "bc8a6e93_abs",
+        "gpt4_c27434e8_abs",
+        "gpt4_fa19884d",
+    )
+
+    result = validate_catalog_profile("oamb-t8-workload-lme60-v1", bundle)
+    assert result.disposition == ValidationDisposition.VALIDATED, result.issues
+    drifted = replace(
+        bundle,
+        case_manifest=bundle.case_manifest.model_copy(update={"manifest_hash": "f" * 64}),
+    )
+    drifted_result = validate_catalog_profile("oamb-t8-workload-lme60-v1", drifted)
+    assert drifted_result.disposition == ValidationDisposition.INVALID
+    assert "workload.lme60.selector-membership.v1" in drifted_result.failed_rule_ids
+
+
+@pytest.mark.skipif(not SOURCE.exists(), reason="download the pinned LongMemEval S dataset")
 def test_real_lme_bundles_pass_closed_production_profiles_and_manifest_drift_fails() -> None:
     lme = require_longmemeval()
     full = lme.build_lme30_bundle(SOURCE)
@@ -136,6 +243,16 @@ def test_real_lme_bundles_pass_closed_production_profiles_and_manifest_drift_fai
     drifted_result = validate_catalog_profile("oamb-t8-workload-lme30-v1", drifted)
     assert drifted_result.disposition == ValidationDisposition.INVALID
     assert "workload.lme30.selector-coverage.v1" in drifted_result.failed_rule_ids
+
+    denominator_drift = replace(
+        full,
+        case_manifest=full.case_manifest.model_copy(
+            update={"logical_contexts": full.case_manifest.logical_contexts[:-1]}
+        ),
+    )
+    denominator_result = validate_catalog_profile("oamb-t8-workload-lme30-v1", denominator_drift)
+    assert denominator_result.disposition == ValidationDisposition.INVALID
+    assert "workload.lme30.denominator.v1" in denominator_result.failed_rule_ids
 
 
 @pytest.mark.skipif(not SOURCE.exists(), reason="download the pinned LongMemEval S dataset")

@@ -40,6 +40,12 @@ class ServiceBundleContractTests(unittest.TestCase):
             hashlib.sha256((ROOT / "mem0" / "server_state.py").read_bytes()).hexdigest(),
             parsed["MEM0_SERVER_OVERLAY_SHA256"],
         )
+        self.assertEqual(
+            hashlib.sha256(
+                (ROOT / "retry-guard" / "sitecustomize.py").read_bytes()
+            ).hexdigest(),
+            parsed["RETRY_GUARD_SHA256"],
+        )
 
     def test_compose_has_six_long_running_services_and_read_only_storage_probe(self) -> None:
         compose = self.read("compose.yaml")
@@ -159,7 +165,11 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn('openviking-storage-probe', command)
         self.assertIn('compose stop openviking', command)
         self.assertIn('compose start openviking', command)
-        self.assertIn('oamb-provider-model-readiness-budget-v1', command)
+        self.assertIn('--resolved-plan', command)
+        self.assertIn('readiness_plan.py', command)
+        self.assertIn('readiness_response.py', command)
+        self.assertIn('environment_hash: $environment_hash', command)
+        self.assertIn('model_calls_dispatched: 7', command)
         self.assertIn('model-readiness-attempt.json', command)
         self.assertIn('billing_complete: false', command)
         self.assertIn('record_model_dispatch', command)
@@ -204,12 +214,32 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn('reasoning_effort: "low"', mem0_bootstrap)
         self.assertIn('is_reasoning_model: true', mem0_bootstrap)
         self.assertIn('"extra_request_body": {"reasoning_effort": "low"}', openviking_config)
-        self.assertIn('reasoning_effort: "low"', operator)
+        self.assertIn('reasoning_effort: $effort', operator)
         self.assertIn("hindsight-model-config.json", operator)
         self.assertIn("openviking-model-config.json", operator)
         self.assertEqual(operator.count('--arg target_model "$TARGET_PROVIDER_MODEL"'), 3)
         self.assertEqual(operator.count("'.model == $target_model"), 2)
         self.assertIn(".llm.config.model == $target_model", operator)
+
+    def test_all_provider_internal_retry_paths_are_disabled_and_proven(self) -> None:
+        compose = self.read("compose.yaml")
+        openviking_config = self.read("openviking/ov.conf")
+        retry_guard = self.read("retry-guard/sitecustomize.py")
+        operator = self.read("bin/provider-services")
+
+        self.assertIn('HINDSIGHT_API_LLM_MAX_RETRIES: "0"', compose)
+        self.assertIn('HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES: "0"', compose)
+        self.assertIn('HINDSIGHT_API_WORKER_MAX_RETRIES: "0"', compose)
+        self.assertEqual(compose.count("./retry-guard/sitecustomize.py:"), 3)
+        self.assertEqual(openviking_config.count('"max_retries": 0'), 2)
+        self.assertIn('kwargs["max_retries"] = INTERNAL_RETRY_COUNT', retry_guard)
+        self.assertIn('module._MEMORY_EXTRACTION_MAX_RETRIES =', retry_guard)
+        for filename in (
+            "hindsight-retry-config.json",
+            "mem0-retry-config.json",
+            "openviking-retry-config.json",
+        ):
+            self.assertIn(filename, operator)
 
     def test_bootstrap_treats_dotenv_as_data(self) -> None:
         for script_name in ("mem0/bootstrap.sh", "openviking/bootstrap.sh"):

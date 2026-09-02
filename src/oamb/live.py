@@ -17,12 +17,12 @@ from decimal import Decimal
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from oamb.artifacts.composition import CapsuleCompositionTarget
 
-from oamb.config.benchmark import ModelRoleId
+from oamb.config.benchmark import MODEL_ROLE_IDS, ModelRoleId
 from oamb.config.doctor import CellSpec, ModelExecutionBinding, ResolvedPlan
 from oamb.config.provider_services import load_provider_service_bindings
 from oamb.contracts.ids import canonical_sha256
@@ -65,11 +65,15 @@ from oamb.workloads.longmemeval import (
     LME6_EXPECTED_SESSION_COUNT,
     LME30_EXPECTED_QUESTION_IDS,
     LME30_EXPECTED_SESSION_COUNT,
-    LME30_WORKLOAD_ID,
+    LME60_EXPECTED_QUESTION_IDS,
+    LME60_EXPECTED_SESSION_COUNT,
     LME_DATASET_MANIFEST_HASH,
     LongMemEvalWorkload,
-    build_lme6_bundle,
-    build_lme30_bundle,
+    build_longmemeval_bundle,
+)
+from oamb.workloads.metrics import (
+    LME_ANSWER_MAX_OUTPUT_TOKENS,
+    LME_JUDGE_MAX_OUTPUT_TOKENS,
 )
 from oamb.workloads.visible_evidence import LME_VISIBLE_EVIDENCE_POLICY
 
@@ -83,11 +87,6 @@ _MEMORY_STAGES = (
     "memory_query",
     "post_query_projection",
 )
-_PROVIDER_ROLE_BY_CELL: dict[str, ModelRoleId] = {
-    "hindsight-lme6": "hindsight_extraction",
-    "mem0-lme6": "mem0_extraction",
-    "openviking-lme6": "openviking_semantic_understanding",
-}
 _MEMORY_SYSTEM_BY_PROVIDER = {
     "hindsight": "hindsight",
     "mem0": "mem0",
@@ -105,7 +104,18 @@ class LiveConfigurationError(ValueError):
 
 
 class LiveCellExecutionError(RuntimeError):
-    """One admitted isolated provider cell failed after the shared barrier."""
+    """One or more isolated provider cells failed after the shared barrier."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        outcomes: tuple[LiveCellOutcome, ...] = (),
+        errors: tuple[BaseException, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.outcomes = outcomes
+        self.errors = errors
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +137,17 @@ class LiveCell:
 class LiveCellCompletion:
     cell_id: str
     capsule_root: Path
+
+
+LiveCellStatus = Literal["completed", "failed", "not_started"]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveCellOutcome:
+    cell_id: str
+    status: LiveCellStatus
+    capsule_root: Path | None
+    detail: str | None
 
 
 def load_live_environment(
@@ -151,7 +172,7 @@ def load_live_environment(
         "OAMB_DEEPSEEK_API_KEY": "DEEPSEEK_API_KEY",
     }
     for target, source in aliases.items():
-        if target not in environment and source in environment:
+        if source in environment:
             environment[target] = environment[source]
     for target, port_name in (
         ("OAMB_HINDSIGHT_BASE_URL", "OAMB_HINDSIGHT_PORT"),
@@ -250,6 +271,303 @@ def load_live_provider_evidence(
     return provider_project, evidence_by_provider
 
 
+def validate_live_readiness_receipt(
+    *,
+    plan: ResolvedPlan,
+    provider_runtime_directory: Path,
+    environment: Mapping[str, str],
+) -> None:
+    """Reopen the all-role preflight receipt and its durable dispatch ledger."""
+
+    receipt_path = provider_runtime_directory / "model-readiness-receipt.json"
+    attempt_path = provider_runtime_directory / "model-readiness-attempt.json"
+    service_receipts = tuple(
+        sorted((provider_runtime_directory / "service-verification-receipts").glob("*.json"))
+    )
+    if len(service_receipts) != 1:
+        raise LiveConfigurationError(
+            "live readiness requires exactly one service verification receipt"
+        )
+    try:
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = json.loads(receipt_bytes)
+        attempt_bytes = attempt_path.read_bytes()
+        attempt = json.loads(attempt_bytes)
+        service_receipt_bytes = service_receipts[0].read_bytes()
+        service_receipt = json.loads(service_receipt_bytes)
+        service_receipt_hash = hashlib.sha256(service_receipt_bytes).hexdigest()
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LiveConfigurationError("live readiness evidence is missing or malformed") from exc
+    receipt_keys = {
+        "schema_version",
+        "provider_project",
+        "resolved_plan_hash",
+        "service_verification_receipt_sha256",
+        "attempt_sha256",
+        "completed_at_utc",
+        "operation_timeout_seconds",
+        "model_calls_dispatched",
+        "role_ids",
+        "provider_internal_retries",
+        "environment_hash",
+        "billing_complete",
+        "cost_usd",
+        "memory_state_created",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != receipt_keys:
+        raise LiveConfigurationError("live readiness receipt schema is invalid")
+    if receipt["environment_hash"] != live_readiness_environment_hash(plan, environment):
+        raise LiveConfigurationError("live readiness environment differs from the probed values")
+    if (
+        receipt["schema_version"] != "oamb-provider-model-readiness-receipt-v1"
+        or not isinstance(service_receipt, dict)
+        or receipt["provider_project"] != service_receipt.get("provider_project")
+        or receipt["resolved_plan_hash"] != plan.resolved_plan_hash
+        or receipt["service_verification_receipt_sha256"] != service_receipt_hash
+        or receipt["attempt_sha256"] != hashlib.sha256(attempt_bytes).hexdigest()
+        or receipt["operation_timeout_seconds"] != plan.execution.operation_timeout_seconds
+        or receipt["model_calls_dispatched"] != 7
+        or receipt["role_ids"] != list(MODEL_ROLE_IDS)
+        or receipt["provider_internal_retries"] != 0
+        or receipt["billing_complete"] is not False
+        or receipt["cost_usd"] is not None
+        or receipt["memory_state_created"] is not False
+    ):
+        raise LiveConfigurationError("live readiness receipt does not bind the resolved plan")
+    attempt_keys = {
+        "schema_version",
+        "provider_project",
+        "resolved_plan_hash",
+        "started_at_utc",
+        "calls_reserved",
+        "calls_dispatched",
+        "operation_timeout_seconds",
+        "attempts",
+        "billing_complete",
+        "cost_usd",
+        "memory_state_created",
+    }
+    expected_attempt_roles = (
+        "embedding",
+        "hindsight_extraction",
+        "mem0_extraction",
+        "openviking_semantic_understanding",
+        "answer",
+        "judge",
+        "openviking-ready",
+    )
+    attempts = attempt.get("attempts") if isinstance(attempt, dict) else None
+    if (
+        not isinstance(attempt, dict)
+        or set(attempt) != attempt_keys
+        or attempt["schema_version"] != "oamb-provider-model-readiness-attempt-v1"
+        or attempt["provider_project"] != receipt["provider_project"]
+        or attempt["resolved_plan_hash"] != plan.resolved_plan_hash
+        or attempt["calls_reserved"] != 7
+        or attempt["calls_dispatched"] != 7
+        or attempt["operation_timeout_seconds"] != plan.execution.operation_timeout_seconds
+        or attempt["billing_complete"] is not False
+        or attempt["cost_usd"] is not None
+        or attempt["memory_state_created"] is not False
+        or not isinstance(attempts, list)
+        or tuple(item.get("role") for item in attempts if isinstance(item, dict))
+        != expected_attempt_roles
+        or any(
+            not isinstance(item, dict)
+            or item.get("status") != "succeeded"
+            or not isinstance(item.get("dispatched_at_utc"), str)
+            or not isinstance(item.get("completed_at_utc"), str)
+            for item in attempts
+        )
+    ):
+        raise LiveConfigurationError("live readiness attempt ledger is incomplete")
+
+
+def live_readiness_environment_hash(
+    plan: ResolvedPlan,
+    environment: Mapping[str, str],
+) -> str:
+    """Bind the secret-safe endpoint and credential values used by all model roles."""
+
+    required_names: list[str] = []
+    for role in plan.model_roles:
+        required_names.append(role.endpoint_variable)
+        if role.credential_variable != "not_applicable":
+            required_names.append(role.credential_variable)
+    unique_names = tuple(dict.fromkeys(required_names))
+    resolved = _resolve_environment(environment, unique_names)
+    return _environment_hash(unique_names, resolved)
+
+
+def build_bounded_profile_evidence(
+    *,
+    plan: ResolvedPlan,
+    dataset_path: Path,
+    provider_runtime_directory: Path,
+    capsule_roots: Mapping[str, Path],
+    validation_paths: Mapping[str, Path],
+    service_evidence_by_provider: Mapping[str, SourceEvidenceBinding],
+    environment: Mapping[str, str],
+) -> tuple[str, dict[str, SourceEvidenceBinding]]:
+    """Validate one same-question provider slice per cell for broad-run admission."""
+
+    from oamb.artifacts.validation.source_root import validate_source_root
+    from oamb.contracts.evidence import CapsuleManifest, ValidationResult
+    from oamb.contracts.states import ValidationDisposition
+
+    expected_cells = {cell.cell_id for cell in plan.cells}
+    if set(capsule_roots) != expected_cells or set(validation_paths) != expected_cells:
+        raise LiveConfigurationError("bounded capsules and validations must name every frozen cell")
+    bundle = build_longmemeval_bundle(Path(dataset_path), plan.dataset.selection)
+    raw_question_by_case_id = {
+        case.case_manifest_entry_id: case.raw_question_id for case in bundle.case_manifest.cases
+    }
+    readiness_receipt_path = provider_runtime_directory / "model-readiness-receipt.json"
+    try:
+        readiness_receipt_hash = hashlib.sha256(readiness_receipt_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise LiveConfigurationError("bounded evidence requires live readiness") from exc
+    raw_question_ids: list[str] = []
+    run_ids: list[str] = []
+    provider_projects: list[str] = []
+    derived: dict[str, SourceEvidenceBinding] = {}
+    roles_by_id = {role.role_id: role for role in plan.model_roles}
+    for cell in plan.cells:
+        root = Path(capsule_roots[cell.cell_id])
+        try:
+            supplied_validation = ValidationResult.model_validate_json(
+                Path(validation_paths[cell.cell_id]).read_bytes()
+            )
+            fresh_validation = validate_source_root(root)
+            manifest = CapsuleManifest.model_validate_json(
+                (root / "capsule-manifest.json").read_bytes()
+            )
+            preflight = json.loads((root / "source/specs/run-preflight.json").read_bytes())
+            run_spec = json.loads((root / "source/specs/run-spec.json").read_bytes())
+            run_documents = tuple(
+                json.loads(path.read_bytes())
+                for path in sorted((root / "source/run").glob("*.json"))
+            )
+            case_documents = tuple(
+                json.loads(path.read_bytes())
+                for path in sorted((root / "source/cases").glob("*.json"))
+            )
+            partition_documents = tuple(
+                document
+                for path in sorted((root / "source/specs").glob("*.json"))
+                for document in (json.loads(path.read_bytes()),)
+                if document.get("schema_name") == "case_partition_spec"
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise LiveConfigurationError(
+                f"bounded evidence is incomplete for {cell.cell_id}"
+            ) from exc
+        if (
+            supplied_validation.disposition != ValidationDisposition.VALIDATED
+            or supplied_validation != fresh_validation
+            or supplied_validation.target_hash != manifest.source_manifest_hash
+            or len(run_documents) != 1
+            or run_documents[0].get("state") != "finalized"
+            or len(case_documents) != 1
+            or case_documents[0].get("state") != "completed"
+            or len(partition_documents) != 1
+            or preflight.get("resolved_plan_hash") != plan.resolved_plan_hash
+            or preflight.get("adapter_profile_hash") != cell.cell_spec_hash
+            or preflight.get("adapter_profile_id") != cell.adapter_profile_id
+            or run_spec.get("run_id") != manifest.run_id
+            or run_spec.get("memory_system_id") != cell.provider_id
+            or run_spec.get("workload_id") != cell.workload_id
+        ):
+            raise LiveConfigurationError(f"bounded evidence does not close {cell.cell_id}")
+        partition = partition_documents[0]
+        selected_case_ids = partition.get("requested_case_manifest_entry_ids")
+        if not isinstance(selected_case_ids, list) or len(selected_case_ids) != 1:
+            raise LiveConfigurationError(
+                f"bounded evidence must contain one question for {cell.cell_id}"
+            )
+        selected_case_id = selected_case_ids[0]
+        raw_question_id = raw_question_by_case_id.get(selected_case_id)
+        if (
+            raw_question_id is None
+            or case_documents[0].get("case_manifest_entry_id") != selected_case_id
+        ):
+            raise LiveConfigurationError(
+                f"bounded evidence question is not frozen for {cell.cell_id}"
+            )
+        base_evidence = service_evidence_by_provider.get(cell.provider_id)
+        provider_profile_evidence = preflight.get("provider_profile_evidence")
+        if base_evidence is None or provider_profile_evidence != base_evidence.model_dump(
+            mode="json"
+        ):
+            raise LiveConfigurationError(
+                f"bounded evidence provider profile drifted for {cell.cell_id}"
+            )
+        role_ids = (
+            cell.producer_role_id,
+            cell.embedding_role_id,
+            cell.answer_role_id,
+            cell.judge_role_id,
+        )
+        selected_roles = tuple(roles_by_id[role_id] for role_id in role_ids)
+        required_environment = _required_environment(cell, selected_roles)
+        resolved_environment = _resolve_environment(environment, required_environment)
+        expected_endpoint_fingerprints = tuple(
+            binding.redacted_endpoint_fingerprint
+            for binding in _role_bindings(selected_roles, resolved_environment)
+        )
+        if (
+            run_spec.get("environment_hash")
+            != _environment_hash(required_environment, resolved_environment)
+            or tuple(preflight.get("redacted_endpoint_fingerprints", ()))
+            != expected_endpoint_fingerprints
+        ):
+            raise LiveConfigurationError(f"bounded evidence environment drifted for {cell.cell_id}")
+        provider_project = preflight.get("provider_project_id")
+        if not isinstance(provider_project, str) or not provider_project:
+            raise LiveConfigurationError(
+                f"bounded evidence provider project is invalid for {cell.cell_id}"
+            )
+        validation_hash = canonical_sha256(supplied_validation)
+        source_root_hash = canonical_sha256(
+            [
+                "oamb-bounded-provider-profile-evidence-initial-v1",
+                base_evidence.source_root_hash,
+                manifest.source_manifest_hash,
+                validation_hash,
+                readiness_receipt_hash,
+                raw_question_id,
+            ]
+        )
+        fields = {
+            "source_kind": SourceEvidenceKind.PROVIDER_SERVICE,
+            "source_identity": (
+                f"{provider_project}:{cell.adapter_profile_id}:bounded:{raw_question_id}"
+            ),
+            "source_root_hash": source_root_hash,
+            "validation_result_hash": validation_hash,
+            "source_schema_versions": (
+                "provider_service_evidence_manifest@1",
+                "bounded_provider_profile_evidence@1",
+            ),
+        }
+        derived[cell.provider_id] = SourceEvidenceBinding(
+            binding_id=canonical_sha256(
+                ["oamb-bounded-provider-evidence-binding-initial-v1", fields]
+            ),
+            **fields,  # type: ignore[arg-type]
+        )
+        raw_question_ids.append(raw_question_id)
+        run_ids.append(manifest.run_id)
+        provider_projects.append(provider_project)
+    if len(set(raw_question_ids)) != 1:
+        raise LiveConfigurationError("bounded provider slices must use the same frozen question")
+    if len(set(run_ids)) != len(run_ids):
+        raise LiveConfigurationError("bounded provider slices must use distinct fresh runs")
+    if len(set(provider_projects)) != 1:
+        raise LiveConfigurationError("bounded provider slices must share one provider project")
+    return raw_question_ids[0], derived
+
+
 def _resolve_live_partition(
     cell: LiveCell,
 ) -> tuple[LongMemEvalWorkload, DatasetManifest, CaseManifest, CasePartitionSpec]:
@@ -259,7 +577,7 @@ def _resolve_live_partition(
     source_path = cell.dataset_path
     if not source_path.is_absolute():
         source_path = Path.cwd() / source_path
-    workload = LongMemEvalWorkload(build_lme6_bundle(build_lme30_bundle(source_path)))
+    workload = LongMemEvalWorkload(build_longmemeval_bundle(source_path, cell.cell.selection))
     dataset_manifest = workload.resolve_sources()
     case_manifest = workload.build_case_manifest(dataset_manifest)
     requested_case_ids = cell.requested_case_manifest_entry_ids or tuple(
@@ -273,7 +591,7 @@ def _resolve_live_partition(
         case_manifest=case_manifest,
         case_plans=workload.iter_case_plans(case_manifest),
         requested_case_manifest_entry_ids=requested_case_ids,
-        budget_policy_hash=cell.cell.limits_hash,
+        budget_policy_hash=cell.cell.authorization_hash,
         retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
     )
     return workload, dataset_manifest, case_manifest, partition
@@ -345,8 +663,9 @@ def execute_live_cell(
     bindings_by_role = dict(zip(cell.role_ids, cell.control.role_bindings, strict=True))
     answer_plan = _model_plan(cell.plan, "answer")
     judge_plan = _model_plan(cell.plan, "judge")
-    memory_timeout_seconds = float(cell.plan.limits.memory_operation_timeout_seconds)
-    model_timeout_seconds = float(cell.plan.limits.model_call_timeout_seconds)
+    operation_timeout_seconds = cell.plan.execution.operation_timeout_seconds
+    memory_timeout_seconds = float(operation_timeout_seconds)
+    model_timeout_seconds = float(operation_timeout_seconds)
 
     def memory_factory(store: object, _plans: object) -> object:
         environment = cell.environment
@@ -382,9 +701,7 @@ def execute_live_cell(
                 benchmark_account=environment["OAMB_OPENVIKING_ACCOUNT_ID"],
                 benchmark_user=environment["OAMB_OPENVIKING_ADMIN_USER_ID"],
                 runtime_binding_hash=cell.control.run_spec.runtime_binding_hash,
-                maximum_task_polls=maximum_task_polls_for_timeout(
-                    cell.plan.limits.memory_operation_timeout_seconds
-                ),
+                maximum_task_polls=maximum_task_polls_for_timeout(operation_timeout_seconds),
                 task_poll_timeout_seconds=memory_timeout_seconds,
                 read_timeout_seconds=memory_timeout_seconds,
                 total_timeout_seconds=memory_timeout_seconds,
@@ -462,12 +779,30 @@ def execute_live_cells(cells: tuple[LiveCell, ...]) -> tuple[LiveCellCompletion,
         try:
             completed = execute_live_cell(cell)
         except BaseException as exc:
+            detail = f"{type(exc).__name__}: {exc}"
             raise LiveCellExecutionError(
-                f"cell {cell.cell.cell_id} failed with {type(exc).__name__}: {exc}"
+                f"cell {cell.cell.cell_id} failed with {detail}",
+                outcomes=(
+                    LiveCellOutcome(
+                        cell.cell.cell_id,
+                        "failed",
+                        cell.capsule_root if cell.capsule_root.exists() else None,
+                        detail,
+                    ),
+                ),
+                errors=(exc,),
             ) from exc
         if completed.capsule_root != cell.capsule_root:
             raise LiveCellExecutionError(
-                f"cell {cell.cell.cell_id} returned a mismatched completion identity"
+                f"cell {cell.cell.cell_id} returned a mismatched completion identity",
+                outcomes=(
+                    LiveCellOutcome(
+                        cell.cell.cell_id,
+                        "failed",
+                        cell.capsule_root if cell.capsule_root.exists() else None,
+                        "mismatched completion identity",
+                    ),
+                ),
             )
         return (LiveCellCompletion(cell.cell.cell_id, completed.capsule_root),)
 
@@ -487,6 +822,10 @@ def _execute_parallel_live_cells(
 ) -> tuple[LiveCellCompletion, ...]:
     workers: list[tuple[LiveCell, BaseProcess, Connection]] = []
     errors: list[BaseException] = []
+    outcomes = {
+        cell.cell.cell_id: LiveCellOutcome(cell.cell.cell_id, "not_started", None, None)
+        for cell in cells
+    }
     for cell, stop_event in zip(cells, stop_events, strict=True):
         receiver: Connection | None = None
         sender: Connection | None = None
@@ -501,10 +840,15 @@ def _execute_parallel_live_cells(
             )
             created_process.start()
         except BaseException as exc:
-            errors.append(
-                LiveCellExecutionError(
-                    f"cell {cell.cell.cell_id} admission failed with {type(exc).__name__}: {exc}"
-                )
+            error = LiveCellExecutionError(
+                f"cell {cell.cell.cell_id} admission failed with {type(exc).__name__}: {exc}"
+            )
+            errors.append(error)
+            outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                cell.cell.cell_id,
+                "failed",
+                cell.capsule_root if cell.capsule_root.exists() else None,
+                str(error),
             )
             if created_process is not None and created_process.pid is not None:
                 assert receiver is not None and sender is not None
@@ -530,10 +874,15 @@ def _execute_parallel_live_cells(
         except EOFError:
             message = ("failed", cell.cell.cell_id, "WorkerExit", "no result message")
         except BaseException as exc:
-            errors.append(
-                LiveCellExecutionError(
-                    f"cell {cell.cell.cell_id} supervision failed with {type(exc).__name__}: {exc}"
-                )
+            error = LiveCellExecutionError(
+                f"cell {cell.cell.cell_id} supervision failed with {type(exc).__name__}: {exc}"
+            )
+            errors.append(error)
+            outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                cell.cell.cell_id,
+                "failed",
+                cell.capsule_root if cell.capsule_root.exists() else None,
+                str(error),
             )
         finally:
             receiver.close()
@@ -541,11 +890,15 @@ def _execute_parallel_live_cells(
             try:
                 worker_process.join()
             except BaseException as exc:
-                errors.append(
-                    LiveCellExecutionError(
-                        f"cell {cell.cell.cell_id} join was interrupted by "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                error = LiveCellExecutionError(
+                    f"cell {cell.cell.cell_id} join was interrupted by {type(exc).__name__}: {exc}"
+                )
+                errors.append(error)
+                outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                    cell.cell.cell_id,
+                    "failed",
+                    cell.capsule_root if cell.capsule_root.exists() else None,
+                    str(error),
                 )
                 continue
             break
@@ -561,36 +914,69 @@ def _execute_parallel_live_cells(
         try:
             worker_process.close()
         except BaseException as exc:
-            errors.append(
-                LiveCellExecutionError(
-                    f"cell {cell.cell.cell_id} worker close failed with {type(exc).__name__}: {exc}"
-                )
+            error = LiveCellExecutionError(
+                f"cell {cell.cell.cell_id} worker close failed with {type(exc).__name__}: {exc}"
+            )
+            errors.append(error)
+            current = outcomes[cell.cell.cell_id]
+            outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                current.cell_id,
+                current.status,
+                current.capsule_root,
+                str(error) if current.detail is None else f"{current.detail}; {error}",
             )
         if kind == "completed" and isinstance(message, tuple) and len(message) == 3:
             _kind, cell_id, capsule_root = message
             if cell_id != cell.cell.cell_id or Path(capsule_root) != cell.capsule_root:
-                errors.append(
-                    LiveCellExecutionError(
-                        f"cell {cell.cell.cell_id} returned a mismatched completion identity"
-                    )
+                error = LiveCellExecutionError(
+                    f"cell {cell.cell.cell_id} returned a mismatched completion identity"
+                )
+                errors.append(error)
+                outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                    cell.cell.cell_id,
+                    "failed",
+                    cell.capsule_root if cell.capsule_root.exists() else None,
+                    str(error),
                 )
             else:
                 completions[cell_id] = LiveCellCompletion(cell_id, Path(capsule_root))
+                prior_detail = outcomes[cell_id].detail
+                outcomes[cell_id] = LiveCellOutcome(
+                    cell_id,
+                    "completed",
+                    Path(capsule_root),
+                    prior_detail,
+                )
         elif kind == "failed" and isinstance(message, tuple) and len(message) == 4:
             _kind, cell_id, error_type, error_message = message
-            errors.append(
-                LiveCellExecutionError(f"cell {cell_id} failed with {error_type}: {error_message}")
+            error = LiveCellExecutionError(
+                f"cell {cell_id} failed with {error_type}: {error_message}"
             )
-        else:
-            errors.append(
-                LiveCellExecutionError(
-                    f"cell {cell.cell.cell_id} returned a malformed worker result"
+            errors.append(error)
+            if cell_id in outcomes:
+                outcomes[cell_id] = LiveCellOutcome(
+                    cell_id,
+                    "failed",
+                    cell.capsule_root if cell.capsule_root.exists() else None,
+                    f"{error_type}: {error_message}",
                 )
+        else:
+            error = LiveCellExecutionError(
+                f"cell {cell.cell.cell_id} returned a malformed worker result"
             )
-    if len(errors) == 1:
-        raise errors[0]
+            errors.append(error)
+            outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                cell.cell.cell_id,
+                "failed",
+                cell.capsule_root if cell.capsule_root.exists() else None,
+                str(error),
+            )
     if errors:
-        raise BaseExceptionGroup("parallel live cells failed", errors)
+        raise LiveCellExecutionError(
+            "; ".join(str(error) for error in errors),
+            outcomes=tuple(outcomes[cell.cell.cell_id] for cell in cells),
+            errors=tuple(errors),
+        )
     return tuple(completions[cell.cell.cell_id] for cell in cells)
 
 
@@ -649,6 +1035,36 @@ def select_live_cells(
     return tuple(cells_by_id[cell_id] for cell_id in selected_cell_ids)
 
 
+def resolve_live_question_case_ids(
+    plan: ResolvedPlan,
+    dataset_path: Path,
+    raw_question_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Resolve public raw question IDs to frozen internal case identities."""
+
+    if not raw_question_ids:
+        return ()
+    if len(set(raw_question_ids)) != len(raw_question_ids):
+        raise LiveConfigurationError("live question selection contains a duplicate")
+    bundle = build_longmemeval_bundle(Path(dataset_path), plan.dataset.selection)
+    cases_by_raw_id = {
+        case.raw_question_id: case.case_manifest_entry_id for case in bundle.case_manifest.cases
+    }
+    unknown = tuple(
+        question_id for question_id in raw_question_ids if question_id not in cases_by_raw_id
+    )
+    if unknown:
+        raise LiveConfigurationError(f"unknown frozen question: {unknown[0]}")
+    canonical = tuple(
+        case.raw_question_id
+        for case in bundle.case_manifest.cases
+        if case.raw_question_id in raw_question_ids
+    )
+    if canonical != raw_question_ids:
+        raise LiveConfigurationError("live questions must remain in frozen manifest order")
+    return tuple(cases_by_raw_id[question_id] for question_id in raw_question_ids)
+
+
 def build_live_cell(
     *,
     plan: ResolvedPlan,
@@ -682,7 +1098,7 @@ def build_live_cell(
 
     roles_by_id = {role.role_id: role for role in plan.model_roles}
     role_ids = (
-        _PROVIDER_ROLE_BY_CELL[cell.cell_id],
+        cell.producer_role_id,
         cell.embedding_role_id,
         cell.answer_role_id,
         cell.judge_role_id,
@@ -738,7 +1154,7 @@ def build_live_cell(
         protocol_id="oamb-initial-v1",
         dataset_manifest_hash=LME_DATASET_MANIFEST_HASH,
         case_manifest_hash=plan.dataset.case_manifest_hash,
-        workload_id=LME30_WORKLOAD_ID,
+        workload_id=cell.workload_id,
         memory_system_id=_MEMORY_SYSTEM_BY_PROVIDER[cell.provider_id],
         runtime_binding_hash=runtime_binding_hash,
         environment_hash=_environment_hash(required_environment, resolved_environment),
@@ -808,6 +1224,7 @@ def build_live_cell(
             plan.execution.max_parallel_history_ingestions_per_provider
         ),
         max_parallel_questions=plan.execution.max_parallel_questions_per_provider,
+        max_retries_per_operation=plan.execution.max_retries_per_operation,
         provider_lifecycle_coordination_directory=provider_runtime_directory,
     )
     return LiveCell(
@@ -852,7 +1269,7 @@ def build_live_continuation_cell(
         raise LiveConfigurationError("provider evidence is not the verified service profile")
     roles_by_id = {role.role_id: role for role in plan.model_roles}
     role_ids = (
-        _PROVIDER_ROLE_BY_CELL[cell.cell_id],
+        cell.producer_role_id,
         cell.embedding_role_id,
         cell.answer_role_id,
         cell.judge_role_id,
@@ -914,7 +1331,7 @@ def build_live_continuation_cell(
         != _environment_hash(required_environment, resolved_environment)
         or run_spec.dataset_manifest_hash != LME_DATASET_MANIFEST_HASH
         or run_spec.case_manifest_hash != plan.dataset.case_manifest_hash
-        or run_spec.workload_id != LME30_WORKLOAD_ID
+        or run_spec.workload_id != cell.workload_id
         or budget != expected_budget
         or bindings != current_bindings
         or tuple(binding.binding_id for binding in bindings) != run_spec.model_role_binding_ids
@@ -948,6 +1365,7 @@ def build_live_continuation_cell(
             plan.execution.max_parallel_history_ingestions_per_provider
         ),
         max_parallel_questions=plan.execution.max_parallel_questions_per_provider,
+        max_retries_per_operation=plan.execution.max_retries_per_operation,
         provider_lifecycle_coordination_directory=provider_runtime_directory,
     )
     return LiveCell(
@@ -1069,7 +1487,7 @@ def _role_bindings(
                         role.binding_hash,
                         role.temperature,
                         role.top_p,
-                        role.max_output_tokens,
+                        role.maximum_output_tokens_per_call,
                     ]
                 ),
                 retry_policy_id="no-retry-v1",
@@ -1093,50 +1511,48 @@ def _budget(
     plan: ResolvedPlan,
     binding_by_role_id: Mapping[str, ModelRoleBindingV2],
 ) -> BudgetSpecV4:
-    limits = plan.limits
     case_count, source_count = _workload_counts(cell.selection)
-    provider_role_id = _PROVIDER_ROLE_BY_CELL[cell.cell_id]
+    provider_role_id = cell.producer_role_id
+    retry_multiplier = plan.execution.max_retries_per_operation + 1
+    operation_timeout_seconds = plan.execution.operation_timeout_seconds
     role_attempts: dict[str, int] = {
         provider_role_id: source_count,
         "embedding": source_count + case_count,
-        "answer": case_count,
-        "judge": case_count,
+        "answer": case_count * retry_multiplier,
+        "judge": case_count * retry_multiplier,
     }
-    input_weights: dict[str, int] = {
-        provider_role_id: 50,
-        "embedding": 25,
-        "answer": 15,
-        "judge": 10,
-    }
-    output_weights: dict[str, int] = {
-        provider_role_id: 50,
+    output_tokens_per_attempt: dict[str, int] = {
+        provider_role_id: 0,
         "embedding": 0,
-        "answer": 25,
-        "judge": 25,
+        "answer": LME_ANSWER_MAX_OUTPUT_TOKENS,
+        "judge": LME_JUDGE_MAX_OUTPUT_TOKENS,
     }
-    cost_per_budgeted_attempt = Decimal(limits.max_cost) / limits.max_budgeted_attempts
     role_ceilings_list: list[RoleBudgetCeiling] = []
     for role_id, binding in binding_by_role_id.items():
         max_attempts = role_attempts[role_id]
-        role_cost = cost_per_budgeted_attempt * max_attempts
         owns_wall = role_id in {"answer", "judge"}
-        max_wall = Decimal(max_attempts * limits.model_call_timeout_seconds if owns_wall else 0)
+        max_wall = Decimal(max_attempts * operation_timeout_seconds if owns_wall else 0)
+        output_tokens = output_tokens_per_attempt[role_id] * max_attempts
         role_ceilings_list.append(
             RoleBudgetCeiling(
                 role_binding_id=binding.binding_id,
                 max_attempts=max_attempts,
-                max_input_tokens=limits.max_input_tokens * input_weights[role_id] // 100,
-                max_output_tokens=limits.max_output_tokens * output_weights[role_id] // 100,
+                max_input_tokens=0,
+                max_output_tokens=output_tokens,
                 max_dispatch_wall_seconds=max_wall,
-                max_cost=role_cost,
-                currency=limits.currency,
+                max_cost=None,
+                currency=None,
                 price_snapshot_id=None,
                 resource_ceilings=(
-                    ResourceBudgetCeiling(
-                        dimension_id="provider_request_wall_seconds_v1",
-                        maximum=max_wall,
-                        unit="seconds",
-                    ),
+                    (
+                        ResourceBudgetCeiling(
+                            dimension_id="provider_request_wall_seconds_v1",
+                            maximum=max_wall,
+                            unit="seconds",
+                        ),
+                    )
+                    if owns_wall
+                    else ()
                 ),
                 provider_budget_cap=ProviderBudgetCap(
                     provider=binding.provider or "provider",
@@ -1161,12 +1577,12 @@ def _budget(
     }
     operations: list[ProviderOperationBudgetCeiling] = []
     routes: list[DispatchBudgetRoute] = []
-    producer_id = binding_by_role_id[_PROVIDER_ROLE_BY_CELL[cell.cell_id]].binding_id
+    producer_id = binding_by_role_id[provider_role_id].binding_id
     embedding_id = binding_by_role_id["embedding"].binding_id
     for stage in _MEMORY_STAGES:
         operation_id = f"{cell.adapter_profile_id}:{stage}"
         max_attempts = operation_attempts[stage]
-        max_wall = Decimal(max_attempts * limits.memory_operation_timeout_seconds)
+        max_wall = Decimal(max_attempts * operation_timeout_seconds)
         request_seconds = ResourceBudgetCeiling(
             dimension_id="provider_request_wall_seconds_v1",
             maximum=max_wall,
@@ -1231,27 +1647,47 @@ def _budget(
                 {"route_hash": dispatch_budget_route_hash(route_fields), **route_fields}
             )
         )
+    maximum_operation_attempts = (
+        sum(operation_attempts.values()) + role_attempts["answer"] + role_attempts["judge"]
+    )
+    maximum_owner_authorizations = sum(operation_attempts.values()) + sum(role_attempts.values())
+    if (
+        maximum_operation_attempts != plan.execution.per_cell_max_operation_attempt_count
+        or maximum_owner_authorizations != plan.execution.per_cell_max_owner_authorization_count
+    ):
+        raise LiveConfigurationError(
+            "derived live operation authorization differs from the resolved plan"
+        )
+    maximum_output_tokens = sum(
+        output_tokens_per_attempt[role_id] * max_attempts
+        for role_id, max_attempts in role_attempts.items()
+    )
+    maximum_dispatch_wall_seconds = Decimal(maximum_operation_attempts * operation_timeout_seconds)
     budget_fields = {
-        "budget_id": canonical_sha256(["oamb-live-budget-initial-v1", run_id]),
+        "budget_id": canonical_sha256(["oamb-live-operation-authorization-initial-v1", run_id]),
         "scope_kind": BudgetScopeKindV3.RUN,
         "scope_id": run_id,
-        "max_attempts": limits.max_budgeted_attempts,
-        "max_input_tokens": limits.max_input_tokens,
-        "max_output_tokens": limits.max_output_tokens,
-        "max_dispatch_wall_seconds": Decimal(limits.total_wall_time_seconds),
-        "max_cost": Decimal(limits.max_cost),
-        "currency": limits.currency,
+        "max_attempts": maximum_owner_authorizations,
+        "max_input_tokens": 0,
+        "max_output_tokens": maximum_output_tokens,
+        "max_dispatch_wall_seconds": maximum_dispatch_wall_seconds,
+        "max_cost": None,
+        "currency": None,
         "resource_ceilings": (
             ResourceBudgetCeiling(
                 dimension_id="provider_request_wall_seconds_v1",
-                maximum=Decimal(limits.total_wall_time_seconds),
+                maximum=maximum_dispatch_wall_seconds,
                 unit="seconds",
             ),
         ),
         "role_ceilings": role_ceilings,
         "provider_operation_ceilings": tuple(operations),
         "dispatch_routes": tuple(routes),
-        "stop_condition_ids": ("budget_exhausted", "identity_drift", "unknown_outcome"),
+        "stop_condition_ids": (
+            "operation_authorization_exhausted",
+            "identity_drift",
+            "unknown_outcome",
+        ),
     }
     return BudgetSpecV4.model_validate(
         {"budget_hash": budget_spec_v4_hash(budget_fields), **budget_fields}
@@ -1263,6 +1699,8 @@ def _workload_counts(selection: str) -> tuple[int, int]:
         return len(LME6_EXPECTED_QUESTION_IDS), LME6_EXPECTED_SESSION_COUNT
     if selection == "lme30":
         return len(LME30_EXPECTED_QUESTION_IDS), LME30_EXPECTED_SESSION_COUNT
+    if selection == "lme60":
+        return len(LME60_EXPECTED_QUESTION_IDS), LME60_EXPECTED_SESSION_COUNT
     raise LiveConfigurationError(f"unsupported live workload selection: {selection}")
 
 
@@ -1270,11 +1708,16 @@ __all__ = [
     "LiveCell",
     "LiveCellCompletion",
     "LiveCellExecutionError",
+    "LiveCellOutcome",
     "LiveConfigurationError",
+    "build_bounded_profile_evidence",
     "build_live_cell",
     "execute_live_cell",
     "execute_live_cells",
     "load_live_environment",
     "load_live_provider_evidence",
+    "live_readiness_environment_hash",
+    "resolve_live_question_case_ids",
     "select_live_cells",
+    "validate_live_readiness_receipt",
 ]

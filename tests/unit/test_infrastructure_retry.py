@@ -154,7 +154,38 @@ async def test_retry_events_are_durable_before_one_two_four_backoffs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_exhaustion_records_final_rejection_and_honors_global_budget() -> None:
+async def test_configured_retry_count_beyond_seed_backoffs_is_honored() -> None:
+    calls = 0
+    events: list[tuple[int, int | None]] = []
+
+    async def call(_supplier_call_ordinal: int) -> str:
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            raise _rejection(calls)
+        return "accepted"
+
+    async def persist(
+        _rejection_value: ModelSupplierRateLimitRejection,
+        call_ordinal: int,
+        backoff_seconds: int | None,
+    ) -> None:
+        events.append((call_ordinal, backoff_seconds))
+
+    result = await execute_with_infrastructure_retry(
+        call,
+        persist_rejection=persist,
+        sleep=lambda _seconds: asyncio.sleep(0),
+        controller=InfrastructureRetryController(maximum_total_retries=4),
+    )
+
+    assert result == "accepted"
+    assert calls == 5
+    assert events == [(1, 1), (2, 2), (3, 4), (4, 8)]
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_records_final_rejection_and_honors_operation_limit() -> None:
     calls = 0
     events: list[tuple[int, int | None]] = []
 
@@ -170,7 +201,7 @@ async def test_retry_exhaustion_records_final_rejection_and_honors_global_budget
     ) -> None:
         events.append((call_ordinal, backoff_seconds))
 
-    with pytest.raises(InfrastructureRetryExhausted, match="global retry budget"):
+    with pytest.raises(InfrastructureRetryExhausted, match="operation retry limit"):
         await execute_with_infrastructure_retry(
             call,
             persist_rejection=persist,
@@ -183,7 +214,7 @@ async def test_retry_exhaustion_records_final_rejection_and_honors_global_budget
 
 
 @pytest.mark.asyncio
-async def test_supplier_internal_retries_consume_the_global_retry_budget() -> None:
+async def test_supplier_internal_retries_consume_the_operation_retry_limit() -> None:
     calls = 0
     events: list[tuple[int, int | None, int]] = []
 
@@ -205,7 +236,7 @@ async def test_supplier_internal_retries_consume_the_global_retry_budget() -> No
             )
         )
 
-    with pytest.raises(InfrastructureRetryExhausted, match="global retry budget"):
+    with pytest.raises(InfrastructureRetryExhausted, match="operation retry limit"):
         await execute_with_infrastructure_retry(
             call,
             persist_rejection=persist,

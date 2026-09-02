@@ -61,6 +61,8 @@ from oamb.workloads.visible_evidence import (
 
 LME30_WORKLOAD_ID = "lme30-native-smoke-plus-v1"
 LME6_MANIFEST_ID = "lme6-live-smoke-v1"
+LME60_WORKLOAD_ID = "lme60-balanced-v1"
+LME60_MANIFEST_ID = f"{LME60_WORKLOAD_ID}-manifest-v1"
 LME_DATASET_ID = "longmemeval-s-cleaned"
 LME_DATASET_REVISION = "98d7416c24c778c2fee6e6f3006e7a073259d48f"
 LME_SOURCE_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
@@ -77,6 +79,7 @@ LME_DATASET_CITATION = (
 LME_DATASET_MANIFEST_HASH = "098fd29291256d5e09dc82db146ee90fadc267e6061c33167bff0b54b98c2a85"
 LME30_CASE_MANIFEST_HASH = "d7db55fb14b85ae6ae25ff83e7343e6a1a5a801257ce7c8f29c5f14729bd4ebf"
 LME6_CASE_MANIFEST_HASH = "3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4"
+LME60_CASE_MANIFEST_HASH = "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
 LME_ANSWER_PROMPT_PACK_ID = "oamb-lme-answer-v1"
 LME_JUDGE_PROMPT_PACK_ID = "oamb-lme-judge-v1"
 LME_ANSWER_OUTPUT_CONTRACT_ID = "lme-answer-text-v1"
@@ -131,8 +134,72 @@ LME6_EXPECTED_QUESTION_IDS = (
     "6b168ec8",
     "a3045048",
 )
+LME60_EXPECTED_QUESTION_IDS = (
+    "72e3ee87",
+    "22d2cb42",
+    "e61a7584",
+    "eace081b",
+    "8fb83627",
+    "f685340e_abs",
+    "07741c44",
+    "f685340e",
+    "89941a93",
+    "031748ae_abs",
+    "21d02d0d",
+    "gpt4_a56e767c",
+    "gpt4_15e38248",
+    "4bc144e2",
+    "157a136e",
+    "8e91e7d9",
+    "gpt4_59c863d7",
+    "2ce6a0f2",
+    "ba358f49",
+    "cc06de0d",
+    "e3fc4d6e",
+    "41275add",
+    "fca762bc",
+    "488d3006",
+    "8cf51dda",
+    "352ab8bd",
+    "3e321797",
+    "eaca4986",
+    "f523d9fe",
+    "71a3fd6b",
+    "32260d93",
+    "1d4e3b97",
+    "0a34ad58",
+    "07b6f563",
+    "d6233ab6",
+    "1c0ddc50",
+    "b0479f84",
+    "caf03d32",
+    "d24813b1",
+    "75832dbd",
+    "6b168ec8",
+    "bc8a6e93_abs",
+    "ccb36322",
+    "8e9d538c",
+    "c14c00dd",
+    "7527f7e2",
+    "c960da58",
+    "6f9b354f",
+    "86b68151",
+    "caf9ead2",
+    "a3045048",
+    "gpt4_ec93e27f",
+    "gpt4_8279ba03",
+    "gpt4_4edbafa2",
+    "b46e15ed",
+    "gpt4_18c2b244",
+    "dcfa8644",
+    "gpt4_c27434e8_abs",
+    "gpt4_fa19884d",
+    "a3838d2b",
+)
 LME30_EXPECTED_SESSION_COUNT = 1_418
 LME6_EXPECTED_SESSION_COUNT = 300
+LME60_EXPECTED_SESSION_COUNT = 2_826
+LME60_EXPECTED_ANSWER_SESSION_REFERENCE_COUNT = 103
 
 _RAW_TIMESTAMP = re.compile(
     r"(?P<year>[0-9]{4})/(?P<month>[0-9]{2})/(?P<day>[0-9]{2}) "
@@ -345,6 +412,30 @@ def select_lme30(rows: Sequence[LongMemEvalRow]) -> tuple[LongMemEvalRow, ...]:
     return result
 
 
+def select_lme60(rows: Sequence[LongMemEvalRow]) -> tuple[LongMemEvalRow, ...]:
+    rows_by_id = {row.question_id: row for row in rows}
+    if len(rows_by_id) != len(rows):
+        raise ValueError("LongMemEval candidate rows contain duplicate question IDs")
+    missing = tuple(
+        question_id for question_id in LME60_EXPECTED_QUESTION_IDS if question_id not in rows_by_id
+    )
+    if missing:
+        raise ValueError(f"LongMemEval source is missing frozen LME-60 case: {missing[0]}")
+    selected = tuple(rows_by_id[question_id] for question_id in LME60_EXPECTED_QUESTION_IDS)
+    for type_index, question_type in enumerate(QUESTION_TYPES):
+        start = type_index * 10
+        if any(row.question_type != question_type for row in selected[start : start + 10]):
+            raise ValueError(f"LongMemEval LME-60 type membership drifted: {question_type}")
+    if sum(len(row.sessions) for row in selected) != LME60_EXPECTED_SESSION_COUNT:
+        raise ValueError("LongMemEval selected session count differs from 2,826")
+    if (
+        sum(len(row.answer_session_ids) for row in selected)
+        != LME60_EXPECTED_ANSWER_SESSION_REFERENCE_COUNT
+    ):
+        raise ValueError("LongMemEval LME-60 answer-session reference count drifted")
+    return selected
+
+
 def build_lme30_bundle(source_path: Path) -> LongMemEvalBundle:
     rows = load_longmemeval_rows(source_path)
     selected = select_lme30(rows)
@@ -353,6 +444,28 @@ def build_lme30_bundle(source_path: Path) -> LongMemEvalBundle:
     if bundle.case_manifest.manifest_hash != LME30_CASE_MANIFEST_HASH:
         raise ValueError("LongMemEval case manifest differs from the frozen LME-30 hash")
     return bundle
+
+
+def build_lme60_bundle(source_path: Path) -> LongMemEvalBundle:
+    rows = load_longmemeval_rows(source_path)
+    selected = select_lme60(rows)
+    dataset = _dataset_manifest(source_path)
+    bundle = _build_bundle(dataset, selected, workload_id=LME60_WORKLOAD_ID)
+    if bundle.case_manifest.manifest_id != LME60_MANIFEST_ID:
+        raise ValueError("LongMemEval LME-60 manifest ID drifted")
+    if bundle.case_manifest.manifest_hash != LME60_CASE_MANIFEST_HASH:
+        raise ValueError("LongMemEval case manifest differs from the frozen LME-60 hash")
+    return bundle
+
+
+def build_longmemeval_bundle(source_path: Path, selection: str) -> LongMemEvalBundle:
+    if selection == "lme6":
+        return build_lme6_bundle(build_lme30_bundle(source_path))
+    if selection == "lme30":
+        return build_lme30_bundle(source_path)
+    if selection == "lme60":
+        return build_lme60_bundle(source_path)
+    raise ValueError(f"unsupported LongMemEval selection: {selection}")
 
 
 def build_lme6_bundle(full: LongMemEvalBundle) -> LongMemEvalBundle:
@@ -786,7 +899,7 @@ def _build_bundle(
                 source_unit_id=canonical_sha256(
                     [
                         "oamb-lme-source-unit-v1",
-                        LME30_WORKLOAD_ID,
+                        workload_id,
                         row.question_id,
                         session.session_id,
                         ordinal,

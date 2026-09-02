@@ -13,8 +13,7 @@ PROJECT_ATTESTATION="$RUNTIME_DIR/provider-project.attestation"
 LIFECYCLE_LOCK="$RUNTIME_DIR/provider-lifecycle.lock"
 LIFECYCLE_LOCK_HELD=false
 OPENVIKING_QUIESCED=false
-MODEL_READINESS_RESERVED_CALLS=5
-MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS=240
+MODEL_READINESS_RESERVED_CALLS=7
 TARGET_PROVIDER_MODEL=deepseek-v4-flash
 
 # Public, tracked values only.
@@ -69,6 +68,12 @@ check_source_checkout() {
         die "Mem0 checkout lacks formal tag v${MEM0_VERSION}"
     [ "$actual_commit" = "$MEM0_COMMIT" ] || die "Mem0 tag v${MEM0_VERSION} resolves to $actual_commit"
     git -C "$checkout" cat-file -e "${MEM0_COMMIT}^{commit}" || die "Mem0 commit is unavailable"
+}
+
+check_retry_guard() {
+    actual=$(shasum -a 256 "$ROOT/retry-guard/sitecustomize.py" | awk '{print $1}')
+    [ "$actual" = "$RETRY_GUARD_SHA256" ] || \
+        die "provider internal-retry guard has unexpected digest: $actual"
 }
 
 check_ports() {
@@ -165,6 +170,7 @@ doctor_build() {
     check_tools
     check_env_file
     check_source_checkout
+    check_retry_guard
 }
 
 doctor_full() {
@@ -363,6 +369,12 @@ verify_services() {
     jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
         '.model == $target_model and .reasoning_effort == "low"' \
         "$proof_dir/hindsight-model-config.json" >/dev/null
+    compose exec -T hindsight python -c \
+        'import json,openai; from hindsight_api.config import get_config; c=get_config(); print(json.dumps({"llm_max_retries":c.llm_max_retries,"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT,"retain_llm_max_retries":c.retain_llm_max_retries,"worker_max_retries":c.worker_max_retries},sort_keys=True,separators=(",",":")))' \
+        > "$proof_dir/hindsight-retry-config.json"
+    jq -e '.llm_max_retries == 0 and .retain_llm_max_retries == 0 and
+            .worker_max_retries == 0 and .openai_sdk_max_retries == 0' \
+        "$proof_dir/hindsight-retry-config.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
         "http://127.0.0.1:$mem0_port/openapi.json" > "$proof_dir/mem0-openapi.json"
     jq -e '.paths["/memories"] and .paths["/search"]' \
@@ -389,6 +401,11 @@ verify_services() {
            .llm.config.reasoning_effort == "low" and
            .llm.config.is_reasoning_model == true' \
         "$proof_dir/mem0-config-redacted.json" >/dev/null
+    compose exec -T mem0 python -c \
+        'import json,openai; print(json.dumps({"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT},sort_keys=True,separators=(",",":")))' \
+        > "$proof_dir/mem0-retry-config.json"
+    jq -e '.openai_sdk_max_retries == 0' \
+        "$proof_dir/mem0-retry-config.json" >/dev/null
     "$ROOT/openviking/bootstrap.sh" "$ROOT" "$ENV_FILE" \
         "$proof_dir/openviking-auth-identity.json"
     compose exec -T openviking python -c \
@@ -398,6 +415,12 @@ verify_services() {
           '.model == $target_model and .reasoning_effort == "low" and
            .provider == "openai"' \
         "$proof_dir/openviking-model-config.json" >/dev/null
+    compose exec -T openviking python -c \
+        'import json,openai; import openviking.session.session as s; from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton; c=OpenVikingConfigSingleton.get_instance(); print(json.dumps({"embedding_max_retries":c.embedding.max_retries,"memory_extraction_max_retries":s._MEMORY_EXTRACTION_MAX_RETRIES,"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT,"vlm_max_retries":c.vlm.max_retries},sort_keys=True,separators=(",",":")))' \
+        > "$proof_dir/openviking-retry-config.json"
+    jq -e '.embedding_max_retries == 0 and .memory_extraction_max_retries == 0 and
+            .openai_sdk_max_retries == 0 and .vlm_max_retries == 0' \
+        "$proof_dir/openviking-retry-config.json" >/dev/null
     trap 'restore_openviking_on_exit $?' 0
     OPENVIKING_QUIESCED=true
     compose stop openviking
@@ -426,41 +449,44 @@ probe_openai_chat() {
     base_url=$2
     api_key=$3
     model=$4
+    thinking_effort=$5
     safe_label=$(printf '%s' "$label" | tr -c 'a-z0-9-' '-')
     header_file="$RUNTIME_DIR/$safe_label-header"
     request_file="$RUNTIME_DIR/$safe_label-request.json"
     response_file="$RUNTIME_DIR/$safe_label-response.json"
     printf 'Authorization: Bearer %s\n' "$api_key" > "$header_file"
     chmod 600 "$header_file"
-    jq -n --arg model "$model" \
+    jq -n --arg model "$model" --arg effort "$thinking_effort" \
         '{model: $model, messages: [{role: "user", content: "Reply with OK."}],
-          temperature: 0, max_tokens: 1, reasoning_effort: "low"}' \
+          temperature: 0, max_tokens: 16, reasoning_effort: $effort}' \
         > "$request_file"
     record_model_dispatch "$label"
-    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 60 \
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 \
+        --max-time "$READINESS_OPERATION_TIMEOUT_SECONDS" \
         -H "@$header_file" -H 'Content-Type: application/json' \
         --data-binary "@$request_file" "${base_url%/}/chat/completions" > "$response_file"
-    jq -e '.choices | type == "array" and length >= 1' "$response_file" >/dev/null || \
+    python3 "$ROOT/lib/readiness_response.py" chat "$response_file" "$model" || \
         die "$label model probe returned an invalid response"
     record_model_terminal "$label"
 }
 
 create_model_readiness_attempt() {
     project=$1
-    budget_hash=$2
+    plan_hash=$2
+    operation_timeout_seconds=$3
     READINESS_ATTEMPT_FILE="$RUNTIME_DIR/model-readiness-attempt.json"
     claim="$RUNTIME_DIR/model-readiness-attempt.claim"
     mkdir "$claim" 2>/dev/null || \
         die "model-readiness attempt already exists; use a new provider project"
     temporary="$READINESS_ATTEMPT_FILE.partial.$$"
-    jq -n --arg project "$project" --arg budget "$budget_hash" \
+    jq -n --arg project "$project" --arg plan "$plan_hash" \
         --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --argjson calls "$MODEL_READINESS_RESERVED_CALLS" \
-        --argjson wall "$MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS" \
+        --argjson timeout "$operation_timeout_seconds" \
         '{schema_version: "oamb-provider-model-readiness-attempt-v1",
-          provider_project: $project, budget_sha256: $budget, started_at_utc: $started,
+          provider_project: $project, resolved_plan_hash: $plan, started_at_utc: $started,
           calls_reserved: $calls, calls_dispatched: 0,
-          max_dispatch_wall_seconds: $wall, attempts: [],
+          operation_timeout_seconds: $timeout, attempts: [],
           billing_complete: false, cost_usd: null, memory_state_created: false}' \
         > "$temporary"
     mv "$temporary" "$READINESS_ATTEMPT_FILE"
@@ -498,28 +524,66 @@ record_model_terminal() {
 }
 
 verify_model_readiness() {
-    [ "${1:-}" = "--budget" ] && [ -n "${2:-}" ] && [ "$#" -eq 2 ] || \
-        die "verify --model-readiness requires --budget FILE"
-    budget_file=$2
-    [ -f "$budget_file" ] || die "model-readiness budget file is absent"
+    [ "${1:-}" = "--resolved-plan" ] && [ -n "${2:-}" ] && \
+        [ "${3:-}" = "--model-env" ] && [ -n "${4:-}" ] && [ "$#" -eq 4 ] || \
+        die "verify --model-readiness requires --resolved-plan FILE --model-env FILE"
+    resolved_plan=$2
+    model_env=$4
+    [ -f "$resolved_plan" ] || die "resolved plan is absent"
+    [ -f "$model_env" ] || die "model environment file is absent"
+    model_env_mode=$(read_file_mode "$model_env" || true)
+    [ "$model_env_mode" = "600" ] || die "$model_env must have mode 0600"
+    validate_env_file "$model_env" || die "$model_env uses unsupported dotenv syntax"
+    answer_base_url=$(read_env_value "$model_env" DEEPSEEK_BASE_URL) || \
+        die "DEEPSEEK_BASE_URL is missing from $model_env"
+    answer_api_key=$(read_env_value "$model_env" DEEPSEEK_API_KEY) || \
+        die "DEEPSEEK_API_KEY is missing from $model_env"
+    [ -n "$answer_base_url" ] && [ -n "$answer_api_key" ] || \
+        die "answer and judge model values must be non-empty"
     doctor_full
+    need_command uv
     acquire_lifecycle_lock
     verify_project_attestation
     project=$(env_value OAMB_PROVIDER_PROJECT)
-    budget_hash=$(shasum -a 256 "$budget_file" | awk '{print $1}')
-    jq -e --argjson calls "$MODEL_READINESS_RESERVED_CALLS" \
-        --argjson wall "$MODEL_READINESS_MAX_DISPATCH_WALL_SECONDS" \
-        '.schema_version == "oamb-provider-model-readiness-budget-v1" and
-         (.max_model_calls | type == "number" and floor == . and . >= $calls) and
-         (.max_model_dispatch_wall_seconds | type == "number" and . >= $wall) and
-         .max_total_cost_usd == null and .cost_metering == "unavailable"' \
-        "$budget_file" >/dev/null || die "model-readiness budget is malformed or too small"
+    readiness_plan="$RUNTIME_DIR/model-readiness-plan.json"
+    [ ! -e "$readiness_plan" ] || \
+        die "model-readiness plan already exists; use a new provider project"
+    uv --directory "$ROOT/.." run --locked python "$ROOT/lib/readiness_plan.py" \
+        "$resolved_plan" "$ENV_FILE" "$model_env" "$RUNTIME_DIR" \
+        > "$readiness_plan" || die "resolved plan or readiness environment is invalid"
+    plan_hash=$(jq -er '.resolved_plan_hash' "$readiness_plan") || \
+        die "resolved plan hash is unavailable"
+    READINESS_OPERATION_TIMEOUT_SECONDS=$(jq -er \
+        '.operation_timeout_seconds | select(type == "number" and floor == . and . > 0)' \
+        "$readiness_plan") || die "resolved operation timeout is invalid"
+    readiness_environment_hash=$(jq -er \
+        '.environment_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+        "$readiness_plan") || die "resolved readiness environment is invalid"
+    role_value() {
+        role_id=$1
+        field=$2
+        jq -er --arg role "$role_id" --arg field "$field" \
+            '.model_roles | map(select(.role_id == $role)) |
+             select(length == 1) | .[0][$field]' "$readiness_plan"
+    }
+    [ "$(role_value hindsight_extraction configured_model)" = \
+        "$(env_value OAMB_HINDSIGHT_LLM_MODEL)" ] || \
+        die "resolved Hindsight model differs from provider configuration"
+    [ "$(role_value mem0_extraction configured_model)" = \
+        "$(env_value OAMB_MEM0_LLM_MODEL)" ] || \
+        die "resolved Mem0 model differs from provider configuration"
+    [ "$(role_value openviking_semantic_understanding configured_model)" = \
+        "$(env_value OAMB_OPENVIKING_VLM_MODEL)" ] || \
+        die "resolved OpenViking model differs from provider configuration"
+    [ "$(role_value embedding configured_model)" = "$(env_value OAMB_EMBEDDING_MODEL)" ] || \
+        die "resolved embedding model differs from provider configuration"
     for service in hindsight mem0-postgres mem0 mem0-inspector openviking; do
         wait_for_health "$service"
     done
     mkdir -p "$RUNTIME_DIR"
     umask 077
-    create_model_readiness_attempt "$project" "$budget_hash"
+    create_model_readiness_attempt "$project" "$plan_hash" \
+        "$READINESS_OPERATION_TIMEOUT_SECONDS"
     embedding_request="$RUNTIME_DIR/embedding-ready-request.json"
     embedding_response="$RUNTIME_DIR/embedding-ready-response.json"
     jq -n --arg model "$(env_value OAMB_EMBEDDING_MODEL)" \
@@ -528,41 +592,69 @@ verify_model_readiness() {
     case "$embedding_base" in
         http://host.docker.internal:*) embedding_base="http://127.0.0.1:${embedding_base#http://host.docker.internal:}" ;;
     esac
-    record_model_dispatch controlled-embedding
-    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 30 \
+    record_model_dispatch embedding
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 \
+        --max-time "$READINESS_OPERATION_TIMEOUT_SECONDS" \
         -H 'Authorization: Bearer oamb-local-embedding' -H 'Content-Type: application/json' \
         --data-binary "@$embedding_request" "${embedding_base%/}/embeddings" > "$embedding_response"
-    jq -e '.data[0].embedding | type == "array" and length == 1024' "$embedding_response" >/dev/null
-    record_model_terminal controlled-embedding
-    probe_openai_chat hindsight-llm \
+    python3 "$ROOT/lib/readiness_response.py" embedding "$embedding_response" \
+        "$(env_value OAMB_EMBEDDING_MODEL)" 1024 || \
+        die "embedding model probe returned an invalid response"
+    record_model_terminal embedding
+    probe_openai_chat hindsight_extraction \
         "$(env_value OAMB_HINDSIGHT_LLM_BASE_URL)" \
         "$(env_value OAMB_HINDSIGHT_LLM_API_KEY)" \
-        "$(env_value OAMB_HINDSIGHT_LLM_MODEL)"
-    probe_openai_chat mem0-llm \
+        "$(role_value hindsight_extraction configured_model)" \
+        "$(role_value hindsight_extraction thinking_effort)"
+    probe_openai_chat mem0_extraction \
         "$(env_value OAMB_MEM0_LLM_BASE_URL)" \
         "$(env_value OAMB_MEM0_LLM_API_KEY)" \
-        "$(env_value OAMB_MEM0_LLM_MODEL)"
-    probe_openai_chat openviking-vlm \
+        "$(role_value mem0_extraction configured_model)" \
+        "$(role_value mem0_extraction thinking_effort)"
+    probe_openai_chat openviking_semantic_understanding \
         "$(env_value OAMB_OPENVIKING_VLM_BASE_URL)" \
         "$(env_value OAMB_OPENVIKING_VLM_API_KEY)" \
-        "$(env_value OAMB_OPENVIKING_VLM_MODEL)"
+        "$(role_value openviking_semantic_understanding configured_model)" \
+        "$(role_value openviking_semantic_understanding thinking_effort)"
+    probe_openai_chat answer "$answer_base_url" "$answer_api_key" \
+        "$(role_value answer configured_model)" "$(role_value answer thinking_effort)"
+    probe_openai_chat judge "$answer_base_url" "$answer_api_key" \
+        "$(role_value judge configured_model)" "$(role_value judge thinking_effort)"
     openviking_port=$(env_value OAMB_OPENVIKING_PORT)
+    openviking_ready_response="$RUNTIME_DIR/openviking-ready-response.json"
     record_model_dispatch openviking-ready
-    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 30 \
-        "http://127.0.0.1:$openviking_port/ready" | jq -e '.status == "ready"' >/dev/null
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 \
+        --max-time "$READINESS_OPERATION_TIMEOUT_SECONDS" \
+        "http://127.0.0.1:$openviking_port/ready" > "$openviking_ready_response"
+    jq -e '.status == "ready"' "$openviking_ready_response" >/dev/null
     record_model_terminal openviking-ready
     receipt="$RUNTIME_DIR/model-readiness-receipt.json"
     [ ! -e "$receipt" ] || die "model-readiness receipt already exists; use a new provider project"
     attempt_hash=$(shasum -a 256 "$READINESS_ATTEMPT_FILE" | awk '{print $1}')
-    jq -n --arg project "$project" --arg budget "$budget_hash" \
+    service_receipts=$(find "$RUNTIME_DIR/service-verification-receipts" \
+        -type f -name '*.json' | wc -l | tr -d ' ')
+    [ "$service_receipts" = "1" ] || die "exactly one service verification receipt is required"
+    service_receipt=$(find "$RUNTIME_DIR/service-verification-receipts" \
+        -type f -name '*.json')
+    service_receipt_hash=$(shasum -a 256 "$service_receipt" | awk '{print $1}')
+    jq -n --arg project "$project" --arg plan "$plan_hash" \
         --arg attempt "$attempt_hash" \
+        --arg service_receipt "$service_receipt_hash" \
+        --arg environment_hash "$readiness_environment_hash" \
         --arg completed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson timeout "$READINESS_OPERATION_TIMEOUT_SECONDS" \
         '{schema_version: "oamb-provider-model-readiness-receipt-v1",
-          provider_project: $project, budget_sha256: $budget, attempt_sha256: $attempt,
-          completed_at_utc: $completed, model_calls_dispatched: 5,
+          provider_project: $project, resolved_plan_hash: $plan,
+          service_verification_receipt_sha256: $service_receipt,
+          attempt_sha256: $attempt, completed_at_utc: $completed,
+          operation_timeout_seconds: $timeout, model_calls_dispatched: 7,
+          role_ids: ["hindsight_extraction","mem0_extraction",
+            "openviking_semantic_understanding","answer","judge","embedding"],
+          provider_internal_retries: 0,
+          environment_hash: $environment_hash,
           billing_complete: false, cost_usd: null,
           memory_state_created: false}' > "$receipt"
-    printf 'verify --model-readiness: PASS (five attempt-bounded probes responded; billing unavailable; receipt preserved)\n'
+    printf 'verify --model-readiness: PASS (all six model roles and OpenViking readiness responded; billing unavailable; receipt preserved)\n'
 }
 
 stop_services() {
@@ -576,7 +668,7 @@ stop_services() {
 }
 
 usage() {
-    printf 'usage: %s {doctor|build|up|verify --services|verify --model-readiness --budget FILE|status|stop}\n' "$0" >&2
+    printf 'usage: %s {doctor|build|up|verify --services|verify --model-readiness --resolved-plan FILE --model-env FILE|status|stop}\n' "$0" >&2
     exit 2
 }
 

@@ -29,7 +29,12 @@ from oamb.contracts.specifications import (
 )
 from oamb.contracts.states import ValidationDisposition
 from oamb.reporting.native_reduce import build_native_accounting_validation_input
-from oamb.workloads.longmemeval import LME6_MANIFEST_ID, LME30_WORKLOAD_ID, LongMemEvalBundle
+from oamb.workloads.longmemeval import (
+    LME6_MANIFEST_ID,
+    LME30_WORKLOAD_ID,
+    LME60_MANIFEST_ID,
+    LongMemEvalBundle,
+)
 from oamb.workloads.memoryagentbench import MAB5_MANIFEST_ID, MAB65_WORKLOAD_ID, MabManifestBundle
 
 NATIVE_RUN_EVIDENCE_PROFILE_ID = "oamb-t8-native-run-evidence-v1"
@@ -43,6 +48,7 @@ NATIVE_RUN_EVIDENCE_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
 
 _WORKLOAD_MANIFEST_IDS = {
     "oamb-t8-workload-lme6-v1": LME6_MANIFEST_ID,
+    "oamb-t8-workload-lme60-v1": LME60_MANIFEST_ID,
     "oamb-t8-workload-lme30-v1": f"{LME30_WORKLOAD_ID}-manifest-v1",
     "oamb-t8-workload-mab5-v1": MAB5_MANIFEST_ID,
     "oamb-t8-workload-mab65-v1": MAB65_WORKLOAD_ID,

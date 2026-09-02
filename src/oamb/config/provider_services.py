@@ -94,17 +94,20 @@ PROFILE_PROOF_FILES = {
         "hindsight-health.json",
         "hindsight-version.json",
         "hindsight-model-config.json",
+        "hindsight-retry-config.json",
     ),
     "mem0-rest-v1": (
         "mem0-openapi.json",
         "mem0-empty-projection.json",
         "mem0-config-redacted.json",
+        "mem0-retry-config.json",
     ),
     "openviking-rest-v1": (
         "openviking-health.json",
         "openviking-auth-identity.json",
         "openviking-storage.json",
         "openviking-model-config.json",
+        "openviking-retry-config.json",
     ),
 }
 
@@ -473,6 +476,13 @@ def _validate_proof_semantics(
         valid = value.get("api_version") == "0.9.2" and isinstance(value.get("features"), dict)
     elif filename == "hindsight-model-config.json":
         valid = value.get("model") == expected_model and value.get("reasoning_effort") == "low"
+    elif filename == "hindsight-retry-config.json":
+        valid = value == {
+            "llm_max_retries": 0,
+            "openai_sdk_max_retries": 0,
+            "retain_llm_max_retries": 0,
+            "worker_max_retries": 0,
+        }
     elif filename == "mem0-openapi.json":
         paths = value.get("paths")
         valid = isinstance(paths, dict) and all(path in paths for path in ("/memories", "/search"))
@@ -503,6 +513,8 @@ def _validate_proof_semantics(
             and llm_config.get("is_reasoning_model") is True
             and value.get("reranker") is None
         )
+    elif filename == "mem0-retry-config.json":
+        valid = value == {"openai_sdk_max_retries": 0}
     elif filename == "openviking-health.json":
         valid = (
             value.get("status") == "ok"
@@ -538,6 +550,13 @@ def _validate_proof_semantics(
             and value.get("model") == expected_model
             and value.get("reasoning_effort") == "low"
         )
+    elif filename == "openviking-retry-config.json":
+        valid = value == {
+            "embedding_max_retries": 0,
+            "memory_extraction_max_retries": 0,
+            "openai_sdk_max_retries": 0,
+            "vlm_max_retries": 0,
+        }
     if not valid:
         raise _semantic_error(filename)
 
