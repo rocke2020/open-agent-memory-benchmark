@@ -19,7 +19,11 @@ def validate_chat_response(document: object, expected_model: str) -> None:
     choices = document.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise ReadinessResponseError("chat response has no usable choice")
-    message = choices[0].get("message")
+    choice = choices[0]
+    finish_reason = choice.get("finish_reason")
+    if not isinstance(finish_reason, str) or finish_reason == "length":
+        raise ReadinessResponseError("chat response did not finish with visible content")
+    message = choice.get("message")
     if not isinstance(message, dict):
         raise ReadinessResponseError("chat response has no assistant message")
     content = message.get("content")

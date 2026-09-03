@@ -135,13 +135,23 @@ _AUDIT_FIELDS = frozenset(
         "audited_empty_response",
     }
 )
-_REFERENCE_CONFIGURATION = {
-    "api_version": "v1.1",
-    "vector_store_provider": "qdrant",
-    "collection_name": "oamb_memories",
-    "embedding_model": "qwen3-embedding:0.6b",
-    "embedding_dimension": 1024,
-    "reranker": None,
+_REFERENCE_CONFIGURATIONS = {
+    MEM0_REST_PROFILE.profile_id: {
+        "api_version": "v1.1",
+        "vector_store_provider": "pgvector",
+        "collection_name": "oamb_memories",
+        "embedding_model": "qwen3-embedding:0.6b",
+        "embedding_dimension": 1024,
+        "reranker": None,
+    },
+    MEM0_SDK_PROFILE.profile_id: {
+        "api_version": "v1.1",
+        "vector_store_provider": "qdrant",
+        "collection_name": "oamb_memories",
+        "embedding_model": "qwen3-embedding:0.6b",
+        "embedding_dimension": 1024,
+        "reranker": None,
+    },
 }
 _REFERENCE_AUDIT = {
     "entity_store_control": "implicit",
@@ -356,8 +366,12 @@ def parse_reference_profile_verdict(
     for field_name, expected_value in expected_identity.items():
         if document[field_name] != expected_value:
             raise ValueError(f"profile verdict {field_name} does not match the exact profile")
-    if configuration != _REFERENCE_CONFIGURATION:
+    expected_configuration = _REFERENCE_CONFIGURATIONS[expected_profile.profile_id]
+    if configuration != expected_configuration:
         raise ValueError("configuration values do not match the exact profile")
+    vector_store_provider = expected_configuration["vector_store_provider"]
+    if not isinstance(vector_store_provider, str):
+        raise RuntimeError("reference vector-store provider must be a string")
     if audit != _REFERENCE_AUDIT:
         raise ValueError("audit values do not match the exact profile")
     raw_reasons = document["unsupported_reason_codes"]
@@ -366,7 +380,7 @@ def parse_reference_profile_verdict(
     return Mem0ReferenceProfileVerdict(
         profile=expected_profile,
         api_version="v1.1",
-        vector_store_provider="qdrant",
+        vector_store_provider=vector_store_provider,
         collection_name="oamb_memories",
         embedding_model="qwen3-embedding:0.6b",
         embedding_dimension=1024,

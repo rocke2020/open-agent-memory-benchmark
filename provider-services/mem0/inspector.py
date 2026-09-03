@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated, fixed-collection, read-only Qdrant projection service."""
+"""Authenticated, fixed-table, read-only PostgreSQL projection service."""
 
 from __future__ import annotations
 
@@ -8,91 +8,210 @@ import hmac
 import json
 import os
 import re
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NamedTuple
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
-from urllib.request import Request, urlopen
-
 
 RUN_ID_RE = re.compile(r"^[0-9a-f]{64}$")
-MAX_QDRANT_RESPONSE_BYTES = 32 * 1024 * 1024
-SCROLL_PAGE_SIZE = 256
-QDRANT_TIMEOUT_SECONDS = 15
+COLLECTION_NAME = "oamb_memories"
+TABLE_NAME = "public.oamb_memories"
+MAX_INSPECTOR_RESPONSE_BYTES = 32 * 1024 * 1024
+PAGE_SIZE = 256
+PAGE_QUERY_LIMIT = PAGE_SIZE + 1
+STATEMENT_TIMEOUT_MILLISECONDS = 15_000
 
 
 class InspectorConfig(NamedTuple):
     listen_host: str
     listen_port: int
     api_key: str
-    qdrant_url: str
-    qdrant_api_key: str
-    collection: str
+    postgres_host: str
+    postgres_port: int
+    postgres_database: str
+    postgres_user: str
+    postgres_password: str
 
 
 class BackendProtocolError(Exception):
-    """The fixed Qdrant backend returned an invalid projection response."""
+    """The fixed PostgreSQL backend returned invalid projection data."""
 
 
 def _json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _run_filter(run_id: str) -> dict[str, object]:
-    return {"must": [{"key": "run_id", "match": {"value": run_id}}]}
+def _parse_uuid(value: object) -> str:
+    if not isinstance(value, str):
+        raise BackendProtocolError("projection ID is not a UUID string")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as exc:
+        raise BackendProtocolError("projection ID is not a UUID") from exc
+    canonical = str(parsed)
+    if value != canonical:
+        raise BackendProtocolError("projection ID is not canonical")
+    return canonical
 
 
-def _decode_cursor(raw_cursor: str | None) -> object | None:
+def _decode_cursor(raw_cursor: str | None) -> str | None:
     if raw_cursor is None:
         return None
     try:
         padding = "=" * (-len(raw_cursor) % 4)
-        decoded = base64.urlsafe_b64decode(raw_cursor + padding)
+        decoded = base64.b64decode(
+            raw_cursor + padding,
+            altchars=b"-_",
+            validate=True,
+        )
         value = json.loads(decoded)
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("cursor must be an OAMB inspector cursor") from exc
-    if isinstance(value, (dict, list, bool)) or value is None:
-        raise ValueError("cursor payload must be a string or number")
+    if not isinstance(value, str):
+        raise ValueError("cursor payload must be a UUID string")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as exc:
+        raise ValueError("cursor payload must be a UUID string") from exc
+    if value != str(parsed):
+        raise ValueError("cursor payload must be a canonical UUID string")
     return value
 
 
-def _encode_cursor(value: object | None) -> str | None:
+def _encode_cursor(value: str | None) -> str | None:
     if value is None:
         return None
     return base64.urlsafe_b64encode(_json_bytes(value)).decode("ascii").rstrip("=")
 
 
-def _qdrant_json(
-    config: InspectorConfig, method: str, path: str, body: dict[str, object] | None = None
-) -> dict[str, object]:
-    request = Request(
-        config.qdrant_url.rstrip("/") + path,
-        data=None if body is None else _json_bytes(body),
-        method=method,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "api-key": config.qdrant_api_key,
-        },
+def _postgres_connection(config: InspectorConfig):
+    import psycopg
+
+    return psycopg.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_database,
+        user=config.postgres_user,
+        password=config.postgres_password,
+        connect_timeout=5,
     )
-    with urlopen(request, timeout=QDRANT_TIMEOUT_SECONDS) as response:
-        payload = response.read(MAX_QDRANT_RESPONSE_BYTES + 1)
-        if len(payload) > MAX_QDRANT_RESPONSE_BYTES:
-            raise BackendProtocolError("Qdrant response exceeds inspector limit")
-        try:
-            decoded = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise BackendProtocolError("Qdrant returned invalid JSON") from exc
-    if not isinstance(decoded, dict) or decoded.get("status") != "ok" or "result" not in decoded:
-        raise BackendProtocolError("Qdrant returned an invalid response")
-    return decoded
 
 
-def create_server(config: InspectorConfig) -> ThreadingHTTPServer:
-    if not config.api_key or not config.qdrant_api_key:
-        raise ValueError("both inspector and Qdrant API keys are required")
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,62}", config.collection):
-        raise ValueError("invalid fixed collection name")
+def _read_projection(
+    config: InspectorConfig,
+    run_id: str,
+    cursor_value: str | None,
+    connection_factory,
+) -> dict[str, object]:
+    with connection_factory(config) as connection, connection.cursor() as cursor:
+        cursor.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        cursor.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (str(STATEMENT_TIMEOUT_MILLISECONDS),),
+        )
+        cursor.execute("SELECT to_regclass(%s)", (TABLE_NAME,))
+        table_row = cursor.fetchone()
+        if not isinstance(table_row, tuple) or len(table_row) != 1:
+            raise BackendProtocolError("table lookup returned an invalid row")
+        if table_row[0] is None:
+            return {
+                "collection": COLLECTION_NAME,
+                "run_id": run_id,
+                "count": 0,
+                "points": [],
+                "next_cursor": None,
+            }
+
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM public.oamb_memories
+            WHERE payload->>'run_id' = %s
+            """,
+            (run_id,),
+        )
+        count_row = cursor.fetchone()
+        if (
+            not isinstance(count_row, tuple)
+            or len(count_row) != 1
+            or type(count_row[0]) is not int
+            or count_row[0] < 0
+        ):
+            raise BackendProtocolError("projection count is invalid")
+        count = count_row[0]
+
+        if cursor_value is None:
+            cursor.execute(
+                """
+                SELECT id::text, payload
+                FROM public.oamb_memories
+                WHERE payload->>'run_id' = %s
+                ORDER BY id
+                LIMIT %s
+                """,
+                (run_id, PAGE_QUERY_LIMIT),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id::text, payload
+                FROM public.oamb_memories
+                WHERE payload->>'run_id' = %s AND id > %s::uuid
+                ORDER BY id
+                LIMIT %s
+                """,
+                (run_id, cursor_value, PAGE_QUERY_LIMIT),
+            )
+        rows = cursor.fetchall()
+        if not isinstance(rows, list) or len(rows) > PAGE_QUERY_LIMIT:
+            raise BackendProtocolError("projection page is invalid")
+
+        points: list[dict[str, object]] = []
+        previous_id = cursor_value
+        for row in rows:
+            if not isinstance(row, tuple) or len(row) != 2:
+                raise BackendProtocolError("projection row shape is invalid")
+            point_id = _parse_uuid(row[0])
+            payload = row[1]
+            if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+                raise BackendProtocolError("projection payload is invalid")
+            if previous_id is not None and point_id <= previous_id:
+                raise BackendProtocolError("projection IDs are not strictly ordered")
+            previous_id = point_id
+            points.append({"id": point_id, "payload": payload})
+
+        if count < len(points):
+            raise BackendProtocolError("projection count is smaller than its page")
+        if cursor_value is None and len(points) != min(count, PAGE_QUERY_LIMIT):
+            raise BackendProtocolError("projection count does not match its first page")
+        has_next = len(points) > PAGE_SIZE
+        points = points[:PAGE_SIZE]
+        next_cursor = _encode_cursor(points[-1]["id"] if has_next else None)
+        return {
+            "collection": COLLECTION_NAME,
+            "run_id": run_id,
+            "count": count,
+            "points": points,
+            "next_cursor": next_cursor,
+        }
+
+
+def create_server(
+    config: InspectorConfig,
+    *,
+    connection_factory=_postgres_connection,
+) -> ThreadingHTTPServer:
+    required_strings = (
+        config.api_key,
+        config.postgres_host,
+        config.postgres_database,
+        config.postgres_user,
+        config.postgres_password,
+    )
+    if not all(required_strings):
+        raise ValueError("inspector and PostgreSQL configuration values are required")
+    if not 1 <= config.postgres_port <= 65_535:
+        raise ValueError("invalid PostgreSQL port")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "OAMBMem0Inspector/1"
@@ -102,6 +221,8 @@ def create_server(config: InspectorConfig) -> ThreadingHTTPServer:
 
         def _reply(self, status: int, value: object) -> None:
             payload = _json_bytes(value)
+            if status == 200 and len(payload) > MAX_INSPECTOR_RESPONSE_BYTES:
+                raise BackendProtocolError("projection response exceeds inspector limit")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -140,36 +261,18 @@ def create_server(config: InspectorConfig) -> ThreadingHTTPServer:
                 cursor_values = query.get("cursor", [])
                 if len(cursor_values) > 1:
                     raise ValueError("cursor may appear at most once")
-                cursor = _decode_cursor(cursor_values[0] if cursor_values else None)
-                run_filter = _run_filter(run_id)
-                base = f"/collections/{config.collection}/points"
-                count_response = _qdrant_json(
-                    config, "POST", base + "/count", {"filter": run_filter, "exact": True}
+                cursor_value = _decode_cursor(cursor_values[0] if cursor_values else None)
+                result = _read_projection(
+                    config,
+                    run_id,
+                    cursor_value,
+                    connection_factory,
                 )
-                scroll_body: dict[str, object] = {
-                    "filter": run_filter,
-                    "limit": SCROLL_PAGE_SIZE,
-                    "with_payload": True,
-                    "with_vector": False,
-                }
-                if cursor is not None:
-                    scroll_body["offset"] = cursor
-                scroll_response = _qdrant_json(config, "POST", base + "/scroll", scroll_body)
-                scroll_result = scroll_response["result"]
-                if not isinstance(scroll_result, dict):
-                    raise ValueError("Qdrant scroll result is not an object")
-                result = {
-                    "collection": config.collection,
-                    "run_id": run_id,
-                    "count": count_response["result"]["count"],
-                    "points": scroll_result.get("points", []),
-                    "next_cursor": _encode_cursor(scroll_result.get("next_page_offset")),
-                }
                 self._reply(200, result)
             except ValueError as exc:
                 self._reply(400, {"error": str(exc)})
-            except (BackendProtocolError, HTTPError, URLError, TimeoutError, KeyError, TypeError):
-                self._reply(502, {"error": "Qdrant projection unavailable"})
+            except Exception:
+                self._reply(502, {"error": "PostgreSQL projection unavailable"})
 
         def do_POST(self) -> None:
             self._reply(405, {"error": "method not allowed"})
@@ -186,9 +289,11 @@ def _config_from_environment() -> InspectorConfig:
         listen_host=os.environ.get("OAMB_INSPECTOR_LISTEN_HOST", "127.0.0.1"),
         listen_port=int(os.environ.get("OAMB_INSPECTOR_LISTEN_PORT", "6333")),
         api_key=os.environ["OAMB_MEM0_INSPECTOR_API_KEY"],
-        qdrant_url=os.environ["OAMB_QDRANT_URL"],
-        qdrant_api_key=os.environ["OAMB_QDRANT_API_KEY"],
-        collection=os.environ.get("OAMB_MEM0_COLLECTION", "oamb_memories"),
+        postgres_host=os.environ["POSTGRES_HOST"],
+        postgres_port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        postgres_database=os.environ["POSTGRES_DB"],
+        postgres_user=os.environ["POSTGRES_USER"],
+        postgres_password=os.environ["POSTGRES_PASSWORD"],
     )
 
 

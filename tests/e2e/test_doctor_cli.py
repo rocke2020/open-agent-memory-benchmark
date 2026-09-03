@@ -224,6 +224,16 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "authorization: bearer" not in result.output.lower()
 
 
+def test_doctor_omits_thinking_effort_from_embedding_summary(tmp_path: Path) -> None:
+    output = tmp_path / "comparison"
+
+    result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
+
+    assert result.exit_code == 0, result.output
+    assert "model embedding: qwen3-embedding:0.6b; recipient=local-vllm-metal" in result.output
+    assert "model embedding: qwen3-embedding:0.6b /" not in result.output
+
+
 def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) -> None:
     config = tmp_path / "benchmark.yml"
     config.write_bytes(BENCHMARK_CONFIG_PATH.read_bytes())

@@ -112,6 +112,7 @@ PROFILE_PROOF_FILES = {
 }
 
 _DEFAULT_REST_PROFILE_IDS = tuple(profile.profile_id for profile in DEFAULT_REST_PROFILES)
+_REDACTED_VALUE = "[redacted]"
 _RECEIPT_KEYS = frozenset(
     {
         "schema_name",
@@ -135,6 +136,20 @@ _PROFILE_KEYS = frozenset(
 )
 _PROOF_MANIFEST_KEYS = frozenset({"schema_name", "schema_version", "profile_id", "files"})
 _PROOF_FILE_KEYS = frozenset({"relative_path", "sha256", "byte_count"})
+_MEM0_VECTOR_STORE_KEYS = frozenset({"provider", "config"})
+_MEM0_PGVECTOR_CONFIG_KEYS = frozenset(
+    {
+        "host",
+        "port",
+        "dbname",
+        "user",
+        "password",
+        "collection_name",
+        "embedding_model_dims",
+        "diskann",
+        "hnsw",
+    }
+)
 _PROJECT_PATTERN = re.compile(r"^oamb-providers-[a-z0-9-]{8,48}$")
 _OPENAPI_SENSITIVE_SCHEMA_KEYS = frozenset(
     {
@@ -424,7 +439,7 @@ def _validate_secret_free_value(
         _validate_sensitive_openapi_schema(value, property_name=key)
     sensitive_container = sensitive_container or (sensitive_key and not schema_metadata)
     if sensitive_container and not isinstance(value, (dict, list)):
-        if value is not None and value != "[redacted]":
+        if value is not None and value != _REDACTED_VALUE:
             raise ProviderServiceBindingError("provider proof contains an unredacted secret")
         return
     if isinstance(value, dict):
@@ -502,9 +517,19 @@ def _validate_proof_semantics(
         valid = (
             value.get("version") == "v1.1"
             and isinstance(vector_store, dict)
-            and vector_store.get("provider") == "qdrant"
+            and set(vector_store) == _MEM0_VECTOR_STORE_KEYS
+            and vector_store.get("provider") == "pgvector"
             and isinstance(vector_config, dict)
+            and set(vector_config) == _MEM0_PGVECTOR_CONFIG_KEYS
+            and vector_config.get("host") == "mem0-postgres"
+            and vector_config.get("port") == 5432
+            and vector_config.get("dbname") == "postgres"
+            and vector_config.get("user") == "oamb_mem0"
+            and vector_config.get("password") == _REDACTED_VALUE
+            and vector_config.get("collection_name") == "oamb_memories"
             and vector_config.get("embedding_model_dims") == 1024
+            and vector_config.get("diskann") is False
+            and vector_config.get("hnsw") is True
             and isinstance(embedder_config, dict)
             and embedder_config.get("embedding_dims") == 1024
             and isinstance(llm_config, dict)

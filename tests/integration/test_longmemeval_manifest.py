@@ -147,7 +147,10 @@ def test_real_pinned_source_builds_exact_lme30_and_lme6_manifests() -> None:
         source.source_reference is not None
         and source.occurred_at is not None
         and source.context_text
-        == f"LongMemEval session {source.source_reference} at {source.occurred_at}"
+        == (
+            f"Session {source.source_reference} - you are the assistant for this conversation - "
+            f"took place at {source.occurred_at}."
+        )
         for plan in full.ingestion_plans
         for source in plan.ordered_source_units
     )

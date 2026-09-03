@@ -53,20 +53,6 @@ services:
       retries: 20
     stop_grace_period: 30s
 
-  mem0-qdrant:
-    image: qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
-    environment:
-      QDRANT__SERVICE__API_KEY: ${OAMB_MEM0_QDRANT_API_KEY:?required}
-      QDRANT__TELEMETRY_DISABLED: "true"
-    volumes:
-      - mem0_qdrant:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/6333; printf \"GET /healthz HTTP/1.0\\r\\napi-key: %s\\r\\n\\r\\n\" \"$$QDRANT__SERVICE__API_KEY\" >&3; grep -q \"200 OK\" <&3'"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    stop_grace_period: 30s
-
   mem0:
     image: oamb/mem0-api:2.0.19-dc82354
     build:
@@ -98,8 +84,6 @@ services:
     depends_on:
       mem0-postgres:
         condition: service_healthy
-      mem0-qdrant:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=5)); assert '/memories' in d['paths'] and '/search' in d['paths']"]
       interval: 10s
@@ -117,11 +101,13 @@ services:
       OAMB_INSPECTOR_LISTEN_HOST: 0.0.0.0
       OAMB_INSPECTOR_LISTEN_PORT: "6333"
       OAMB_MEM0_INSPECTOR_API_KEY: ${OAMB_MEM0_INSPECTOR_API_KEY:?required}
-      OAMB_QDRANT_URL: http://mem0-qdrant:6333
-      OAMB_QDRANT_API_KEY: ${OAMB_MEM0_QDRANT_API_KEY:?required}
-      OAMB_MEM0_COLLECTION: oamb_memories
+      POSTGRES_HOST: mem0-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: postgres
+      POSTGRES_USER: oamb_mem0
+      POSTGRES_PASSWORD: ${OAMB_MEM0_POSTGRES_PASSWORD:?required}
     depends_on:
-      mem0-qdrant:
+      mem0-postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:6333/health',headers={'Authorization':'Bearer '+os.environ['OAMB_MEM0_INSPECTOR_API_KEY']}); assert urllib.request.urlopen(r,timeout=5).status == 200"]
@@ -183,6 +169,5 @@ services:
 volumes:
   hindsight_pg0:
   mem0_postgres:
-  mem0_qdrant:
   mem0_history:
   openviking_workspace:

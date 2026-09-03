@@ -913,7 +913,8 @@ def _build_bundle(
                 source_reference=session.session_id,
                 occurred_at=session.canonical_timestamp,
                 context_text=(
-                    f"LongMemEval session {session.session_id} at {session.canonical_timestamp}"
+                    f"Session {session.session_id} - you are the assistant for this conversation - "
+                    f"took place at {session.canonical_timestamp}."
                 ),
                 source_metadata=(
                     ("question_id", row.question_id),

@@ -148,15 +148,16 @@ def test_v2_0_19_historical_negative_fixtures_remain_zero_dispatch(
 
 
 @pytest.mark.parametrize(
-    ("profile_name", "fixture_name"),
+    ("profile_name", "fixture_name", "vector_store_provider"),
     (
-        ("MEM0_REST_PROFILE", "rest-profile-verdict.json"),
-        ("MEM0_SDK_PROFILE", "sdk-profile-verdict.json"),
+        ("MEM0_REST_PROFILE", "rest-profile-verdict.json", "pgvector"),
+        ("MEM0_SDK_PROFILE", "sdk-profile-verdict.json", "qdrant"),
     ),
 )
 def test_v2_0_19_profile_fixture_binds_exact_config_and_negative_audit(
     profile_name: str,
     fixture_name: str,
+    vector_store_provider: str,
 ) -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
     profile = getattr(mem0, profile_name)
@@ -167,7 +168,7 @@ def test_v2_0_19_profile_fixture_binds_exact_config_and_negative_audit(
     )
 
     assert verdict.api_version == "v1.1"
-    assert verdict.vector_store_provider == "qdrant"
+    assert verdict.vector_store_provider == vector_store_provider
     assert verdict.collection_name == "oamb_memories"
     assert verdict.embedding_model == "qwen3-embedding:0.6b"
     assert verdict.embedding_dimension == 1024

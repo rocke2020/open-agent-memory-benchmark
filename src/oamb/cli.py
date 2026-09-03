@@ -90,15 +90,14 @@ def doctor_command(
             f"{plan.decision.maximum_exact_mcnemar_p_value}"
         )
     for role in plan.model_roles:
-        rank = (
-            "not applicable"
-            if role.thinking_effort_rank_1_indexed is None
-            else f"rank {role.thinking_effort_rank_1_indexed}/{len(role.thinking_effort_scale)}"
-        )
-        typer.echo(
-            f"model {role.role_id}: {role.configured_model} / "
-            f"{role.thinking_effort} ({rank}); recipient={role.recipient}"
-        )
+        model_summary = f"model {role.role_id}: {role.configured_model}"
+        if role.thinking_effort_rank_1_indexed is not None:
+            model_summary += (
+                f" / {role.thinking_effort} "
+                f"(rank {role.thinking_effort_rank_1_indexed}/"
+                f"{len(role.thinking_effort_scale)})"
+            )
+        typer.echo(f"{model_summary}; recipient={role.recipient}")
     typer.echo("credential values: [REDACTED]")
     typer.echo(f"resolved plan: {destination}")
     typer.echo(f"resolved plan sha256: {hashlib.sha256(content).hexdigest()}")

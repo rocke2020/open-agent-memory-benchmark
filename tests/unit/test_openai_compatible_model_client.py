@@ -648,6 +648,82 @@ async def test_additive_openai_details_profile_preserves_cached_and_reasoning_us
 
 
 @pytest.mark.asyncio
+async def test_additive_openai_details_profile_accepts_consistent_cache_aliases() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "answer-model",
+                "choices": [
+                    {"index": 0, "message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {
+                    "prompt_tokens": 87,
+                    "completion_tokens": 11,
+                    "total_tokens": 98,
+                    "prompt_tokens_details": {"cached_tokens": 7},
+                    "completion_tokens_details": {"reasoning_tokens": 3},
+                    "prompt_cache_hit_tokens": 7,
+                    "prompt_cache_miss_tokens": 80,
+                },
+            },
+        )
+
+    store = CapturingStore()
+    client = _client(store, handler, usage_profile="openai-details-v3")
+
+    receipt = await client.complete(_request())
+
+    assert receipt.usage_reference_ids
+    usage = json.loads(store.records[0].canonical_bytes)
+    assert usage["proof_status"] == "measured_complete"
+    assert usage["cached_input_tokens"] == 7
+    assert usage["reasoning_tokens"] == 3
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cache_hit_tokens", "cache_miss_tokens", "error"),
+    (
+        (7, 79, "supplier cache aliases disagree with prompt tokens"),
+        (6, 81, "supplier cache aliases disagree with nested cache details"),
+    ),
+)
+async def test_additive_openai_details_profile_rejects_inconsistent_cache_aliases(
+    cache_hit_tokens: int,
+    cache_miss_tokens: int,
+    error: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "answer-model",
+                "choices": [
+                    {"index": 0, "message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {
+                    "prompt_tokens": 87,
+                    "completion_tokens": 11,
+                    "total_tokens": 98,
+                    "prompt_tokens_details": {"cached_tokens": 7},
+                    "completion_tokens_details": {"reasoning_tokens": 3},
+                    "prompt_cache_hit_tokens": cache_hit_tokens,
+                    "prompt_cache_miss_tokens": cache_miss_tokens,
+                },
+            },
+        )
+
+    client = _client(CapturingStore(), handler, usage_profile="openai-details-v3")
+
+    with pytest.raises(ModelCallFailure, match=error):
+        await client.complete(_request())
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_additive_openai_details_profile_marks_missing_details_partial() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

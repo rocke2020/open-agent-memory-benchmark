@@ -52,11 +52,18 @@ DEFAULT_MODEL_CALL_TIMEOUT_SECONDS = 120.0
 _BASE_USAGE_FIELDS: frozenset[str] = frozenset(
     {"prompt_tokens", "completion_tokens", "total_tokens"}
 )
-_OPENAI_DETAILS_USAGE_FIELDS: frozenset[str] = _BASE_USAGE_FIELDS | {
-    "prompt_tokens_details",
-    "completion_tokens_details",
-    "prompt_cached_tokens_details",
-}
+_CACHE_ALIAS_USAGE_FIELDS: frozenset[str] = frozenset(
+    {"prompt_cache_hit_tokens", "prompt_cache_miss_tokens"}
+)
+_OPENAI_DETAILS_USAGE_FIELDS: frozenset[str] = (
+    _BASE_USAGE_FIELDS
+    | {
+        "prompt_tokens_details",
+        "completion_tokens_details",
+        "prompt_cached_tokens_details",
+    }
+    | _CACHE_ALIAS_USAGE_FIELDS
+)
 _OPENAI_DETAIL_FIELDS: dict[str, frozenset[str]] = {
     "prompt_tokens_details": frozenset({"audio_tokens", "cached_tokens"}),
     "completion_tokens_details": frozenset(
@@ -588,10 +595,25 @@ class OpenAICompatibleModelClient:
         if not all(type(value) is int and value >= 0 for value in base_values):
             raise ValueError("supplier usage base token fields must be non-negative integers")
         input_tokens, output_tokens, total_tokens = cast(tuple[int, int, int], base_values)
+        cache_alias_values: tuple[int, int] | None = None
+        present_cache_aliases = usage_fields & _CACHE_ALIAS_USAGE_FIELDS
+        if present_cache_aliases:
+            if present_cache_aliases != _CACHE_ALIAS_USAGE_FIELDS:
+                raise ValueError("supplier cache aliases must be provided together")
+            raw_cache_alias_values = tuple(
+                raw_usage.get(name)
+                for name in ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens")
+            )
+            if not all(type(value) is int and value >= 0 for value in raw_cache_alias_values):
+                raise ValueError("supplier cache aliases must be non-negative integers")
+            cache_alias_values = cast(tuple[int, int], raw_cache_alias_values)
+            if sum(cache_alias_values) != input_tokens:
+                raise ValueError("supplier cache aliases disagree with prompt tokens")
         detail_values: dict[str, int | None] = {
             "cached_input_tokens": None,
             "reasoning_tokens": None,
         }
+        cached_input_raw_path: str | None = None
         unknown_paths: list[str] = [
             str(field) for field in sorted(usage_fields - _OPENAI_DETAILS_USAGE_FIELDS)
         ]
@@ -623,10 +645,19 @@ class OpenAICompatibleModelClient:
                 cached = detail_container.get("cached_tokens")
                 if type(cached) is int:
                     detail_values["cached_input_tokens"] = cached
+                    cached_input_raw_path = "usage.prompt_tokens_details.cached_tokens"
             if container_name == "completion_tokens_details":
                 reasoning = detail_container.get("reasoning_tokens")
                 if type(reasoning) is int:
                     detail_values["reasoning_tokens"] = reasoning
+        if cache_alias_values is not None:
+            cache_hit_tokens, _ = cache_alias_values
+            cached_input_tokens = detail_values["cached_input_tokens"]
+            if cached_input_tokens is not None and cached_input_tokens != cache_hit_tokens:
+                raise ValueError("supplier cache aliases disagree with nested cache details")
+            if cached_input_tokens is None:
+                detail_values["cached_input_tokens"] = cache_hit_tokens
+                cached_input_raw_path = "usage.prompt_cache_hit_tokens"
         covered_dimensions = [
             "input_tokens",
             "visible_output_tokens",
@@ -638,10 +669,12 @@ class OpenAICompatibleModelClient:
             ("supplier_reported_total_tokens", "usage.total_tokens"),
         ]
         for dimension, raw_path in (
-            ("cached_input_tokens", "usage.prompt_tokens_details.cached_tokens"),
+            ("cached_input_tokens", cached_input_raw_path),
             ("reasoning_tokens", "usage.completion_tokens_details.reasoning_tokens"),
         ):
             if detail_values[dimension] is not None:
+                if raw_path is None:
+                    raise AssertionError("measured token detail requires a raw field path")
                 covered_dimensions.append(dimension)
                 raw_field_paths.append((dimension, raw_path))
         unavailable_dimensions = tuple(

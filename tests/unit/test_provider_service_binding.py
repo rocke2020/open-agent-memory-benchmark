@@ -99,8 +99,18 @@ def _proof_bytes(filename: str) -> bytes:
             },
             "reranker": None,
             "vector_store": {
-                "config": {"embedding_model_dims": 1024},
-                "provider": "qdrant",
+                "config": {
+                    "collection_name": "oamb_memories",
+                    "dbname": "postgres",
+                    "diskann": False,
+                    "embedding_model_dims": 1024,
+                    "hnsw": True,
+                    "host": "mem0-postgres",
+                    "password": "[redacted]",
+                    "port": 5432,
+                    "user": "oamb_mem0",
+                },
+                "provider": "pgvector",
             },
             "version": "v1.1",
         },
@@ -724,6 +734,40 @@ def test_consumer_rejects_self_consistent_but_semantically_failed_proofs(
 ) -> None:
     from oamb.config.provider_services import ProviderServiceBindingError
 
+    receipt_path = _write_service_artifacts(
+        tmp_path,
+        payload_overrides={filename: _canonical_bytes(document)},
+    )
+
+    with pytest.raises(ProviderServiceBindingError, match="semantic"):
+        _load(receipt_path)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    (
+        (("vector_store", "provider"), "qdrant"),
+        (("vector_store", "config", "dbname"), "mem0_app"),
+        (("vector_store", "config", "collection_name"), "other"),
+        (("vector_store", "config", "embedding_model_dims"), 768),
+        (("vector_store", "config", "hnsw"), False),
+        (("vector_store", "config", "diskann"), True),
+        (("vector_store", "config", "url"), "http://mem0-qdrant:6333"),
+    ),
+)
+def test_consumer_rejects_wrong_mem0_pgvector_proof(
+    tmp_path: Path,
+    path: tuple[str, ...],
+    value: object,
+) -> None:
+    from oamb.config.provider_services import ProviderServiceBindingError
+
+    filename = "mem0-config-redacted.json"
+    document = json.loads(_proof_bytes(filename))
+    target = document
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
     receipt_path = _write_service_artifacts(
         tmp_path,
         payload_overrides={filename: _canonical_bytes(document)},

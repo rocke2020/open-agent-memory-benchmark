@@ -30,20 +30,16 @@ The exact commits and digests are in `versions.env`. The Mem0 build accepts
 only an official local checkout whose `v2.0.19` tag resolves to the recorded
 commit. Dirty worktree content and the checkout's current branch are excluded
 because the build input is a digest-checked `git archive` of that commit.
-The tracked server overlay changes one upstream merge edge: switching provider
-names replaces that provider's incompatible config object instead of retaining
-fields from the former provider. Its hash is recorded in `versions.env` and the
-image label; tests prove pgvector-to-Qdrant replacement and same-provider merge.
 The build-input fingerprint additionally binds the Dockerfile, dependency lock,
-inspector, overlay, Docker ignore rules, and fixed source archive before an
-existing local image may be reused.
+inspector, Docker ignore rules, and fixed source archive before an existing
+local image may be reused.
 
 ## State and safety boundary
 
 Each `OAMB_PROVIDER_PROJECT` owns new Compose volumes. The project never mounts
 an existing `~/.openviking`, Mem0 history directory, provider checkout, or
-database. Only four HTTP API ports bind to `127.0.0.1`; PostgreSQL and Qdrant
-remain private. `stop` preserves containers, volumes, and data and refuses to
+database. Only four HTTP API ports bind to `127.0.0.1`; PostgreSQL remains
+private. `stop` preserves containers, volumes, and data and refuses to
 run or memory-conformance lifecycle while `.runtime/active-operation` exists.
 
 The commands in this directory do not run benchmark memory ingestion,
@@ -137,8 +133,8 @@ resolved cell, runtime outbound trace, and fresh capsule validation.
 All three default profiles use the same controlled embedding endpoint, model,
 and dimension: `qwen3-embedding:0.6b` with 1,024 dimensions. They intentionally
 do not share one vector database. Hindsight keeps its embedded pg0/pgvector
-store, Mem0 uses its private Qdrant store, and OpenViking uses its embedded AGFS
-and local vector workspace. Storage and indexing are part of each memory
+store, Mem0 uses its private PostgreSQL/pgvector store, and OpenViking uses its
+embedded AGFS and local vector workspace. Storage and indexing are part of each memory
 provider's native behavior; forcing one common database would bypass that
 behavior and would no longer be the default provider comparison. A future
 common-vector-store experiment must be a separately named ablation and may run
@@ -170,9 +166,10 @@ Default host endpoints are:
 
 The inspector supports authenticated `GET /health` and
 `GET /v1/projection?run_id=<64-lowercase-hex>[&cursor=<opaque>]` only. It fixes
-the Qdrant collection, constructs exact count/scroll filters itself, excludes
-vectors, and never accepts arbitrary Qdrant methods, paths, bodies, filters, or
-collections. The runner gets the inspector key, never the Qdrant backend key.
+the `public.oamb_memories` table, binds the run ID and UUID cursor itself,
+selects only IDs and JSON payloads, and never accepts arbitrary SQL, table names,
+or write operations. The runner gets the inspector key, never the PostgreSQL
+credential.
 
 ## Offline verification
 

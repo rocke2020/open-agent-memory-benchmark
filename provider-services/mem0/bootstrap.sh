@@ -21,7 +21,7 @@ OAMB_MEM0_LLM_MODEL=$(required_env_value OAMB_MEM0_LLM_MODEL)
 OAMB_MEM0_LLM_BASE_URL=$(required_env_value OAMB_MEM0_LLM_BASE_URL)
 OAMB_EMBEDDING_MODEL=$(env_value OAMB_EMBEDDING_MODEL || printf 'qwen3-embedding:0.6b')
 OAMB_EMBEDDING_BASE_URL=$(env_value OAMB_EMBEDDING_BASE_URL || printf 'http://host.docker.internal:18000/v1')
-OAMB_MEM0_QDRANT_API_KEY=$(required_env_value OAMB_MEM0_QDRANT_API_KEY)
+OAMB_MEM0_POSTGRES_PASSWORD=$(required_env_value OAMB_MEM0_POSTGRES_PASSWORD)
 OAMB_MEM0_ADMIN_API_KEY=$(required_env_value OAMB_MEM0_ADMIN_API_KEY)
 
 COMPOSE="docker compose --env-file $ENV_FILE -f $ROOT/compose.yaml"
@@ -42,13 +42,14 @@ jq -n \
   --arg llm_base "$OAMB_MEM0_LLM_BASE_URL" \
   --arg embed_model "$OAMB_EMBEDDING_MODEL" \
   --arg embed_base "$OAMB_EMBEDDING_BASE_URL" \
-  --arg qdrant_key "$OAMB_MEM0_QDRANT_API_KEY" \
+  --arg postgres_password "$OAMB_MEM0_POSTGRES_PASSWORD" \
   '{
     version: "v1.1",
-    vector_store: {provider: "qdrant", config: {
-      url: "http://mem0-qdrant:6333", api_key: $qdrant_key,
+    vector_store: {provider: "pgvector", config: {
+      host: "mem0-postgres", port: 5432, dbname: "postgres",
+      user: "oamb_mem0", password: $postgres_password,
       collection_name: "oamb_memories", embedding_model_dims: 1024,
-      path: null, on_disk: true
+      diskann: false, hnsw: true
     }},
     llm: {provider: "openai", config: {
       api_key: $llm_key, model: $llm_model, openai_base_url: $llm_base,

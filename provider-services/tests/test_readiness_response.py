@@ -23,7 +23,12 @@ class ReadinessResponseTests(unittest.TestCase):
         module = load_module()
         valid = {
             "model": "deepseek-v4-flash",
-            "choices": [{"message": {"role": "assistant", "content": "OK"}}],
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "OK"},
+                }
+            ],
         }
 
         module.validate_chat_response(valid, "deepseek-v4-flash")
@@ -34,7 +39,27 @@ class ReadinessResponseTests(unittest.TestCase):
             {"model": "deepseek-v4-flash", "choices": [{}]},
             {
                 "model": "deepseek-v4-flash",
-                "choices": [{"message": {"role": "assistant", "content": ""}}],
+                "choices": [
+                    {"message": {"role": "assistant", "content": "OK"}}
+                ],
+            },
+            {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": "OK"},
+                    }
+                ],
+            },
+            {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ],
             },
         )
         for document in invalid:

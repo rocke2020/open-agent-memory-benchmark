@@ -25,14 +25,22 @@ score, so users can choose a memory system according to their own needs.
 ## Why Open Agent Memory Benchmark?
 
 Most agent-memory comparisons are published by individual memory providers.
-Their results are hard to compare because they may use different questions,
-prompts, answer and judge models, retrieval modes, limits, or token definitions.
+Their results are hard to compare because they may use different prompts, extraction/answer/judge models, retrieval modes, limits, or token definitions.
 Important adoption costs, especially indexing tokens, may be missing entirely.
 
 OAMB fixes the questions, answer and judge policy, model roles, and comparison
 rules before a run starts. Each provider still uses its native memory API, while
 provider-specific settings and measured results remain visible in saved evidence
 and a self-contained offline report.
+
+OAMB separates memory extraction, answer generation, and scoring. Its self-
+curated extraction context frames each session as a conversation in which the
+model is the assistant, preserves the session timestamp, and deliberately omits
+the LongMemEval benchmark name. This framing is better suited to evaluating
+normal assistant memory behavior because it supplies useful role and temporal
+context without revealing the benchmark identity. Answer generation uses
+OAMB's own evidence-grounded prompt. Scoring preserves the original LongMemEval
+judge rubrics, with source attribution and byte-pinned templates.
 
 The goal is a fair and open evaluation of agent memory that is convenient to
 run, inspect, and reproduce.
@@ -43,14 +51,27 @@ OAMB uses one explicit workflow:
 
 1. Configure the workload, providers, model roles, and two runtime controls in
    `configs/benchmark.yml`.
-2. Run `oamb doctor` to validate the configuration and freeze an immutable
-   resolved plan before any provider call.
+2. Change to the cloned repository, then run the complete command below to
+   validate the configuration and freeze an immutable resolved plan before any
+   provider call. The shorthand `oamb doctor` is incomplete and will not run.
+
+   ```bash
+   cd open-agent-memory-benchmark
+
+   OAMB_DOCTOR_DIR="$PWD/.local-demo/doctor-$(date -u +%Y%m%d-%H%M%S)"
+
+   uv run --locked oamb doctor \
+     configs/benchmark.yml \
+     --output "$OAMB_DOCTOR_DIR"
+   ```
+
 3. Prepare and verify the exact-pinned local provider services.
 4. Run one frozen question through each provider and validate all three saved
    capsules. This is the small real-use gate before the larger evaluation.
 5. Run the 60-question comparison, then freshly validate every full capsule.
-6. Run `oamb compare` to build all three pairwise comparisons and one offline
-   HTML report.
+6. Run the complete `uv run --locked oamb compare ...` command in
+   [Quick start step 6](#6-build-and-open-the-comparison-report) to build all
+   three pairwise comparisons and one offline HTML report.
 
 The checked-in runtime controls allow two additional safe attempts per eligible
 operation and a 900-second timeout per external attempt. They do not impose a
@@ -79,26 +100,11 @@ Compose, `curl`, `jq`, and `shasum`. You also need:
   `qwen3-embedding:0.6b` with 1,024 dimensions and at least an 8,192-token model
   and scheduler batch limit.
 
-On Apple Silicon, the official
-[vLLM-Metal installation guide](https://github.com/vllm-project/vllm-metal/blob/main/docs/installation.md)
-and
-[embedding guide](https://github.com/vllm-project/vllm-metal/blob/main/docs/text_embedding_pooling.md)
-provide one way to run the embedding endpoint. After installing vLLM-Metal,
-this command requests the required public model name and limits on port `18000`;
-the later provider preflight verifies the actual response:
+On Apple Silicon, start the compatible embedding endpoint on port `18000` with
+the checked-in helper; the later provider preflight verifies the actual response:
 
 ```bash
-source ~/.venv-vllm-metal/bin/activate
-
-VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-VLLM_METAL_USE_PAGED_ATTENTION=1 \
-VLLM_METAL_MEMORY_FRACTION=auto \
-vllm serve mlx-community/Qwen3-Embedding-0.6B-8bit \
-  --runner pooling \
-  --served-model-name qwen3-embedding:0.6b \
-  --max-model-len 8192 \
-  --max-num-batched-tokens 8192 \
-  --port 18000
+./scripts/start_vllm_metal.sh
 ```
 
 Keep that server running in its own terminal.
@@ -127,6 +133,16 @@ test "$(git -C .local-demo/provider-source/mem0 \
 The dataset downloader verifies the pinned revision and SHA-256. The final
 `test` command independently verifies the Mem0 release commit and stops on a
 mismatch.
+
+Compose declares all three providers. Hindsight and OpenViking use pinned
+published images; Mem0 is built from verified v2.0.19 source with hash-locked
+dependencies. The checkout above is only an immutable build input and is not
+mounted at runtime.
+
+Following the official Mem0 topology, one pgvector-enabled PostgreSQL service
+stores both application data and vector memories. OAMB's narrow read-only
+inspector reads that PostgreSQL memory table for evidence checks; no separate
+vector-database service is required.
 
 Create one unique working directory for this attempt:
 

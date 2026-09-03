@@ -14,6 +14,7 @@ LIFECYCLE_LOCK="$RUNTIME_DIR/provider-lifecycle.lock"
 LIFECYCLE_LOCK_HELD=false
 OPENVIKING_QUIESCED=false
 MODEL_READINESS_RESERVED_CALLS=7
+MODEL_READINESS_CHAT_MAX_TOKENS=1024
 TARGET_PROVIDER_MODEL=deepseek-v4-flash
 
 # Public, tracked values only.
@@ -182,7 +183,7 @@ doctor_full() {
         OAMB_HINDSIGHT_LLM_BASE_URL OAMB_HINDSIGHT_LLM_API_KEY \
         OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_BASE_URL OAMB_MEM0_LLM_API_KEY \
         OAMB_MEM0_ADMIN_API_KEY OAMB_MEM0_JWT_SECRET \
-        OAMB_MEM0_POSTGRES_PASSWORD OAMB_MEM0_QDRANT_API_KEY \
+        OAMB_MEM0_POSTGRES_PASSWORD \
         OAMB_MEM0_INSPECTOR_API_KEY OAMB_OPENVIKING_VLM_PROVIDER \
         OAMB_OPENVIKING_VLM_MODEL OAMB_OPENVIKING_VLM_BASE_URL \
         OAMB_OPENVIKING_VLM_API_KEY OAMB_OPENVIKING_ROOT_API_KEY \
@@ -236,7 +237,6 @@ mem0_build_input_sha256() {
             .dockerignore \
             mem0/Dockerfile \
             mem0/requirements.lock \
-            mem0/server_state.py \
             mem0/inspector.py
         do
             digest=$(shasum -a 256 "$ROOT/$relative_path" | awk '{print $1}')
@@ -252,8 +252,7 @@ mem0_image_matches_pin() {
     docker image inspect "$MEM0_IMAGE" 2>/dev/null | jq -e --arg build_input "$expected_build_input" \
         '.[0].Config.Labels["org.opencontainers.image.version"] == "2.0.19" and
          .[0].Config.Labels["org.opencontainers.image.revision"] == "dc82354e143c2581d505d581a00286d6ef8c3605" and
-         .[0].Config.Labels["io.oamb.mem0.build-input-sha256"] == $build_input and
-         .[0].Config.Labels["io.oamb.mem0.server-overlay-sha256"] == "fc6d575c66f8c27816cc8f293849a0ce1612f0f5048e3232a867593755ede2d8"' \
+         .[0].Config.Labels["io.oamb.mem0.build-input-sha256"] == $build_input' \
         >/dev/null 2>&1
 }
 
@@ -271,18 +270,14 @@ build_images() {
     docker image inspect "$MEM0_IMAGE" | jq -e --arg build_input "$mem0_build_input" \
         '.[0].Config.Labels["org.opencontainers.image.version"] == "2.0.19" and
          .[0].Config.Labels["org.opencontainers.image.revision"] == "dc82354e143c2581d505d581a00286d6ef8c3605" and
-         .[0].Config.Labels["io.oamb.mem0.build-input-sha256"] == $build_input and
-         .[0].Config.Labels["io.oamb.mem0.server-overlay-sha256"] == "fc6d575c66f8c27816cc8f293849a0ce1612f0f5048e3232a867593755ede2d8"' \
+         .[0].Config.Labels["io.oamb.mem0.build-input-sha256"] == $build_input' \
         >/dev/null
     docker run --rm --entrypoint python "$MEM0_IMAGE" -c \
         "import importlib.metadata as m; expected={'mem0ai':'2.0.19','fastapi':'0.115.8','pydantic':'2.10.4','uvicorn':'0.34.0','python-dotenv':'1.2.2','bcrypt':'4.0.1'}; assert {k:m.version(k) for k in expected} == expected"
-    docker run --rm --entrypoint python "$MEM0_IMAGE" -c \
-        "import sys; sys.path.insert(0,'/app'); from server_state import _merge_config; base={'vector_store':{'provider':'pgvector','config':{'dbname':'postgres'}}}; update={'vector_store':{'provider':'qdrant','config':{'url':'http://qdrant'}}}; assert _merge_config(base,update)==update"
     hindsight_image="ghcr.io/vectorize-io/hindsight-api:0.9.2-slim@${HINDSIGHT_IMAGE_DIGEST}"
     openviking_image="ghcr.io/volcengine/openviking:v0.4.16@${OPENVIKING_IMAGE_DIGEST}"
     ensure_image "$hindsight_image"
     ensure_image "pgvector/pgvector:0.8.6-pg17@${MEM0_POSTGRES_IMAGE_DIGEST}"
-    ensure_image "qdrant/qdrant:v1.18.2@${MEM0_QDRANT_IMAGE_DIGEST}"
     ensure_image "$openviking_image"
     docker image inspect "$hindsight_image" | jq -e \
         '.[0].Config.Labels["org.opencontainers.image.version"] == "0.9.2-slim" and
@@ -397,7 +392,17 @@ verify_services() {
         "$proof_dir/mem0-empty-projection.json" >/dev/null
     cp "$RUNTIME_DIR/mem0-config-redacted.json" "$proof_dir/mem0-config-redacted.json"
     jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
-          '.llm.config.model == $target_model and
+          '.vector_store.provider == "pgvector" and
+           .vector_store.config.host == "mem0-postgres" and
+           .vector_store.config.port == 5432 and
+           .vector_store.config.dbname == "postgres" and
+           .vector_store.config.user == "oamb_mem0" and
+           .vector_store.config.password == "[redacted]" and
+           .vector_store.config.collection_name == "oamb_memories" and
+           .vector_store.config.embedding_model_dims == 1024 and
+           .vector_store.config.diskann == false and
+           .vector_store.config.hnsw == true and
+           .llm.config.model == $target_model and
            .llm.config.reasoning_effort == "low" and
            .llm.config.is_reasoning_model == true' \
         "$proof_dir/mem0-config-redacted.json" >/dev/null
@@ -457,8 +462,9 @@ probe_openai_chat() {
     printf 'Authorization: Bearer %s\n' "$api_key" > "$header_file"
     chmod 600 "$header_file"
     jq -n --arg model "$model" --arg effort "$thinking_effort" \
+        --argjson max_tokens "$MODEL_READINESS_CHAT_MAX_TOKENS" \
         '{model: $model, messages: [{role: "user", content: "Reply with OK."}],
-          temperature: 0, max_tokens: 16, reasoning_effort: $effort}' \
+          temperature: 0, max_tokens: $max_tokens, reasoning_effort: $effort}' \
         > "$request_file"
     record_model_dispatch "$label"
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 \
@@ -631,11 +637,11 @@ verify_model_readiness() {
     receipt="$RUNTIME_DIR/model-readiness-receipt.json"
     [ ! -e "$receipt" ] || die "model-readiness receipt already exists; use a new provider project"
     attempt_hash=$(shasum -a 256 "$READINESS_ATTEMPT_FILE" | awk '{print $1}')
-    service_receipts=$(find "$RUNTIME_DIR/service-verification-receipts" \
-        -type f -name '*.json' | wc -l | tr -d ' ')
-    [ "$service_receipts" = "1" ] || die "exactly one service verification receipt is required"
-    service_receipt=$(find "$RUNTIME_DIR/service-verification-receipts" \
-        -type f -name '*.json')
+    service_receipt_directory="$RUNTIME_DIR/service-verification-receipts"
+    set -- "$service_receipt_directory"/*.json
+    [ "$#" -eq 1 ] && [ -f "$1" ] || \
+        die "exactly one service verification receipt is required"
+    service_receipt=$1
     service_receipt_hash=$(shasum -a 256 "$service_receipt" | awk '{print $1}')
     jq -n --arg project "$project" --arg plan "$plan_hash" \
         --arg attempt "$attempt_hash" \

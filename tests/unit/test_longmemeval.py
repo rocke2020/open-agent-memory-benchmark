@@ -118,6 +118,24 @@ def test_session_document_removes_has_answer_and_preserves_exact_utf8_bytes() ->
     )
 
 
+def test_bundle_frames_ingestion_context_as_an_assistant_conversation(tmp_path: Path) -> None:
+    lme = require_longmemeval()
+    source = tmp_path / "longmemeval.json"
+    expected_sha256 = _write_rows(source, [_row()])
+    row = lme.load_longmemeval_rows(source, expected_sha256=expected_sha256)[0]
+
+    bundle = lme._build_bundle(
+        _dataset_manifest_for_test(source),
+        (row,),
+        workload_id="assistant-context-v1",
+    )
+
+    assert bundle.ingestion_plans[0].ordered_source_units[0].context_text == (
+        "Session session-1 - you are the assistant for this conversation - took place at "
+        "2024-02-28T01:02:00+00:00."
+    )
+
+
 def test_loader_rejects_checksum_and_aligned_list_failures(tmp_path: Path) -> None:
     lme = require_longmemeval()
     source = tmp_path / "longmemeval.json"

@@ -134,8 +134,11 @@ class ServiceReceiptTests(unittest.TestCase):
                 json.dumps(
                     {
                         "vector_store": {
-                            "provider": "qdrant",
-                            "config": {"url": "http://mem0-qdrant:6333"},
+                            "provider": "pgvector",
+                            "config": {
+                                "host": "mem0-postgres",
+                                "password": "[redacted]",
+                            },
                         },
                         "llm": {
                             "provider": "openai",
@@ -154,25 +157,17 @@ class ServiceReceiptTests(unittest.TestCase):
             )
 
             manifest = json.loads(
-                (
-                    root
-                    / "receipts"
-                    / "proofs"
-                    / "manifests"
-                    / f"{manifest_hash}.json"
-                ).read_bytes()
+                (root / "receipts" / "proofs" / "manifests" / f"{manifest_hash}.json").read_bytes()
             )
             config_entry = next(
                 entry
                 for entry in manifest["files"]
                 if entry["relative_path"] == "mem0-config-redacted.json"
             )
-            sealed = (
-                root / "receipts" / "proofs" / "blobs" / config_entry["sha256"]
-            ).read_bytes()
+            sealed = (root / "receipts" / "proofs" / "blobs" / config_entry["sha256"]).read_bytes()
             self.assertNotIn(b"://", sealed)
             self.assertEqual(
-                json.loads(sealed)["vector_store"]["config"]["url"],
+                json.loads(sealed)["vector_store"]["config"]["password"],
                 "[redacted]",
             )
 

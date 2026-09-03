@@ -8,8 +8,7 @@ LABEL org.opencontainers.image.title="OAMB Mem0 REST API" \
       org.opencontainers.image.version="2.0.19" \
       org.opencontainers.image.revision="dc82354e143c2581d505d581a00286d6ef8c3605" \
       io.oamb.mem0.source-archive-sha256="${MEM0_SOURCE_ARCHIVE_SHA256}" \
-      io.oamb.mem0.build-input-sha256="${MEM0_BUILD_INPUT_SHA256}" \
-      io.oamb.mem0.server-overlay-sha256="fc6d575c66f8c27816cc8f293849a0ce1612f0f5048e3232a867593755ede2d8"
+      io.oamb.mem0.build-input-sha256="${MEM0_BUILD_INPUT_SHA256}"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,7 +27,6 @@ RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation /opt/mem
 
 WORKDIR /app
 RUN cp -a /opt/mem0-source/server/. /app/
-COPY mem0/server_state.py /app/server_state.py
 COPY mem0/inspector.py /opt/oamb/inspector.py
 
 EXPOSE 8000

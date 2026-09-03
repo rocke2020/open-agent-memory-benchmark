@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import ast
 import hashlib
 import re
 import unittest
-from copy import deepcopy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +22,6 @@ class ServiceBundleContractTests(unittest.TestCase):
             "HINDSIGHT_IMAGE_DIGEST": "sha256:7635a15739361dbdf221ba796ad25a813f876144fe113022eea8e26cb6ee75e7",
             "MEM0_VERSION": "2.0.19",
             "MEM0_COMMIT": "dc82354e143c2581d505d581a00286d6ef8c3605",
-            "MEM0_SERVER_OVERLAY_SHA256": "fc6d575c66f8c27816cc8f293849a0ce1612f0f5048e3232a867593755ede2d8",
             "OPENVIKING_VERSION": "0.4.16",
             "OPENVIKING_COMMIT": "499995f3ed2e7f551a715179c4053772c51ff819",
             "OPENVIKING_IMAGE_DIGEST": "sha256:46f9e34cd37238c28cbd9535033773d179006bdf7f3e528dd1c46567abce7701",
@@ -36,33 +33,30 @@ class ServiceBundleContractTests(unittest.TestCase):
         )
         for key, value in expected.items():
             self.assertEqual(parsed.get(key), value, key)
+        self.assertNotIn("MEM0_SERVER_OVERLAY_SHA256", parsed)
+        self.assertNotIn("MEM0_QDRANT_VERSION", parsed)
+        self.assertNotIn("MEM0_QDRANT_IMAGE_DIGEST", parsed)
         self.assertEqual(
-            hashlib.sha256((ROOT / "mem0" / "server_state.py").read_bytes()).hexdigest(),
-            parsed["MEM0_SERVER_OVERLAY_SHA256"],
-        )
-        self.assertEqual(
-            hashlib.sha256(
-                (ROOT / "retry-guard" / "sitecustomize.py").read_bytes()
-            ).hexdigest(),
+            hashlib.sha256((ROOT / "retry-guard" / "sitecustomize.py").read_bytes()).hexdigest(),
             parsed["RETRY_GUARD_SHA256"],
         )
 
-    def test_compose_has_six_long_running_services_and_read_only_storage_probe(self) -> None:
+    def test_compose_has_five_long_running_services_and_read_only_storage_probe(self) -> None:
         compose = self.read("compose.yaml")
         for service in (
             "hindsight",
             "mem0-postgres",
-            "mem0-qdrant",
             "mem0",
             "mem0-inspector",
             "openviking",
         ):
             self.assertRegex(compose, rf"(?m)^  {re.escape(service)}:$")
-        self.assertEqual(compose.count("    healthcheck:\n"), 6)
+        self.assertNotRegex(compose, r"(?m)^  mem0-qdrant:$")
+        self.assertNotRegex(compose, r"(?m)^  mem0_qdrant:$")
+        self.assertNotIn("QDRANT", compose)
+        self.assertEqual(compose.count("    healthcheck:\n"), 5)
         self.assertRegex(compose, r"(?m)^  openviking-storage-probe:$")
-        probe = compose.split("  openviking-storage-probe:\n", 1)[1].split(
-            "\nvolumes:\n", 1
-        )[0]
+        probe = compose.split("  openviking-storage-probe:\n", 1)[1].split("\nvolumes:\n", 1)[0]
         self.assertIn('profiles: ["verification"]', probe)
         self.assertIn("network_mode: none", probe)
         self.assertIn("read_only: true", probe)
@@ -80,11 +74,16 @@ class ServiceBundleContractTests(unittest.TestCase):
             self.assertIn("127.0.0.1:${OAMB_", compose)
             self.assertIn(port, compose)
 
-    def test_runner_never_receives_qdrant_backend_key(self) -> None:
+    def test_inspector_uses_private_postgres_without_runner_credentials(self) -> None:
         compose = self.read("compose.yaml")
+        env_example = self.read(".env.example")
         self.assertIn("OAMB_MEM0_INSPECTOR_API_KEY", compose)
-        self.assertIn("QDRANT_API_KEY", compose)
-        self.assertNotIn("OAMB_RUNNER_QDRANT", compose)
+        self.assertIn("POSTGRES_HOST: mem0-postgres", compose)
+        self.assertIn("POSTGRES_DB: postgres", compose)
+        self.assertIn("POSTGRES_USER: oamb_mem0", compose)
+        self.assertNotIn("QDRANT", compose)
+        self.assertNotIn("QDRANT", env_example)
+        self.assertNotIn("OAMB_RUNNER_POSTGRES", compose)
 
     def test_mem0_image_is_fixed_source_and_not_dev_reinstall(self) -> None:
         dockerfile = self.read("mem0/Dockerfile")
@@ -97,42 +96,24 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertNotIn("--force-reinstall", dockerfile)
         self.assertNotIn("--reload", dockerfile)
         self.assertNotRegex(dockerfile, r"(?m)^CMD .*pip install")
-        self.assertIn("COPY mem0/server_state.py /app/server_state.py", dockerfile)
+        self.assertNotIn("server_state.py", dockerfile)
+        self.assertNotIn("server-overlay-sha256", dockerfile)
         self.assertIn("io.oamb.mem0.build-input-sha256", dockerfile)
 
-    def test_mem0_provider_switch_replaces_incompatible_config(self) -> None:
-        source = self.read("mem0/server_state.py")
-        tree = ast.parse(source)
-        merge_function = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "_merge_config"
-        )
-        namespace = {"Any": object, "Dict": dict, "deepcopy": deepcopy}
-        exec(compile(ast.Module(body=[merge_function], type_ignores=[]), "server_state.py", "exec"), namespace)
-        merge = namespace["_merge_config"]
-        base = {
-            "vector_store": {
-                "provider": "pgvector",
-                "config": {"dbname": "postgres", "user": "oamb"},
-            }
-        }
-        switched = merge(
-            base,
-            {"vector_store": {"provider": "qdrant", "config": {"url": "http://qdrant"}}},
-        )
-        self.assertEqual(
-            switched["vector_store"],
-            {"provider": "qdrant", "config": {"url": "http://qdrant"}},
-        )
-        same_provider = merge(
-            switched,
-            {"vector_store": {"provider": "qdrant", "config": {"api_key": "secret"}}},
-        )
-        self.assertEqual(
-            same_provider["vector_store"]["config"],
-            {"url": "http://qdrant", "api_key": "secret"},
-        )
+    def test_mem0_uses_official_pgvector_config_without_overlay(self) -> None:
+        bootstrap = self.read("mem0/bootstrap.sh")
+        dockerignore = self.read(".dockerignore")
+        operator = self.read("bin/provider-services")
+        self.assertIn('vector_store: {provider: "pgvector"', bootstrap)
+        self.assertIn('host: "mem0-postgres"', bootstrap)
+        self.assertIn('dbname: "postgres"', bootstrap)
+        self.assertIn('collection_name: "oamb_memories"', bootstrap)
+        self.assertIn("embedding_model_dims: 1024", bootstrap)
+        self.assertIn("hnsw: true", bootstrap)
+        self.assertIn("diskann: false", bootstrap)
+        self.assertNotIn("server_state.py", dockerignore)
+        self.assertNotIn("MEM0_SERVER_OVERLAY_SHA256", operator)
+        self.assertNotIn("MEM0_QDRANT_IMAGE_DIGEST", operator)
 
     def test_operator_surface_preserves_state(self) -> None:
         command = self.read("bin/provider-services")
@@ -150,32 +131,37 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn("docker volume ls", command)
         self.assertIn("docker network ls", command)
         self.assertIn('--filter "publish=$port"', command)
-        self.assertIn('org.opencontainers.image.revision', command)
-        self.assertIn('ensure_image', command)
+        self.assertIn("org.opencontainers.image.revision", command)
+        self.assertIn("ensure_image", command)
         self.assertIn('docker image inspect "$image"', command)
-        self.assertIn('mem0_image_matches_pin', command)
-        self.assertIn('mem0_build_input_sha256', command)
-        self.assertIn('--build-arg MEM0_BUILD_INPUT_SHA256=', command)
-        self.assertIn('/v1/projection?run_id=', command)
-        self.assertIn('/chat/completions', command)
-        self.assertIn('/embeddings', command)
-        self.assertIn('dimensions: 1024', command)
-        self.assertIn('/ready', command)
+        self.assertIn("mem0_image_matches_pin", command)
+        self.assertIn("mem0_build_input_sha256", command)
+        self.assertIn("--build-arg MEM0_BUILD_INPUT_SHA256=", command)
+        self.assertIn("/v1/projection?run_id=", command)
+        self.assertIn("/chat/completions", command)
+        self.assertIn("/embeddings", command)
+        self.assertIn("dimensions: 1024", command)
+        self.assertIn("/ready", command)
         self.assertIn('.version == "v0.4.16"', command)
-        self.assertIn('openviking-storage-probe', command)
-        self.assertIn('compose stop openviking', command)
-        self.assertIn('compose start openviking', command)
-        self.assertIn('--resolved-plan', command)
-        self.assertIn('readiness_plan.py', command)
-        self.assertIn('readiness_response.py', command)
-        self.assertIn('environment_hash: $environment_hash', command)
-        self.assertIn('model_calls_dispatched: 7', command)
-        self.assertIn('model-readiness-attempt.json', command)
-        self.assertIn('billing_complete: false', command)
-        self.assertIn('record_model_dispatch', command)
-        self.assertIn('record_model_terminal', command)
-        self.assertIn('restore_openviking_on_exit', command)
-        self.assertIn('OPENVIKING_QUIESCED', command)
+        self.assertIn("openviking-storage-probe", command)
+        self.assertIn("compose stop openviking", command)
+        self.assertIn("compose start openviking", command)
+        self.assertIn("--resolved-plan", command)
+        self.assertIn("readiness_plan.py", command)
+        self.assertIn("readiness_response.py", command)
+        self.assertIn("environment_hash: $environment_hash", command)
+        self.assertIn("model_calls_dispatched: 7", command)
+        self.assertIn("MODEL_READINESS_CHAT_MAX_TOKENS=1024", command)
+        self.assertIn("max_tokens: $max_tokens", command)
+        self.assertNotIn("max_tokens: 16", command)
+        self.assertIn("model-readiness-attempt.json", command)
+        self.assertIn("billing_complete: false", command)
+        self.assertIn('set -- "$service_receipt_directory"/*.json', command)
+        self.assertNotIn('find "$RUNTIME_DIR/service-verification-receipts"', command)
+        self.assertIn("record_model_dispatch", command)
+        self.assertIn("record_model_terminal", command)
+        self.assertIn("restore_openviking_on_exit", command)
+        self.assertIn("OPENVIKING_QUIESCED", command)
         all_text = "\n".join(
             path.read_text(encoding="utf-8")
             for path in ROOT.rglob("*")
@@ -212,9 +198,9 @@ class ServiceBundleContractTests(unittest.TestCase):
 
         self.assertIn('HINDSIGHT_API_LLM_REASONING_EFFORT: "low"', compose)
         self.assertIn('reasoning_effort: "low"', mem0_bootstrap)
-        self.assertIn('is_reasoning_model: true', mem0_bootstrap)
+        self.assertIn("is_reasoning_model: true", mem0_bootstrap)
         self.assertIn('"extra_request_body": {"reasoning_effort": "low"}', openviking_config)
-        self.assertIn('reasoning_effort: $effort', operator)
+        self.assertIn("reasoning_effort: $effort", operator)
         self.assertIn("hindsight-model-config.json", operator)
         self.assertIn("openviking-model-config.json", operator)
         self.assertEqual(operator.count('--arg target_model "$TARGET_PROVIDER_MODEL"'), 3)
@@ -233,7 +219,7 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertEqual(compose.count("./retry-guard/sitecustomize.py:"), 3)
         self.assertEqual(openviking_config.count('"max_retries": 0'), 2)
         self.assertIn('kwargs["max_retries"] = INTERNAL_RETRY_COUNT', retry_guard)
-        self.assertIn('module._MEMORY_EXTRACTION_MAX_RETRIES =', retry_guard)
+        self.assertIn("module._MEMORY_EXTRACTION_MAX_RETRIES =", retry_guard)
         for filename in (
             "hindsight-retry-config.json",
             "mem0-retry-config.json",
@@ -252,8 +238,8 @@ class ServiceBundleContractTests(unittest.TestCase):
         script = self.read("openviking/bootstrap.sh")
         self.assertIn('"$BASE_URL/health"', script)
         self.assertIn('.role == "admin"', script)
-        self.assertIn('.account_id == $account', script)
-        self.assertIn('.user_id == $user', script)
+        self.assertIn(".account_id == $account", script)
+        self.assertIn(".user_id == $user", script)
 
     def test_example_env_has_placeholders_not_credentials(self) -> None:
         example = self.read(".env.example")
