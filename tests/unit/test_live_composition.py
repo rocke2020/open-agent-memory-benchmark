@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import multiprocessing
 import os
@@ -912,8 +913,16 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
     receipts.mkdir(parents=True)
     service_receipt = {"provider_project": "oamb-providers-readiness-test"}
     service_bytes = json.dumps(service_receipt).encode()
-    service_path = receipts / "service.json"
+    service_hash = hashlib.sha256(service_bytes).hexdigest()
+    service_path = receipts / f"{service_hash}.json"
     service_path.write_bytes(service_bytes)
+    unrelated_bytes = json.dumps({"provider_project": "unrelated-history"}).encode()
+    unrelated_hash = hashlib.sha256(unrelated_bytes).hexdigest()
+    (receipts / f"{unrelated_hash}.json").write_bytes(unrelated_bytes)
+    (receipts / "malformed-history.json").write_text("not json", encoding="utf-8")
+    (receipts / "service-verification-current.sha256").write_text(
+        "malformed current selection\n", encoding="utf-8"
+    )
     attempt = {
         "schema_version": "oamb-provider-model-readiness-attempt-v1",
         "provider_project": "oamb-providers-readiness-test",
@@ -949,7 +958,7 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
         "schema_version": "oamb-provider-model-readiness-receipt-v1",
         "provider_project": "oamb-providers-readiness-test",
         "resolved_plan_hash": plan.resolved_plan_hash,
-        "service_verification_receipt_sha256": hashlib.sha256(service_bytes).hexdigest(),
+        "service_verification_receipt_sha256": service_hash,
         "attempt_sha256": hashlib.sha256(attempt_bytes).hexdigest(),
         "completed_at_utc": "2026-09-02T00:00:02Z",
         "operation_timeout_seconds": 900,
@@ -964,10 +973,22 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
     receipt_path = runtime / "model-readiness-receipt.json"
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
-    live.validate_live_readiness_receipt(
-        plan=plan,
-        provider_runtime_directory=runtime,
-        environment=environment,
+    assert (
+        live.validate_live_readiness_receipt(
+            plan=plan,
+            provider_runtime_directory=runtime,
+            environment=environment,
+        )
+        == service_path
+    )
+    (receipts / "service-verification-current.sha256").unlink()
+    assert (
+        live.validate_live_readiness_receipt(
+            plan=plan,
+            provider_runtime_directory=runtime,
+            environment=environment,
+        )
+        == service_path
     )
 
     drifted_environment = {**environment, "OAMB_DEEPSEEK_API_KEY": "different-answer-key"}
@@ -986,6 +1007,184 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
             provider_runtime_directory=runtime,
             environment=environment,
         )
+
+
+def test_service_receipt_resolution_uses_current_selection_or_explicit_binding(
+    tmp_path: Path,
+) -> None:
+    from oamb import live
+
+    runtime = tmp_path / "runtime"
+    receipts = runtime / "service-verification-receipts"
+    receipts.mkdir(parents=True)
+    first_bytes = b'{"receipt":"first"}'
+    second_bytes = b'{"receipt":"second"}'
+    first_hash = hashlib.sha256(first_bytes).hexdigest()
+    second_hash = hashlib.sha256(second_bytes).hexdigest()
+    first_path = receipts / f"{first_hash}.json"
+    second_path = receipts / f"{second_hash}.json"
+    first_path.write_bytes(first_bytes)
+    second_path.write_bytes(second_bytes)
+    (receipts / "service-verification-current.sha256").write_text(
+        f"{second_hash}\n", encoding="utf-8"
+    )
+
+    assert live.resolve_service_verification_receipt(runtime) == second_path
+    assert (
+        live.resolve_service_verification_receipt(runtime, expected_sha256=first_hash) == first_path
+    )
+
+
+def test_service_receipt_resolution_rejects_missing_bound_receipt(tmp_path: Path) -> None:
+    from oamb import live
+
+    runtime = tmp_path / "runtime"
+    (runtime / "service-verification-receipts").mkdir(parents=True)
+
+    with pytest.raises(live.LiveConfigurationError, match="missing or malformed"):
+        live.resolve_service_verification_receipt(runtime, expected_sha256="a" * 64)
+
+
+def test_readiness_plan_binds_current_receipt_before_attempt_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module_path = REPOSITORY_ROOT / "provider-services/lib/readiness_plan.py"
+    spec = importlib.util.spec_from_file_location("provider_readiness_plan", module_path)
+    assert spec is not None and spec.loader is not None
+    readiness_plan = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(readiness_plan)
+    plan = _lme60_plan()
+    environment = _environment()
+    runtime = tmp_path / "runtime"
+    receipts = runtime / "service-verification-receipts"
+    receipts.mkdir(parents=True)
+    receipt_bytes = b'{"receipt":"current"}'
+    receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
+    (receipts / f"{receipt_hash}.json").write_bytes(receipt_bytes)
+    pointer = receipts / "service-verification-current.sha256"
+    pointer.write_text(f"{receipt_hash}\n", encoding="utf-8")
+    validated_paths: list[Path] = []
+    monkeypatch.setattr(readiness_plan, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(readiness_plan, "load_live_environment", lambda **_kwargs: environment)
+    monkeypatch.setattr(
+        readiness_plan,
+        "validate_live_service_verification_receipt",
+        lambda **kwargs: validated_paths.append(kwargs["service_receipt_path"]),
+        raising=False,
+    )
+
+    document = readiness_plan.readiness_plan_document(
+        tmp_path / "resolved-plan.json",
+        provider_env_path=tmp_path / "provider.env",
+        model_env_path=tmp_path / "model.env",
+        provider_runtime_directory=runtime,
+    )
+
+    assert document["service_verification_receipt_sha256"] == receipt_hash
+    assert validated_paths == [receipts / f"{receipt_hash}.json"]
+    pointer.write_text("malformed\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        readiness_plan.readiness_plan_document(
+            tmp_path / "resolved-plan.json",
+            provider_env_path=tmp_path / "provider.env",
+            model_env_path=tmp_path / "model.env",
+            provider_runtime_directory=runtime,
+        )
+    assert not (runtime / "model-readiness-plan.json").exists()
+    assert not (runtime / "model-readiness-attempt.json").exists()
+
+
+def test_readiness_plan_rejects_content_addressed_malformed_service_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module_path = REPOSITORY_ROOT / "provider-services/lib/readiness_plan.py"
+    spec = importlib.util.spec_from_file_location("invalid_provider_readiness_plan", module_path)
+    assert spec is not None and spec.loader is not None
+    readiness_plan = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(readiness_plan)
+    runtime = tmp_path / "runtime"
+    receipts = runtime / "service-verification-receipts"
+    receipts.mkdir(parents=True)
+    (runtime / "provider-project.attestation").write_text(
+        "project=oamb-providers-readiness-test\n", encoding="utf-8"
+    )
+    receipt_bytes = b"not-json-but-content-addressed"
+    receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
+    (receipts / f"{receipt_hash}.json").write_bytes(receipt_bytes)
+    (receipts / "service-verification-current.sha256").write_text(
+        f"{receipt_hash}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(readiness_plan, "load_resolved_plan_for_run", lambda _path: _lme60_plan())
+    monkeypatch.setattr(readiness_plan, "load_live_environment", lambda **_kwargs: _environment())
+
+    with pytest.raises(ValueError):
+        readiness_plan.readiness_plan_document(
+            tmp_path / "resolved-plan.json",
+            provider_env_path=tmp_path / "provider.env",
+            model_env_path=tmp_path / "model.env",
+            provider_runtime_directory=runtime,
+        )
+    assert not (runtime / "model-readiness-plan.json").exists()
+    assert not (runtime / "model-readiness-attempt.json").exists()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("missing", "malformed", "symlink", "non-hex", "absent-target", "mismatch"),
+)
+def test_service_receipt_resolution_rejects_invalid_current_selection(
+    tmp_path: Path, failure: str
+) -> None:
+    from oamb import live
+
+    runtime = tmp_path / "runtime"
+    receipts = runtime / "service-verification-receipts"
+    receipts.mkdir(parents=True)
+    pointer = receipts / "service-verification-current.sha256"
+    content = b'{"receipt":"current"}'
+    content_hash = hashlib.sha256(content).hexdigest()
+    if failure == "malformed":
+        pointer.write_text(content_hash, encoding="utf-8")
+    elif failure == "symlink":
+        target = tmp_path / "pointer-target"
+        target.write_text(f"{content_hash}\n", encoding="utf-8")
+        pointer.symlink_to(target)
+    elif failure == "non-hex":
+        pointer.write_text(f"{'g' * 64}\n", encoding="utf-8")
+    elif failure == "absent-target":
+        pointer.write_text(f"{content_hash}\n", encoding="utf-8")
+    elif failure == "mismatch":
+        pointer.write_text(f"{content_hash}\n", encoding="utf-8")
+        (receipts / f"{content_hash}.json").write_bytes(b"different")
+
+    with pytest.raises(live.LiveConfigurationError):
+        live.resolve_service_verification_receipt(runtime)
+
+
+@pytest.mark.parametrize("failure", ("malformed-hash", "symlink", "mismatch"))
+def test_service_receipt_resolution_rejects_invalid_bound_receipt(
+    tmp_path: Path, failure: str
+) -> None:
+    from oamb import live
+
+    runtime = tmp_path / "runtime"
+    receipts = runtime / "service-verification-receipts"
+    receipts.mkdir(parents=True)
+    content = b'{"receipt":"bound"}'
+    content_hash = hashlib.sha256(content).hexdigest()
+    bound_path = receipts / f"{content_hash}.json"
+    expected_hash = content_hash
+    if failure == "malformed-hash":
+        expected_hash = "not-a-hash"
+    elif failure == "symlink":
+        target = tmp_path / "bound-target"
+        target.write_bytes(content)
+        bound_path.symlink_to(target)
+    else:
+        bound_path.write_bytes(b"different")
+
+    with pytest.raises(live.LiveConfigurationError):
+        live.resolve_service_verification_receipt(runtime, expected_sha256=expected_hash)
 
 
 def test_bounded_profile_evidence_closes_one_same_question_per_provider(

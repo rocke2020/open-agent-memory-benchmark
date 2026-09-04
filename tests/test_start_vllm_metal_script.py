@@ -5,7 +5,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "start_vllm_metal.sh"
+SCRIPT_PATH = (
+    Path(__file__).parents[1] / "scripts" / "start_local_embedding" / "start_vllm_metal.sh"
+)
 
 
 def test_start_vllm_metal_is_executable_from_readme_command() -> None:
@@ -19,7 +21,13 @@ def _write_vllm(executable: Path, body: str) -> None:
 
 
 def _copy_script(tmp_path: Path) -> Path:
-    script = tmp_path / "open-agent-memory-benchmark" / "scripts" / SCRIPT_PATH.name
+    script = (
+        tmp_path
+        / "open-agent-memory-benchmark"
+        / "scripts"
+        / "start_local_embedding"
+        / SCRIPT_PATH.name
+    )
     script.parent.mkdir(parents=True)
     shutil.copy2(SCRIPT_PATH, script)
     return script

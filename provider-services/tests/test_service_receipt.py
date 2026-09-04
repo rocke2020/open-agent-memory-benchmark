@@ -304,6 +304,81 @@ class ServiceReceiptTests(unittest.TestCase):
             self.assertNotIn(temporary, first.read_text(encoding="utf-8"))
             self.assertRegex(first.name, r"^[0-9a-f]{64}\.json$")
 
+    def test_new_receipt_replaces_only_current_selection(self) -> None:
+        module = load_module()
+        proof_hashes = {
+            "hindsight-rest-v1": "b" * 64,
+            "mem0-rest-v1": "c" * 64,
+            "openviking-rest-v1": "d" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve()
+            first = module.seal_service_verification_receipt(
+                output,
+                module.build_service_verification_receipt(
+                    provider_project="oamb-providers-test-alpha",
+                    project_attestation_sha256="a" * 64,
+                    verified_at_utc="2026-08-27T12:00:00Z",
+                    profile_proof_manifest_sha256=proof_hashes,
+                ),
+            )
+            second = module.seal_service_verification_receipt(
+                output,
+                module.build_service_verification_receipt(
+                    provider_project="oamb-providers-test-alpha",
+                    project_attestation_sha256="a" * 64,
+                    verified_at_utc="2026-08-27T12:01:00Z",
+                    profile_proof_manifest_sha256=proof_hashes,
+                ),
+            )
+
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+            self.assertEqual(
+                (output / "service-verification-current.sha256").read_text(encoding="utf-8"),
+                f"{second.stem}\n",
+            )
+
+    def test_pointer_replacement_failure_preserves_old_selection_and_new_receipt(
+        self,
+    ) -> None:
+        module = load_module()
+        proof_hashes = {
+            "hindsight-rest-v1": "b" * 64,
+            "mem0-rest-v1": "c" * 64,
+            "openviking-rest-v1": "d" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve()
+            first = module.build_service_verification_receipt(
+                provider_project="oamb-providers-test-alpha",
+                project_attestation_sha256="a" * 64,
+                verified_at_utc="2026-08-27T12:00:00Z",
+                profile_proof_manifest_sha256=proof_hashes,
+            )
+            second = module.build_service_verification_receipt(
+                provider_project="oamb-providers-test-alpha",
+                project_attestation_sha256="a" * 64,
+                verified_at_utc="2026-08-27T12:01:00Z",
+                profile_proof_manifest_sha256=proof_hashes,
+            )
+            first_path = module.seal_service_verification_receipt(output, first)
+            second_hash = hashlib.sha256(module._canonical_json_bytes(second)).hexdigest()
+
+            with mock.patch.object(
+                module.os, "replace", side_effect=OSError("planted pointer failure")
+            ):
+                with self.assertRaisesRegex(OSError, "planted pointer failure"):
+                    module.seal_service_verification_receipt(output, second)
+
+            self.assertTrue(first_path.is_file())
+            self.assertTrue((output / f"{second_hash}.json").is_file())
+            self.assertEqual(
+                (output / "service-verification-current.sha256").read_text(encoding="utf-8"),
+                f"{first_path.stem}\n",
+            )
+
     def test_cli_seals_proof_store_and_one_receipt_for_operator(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

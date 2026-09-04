@@ -1558,6 +1558,54 @@ def test_live_entrypoint_owns_provider_lifecycle_through_terminal_capsule(
     assert validate_source_root(path_drift_root).disposition == ValidationDisposition.INVALID
 
 
+def test_live_validation_matches_role_inventory_independent_of_manifest_path_order(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureJudgeWorkload()
+    dataset = workload.resolve_sources()
+    case_manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id="controlled-native-role-path-order",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=case_manifest.manifest_hash,
+        workload_id=case_manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="recorded-answer-v1",
+        judge_role_binding_id="fake-judge-v1",
+        provider_runtime_directory=tmp_path / "provider-runtime-role-path-order",
+    )
+
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id=control.run_spec.run_id,
+        adapter_profile_id=control.preflight_record.adapter_profile_id,
+        workload=workload,
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=_RecordedNativeModel,
+        answer_role_binding_id="recorded-answer-v1",
+        judge_model_factory=_RecordedNativeModel,
+        judge_role_binding_id="fake-judge-v1",
+        control=control,
+    )
+
+    persisted_role_ids = tuple(
+        json.loads((completed.capsule_root / entry.relative_path).read_bytes())["binding_id"]
+        for entry in completed.manifest.source_entries
+        if entry.record_kind == "model_role_binding"
+    )
+    assert persisted_role_ids == ("fake-judge-v1", "recorded-answer-v1")
+    assert control.run_spec.model_role_binding_ids == (
+        "recorded-answer-v1",
+        "fake-judge-v1",
+    )
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+
+
 def test_live_validation_accepts_multiple_provider_usage_records_with_model_role_owners(
     tmp_path: Path,
 ) -> None:

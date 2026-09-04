@@ -156,7 +156,16 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertNotIn("max_tokens: 16", command)
         self.assertIn("model-readiness-attempt.json", command)
         self.assertIn("billing_complete: false", command)
-        self.assertIn('set -- "$service_receipt_directory"/*.json', command)
+        self.assertIn("service_verification_receipt_sha256", command)
+        self.assertNotIn('set -- "$service_receipt_directory"/*.json', command)
+        self.assertLess(
+            command.index('readiness_plan_temporary="$readiness_plan.partial.$$"'),
+            command.index('create_model_readiness_attempt "$project"'),
+        )
+        self.assertLess(
+            command.index("service_verification_receipt_sha256"),
+            command.index('create_model_readiness_attempt "$project"'),
+        )
         self.assertNotIn('find "$RUNTIME_DIR/service-verification-receipts"', command)
         self.assertIn("record_model_dispatch", command)
         self.assertIn("record_model_terminal", command)
@@ -179,6 +188,18 @@ class ServiceBundleContractTests(unittest.TestCase):
             "collections/" + "delete",
         ):
             self.assertNotIn(destructive, all_text)
+
+    def test_model_readiness_uses_the_shared_host_embedding_resolver(self) -> None:
+        command = self.read("bin/provider-services")
+        resolver = ROOT / "lib" / "host_embedding.sh"
+
+        self.assertTrue(resolver.is_file())
+        self.assertIn('. "$ROOT/lib/host_embedding.sh"', command)
+        self.assertIn("resolve_host_embedding_base", command)
+        self.assertNotIn(
+            'embedding_base="http://127.0.0.1:${embedding_base#http://host.docker.internal:}"',
+            command,
+        )
 
     def test_openviking_isolated_api_configuration(self) -> None:
         compose = self.read("compose.yaml")

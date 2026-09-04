@@ -393,8 +393,9 @@ def run_command(
             provider_runtime_directory=provider_runtime,
             base_environment=os.environ,
         )
+        service_receipt_path = None
         if plan.dataset.selection == "lme60":
-            validate_live_readiness_receipt(
+            service_receipt_path = validate_live_readiness_receipt(
                 plan=plan,
                 provider_runtime_directory=provider_runtime,
                 environment=environment,
@@ -403,6 +404,7 @@ def run_command(
             plan=plan,
             provider_runtime_directory=provider_runtime,
             environment=environment,
+            service_receipt_path=service_receipt_path,
         )
         if lme60_requires_bounded_proof:
             dataset_path = Path(plan.dataset.path)
@@ -749,6 +751,13 @@ def compare_command(
             help="Exact frozen dataset file used to add local-only question and answer details.",
         ),
     ] = None,
+    diagnostic: Annotated[
+        bool,
+        typer.Option(
+            "--diagnostic",
+            help="Allow aligned partial coverage and suppress full-study accuracy claims.",
+        ),
+    ] = False,
 ) -> None:
     """Freshly validate frozen cells and build every pair plus offline report."""
 
@@ -780,6 +789,7 @@ def compare_command(
             sources,
             output_root=output_root,
             dataset_source=dataset_source,
+            diagnostic=diagnostic,
         )
     except (OSError, ComparisonProjectError, ResolvedPlanError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc

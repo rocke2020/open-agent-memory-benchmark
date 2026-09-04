@@ -52,14 +52,24 @@ def test_live_question_run_writes_machine_readable_result_map(
     capsule_root = tmp_path / "capsules" / "hindsight-question"
     capsule_root.mkdir(parents=True)
     result_map = tmp_path / "hindsight-result.json"
+    bound_service_receipt = tmp_path / "bound-service-receipt.json"
 
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        live,
+        "validate_live_readiness_receipt",
+        lambda **_kwargs: bound_service_receipt,
+    )
     monkeypatch.setattr(live, "load_live_environment", lambda **_kwargs: {})
+
+    def load_provider_evidence(**kwargs: object) -> tuple[str, dict[str, object]]:
+        assert kwargs["service_receipt_path"] == bound_service_receipt
+        return "provider-project", {"hindsight": object()}
+
     monkeypatch.setattr(
         live,
         "load_live_provider_evidence",
-        lambda **_kwargs: ("provider-project", {"hindsight": object()}),
+        load_provider_evidence,
     )
     monkeypatch.setattr(
         live,

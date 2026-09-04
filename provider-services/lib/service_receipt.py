@@ -39,6 +39,7 @@ PROFILE_PROOF_FILES = {
 }
 PRIVATE_PATH_PREFIXES = ("/Users/", "/home/", "/private/var/", "C:\\Users\\")
 REDACTED_VALUE = "[redacted]"
+CURRENT_RECEIPT_POINTER = "service-verification-current.sha256"
 
 
 def build_service_verification_receipt(
@@ -134,8 +135,7 @@ def _redact_control_authorities(value: object) -> object:
     if isinstance(value, list):
         return [_redact_control_authorities(item) for item in value]
     if isinstance(value, str) and (
-        "://" in value
-        or value.startswith(("localhost:", "127.0.0.1:", *PRIVATE_PATH_PREFIXES))
+        "://" in value or value.startswith(("localhost:", "127.0.0.1:", *PRIVATE_PATH_PREFIXES))
     ):
         return REDACTED_VALUE
     return value
@@ -145,12 +145,49 @@ def seal_service_verification_receipt(
     output_directory: Path,
     receipt: Mapping[str, object],
 ) -> Path:
-    return _seal_content_addressed_bytes(
+    path = _seal_content_addressed_bytes(
         output_directory,
         _canonical_json_bytes(receipt),
         suffix=".json",
         trusted_root=output_directory,
     )
+    _replace_current_receipt_hash(output_directory, path.stem)
+    return path
+
+
+def _replace_current_receipt_hash(output_directory: Path, receipt_hash: str) -> None:
+    _require_sha256(receipt_hash)
+    output_directory = _ensure_durable_directory(
+        output_directory,
+        trusted_root=output_directory,
+    )
+    pointer = output_directory / CURRENT_RECEIPT_POINTER
+    try:
+        pointer_metadata = pointer.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(pointer_metadata.st_mode):
+            raise ValueError("current service receipt pointer must be a regular file")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{CURRENT_RECEIPT_POINTER}.tmp-",
+        dir=output_directory,
+    )
+    temporary = Path(temporary_name)
+    replaced = False
+    try:
+        _write_all(descriptor, f"{receipt_hash}\n".encode("ascii"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, pointer)
+        replaced = True
+        _fsync_directory(output_directory)
+    finally:
+        if not replaced:
+            temporary.unlink(missing_ok=True)
+            _fsync_directory(output_directory)
 
 
 def _seal_content_addressed_bytes(
@@ -173,12 +210,7 @@ def _seal_content_addressed_bytes(
     )
     temporary = Path(temporary_name)
     try:
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short service receipt write")
-            view = view[written:]
+        _write_all(descriptor, content)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -193,6 +225,15 @@ def _seal_content_addressed_bytes(
         temporary.unlink(missing_ok=True)
         _fsync_directory(output_directory)
     return target
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short service receipt write")
+        view = view[written:]
 
 
 def _ensure_durable_directory(directory: Path, *, trusted_root: Path) -> Path:

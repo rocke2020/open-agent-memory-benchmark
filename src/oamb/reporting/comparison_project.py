@@ -161,6 +161,7 @@ def build_comparison_project(
     *,
     output_root: Path,
     dataset_source: Path | None = None,
+    diagnostic: bool = False,
 ) -> ComparisonProjectBuildResult:
     """Revalidate all cells, derive every canonical pair, and publish one offline report."""
 
@@ -172,8 +173,16 @@ def build_comparison_project(
             "validated source roots do not close the resolved cell inventory"
         )
 
-    snapshots = tuple(_load_cell_snapshot(plan, cell, sources[cell.cell_id]) for cell in plan.cells)
-    _require_shared_case_manifest(plan, snapshots)
+    snapshots = tuple(
+        _load_cell_snapshot(
+            plan,
+            cell,
+            sources[cell.cell_id],
+            allow_incomplete=diagnostic,
+        )
+        for cell in plan.cells
+    )
+    _require_shared_case_manifest(plan, snapshots, allow_incomplete=diagnostic)
     cell_documents = tuple(_cell_document(plan, snapshot) for snapshot in snapshots)
     local_question_content = (
         _load_local_question_content(plan, Path(dataset_source), snapshots[0].case_manifest_bytes)
@@ -189,13 +198,29 @@ def build_comparison_project(
         included=bool(local_question_content),
     )
     comparison_documents = tuple(
-        _pair_document(plan, left, right) for left, right in combinations(cell_documents, 2)
+        _pair_document(
+            plan,
+            left,
+            right,
+            complete_coverage=not diagnostic,
+        )
+        for left, right in combinations(cell_documents, 2)
     )
     if len(comparison_documents) != math.comb(len(plan.cells), 2):
         raise ComparisonProjectError("pairwise comparison inventory is incomplete")
 
+    expected_case_count = _expected_case_count(plan.dataset.selection)
     limitations = tuple(
-        [
+        (
+            [
+                "Diagnostic comparison: "
+                f"{len(snapshots[0].cases)} of {expected_case_count} frozen questions; "
+                "no full-study leader claim."
+            ]
+            if diagnostic and expected_case_count is not None
+            else []
+        )
+        + [
             f"runtime retrieval proof unavailable for {snapshot.cell.cell_id}; configured "
             "generation-free retrieval is not reported as a runtime-verified claim"
             for snapshot in snapshots
@@ -252,6 +277,8 @@ def build_comparison_project(
         "limitations": limitations,
         "controlled_comparison_warning": CONTROLLED_COMPARISON_WARNING,
     }
+    if diagnostic:
+        export_body["diagnostic"] = True
     report_id = canonical_sha256(["oamb-comparison-project-initial-v1", export_body])
     export = {**export_body, "report_id": report_id}
     export_bytes = canonical_json_bytes(export)
@@ -310,6 +337,8 @@ def _load_cell_snapshot(
     plan: ResolvedPlan,
     cell: CellSpec,
     source: ValidatedCellRoot,
+    *,
+    allow_incomplete: bool = False,
 ) -> _CellSnapshot:
     root = Path(source.root)
     supplied_validation = source.validation_result
@@ -406,7 +435,16 @@ def _load_cell_snapshot(
         _required_text(item, "case_manifest_entry_id") for item in manifest_cases
     )
     cases_by_id = _unique_by(case_records, "case_manifest_entry_id", "case record")
-    if tuple(cases_by_id) != manifest_case_ids:
+    if allow_incomplete:
+        unknown_case_ids = set(cases_by_id).difference(manifest_case_ids)
+        if unknown_case_ids:
+            raise ComparisonProjectError(
+                f"cell {cell.cell_id} case records do not close the case manifest"
+            )
+        ordered_cases = tuple(
+            cases_by_id[case_id] for case_id in manifest_case_ids if case_id in cases_by_id
+        )
+    elif tuple(cases_by_id) != manifest_case_ids:
         try:
             ordered_cases = tuple(cases_by_id[item] for item in manifest_case_ids)
         except KeyError as exc:
@@ -718,6 +756,8 @@ def _read_source_documents(
 def _require_shared_case_manifest(
     plan: ResolvedPlan,
     snapshots: tuple[_CellSnapshot, ...],
+    *,
+    allow_incomplete: bool = False,
 ) -> None:
     if not snapshots:
         raise ComparisonProjectError("comparison has no cell snapshots")
@@ -727,10 +767,22 @@ def _require_shared_case_manifest(
     case_count = len(snapshots[0].cases)
     if any(len(item.cases) != case_count for item in snapshots):
         raise ComparisonProjectError("provider-specific result coverage is not closed")
+    case_ids = tuple(_required_text(item, "case_manifest_entry_id") for item in snapshots[0].cases)
+    if any(
+        tuple(_required_text(case, "case_manifest_entry_id") for case in item.cases) != case_ids
+        for item in snapshots[1:]
+    ):
+        raise ComparisonProjectError("provider-specific case selection is not aligned")
     expected = _expected_case_count(plan.dataset.selection)
-    if expected is not None and (
-        case_count != expected
-        or sum(len(item.cases) for item in snapshots) != expected * len(plan.cells)
+    if allow_incomplete and (case_count < 1 or (expected is not None and case_count > expected)):
+        raise ComparisonProjectError("diagnostic comparison case coverage is invalid")
+    if (
+        not allow_incomplete
+        and expected is not None
+        and (
+            case_count != expected
+            or sum(len(item.cases) for item in snapshots) != expected * len(plan.cells)
+        )
     ):
         raise ComparisonProjectError("comparison case/result coverage is incomplete")
 
@@ -806,7 +858,7 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
         "accounting": _accounting_document(plan, snapshot),
         "limitations": limitations,
     }
-    if plan.dataset.selection == "lme60":
+    if plan.dataset.selection == "lme60" and len(snapshot.cases) == 60:
         document["accuracy"] = _accuracy_document(plan, snapshot)
     return document
 
@@ -1395,6 +1447,12 @@ def _question_documents(
     manifest_case_ids = tuple(
         _required_text(item, "case_manifest_entry_id") for item in manifest_cases
     )
+    manifest_ordinals = {
+        case_id: ordinal for ordinal, case_id in enumerate(manifest_case_ids, start=1)
+    }
+    selected_case_ids = tuple(
+        _required_text(item, "case_manifest_entry_id") for item in snapshots[0].cases
+    )
     content_by_id: dict[str, dict[str, object]] = {}
     if local_question_content:
         for item in local_question_content:
@@ -1406,7 +1464,7 @@ def _question_documents(
             raise ComparisonProjectError("question content order differs from the manifest")
 
     questions: list[dict[str, object]] = []
-    for index, case_id in enumerate(manifest_case_ids):
+    for index, case_id in enumerate(selected_case_ids):
         provider_results = tuple(
             _question_provider_result(
                 snapshot,
@@ -1417,7 +1475,7 @@ def _question_documents(
         )
         document: dict[str, object] = {
             "case_manifest_entry_id": case_id,
-            "ordinal_1_indexed": index + 1,
+            "ordinal_1_indexed": manifest_ordinals[case_id],
             "provider_results": provider_results,
         }
         if local_question_content:
@@ -1601,6 +1659,8 @@ def _pair_document(
     plan: ResolvedPlan,
     left: dict[str, Any],
     right: dict[str, Any],
+    *,
+    complete_coverage: bool = True,
 ) -> dict[str, Any]:
     limitations: list[str] = []
     comparable = True
@@ -1642,6 +1702,7 @@ def _pair_document(
         left,
         right,
         comparable=comparable,
+        complete_coverage=complete_coverage,
         signed_delta=signed_delta,
         paired_accuracy=paired_accuracy,
     )
@@ -1760,6 +1821,7 @@ def _pair_accuracy_decision(
     right: Mapping[str, Any],
     *,
     comparable: bool,
+    complete_coverage: bool = True,
     signed_delta: Mapping[str, int] | str,
     paired_accuracy: Mapping[str, object] | str,
 ) -> dict[str, object]:
@@ -1773,7 +1835,7 @@ def _pair_accuracy_decision(
         )
     minimum_delta, maximum_p_value, threshold_text = thresholds
     failed: list[str] = []
-    if not comparable:
+    if not comparable or not complete_coverage:
         failed.append("complete_equal_coverage")
     delta = _fraction_value(signed_delta)
     if delta is None or abs(delta) < minimum_delta:
@@ -2303,6 +2365,17 @@ def _validate_accuracy_export(export: Mapping[str, Any]) -> None:
         for cell in cells:
             results = cell.get("results")
             accuracy = cell.get("accuracy")
+            if export.get("diagnostic") is True:
+                if (
+                    not isinstance(results, (list, tuple))
+                    or not 0 < len(results) < 60
+                    or any(not isinstance(item, dict) for item in results)
+                    or accuracy is not None
+                ):
+                    raise ComparisonProjectError(
+                        "diagnostic comparison accuracy evidence is invalid"
+                    )
+                continue
             if (
                 not isinstance(results, (list, tuple))
                 or len(results) != 60
@@ -2358,6 +2431,7 @@ def _validate_accuracy_export(export: Mapping[str, Any]) -> None:
             left,
             right,
             comparable=comparable,
+            complete_coverage=export.get("diagnostic") is not True,
             signed_delta=comparison.get("signed_delta", "unavailable"),
             paired_accuracy=expected_paired,
         )

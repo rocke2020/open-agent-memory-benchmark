@@ -7,7 +7,12 @@ from pathlib import Path
 
 from oamb.config.doctor import load_resolved_plan_for_run
 from oamb.contracts.ids import canonical_json_bytes
-from oamb.live import live_readiness_environment_hash, load_live_environment
+from oamb.live import (
+    live_readiness_environment_hash,
+    load_live_environment,
+    resolve_service_verification_receipt,
+    validate_live_service_verification_receipt,
+)
 
 
 def readiness_plan_document(
@@ -24,6 +29,13 @@ def readiness_plan_document(
         provider_runtime_directory=provider_runtime_directory,
         base_environment={},
     )
+    service_receipt_path = resolve_service_verification_receipt(provider_runtime_directory)
+    validate_live_service_verification_receipt(
+        plan=plan,
+        provider_runtime_directory=provider_runtime_directory,
+        environment=environment,
+        service_receipt_path=service_receipt_path,
+    )
     return {
         "schema_name": "oamb_live_readiness_plan",
         "schema_version": 1,
@@ -31,6 +43,7 @@ def readiness_plan_document(
         "max_retries_per_operation": plan.execution.max_retries_per_operation,
         "operation_timeout_seconds": plan.execution.operation_timeout_seconds,
         "environment_hash": live_readiness_environment_hash(plan, environment),
+        "service_verification_receipt_sha256": service_receipt_path.stem,
         "model_roles": [
             {
                 "role_id": role.role_id,

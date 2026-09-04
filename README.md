@@ -25,59 +25,37 @@ score, so users can choose a memory system according to their own needs.
 ## Why Open Agent Memory Benchmark?
 
 Most agent-memory comparisons are published by individual memory providers.
-Their results are hard to compare because they may use different prompts, extraction/answer/judge models, retrieval modes, limits, or token definitions.
-Important adoption costs, especially indexing tokens, may be missing entirely.
+Their results are hard to compare because they may use different prompts,
+extraction, answer, and judge models, retrieval modes, limits, or token
+definitions. Important adoption costs, especially indexing tokens, may be
+missing entirely.
 
 OAMB fixes the questions, answer and judge policy, model roles, and comparison
 rules before a run starts. Each provider still uses its native memory API, while
 provider-specific settings and measured results remain visible in saved evidence
 and a self-contained offline report.
 
-OAMB separates memory extraction, answer generation, and scoring. Its self-
-curated extraction context frames each session as a conversation in which the
-model is the assistant, preserves the session timestamp, and deliberately omits
-the LongMemEval benchmark name. This framing is better suited to evaluating
-normal assistant memory behavior because it supplies useful role and temporal
-context without revealing the benchmark identity. Answer generation uses
-OAMB's own evidence-grounded prompt. Scoring preserves the original LongMemEval
-judge rubrics, with source attribution and byte-pinned templates.
+OAMB separates memory extraction, answer generation, and scoring. Its extraction
+context frames each session as a conversation in which the model is the
+assistant, preserves the session timestamp, and omits the benchmark name. Answer
+generation uses OAMB's evidence-grounded prompt. Scoring preserves the original
+LongMemEval judge rubrics, with source attribution and byte-pinned templates.
 
-The goal is a fair and open evaluation of agent memory that is convenient to
-run, inspect, and reproduce.
+The goal is a fair and open evaluation of agent memory that is quick to run,
+inspect, and reproduce.
 
 ## How do I use Open Agent Memory Benchmark?
 
-OAMB uses one explicit workflow:
-
-1. Configure the workload, providers, model roles, and two runtime controls in
-   `configs/benchmark.yml`.
-2. Change to the cloned repository, then run the complete command below to
-   validate the configuration and freeze an immutable resolved plan before any
-   provider call. The shorthand `oamb doctor` is incomplete and will not run.
-
-   ```bash
-   cd open-agent-memory-benchmark
-
-   OAMB_DOCTOR_DIR="$PWD/.local-demo/doctor-$(date -u +%Y%m%d-%H%M%S)"
-
-   uv run --locked oamb doctor \
-     configs/benchmark.yml \
-     --output "$OAMB_DOCTOR_DIR"
-   ```
-
-3. Prepare and verify the exact-pinned local provider services.
-4. Run one frozen question through each provider and validate all three saved
-   capsules. This is the small real-use gate before the larger evaluation.
-5. Run the 60-question comparison, then freshly validate every full capsule.
-6. Run the complete `uv run --locked oamb compare ...` command in
-   [Quick start step 6](#6-build-and-open-the-comparison-report) to build all
-   three pairwise comparisons and one offline HTML report.
+The normal workflow is two commands: `precheck.sh` prepares and verifies the
+complete runtime, then `run.sh` executes, validates, builds the comparison, and
+opens its offline report. Smoke mode is the default; full mode uses the same
+frozen plan and provider profiles for all 60 questions.
 
 The checked-in runtime controls allow two additional safe attempts per eligible
 operation and a 900-second timeout per external attempt. They do not impose a
 whole-run, aggregate-token, storage, resource, memory, or cost cap. Tokens,
 latency, storage, resources, and cost are measured results; unavailable
-measurements are reported as unavailable, never as zero.
+measurements remain unavailable rather than becoming zero.
 
 Retrieval generation is disabled in v0.1.0. Query embedding is allowed, but
 query rewriting, decomposition, reflection, generative reranking, and fallback
@@ -85,293 +63,96 @@ to a generation-model retrieval path are not.
 
 ## Quick start
 
-This walkthrough starts from a Git clone and performs a real LME-60 evaluation.
-It writes isolated provider state and makes potentially billable model calls.
-Run every command from the repository root and keep using the same shell so the
-working variables remain available.
+These two steps run a real comparison. They create isolated provider state and
+can make billable model calls; neither script deletes provider or database data.
 
-Before starting, install Git, Python 3.11 or newer, `uv`, Docker Engine with
-Compose, `curl`, `jq`, and `shasum`. You also need:
+Install Git, Python 3.11 or newer, `uv`, Docker Engine with Compose, `curl`,
+`jq`, and `shasum`. You also need an OpenAI-compatible endpoint that serves
+`deepseek-v4-flash` and `deepseek-v4-pro`.
 
-- an OpenAI-compatible DeepSeek endpoint that provides `deepseek-v4-flash` and
-  `deepseek-v4-pro`;
-- credentials for that endpoint; and
-- an OpenAI-compatible embedding endpoint serving
-  `qwen3-embedding:0.6b` with 1,024 dimensions and at least an 8,192-token model
-  and scheduler batch limit.
+For local embeddings, macOS uses the checked-in vLLM-Metal helper and Linux uses
+the checked-in Ollama helper. The embedding model must be
+`qwen3-embedding:0.6b`, return 1,024 dimensions, and accept at least 8,192 input
+tokens. The macOS helper expects a sibling `vllm-metal` checkout and the cached
+model paths described by its error messages; the Linux helper requires Ollama
+and may download the 639 MB model on first use. On Linux, Ollama binds only to
+the Docker bridge gateway needed by the provider containers, not to LAN interfaces.
 
-On Apple Silicon, start the compatible embedding endpoint on port `18000` with
-the checked-in helper; the later provider preflight verifies the actual response:
+### 1. Precheck
 
-```bash
-./scripts/start_vllm_metal.sh
-```
-
-Keep that server running in its own terminal.
-
-### 1. Clone OAMB and prepare its inputs
+Clone OAMB and run the single precheck command from its root:
 
 ```bash
-set -euo pipefail
-
-git clone https://github.com/rocke2020/open-agent-memory-benchmark.git
-cd open-agent-memory-benchmark
-
-uv sync --locked --group download
-./scripts/download/longmemeval.sh
-
-mkdir -p .local-demo/provider-source
-git clone --branch v2.0.19 --single-branch \
-  https://github.com/mem0ai/mem0.git \
-  .local-demo/provider-source/mem0
-
-test "$(git -C .local-demo/provider-source/mem0 \
-  rev-parse 'v2.0.19^{commit}')" = \
-  "dc82354e143c2581d505d581a00286d6ef8c3605"
+git clone https://github.com/rocke2020/open-agent-memory-benchmark.git && \
+  cd open-agent-memory-benchmark && \
+  ./precheck.sh
 ```
 
-The dataset downloader verifies the pinned revision and SHA-256. The final
-`test` command independently verifies the Mem0 release commit and stops on a
-mismatch.
+On first use, `precheck.sh` securely prompts for the model API URL and key. It
+then installs locked dependencies, downloads and verifies LongMemEval, clones
+and verifies the pinned Mem0 source, creates private local service credentials,
+starts the OS-specific embedding server when needed, starts all three memory
+providers, freezes `configs/benchmark.yml`, and verifies every runtime role.
+Existing configured `.env` files and provider data are reused, not overwritten.
 
-Compose declares all three providers. Hindsight and OpenViking use pinned
-published images; Mem0 is built from verified v2.0.19 source with hash-locked
-dependencies. The checkout above is only an immutable build input and is not
-mounted at runtime.
-
-Following the official Mem0 topology, one pgvector-enabled PostgreSQL service
-stores both application data and vector memories. OAMB's narrow read-only
-inspector reads that PostgreSQL memory table for evidence checks; no separate
-vector-database service is required.
-
-Create one unique working directory for this attempt:
+To use an OpenAI-compatible online embedding endpoint directly, pass its base
+URL. The endpoint must accept the profile's `oamb-local-embedding` bearer value:
 
 ```bash
-OAMB_RUN_LABEL="lme60-$(date -u +%Y%m%d-%H%M%S)"
-OAMB_WORK_DIR="$PWD/.local-demo/$OAMB_RUN_LABEL"
-MEM0_CHECKOUT="$PWD/.local-demo/provider-source/mem0"
-
-mkdir -p \
-  "$OAMB_WORK_DIR/bounded" \
-  "$OAMB_WORK_DIR/full" \
-  "$OAMB_WORK_DIR/results" \
-  "$OAMB_WORK_DIR/validations"
+./precheck.sh --embedding-api-url https://embedding.example/v1
 ```
 
-### 2. Configure credentials and local services
+To keep an already configured embedding endpoint without starting a local
+server, use `./precheck.sh --no-start-embedding`. In both cases the all-role
+readiness gate still sends a real embedding request and validates the returned
+model and dimensions. Do not continue unless precheck prints `precheck: PASS`.
+
+### 2. Run
+
+Run the smoke comparison. `--smoke_test` is the default, so these are identical:
 
 ```bash
-cp .env.example .env
-chmod 600 .env
-
-cp provider-services/.env.example provider-services/.env
-chmod 600 provider-services/.env
-
-printf 'OAMB_PROVIDER_PROJECT=oamb-providers-%s\n' "$OAMB_RUN_LABEL"
-printf 'OAMB_MEM0_SOURCE_CHECKOUT=%s\n' "$MEM0_CHECKOUT"
+./run.sh
+# ./run.sh --smoke_test
 ```
 
-Open `.env` in a text editor and replace both placeholders:
+Smoke mode runs the frozen question `72e3ee87` once on Hindsight, Mem0, and
+OpenViking. It freshly validates all three capsules, builds a three-provider
+diagnostic comparison over the same question, and opens `report.html`. A
+one-question report never claims a full-study accuracy leader.
 
-```text
-DEEPSEEK_BASE_URL=https://your-openai-compatible-endpoint/v1
-DEEPSEEK_API_KEY=your-api-key
-```
-
-Then open `provider-services/.env` and:
-
-- replace `OAMB_PROVIDER_PROJECT` and `OAMB_MEM0_SOURCE_CHECKOUT` with the two
-  values printed above;
-- replace every `change-me` value;
-- set the three provider-model endpoints and credentials; and
-- keep the pinned model names, ports, and embedding model unchanged unless your
-  embedding server uses a different reachable host URL.
-
-The provider dotenv parser intentionally does not support quotes, shell
-expansion, backticks, backslashes, or inline comments. Use one plain
-`NAME=value` per line.
-
-### 3. Freeze the plan and verify every runtime role
+Run the complete balanced LME-60 comparison with:
 
 ```bash
-uv run --locked oamb doctor \
-  configs/benchmark.yml \
-  --output "$OAMB_WORK_DIR/plan"
-
-PLAN="$OAMB_WORK_DIR/plan/resolved-plan.json"
-
-./provider-services/bin/provider-services doctor
-./provider-services/bin/provider-services build
-./provider-services/bin/provider-services up
-./provider-services/bin/provider-services verify --services
+./run.sh --full_test
 ```
 
-The next command is the first potentially billable step. It probes the shared
-embedding role, all three provider-owned producer roles, the answer role, the
-judge role, and OpenViking readiness once each. It also proves that
-provider-internal retries are disabled.
+Full mode first produces the required one-question proof for each provider,
+then runs all 60 questions on every provider for 180 provider-specific results.
+It freshly validates each full capsule before building and opening the final
+comparison report.
 
-```bash
-./provider-services/bin/provider-services verify --model-readiness \
-  --resolved-plan "$PLAN" \
-  --model-env "$PWD/.env"
+Both modes print the report path under `.local-demo/<run-label>/`. Set
+`OAMB_NO_OPEN=1` only in a headless environment; the HTML is still built and
+validated, and its path is printed.
 
-./provider-services/bin/provider-services status
-```
-
-Do not continue unless both verification commands report `PASS`.
-
-### 4. Run and validate one question on every provider
-
-Use the same frozen question for all three providers:
-
-```bash
-uv run --locked oamb run "$PLAN" \
-  --cell hindsight-lme60 \
-  --question 72e3ee87 \
-  --run-label "${OAMB_RUN_LABEL}-bounded-hindsight" \
-  --output-root "$OAMB_WORK_DIR/bounded" \
-  --result-map "$OAMB_WORK_DIR/results/bounded-hindsight.json"
-
-uv run --locked oamb run "$PLAN" \
-  --cell mem0-lme60 \
-  --question 72e3ee87 \
-  --run-label "${OAMB_RUN_LABEL}-bounded-mem0" \
-  --output-root "$OAMB_WORK_DIR/bounded" \
-  --result-map "$OAMB_WORK_DIR/results/bounded-mem0.json"
-
-uv run --locked oamb run "$PLAN" \
-  --cell openviking-lme60 \
-  --question 72e3ee87 \
-  --run-label "${OAMB_RUN_LABEL}-bounded-openviking" \
-  --output-root "$OAMB_WORK_DIR/bounded" \
-  --result-map "$OAMB_WORK_DIR/results/bounded-openviking.json"
-```
-
-Read the capsule paths from the result maps and validate their actual bytes:
-
-```bash
-HINDSIGHT_BOUNDED_ROOT="$(jq -er '.capsule_roots["hindsight-lme60"]' \
-  "$OAMB_WORK_DIR/results/bounded-hindsight.json")"
-MEM0_BOUNDED_ROOT="$(jq -er '.capsule_roots["mem0-lme60"]' \
-  "$OAMB_WORK_DIR/results/bounded-mem0.json")"
-OPENVIKING_BOUNDED_ROOT="$(jq -er '.capsule_roots["openviking-lme60"]' \
-  "$OAMB_WORK_DIR/results/bounded-openviking.json")"
-
-uv run --locked oamb capsule validate "$HINDSIGHT_BOUNDED_ROOT" \
-  --output "$OAMB_WORK_DIR/validations/bounded-hindsight.json"
-uv run --locked oamb capsule validate "$MEM0_BOUNDED_ROOT" \
-  --output "$OAMB_WORK_DIR/validations/bounded-mem0.json"
-uv run --locked oamb capsule validate "$OPENVIKING_BOUNDED_ROOT" \
-  --output "$OAMB_WORK_DIR/validations/bounded-openviking.json"
-```
-
-Do not start LME-60 unless all three validation commands print `validated`.
-
-### 5. Run and validate LME-60
-
-The full command admits all three provider cells concurrently. It refuses to
-start unless the three bounded capsules are fresh, valid, use the same frozen
-question, and match the current provider project and resolved plan.
-
-```bash
-uv run --locked oamb run "$PLAN" \
-  --run-label "${OAMB_RUN_LABEL}-full" \
-  --output-root "$OAMB_WORK_DIR/full" \
-  --result-map "$OAMB_WORK_DIR/results/full.json" \
-  --bounded-capsule "hindsight-lme60=$HINDSIGHT_BOUNDED_ROOT" \
-  --bounded-capsule "mem0-lme60=$MEM0_BOUNDED_ROOT" \
-  --bounded-capsule "openviking-lme60=$OPENVIKING_BOUNDED_ROOT" \
-  --bounded-validation \
-    "hindsight-lme60=$OAMB_WORK_DIR/validations/bounded-hindsight.json" \
-  --bounded-validation \
-    "mem0-lme60=$OAMB_WORK_DIR/validations/bounded-mem0.json" \
-  --bounded-validation \
-    "openviking-lme60=$OAMB_WORK_DIR/validations/bounded-openviking.json"
-
-HINDSIGHT_ROOT="$(jq -er '.capsule_roots["hindsight-lme60"]' \
-  "$OAMB_WORK_DIR/results/full.json")"
-MEM0_ROOT="$(jq -er '.capsule_roots["mem0-lme60"]' \
-  "$OAMB_WORK_DIR/results/full.json")"
-OPENVIKING_ROOT="$(jq -er '.capsule_roots["openviking-lme60"]' \
-  "$OAMB_WORK_DIR/results/full.json")"
-
-uv run --locked oamb capsule validate "$HINDSIGHT_ROOT" \
-  --output "$OAMB_WORK_DIR/validations/full-hindsight.json"
-uv run --locked oamb capsule validate "$MEM0_ROOT" \
-  --output "$OAMB_WORK_DIR/validations/full-mem0.json"
-uv run --locked oamb capsule validate "$OPENVIKING_ROOT" \
-  --output "$OAMB_WORK_DIR/validations/full-openviking.json"
-```
-
-Each full validation must print `validated` before comparison.
-
-### 6. Build and open the comparison report
-
-```bash
-uv run --locked oamb compare "$PLAN" \
-  --cell-root "hindsight-lme60=$HINDSIGHT_ROOT" \
-  --cell-root "mem0-lme60=$MEM0_ROOT" \
-  --cell-root "openviking-lme60=$OPENVIKING_ROOT" \
-  --validation \
-    "hindsight-lme60=$OAMB_WORK_DIR/validations/full-hindsight.json" \
-  --validation \
-    "mem0-lme60=$OAMB_WORK_DIR/validations/full-mem0.json" \
-  --validation \
-    "openviking-lme60=$OAMB_WORK_DIR/validations/full-openviking.json" \
-  --dataset-source \
-    datasets/longmemeval-cleaned/longmemeval_s_cleaned.json \
-  --output-root "$OAMB_WORK_DIR/comparison"
-
-jq -e '
-  .coverage == {
-    "cell_count": 3,
-    "unique_case_count": 60,
-    "provider_specific_result_count": 180
-  } and
-  ([.cells[].completed_case_count] | all(. == 60)) and
-  ([.cells[].accuracy.all_60.denominator] | all(. == 60)) and
-  (.comparisons | length) == 3
-' "$OAMB_WORK_DIR/comparison/report.json" >/dev/null
-
-open "$OAMB_WORK_DIR/comparison/report.html"       # macOS
-# xdg-open "$OAMB_WORK_DIR/comparison/report.html" # Linux
-```
-
-`report.html` is self-contained and makes no network requests. It presents
-overall and per-question-type accuracy with 95% Wilson intervals, pairwise
-exact McNemar evidence, context tokens, indexing tokens, latency, retries,
-failures, resource and cost evidence, and measurement coverage. A provider is
-shown as an observed accuracy leader only when it satisfies the frozen accuracy
-delta and McNemar thresholds against both other providers.
-
-### If a run stops or fails
+## If a run stops or fails
 
 Preserve `.local-demo`, `provider-services/.runtime`, and all provider state.
-Do not delete or overwrite them. A failed model-readiness attempt cannot be
-reused with a different project name because its runtime is already bound to
-the old project. First stop that project's containers while preserving their
-data:
+Do not delete or overwrite them. Inspect the printed result-map paths first;
+they retain canonical outcomes and every completed capsule root.
+
+A readiness failure whose runtime is already bound to a provider project needs
+a separate fresh clone and provider project. Stop the old project without
+deleting its volumes:
 
 ```bash
 ./provider-services/bin/provider-services stop
 ```
 
-Then start again in a separate fresh clone, which gives the new project its own
-`provider-services/.runtime`. Choose a new `OAMB_PROVIDER_PROJECT`, run label,
-and working directory there, and follow this Quick Start from the beginning.
-Do not copy the failed clone's `.runtime` into the new clone. The stopped
-project's Docker volumes and the original evidence remain preserved.
-
-If `oamb run` fails after dispatch, inspect the `--result-map` path from that
-command before doing anything else. It records each cell as completed, failed,
-or not started and preserves every completed capsule path. If that map itself
-could not be created, the command prints the same cell outcomes and paths with
-both the run error and map error.
-
-The 900-second operation timeout limits local waiting for one attempt. It does
-not prove that remote work or remote billing stopped, so retain the evidence and
-reconcile uncertain calls before starting another project.
+The per-operation timeout limits local waiting for one attempt. It does not
+prove remote work or supplier billing stopped, so reconcile uncertain calls
+before starting another project.
 
 ## Provider and evidence boundaries
 

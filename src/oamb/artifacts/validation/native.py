@@ -538,7 +538,12 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
                 preflight = run_preflights[0]
                 budget = budgets[0]
                 expected_run_spec_hash = canonical_sha256(run_spec)
-                role_ids = tuple(item.binding_id for item in role_bindings)
+                persisted_role_ids = tuple(item.binding_id for item in role_bindings)
+                role_inventory_closes = bool(
+                    len(persisted_role_ids) == len(set(persisted_role_ids))
+                    and run_spec.model_role_binding_ids == preflight.role_binding_ids
+                    and set(run_spec.model_role_binding_ids) == set(persisted_role_ids)
+                )
                 live_control_closes = bool(
                     run_spec.run_id == manifest.run_id
                     and run_spec.dataset_manifest_hash == datasets[0].manifest_hash
@@ -547,14 +552,13 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
                     and run_spec.memory_system_id == first.memory_system_id
                     and run_spec.runtime_binding_hash == first.runtime_binding_hash
                     and run_spec.budget_id == budget.budget_id
-                    and run_spec.model_role_binding_ids == role_ids
+                    and role_inventory_closes
                     and preflight.run_id == manifest.run_id
                     and preflight.run_spec_hash == expected_run_spec_hash
                     and preflight.dataset_manifest_hash == datasets[0].manifest_hash
                     and preflight.subset_manifest_hash == case_manifests[0].manifest_hash
                     and preflight.adapter_profile_id == first.adapter_profile_id
                     and preflight.runtime_binding_hash == first.runtime_binding_hash
-                    and preflight.role_binding_ids == role_ids
                     and preflight.budget_hash == canonical_sha256(budget)
                     and preflight.dispatch_routes == budget.dispatch_routes
                     and budget.scope_id == manifest.run_id

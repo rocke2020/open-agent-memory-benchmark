@@ -45,6 +45,7 @@ class OperatorDoctorTests(unittest.TestCase):
             "bin/provider-services",
             "compose.yaml",
             "lib/env.sh",
+            "lib/host_embedding.sh",
             "lib/lifecycle.sh",
             "retry-guard/sitecustomize.py",
             "versions.env",

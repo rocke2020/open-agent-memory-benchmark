@@ -710,14 +710,13 @@ def _validated_profile_records(value: object) -> tuple[dict[str, Any], ...]:
     return records
 
 
-def load_provider_service_bindings(
+def _validated_provider_service_receipt(
     receipt_path: Path,
     *,
     expected_project: str,
     expected_project_attestation_sha256: str,
-    controlled_embeddings: Mapping[str, ControlledEmbeddingDescriptor],
     expected_provider_models: Mapping[str, str],
-) -> tuple[ProviderServiceProfileBinding, ...]:
+) -> tuple[str, datetime, tuple[dict[str, Any], ...]]:
     content = _read_regular_proof_file(
         receipt_path,
         "provider service receipt",
@@ -746,11 +745,58 @@ def load_provider_service_bindings(
 
     verified_at = _parse_verified_at(receipt["verified_at_utc"])
     profile_records = _validated_profile_records(receipt["profiles"])
+    provider_models = _require_provider_model_mapping(expected_provider_models)
+    for exact_profile, profile_record in zip(
+        DEFAULT_REST_PROFILES,
+        profile_records,
+        strict=True,
+    ):
+        _validate_profile_proof_store(
+            receipt_path,
+            exact_profile,
+            _require_sha256(
+                profile_record["proof_manifest_sha256"],
+                "profile proof manifest hash",
+            ),
+            expected_model=provider_models[exact_profile.profile_id],
+        )
+    return receipt_sha256, verified_at, profile_records
+
+
+def validate_provider_service_receipt(
+    receipt_path: Path,
+    *,
+    expected_project: str,
+    expected_project_attestation_sha256: str,
+    expected_provider_models: Mapping[str, str],
+) -> str:
+    receipt_sha256, _verified_at, _profile_records = _validated_provider_service_receipt(
+        receipt_path,
+        expected_project=expected_project,
+        expected_project_attestation_sha256=expected_project_attestation_sha256,
+        expected_provider_models=expected_provider_models,
+    )
+    return receipt_sha256
+
+
+def load_provider_service_bindings(
+    receipt_path: Path,
+    *,
+    expected_project: str,
+    expected_project_attestation_sha256: str,
+    controlled_embeddings: Mapping[str, ControlledEmbeddingDescriptor],
+    expected_provider_models: Mapping[str, str],
+) -> tuple[ProviderServiceProfileBinding, ...]:
+    receipt_sha256, verified_at, profile_records = _validated_provider_service_receipt(
+        receipt_path,
+        expected_project=expected_project,
+        expected_project_attestation_sha256=expected_project_attestation_sha256,
+        expected_provider_models=expected_provider_models,
+    )
     embeddings = _require_embedding_mapping(
         controlled_embeddings,
         "controlled embedding descriptors",
     )
-    provider_models = _require_provider_model_mapping(expected_provider_models)
     bindings: list[ProviderServiceProfileBinding] = []
     for exact_profile, profile_record in zip(
         DEFAULT_REST_PROFILES,
@@ -761,12 +807,6 @@ def load_provider_service_bindings(
         proof_manifest_sha256 = _require_sha256(
             profile_record["proof_manifest_sha256"],
             "profile proof manifest hash",
-        )
-        _validate_profile_proof_store(
-            receipt_path,
-            exact_profile,
-            proof_manifest_sha256,
-            expected_model=provider_models[profile_id],
         )
         embedding = embeddings[profile_id]
         if not isinstance(embedding, ControlledEmbeddingDescriptor):
@@ -784,7 +824,7 @@ def load_provider_service_bindings(
             ProviderServiceProfileBinding(
                 receipt_sha256=receipt_sha256,
                 provider_project=expected_project,
-                project_attestation_sha256=attestation_hash,
+                project_attestation_sha256=expected_project_attestation_sha256,
                 profile_proof_manifest_sha256=proof_manifest_sha256,
                 verified_at_utc=verified_at,
                 exact_profile=exact_profile,

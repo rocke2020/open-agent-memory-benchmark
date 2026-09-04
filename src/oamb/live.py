@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import signal
 import socket
+import stat
 import threading
 import time
 from collections.abc import Mapping
@@ -22,9 +23,14 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from oamb.artifacts.composition import CapsuleCompositionTarget
 
+from oamb.artifacts.atomic import read_regular_file
 from oamb.config.benchmark import MODEL_ROLE_IDS, ModelRoleId
 from oamb.config.doctor import CellSpec, ModelExecutionBinding, ResolvedPlan
-from oamb.config.provider_services import load_provider_service_bindings
+from oamb.config.provider_services import (
+    ProviderServiceBindingError,
+    load_provider_service_bindings,
+    validate_provider_service_receipt,
+)
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.specifications import (
     BindingKind,
@@ -97,6 +103,7 @@ _EXTRA_ENVIRONMENT_BY_PROVIDER = {
     "mem0": ("OAMB_MEM0_INSPECTOR_BASE_URL", "OAMB_MEM0_INSPECTOR_API_KEY"),
     "openviking": ("OAMB_OPENVIKING_ACCOUNT_ID", "OAMB_OPENVIKING_ADMIN_USER_ID"),
 }
+_SERVICE_RECEIPT_POINTER = "service-verification-current.sha256"
 
 
 class LiveConfigurationError(ValueError):
@@ -196,38 +203,31 @@ def load_live_provider_evidence(
     plan: ResolvedPlan,
     provider_runtime_directory: Path,
     environment: Mapping[str, str],
+    service_receipt_path: Path | None = None,
 ) -> tuple[str, dict[str, SourceEvidenceBinding]]:
-    """Reopen the current provider-service proof store before live composition."""
+    """Reopen one explicitly selected provider-service proof before composition."""
 
-    receipt_paths = tuple(
-        sorted((provider_runtime_directory / "service-verification-receipts").glob("*.json"))
-    )
-    if len(receipt_paths) != 1:
-        raise LiveConfigurationError(
-            "provider runtime must contain exactly one verification receipt"
+    if service_receipt_path is None:
+        receipt_path = resolve_service_verification_receipt(provider_runtime_directory)
+    else:
+        receipt_path = resolve_service_verification_receipt(
+            provider_runtime_directory,
+            expected_sha256=service_receipt_path.stem,
         )
-    receipt_path = receipt_paths[0]
+        if receipt_path != service_receipt_path.absolute():
+            raise LiveConfigurationError("provider verification receipt path is not canonical")
+    provider_project, attestation_hash = _live_service_identity(
+        provider_runtime_directory,
+    )
     try:
-        receipt = json.loads(receipt_path.read_bytes())
-        provider_project = receipt["provider_project"]
-        attestation_hash = receipt["project_attestation_sha256"]
-    except (KeyError, TypeError, json.JSONDecodeError, UnicodeError) as exc:
-        raise LiveConfigurationError("provider verification receipt is malformed") from exc
-    if not isinstance(provider_project, str) or not isinstance(attestation_hash, str):
-        raise LiveConfigurationError("provider verification receipt identity is malformed")
-    attestation_path = provider_runtime_directory / "provider-project.attestation"
-    try:
-        actual_attestation_hash = hashlib.sha256(attestation_path.read_bytes()).hexdigest()
         embedding_artifact_hash = hashlib.sha256(
-            (provider_runtime_directory / "embedding-ready-response.json").read_bytes()
+            read_regular_file(provider_runtime_directory / "embedding-ready-response.json")
         ).hexdigest()
         embedding_endpoint = environment["OAMB_EMBEDDING_BASE_URL"]
     except (KeyError, OSError) as exc:
         raise LiveConfigurationError(
             "provider runtime embedding or attestation proof is missing"
         ) from exc
-    if actual_attestation_hash != attestation_hash:
-        raise LiveConfigurationError("provider project attestation content changed")
     embedding = ControlledEmbeddingDescriptor(
         endpoint_fingerprint=canonical_sha256(
             ["oamb-controlled-embedding-endpoint-initial-v1", embedding_endpoint]
@@ -245,13 +245,7 @@ def load_live_provider_evidence(
         expected_project=provider_project,
         expected_project_attestation_sha256=attestation_hash,
         controlled_embeddings={profile_id: embedding for profile_id in profile_ids},
-        expected_provider_models={
-            "hindsight-rest-v1": _model_plan(plan, "hindsight_extraction").configured_model,
-            "mem0-rest-v1": _model_plan(plan, "mem0_extraction").configured_model,
-            "openviking-rest-v1": _model_plan(
-                plan, "openviking_semantic_understanding"
-            ).configured_model,
-        },
+        expected_provider_models=_expected_provider_models(plan),
     )
     evidence_by_provider: dict[str, SourceEvidenceBinding] = {}
     for binding in bindings:
@@ -271,31 +265,141 @@ def load_live_provider_evidence(
     return provider_project, evidence_by_provider
 
 
+def validate_live_service_verification_receipt(
+    *,
+    plan: ResolvedPlan,
+    provider_runtime_directory: Path,
+    environment: Mapping[str, str],
+    service_receipt_path: Path,
+) -> None:
+    """Validate one selected service receipt and all referenced proof bytes."""
+
+    provider_project, attestation_hash = _live_service_identity(
+        provider_runtime_directory,
+    )
+    try:
+        validate_provider_service_receipt(
+            service_receipt_path,
+            expected_project=provider_project,
+            expected_project_attestation_sha256=attestation_hash,
+            expected_provider_models=_expected_provider_models(plan),
+        )
+    except (OSError, ProviderServiceBindingError) as exc:
+        raise LiveConfigurationError(
+            "selected service verification receipt or proof is malformed"
+        ) from exc
+
+
+def _live_service_identity(
+    provider_runtime_directory: Path,
+) -> tuple[str, str]:
+    try:
+        attestation = read_regular_file(provider_runtime_directory / "provider-project.attestation")
+        project_lines = tuple(
+            line.removeprefix(b"project=")
+            for line in attestation.splitlines()
+            if line.startswith(b"project=")
+        )
+        if len(project_lines) != 1:
+            raise ValueError("provider project attestation has no unique project")
+        provider_project = project_lines[0].decode("ascii")
+        attestation_hash = hashlib.sha256(attestation).hexdigest()
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise LiveConfigurationError(
+            "provider runtime project identity or attestation is missing"
+        ) from exc
+    if not provider_project:
+        raise LiveConfigurationError("provider runtime project identity is malformed")
+    return provider_project, attestation_hash
+
+
+def _expected_provider_models(plan: ResolvedPlan) -> dict[str, str]:
+    return {
+        "hindsight-rest-v1": _model_plan(plan, "hindsight_extraction").configured_model,
+        "mem0-rest-v1": _model_plan(plan, "mem0_extraction").configured_model,
+        "openviking-rest-v1": _model_plan(
+            plan, "openviking_semantic_understanding"
+        ).configured_model,
+    }
+
+
+def resolve_service_verification_receipt(
+    provider_runtime_directory: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> Path:
+    """Resolve and content-validate one service receipt without enumerating history."""
+
+    runtime = Path(provider_runtime_directory).absolute()
+    receipts = runtime / "service-verification-receipts"
+    _require_real_directory(runtime, label="provider runtime")
+    _require_real_directory(receipts, label="service verification receipt directory")
+    if expected_sha256 is None:
+        try:
+            pointer_bytes = read_regular_file(receipts / _SERVICE_RECEIPT_POINTER)
+        except OSError as exc:
+            raise LiveConfigurationError(
+                "current service verification receipt selection is missing or malformed"
+            ) from exc
+        if (
+            len(pointer_bytes) != 65
+            or pointer_bytes[-1:] != b"\n"
+            or any(byte not in b"0123456789abcdef" for byte in pointer_bytes[:-1])
+        ):
+            raise LiveConfigurationError(
+                "current service verification receipt selection is missing or malformed"
+            )
+        receipt_hash = pointer_bytes[:-1].decode("ascii")
+    else:
+        receipt_hash = expected_sha256
+        if not _is_sha256(receipt_hash):
+            raise LiveConfigurationError(
+                "bound service verification receipt hash is missing or malformed"
+            )
+    receipt_path = receipts / f"{receipt_hash}.json"
+    try:
+        receipt_bytes = read_regular_file(receipt_path)
+    except OSError as exc:
+        raise LiveConfigurationError(
+            "service verification receipt is missing or malformed"
+        ) from exc
+    if hashlib.sha256(receipt_bytes).hexdigest() != receipt_hash:
+        raise LiveConfigurationError("service verification receipt content hash differs")
+    return receipt_path
+
+
+def _require_real_directory(path: Path, *, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise LiveConfigurationError(f"{label} is missing or malformed") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise LiveConfigurationError(f"{label} is a symbolic link or non-directory")
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def validate_live_readiness_receipt(
     *,
     plan: ResolvedPlan,
     provider_runtime_directory: Path,
     environment: Mapping[str, str],
-) -> None:
+) -> Path:
     """Reopen the all-role preflight receipt and its durable dispatch ledger."""
 
     receipt_path = provider_runtime_directory / "model-readiness-receipt.json"
     attempt_path = provider_runtime_directory / "model-readiness-attempt.json"
-    service_receipts = tuple(
-        sorted((provider_runtime_directory / "service-verification-receipts").glob("*.json"))
-    )
-    if len(service_receipts) != 1:
-        raise LiveConfigurationError(
-            "live readiness requires exactly one service verification receipt"
-        )
     try:
-        receipt_bytes = receipt_path.read_bytes()
+        receipt_bytes = read_regular_file(receipt_path)
         receipt = json.loads(receipt_bytes)
-        attempt_bytes = attempt_path.read_bytes()
+        attempt_bytes = read_regular_file(attempt_path)
         attempt = json.loads(attempt_bytes)
-        service_receipt_bytes = service_receipts[0].read_bytes()
-        service_receipt = json.loads(service_receipt_bytes)
-        service_receipt_hash = hashlib.sha256(service_receipt_bytes).hexdigest()
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise LiveConfigurationError("live readiness evidence is missing or malformed") from exc
     receipt_keys = {
@@ -316,6 +420,14 @@ def validate_live_readiness_receipt(
     }
     if not isinstance(receipt, dict) or set(receipt) != receipt_keys:
         raise LiveConfigurationError("live readiness receipt schema is invalid")
+    service_receipt_path = resolve_service_verification_receipt(
+        provider_runtime_directory,
+        expected_sha256=receipt["service_verification_receipt_sha256"],
+    )
+    try:
+        service_receipt = json.loads(read_regular_file(service_receipt_path))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LiveConfigurationError("live readiness evidence is missing or malformed") from exc
     if receipt["environment_hash"] != live_readiness_environment_hash(plan, environment):
         raise LiveConfigurationError("live readiness environment differs from the probed values")
     if (
@@ -323,7 +435,6 @@ def validate_live_readiness_receipt(
         or not isinstance(service_receipt, dict)
         or receipt["provider_project"] != service_receipt.get("provider_project")
         or receipt["resolved_plan_hash"] != plan.resolved_plan_hash
-        or receipt["service_verification_receipt_sha256"] != service_receipt_hash
         or receipt["attempt_sha256"] != hashlib.sha256(attempt_bytes).hexdigest()
         or receipt["operation_timeout_seconds"] != plan.execution.operation_timeout_seconds
         or receipt["model_calls_dispatched"] != 7
@@ -381,6 +492,7 @@ def validate_live_readiness_receipt(
         )
     ):
         raise LiveConfigurationError("live readiness attempt ledger is incomplete")
+    return service_receipt_path
 
 
 def live_readiness_environment_hash(
@@ -1720,4 +1832,5 @@ __all__ = [
     "resolve_live_question_case_ids",
     "select_live_cells",
     "validate_live_readiness_receipt",
+    "validate_live_service_verification_receipt",
 ]

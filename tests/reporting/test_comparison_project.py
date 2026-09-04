@@ -80,14 +80,15 @@ def _write_cell_root(
     run_id = f"run-{cell.cell_id}"
     started_at = datetime(2026, 8, 30, 0, 0, tzinfo=UTC) + timedelta(minutes=cell_index)
     case_count = len(metric_numerators)
-    case_ids = tuple(f"{index:064x}" for index in range(1, case_count + 1))
+    manifest_case_count = len(raw_question_ids) if raw_question_ids is not None else case_count
+    case_ids = tuple(f"{index:064x}" for index in range(1, manifest_case_count + 1))
     case_occurrence_ids = tuple(
         f"{index + 100 + cell_index * 10:064x}" for index in range(1, case_count + 1)
     )
     question_ids = raw_question_ids or tuple(
-        f"question-{index}" for index in range(1, case_count + 1)
+        f"question-{index}" for index in range(1, manifest_case_count + 1)
     )
-    assert len(question_ids) == case_count
+    assert len(question_ids) == manifest_case_count
     records: list[tuple[str, str, dict[str, object]]] = [
         (
             "run_spec",
@@ -158,7 +159,7 @@ def _write_cell_root(
     ]
     raw_payloads: dict[str, bytes] = {}
     for index, (case_id, occurrence_id, numerator) in enumerate(
-        zip(case_ids, case_occurrence_ids, metric_numerators, strict=True)
+        zip(case_ids[:case_count], case_occurrence_ids, metric_numerators, strict=True)
     ):
         query_start = started_at + timedelta(seconds=index + 1)
         query_end = query_start + timedelta(milliseconds=100 + index + cell_index)
@@ -739,6 +740,26 @@ def _lme60_sources(
             plan,
             cell_index=index,
             metric_numerators=outcomes,
+            raw_question_ids=LME60_EXPECTED_QUESTION_IDS,
+        )
+        sources[cell.cell_id] = ValidatedCellRoot(root=root, validation_result=validation)
+    return sources
+
+
+def _lme60_one_question_sources(
+    tmp_path: Path,
+    plan: ResolvedPlan,
+) -> dict[str, ValidatedCellRoot]:
+    from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
+
+    sources: dict[str, ValidatedCellRoot] = {}
+    for index, cell in enumerate(plan.cells):
+        root = tmp_path / "lme60-one-question-capsules" / cell.cell_id
+        validation = _write_cell_root(
+            root,
+            plan,
+            cell_index=index,
+            metric_numerators=((1,), (0,), (1,))[index],
             raw_question_ids=LME60_EXPECTED_QUESTION_IDS,
         )
         sources[cell.cell_id] = ValidatedCellRoot(root=root, validation_result=validation)
@@ -2031,6 +2052,117 @@ def test_lme60_project_exports_accuracy_evidence_and_renders_the_decision(
     assert "Exact McNemar p" in rendered
     assert "Observed accuracy leader" in rendered
     assert "Accuracy by question type" in rendered
+
+
+def test_lme60_normal_comparison_rejects_one_question_capsules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _lme60_plan()
+    sources = _lme60_one_question_sources(tmp_path, plan)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+
+    with pytest.raises(
+        comparison_project.ComparisonProjectError,
+        match="case records do not close|case/result coverage is incomplete",
+    ):
+        comparison_project.build_comparison_project(
+            plan,
+            sources,
+            output_root=tmp_path / "normal-report",
+        )
+
+
+def test_lme60_diagnostic_comparison_reports_same_one_question_across_providers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _lme60_plan()
+    sources = _lme60_one_question_sources(tmp_path, plan)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / "diagnostic-report",
+        diagnostic=True,
+    )
+    export = json.loads(built.export_path.read_bytes())
+    rendered = built.html_path.read_text(encoding="utf-8")
+
+    assert export["diagnostic"] is True
+    assert export["coverage"] == {
+        "cell_count": 3,
+        "unique_case_count": 1,
+        "provider_specific_result_count": 3,
+    }
+    assert all("accuracy" not in cell for cell in export["cells"])
+    assert export["accuracy_decision"]["status"] == "no_clear_accuracy_leader"
+    assert export["accuracy_decision"]["failed_predicates"] == ["complete_equal_coverage"]
+    assert "Diagnostic comparison: 1 of 60 frozen questions" in rendered
+
+
+def test_lme60_diagnostic_pair_never_claims_a_partial_subset_leader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.reporting import comparison_project
+    from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
+
+    plan = _lme60_plan()
+    sources: dict[str, ValidatedCellRoot] = {}
+    for index, cell in enumerate(plan.cells):
+        root = tmp_path / "lme60-ten-question-capsules" / cell.cell_id
+        validation = _write_cell_root(
+            root,
+            plan,
+            cell_index=index,
+            metric_numerators=((1,) * 10, (0,) * 10, (0,) * 10)[index],
+            raw_question_ids=LME60_EXPECTED_QUESTION_IDS,
+        )
+        sources[cell.cell_id] = ValidatedCellRoot(root=root, validation_result=validation)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / "diagnostic-ten-question-report",
+        diagnostic=True,
+    )
+    export = json.loads(built.export_path.read_bytes())
+    rendered = built.html_path.read_text(encoding="utf-8")
+
+    assert all(
+        pair["accuracy_decision"]["status"] == "no_clear_accuracy_leader"
+        for pair in export["comparisons"]
+    )
+    assert all(
+        "complete_equal_coverage" in pair["accuracy_decision"]["failed_predicates"]
+        for pair in export["comparisons"]
+    )
+    assert "Observed leader:" not in rendered
 
 
 @pytest.mark.parametrize("mutation", ("wilson", "mcnemar", "leader"))

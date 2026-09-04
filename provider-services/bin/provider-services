@@ -20,6 +20,7 @@ TARGET_PROVIDER_MODEL=deepseek-v4-flash
 # Public, tracked values only.
 . "$VERSIONS_FILE"
 . "$ROOT/lib/env.sh"
+. "$ROOT/lib/host_embedding.sh"
 . "$ROOT/lib/lifecycle.sh"
 
 die() {
@@ -554,11 +555,23 @@ verify_model_readiness() {
     readiness_plan="$RUNTIME_DIR/model-readiness-plan.json"
     [ ! -e "$readiness_plan" ] || \
         die "model-readiness plan already exists; use a new provider project"
-    uv --directory "$ROOT/.." run --locked python "$ROOT/lib/readiness_plan.py" \
+    readiness_plan_temporary="$readiness_plan.partial.$$"
+    [ ! -e "$readiness_plan_temporary" ] || \
+        die "temporary model-readiness plan already exists"
+    if ! uv --directory "$ROOT/.." run --locked python "$ROOT/lib/readiness_plan.py" \
         "$resolved_plan" "$ENV_FILE" "$model_env" "$RUNTIME_DIR" \
-        > "$readiness_plan" || die "resolved plan or readiness environment is invalid"
+        > "$readiness_plan_temporary"
+    then
+        rm -f "$readiness_plan_temporary"
+        die "resolved plan, readiness environment, or service receipt is invalid"
+    fi
+    mv "$readiness_plan_temporary" "$readiness_plan"
     plan_hash=$(jq -er '.resolved_plan_hash' "$readiness_plan") || \
         die "resolved plan hash is unavailable"
+    service_verification_receipt_sha256=$(jq -er \
+        '.service_verification_receipt_sha256 |
+         select(type == "string" and test("^[0-9a-f]{64}$"))' \
+        "$readiness_plan") || die "selected service verification receipt is invalid"
     READINESS_OPERATION_TIMEOUT_SECONDS=$(jq -er \
         '.operation_timeout_seconds | select(type == "number" and floor == . and . > 0)' \
         "$readiness_plan") || die "resolved operation timeout is invalid"
@@ -595,9 +608,8 @@ verify_model_readiness() {
     jq -n --arg model "$(env_value OAMB_EMBEDDING_MODEL)" \
         '{model: $model, input: ["OAMB readiness probe"], dimensions: 1024}' > "$embedding_request"
     embedding_base=$(env_value OAMB_EMBEDDING_BASE_URL)
-    case "$embedding_base" in
-        http://host.docker.internal:*) embedding_base="http://127.0.0.1:${embedding_base#http://host.docker.internal:}" ;;
-    esac
+    embedding_base=$(resolve_host_embedding_base "$embedding_base") || \
+        die "cannot resolve the host embedding URL"
     record_model_dispatch embedding
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 \
         --max-time "$READINESS_OPERATION_TIMEOUT_SECONDS" \
@@ -637,15 +649,9 @@ verify_model_readiness() {
     receipt="$RUNTIME_DIR/model-readiness-receipt.json"
     [ ! -e "$receipt" ] || die "model-readiness receipt already exists; use a new provider project"
     attempt_hash=$(shasum -a 256 "$READINESS_ATTEMPT_FILE" | awk '{print $1}')
-    service_receipt_directory="$RUNTIME_DIR/service-verification-receipts"
-    set -- "$service_receipt_directory"/*.json
-    [ "$#" -eq 1 ] && [ -f "$1" ] || \
-        die "exactly one service verification receipt is required"
-    service_receipt=$1
-    service_receipt_hash=$(shasum -a 256 "$service_receipt" | awk '{print $1}')
     jq -n --arg project "$project" --arg plan "$plan_hash" \
         --arg attempt "$attempt_hash" \
-        --arg service_receipt "$service_receipt_hash" \
+        --arg service_receipt "$service_verification_receipt_sha256" \
         --arg environment_hash "$readiness_environment_hash" \
         --arg completed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --argjson timeout "$READINESS_OPERATION_TIMEOUT_SECONDS" \

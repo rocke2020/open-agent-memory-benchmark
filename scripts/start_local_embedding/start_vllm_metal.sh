@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VLLM_METAL_VENV="${VLLM_METAL_VENV:-$PROJECT_ROOT/../vllm-metal/.venv-vllm-metal}"
 VLLM_METAL_BIN="$VLLM_METAL_VENV/bin/vllm"
 EMBEDDING_GGUF_PATH="${OAMB_VLLM_METAL_GGUF_PATH:-$HOME/.cache/qmd/models/Qwen3-Embedding-0.6B-Q8_0.gguf}"
