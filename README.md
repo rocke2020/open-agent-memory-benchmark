@@ -143,6 +143,21 @@ then runs all 60 questions on every provider for 180 provider-specific results.
 It freshly validates each full capsule before building and opening the final
 comparison report.
 
+If an explicitly started full run stops after sealing partial capsules, resume
+it with:
+
+```bash
+./run.sh --full_test --resume
+```
+
+Resume validates every immutable source part against the current frozen plan
+before any provider or model call. It then runs only unfinished whole question
+groups in fresh provider scopes, with independent providers overlapping within
+the plan's provider limit. Original and recovered parts are composed into one
+freshly validated capsule per provider before the normal 60-question,
+180-result comparison is built. Resume never applies to smoke mode and never
+falls back to a fresh full run.
+
 Smoke reports are written under `outputs/smoke-test/<run-label>/`; full-study
 reports are written under `outputs/full-test/<run-label>/`. Set
 `OAMB_NO_OPEN=1` only in a headless environment; the HTML is still built and
@@ -155,6 +170,14 @@ and all provider state. Do not delete or overwrite them. Inspect the printed
 result-map paths first; they retain canonical outcomes and every completed
 capsule root. `outputs/tmp` contains shared preparation state and reproducible
 scratch outputs, not successful-run evidence.
+
+The first `--resume` selects one unambiguous interrupted full result map and
+writes `outputs/full-test/<run-label>/results/full-resume-state.json`. Each
+later recovery part is added to that state before the command exits, so another
+`--resume` can reuse it after a second interruption. Preserve this state file,
+all referenced capsule roots, and their result maps. If selection is ambiguous,
+missing, modified, or incompatible with the current plan, resume stops before
+external dispatch and asks the operator to reconcile the preserved evidence.
 
 A readiness failure whose runtime is already bound to a provider project needs
 a separate fresh clone and provider project. Stop the old project without

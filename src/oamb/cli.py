@@ -239,6 +239,13 @@ def run_command(
             help="Validated immutable part; repeat to derive only remaining whole groups.",
         ),
     ] = None,
+    recovery_analysis_output: Annotated[
+        Path | None,
+        typer.Option(
+            "--recovery-analysis-output",
+            help="Create-only recovery analysis JSON; validate and stop before dispatch.",
+        ),
+    ] = None,
     provider_runtime: Annotated[
         Path,
         typer.Option("--provider-runtime", help="Verified provider runtime directory."),
@@ -260,7 +267,15 @@ def run_command(
 
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
-        if case or question or bounded_capsule or bounded_validation or recover_from or result_map:
+        if (
+            case
+            or question
+            or bounded_capsule
+            or bounded_validation
+            or recover_from
+            or recovery_analysis_output
+            or result_map
+        ):
             raise typer.BadParameter(
                 "partition, bounded-proof, recovery, and result-map options require a live "
                 "resolved plan"
@@ -308,6 +323,16 @@ def run_command(
         raise typer.BadParameter("--recover-from and --case are mutually exclusive")
     if recover_from and question:
         raise typer.BadParameter("--recover-from and --question are mutually exclusive")
+    if recovery_analysis_output is not None and not recover_from:
+        raise typer.BadParameter("--recovery-analysis-output requires --recover-from")
+    if recovery_analysis_output is not None and result_map is not None:
+        raise typer.BadParameter(
+            "--recovery-analysis-output and --result-map are mutually exclusive"
+        )
+    if recovery_analysis_output is not None and (
+        recovery_analysis_output.exists() or recovery_analysis_output.is_symlink()
+    ):
+        raise typer.BadParameter("recovery analysis output already exists")
     if result_map is not None and (result_map.exists() or result_map.is_symlink()):
         raise typer.BadParameter("result map already exists")
     try:
@@ -341,7 +366,7 @@ def run_command(
                     retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
                 ),
             )
-            if not recovery.remaining_case_manifest_entry_ids:
+            if not recovery.remaining_case_manifest_entry_ids and recovery_analysis_output is None:
                 raise LiveConfigurationError(
                     "recovery parts already contain every target whole group; compose them"
                 )
@@ -474,6 +499,27 @@ def run_command(
                 "recovery remaining groups: " + ",".join(recovery.remaining_ingestion_plan_ids)
             )
             typer.echo("recovery source manifests: " + ",".join(recovery.source_manifest_sha256s))
+            if recovery_analysis_output is not None:
+                analysis_document = {
+                    "schema_name": "capsule_recovery_analysis",
+                    "schema_version": 1,
+                    "resolved_plan_hash": plan.resolved_plan_hash,
+                    "cell_id": selected_cells[0].cell_id,
+                    "source_manifest_sha256s": recovery.source_manifest_sha256s,
+                    "reusable_ingestion_plan_ids": recovery.reusable_ingestion_plan_ids,
+                    "quarantined_ingestion_plan_ids": recovery.quarantined_ingestion_plan_ids,
+                    "remaining_ingestion_plan_ids": recovery.remaining_ingestion_plan_ids,
+                    "remaining_case_manifest_entry_ids": (
+                        recovery.remaining_case_manifest_entry_ids
+                    ),
+                }
+                atomic_write_bytes(
+                    recovery_analysis_output,
+                    canonical_json_bytes(analysis_document),
+                    trusted_root=recovery_analysis_output.parent,
+                )
+                typer.echo(f"recovery analysis: {recovery_analysis_output}")
+                return
 
         def emit_outcomes(
             outcomes: tuple[LiveCellOutcome, ...],

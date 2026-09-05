@@ -263,6 +263,87 @@ def test_lme60_recovery_requires_bounded_proof_before_runtime_loading(
     assert runtime_loaded is False
 
 
+@pytest.mark.parametrize("has_remaining", (True, False))
+def test_recovery_analysis_output_closes_current_execution_without_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    has_remaining: bool,
+) -> None:
+    from oamb.artifacts import composition
+    from oamb.config import doctor
+
+    plan = _lme6_plan()
+    selected_cell = plan.cells[0]
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    recovery_root = tmp_path / "part"
+    recovery_root.mkdir()
+    analysis_output = tmp_path / "recovery-analysis.json"
+    executed = False
+    recovery = SimpleNamespace(
+        source_capsule_ids=(canonical_sha256(["source-capsule"]),),
+        source_manifest_sha256s=(canonical_sha256(["source-manifest"]),),
+        reusable_ingestion_plan_ids=(canonical_sha256(["reusable-plan"]),),
+        quarantined_ingestion_plan_ids=(canonical_sha256(["quarantined-plan"]),),
+        remaining_ingestion_plan_ids=(
+            (canonical_sha256(["remaining-plan"]),) if has_remaining else ()
+        ),
+        remaining_case_manifest_entry_ids=(
+            (canonical_sha256(["remaining-case"]),) if has_remaining else ()
+        ),
+    )
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(composition, "analyze_capsule_recovery", lambda *_a, **_k: recovery)
+    monkeypatch.setattr(live, "load_live_environment", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        live,
+        "load_live_provider_evidence",
+        lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
+    )
+    monkeypatch.setattr(live, "build_live_cell", lambda **_kwargs: object())
+    monkeypatch.setattr(live, "live_composition_target", lambda _cell: object())
+
+    def execute(_cells: object) -> tuple[live.LiveCellCompletion, ...]:
+        nonlocal executed
+        executed = True
+        return ()
+
+    monkeypatch.setattr(live, "execute_live_cells", execute)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            str(resolved_plan),
+            "--output-root",
+            str(tmp_path / "capsules"),
+            "--cell",
+            selected_cell.cell_id,
+            "--run-label",
+            "recovery-analysis",
+            "--recover-from",
+            str(recovery_root),
+            "--recovery-analysis-output",
+            str(analysis_output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert executed is False
+    assert json.loads(analysis_output.read_bytes()) == {
+        "cell_id": selected_cell.cell_id,
+        "quarantined_ingestion_plan_ids": list(recovery.quarantined_ingestion_plan_ids),
+        "remaining_case_manifest_entry_ids": list(recovery.remaining_case_manifest_entry_ids),
+        "remaining_ingestion_plan_ids": list(recovery.remaining_ingestion_plan_ids),
+        "resolved_plan_hash": plan.resolved_plan_hash,
+        "reusable_ingestion_plan_ids": list(recovery.reusable_ingestion_plan_ids),
+        "schema_name": "capsule_recovery_analysis",
+        "schema_version": 1,
+        "source_manifest_sha256s": list(recovery.source_manifest_sha256s),
+    }
+
+
 def test_failed_parallel_run_preserves_completed_capsule_in_result_map(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
