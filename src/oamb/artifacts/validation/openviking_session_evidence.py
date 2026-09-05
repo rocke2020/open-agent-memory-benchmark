@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from oamb.contracts.evidence import CaseRecordV3, IngestionPlanRecordV2
-from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ids import canonical_sha256, openviking_session_id
 from oamb.contracts.ports import NativeEvidenceCandidate
 from oamb.contracts.states import AttemptOutcome
 from oamb.memory_systems.openviking.session_adapter import (
@@ -48,8 +48,11 @@ def reconstruct_openviking_session_indexing_usage(
     attempt_ids = _ordered_text(plan, "ordered_dispatch_attempt_ids")
     source_ids = _ordered_text(plan, "ordered_source_unit_ids")
     readiness_refs = _ordered_text(plan, "readiness_evidence_refs")
+    ingestion_occurrence_id = plan.get("ingestion_occurrence_id")
     if (
         not attempt_ids
+        or not isinstance(ingestion_occurrence_id, str)
+        or not ingestion_occurrence_id
         or len(attempt_ids) != len(source_ids)
         or len(set(attempt_ids)) != len(attempt_ids)
         or len(set(source_ids)) != len(source_ids)
@@ -57,7 +60,7 @@ def reconstruct_openviking_session_indexing_usage(
         raise ValueError("OpenViking indexing usage dispatch ledger is invalid")
 
     expected = {
-        _session_id(source_id): attempt_id
+        openviking_session_id(ingestion_occurrence_id, source_id): attempt_id
         for source_id, attempt_id in zip(source_ids, attempt_ids, strict=True)
     }
     accepted: dict[str, set[tuple[str, str]]] = {session_id: set() for session_id in expected}
@@ -129,7 +132,9 @@ def reconstruct_openviking_session_indexing_usage(
         completed[session_id] = usage
         completed_identities[session_id] = (task_id, archive_uri)
 
-    expected_sessions = tuple(_session_id(source_id) for source_id in source_ids)
+    expected_sessions = tuple(
+        openviking_session_id(ingestion_occurrence_id, source_id) for source_id in source_ids
+    )
     if set(completed) != set(expected_sessions):
         raise ValueError("OpenViking indexing usage is missing a completed snapshot")
     if any(
@@ -174,7 +179,10 @@ def reconstruct_openviking_session_plan(
             or attempt.raw_response_ref not in plan.readiness_evidence_refs
         ):
             raise ValueError("OpenViking session dispatch attempt is incomplete")
-    expected_sessions = tuple(_session_id(source_id) for source_id in plan.ordered_source_unit_ids)
+    expected_sessions = tuple(
+        openviking_session_id(plan.ingestion_occurrence_id, source_id)
+        for source_id in plan.ordered_source_unit_ids
+    )
     created, committed, completed, archived = _session_terminal_evidence(
         raw_payloads,
         plan.readiness_evidence_refs,
@@ -315,10 +323,6 @@ def _session_terminal_evidence(
         if isinstance(token_usage, dict) and isinstance(token_usage.get("total"), dict):
             completed.add(session_id)
     return created, committed, completed, archived
-
-
-def _session_id(source_unit_id: str) -> str:
-    return "oamb-" + hashlib.sha256(b"session\0" + source_unit_id.encode("utf-8")).hexdigest()
 
 
 def _ordered_text(plan: Mapping[str, Any], field: str) -> tuple[str, ...]:

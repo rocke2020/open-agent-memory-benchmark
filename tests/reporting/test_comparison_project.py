@@ -17,7 +17,7 @@ import pytest
 from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import ResolvedPlan, build_resolved_plan
 from oamb.contracts.evidence import ValidationResult
-from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from oamb.contracts.ids import canonical_json_bytes, canonical_sha256, openviking_session_id
 from oamb.contracts.states import ValidationDisposition
 from oamb.reporting.comparison_project import ValidatedCellRoot
 from oamb.workloads.visible_evidence import count_o200k_tokens, tokenizer_fingerprint
@@ -798,6 +798,7 @@ def _openviking_indexing_snapshot(
     cell = plan.cells[2]
     attempt_ids = ("a" * 64, "2" * 64)
     source_ids = ("source-one", "source-two")
+    ingestion_occurrence_id = "openviking-indexing-occurrence"
     values = ((11, 3, 14, 2, 1, 7, 21), (17, 5, 22, 4, 3, 9, 31))
     raw_payloads: dict[str, bytes] = {}
     readiness_refs: list[str] = []
@@ -810,7 +811,7 @@ def _openviking_indexing_snapshot(
         accepted_task_suffix: str | None = None,
     ) -> str:
         prompt, completion, llm_total, cached, reasoning, embedding, combined = usage_values
-        session_id = "oamb-" + hashlib.sha256(b"session\0" + source_id.encode("utf-8")).hexdigest()
+        session_id = openviking_session_id(ingestion_occurrence_id, source_id)
         archive_uri = f"viking://user/test/sessions/{session_id}/history/archive_001"
         accepted_payload = canonical_json_bytes(
             {
@@ -930,6 +931,7 @@ def _openviking_indexing_snapshot(
         ingestion_plans=(
             {
                 "adapter_profile_id": cell.adapter_profile_id,
+                "ingestion_occurrence_id": ingestion_occurrence_id,
                 "ordered_dispatch_attempt_ids": list(attempt_ids),
                 "ordered_source_unit_ids": list(source_ids),
                 "readiness_evidence_refs": readiness_refs,

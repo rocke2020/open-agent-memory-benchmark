@@ -1092,6 +1092,15 @@ def run_native_vertical_slice(
             except ResumeRejectedError as release_error:
                 if "active provider attempt" not in str(release_error):
                     raise
+                lifecycle.release_supervised_aborted_run(
+                    authority,
+                    verify_terminal_abort=lambda attempts: _verify_supervised_aborted_capsule(
+                        capsule_root,
+                        run_id=run_id,
+                        run_spec_hash=live_run_spec_hash,
+                        active_attempts=attempts,
+                    ),
+                )
         raise
     if lifecycle is not None and authority is not None:
         if live_run_spec_hash is None:
@@ -4488,6 +4497,52 @@ def _verify_terminal_capsule(
     )
     if expected_entry is None or expected_entry.sha256 != hashlib.sha256(run_payload).hexdigest():
         raise ValueError("terminal capsule manifest does not bind its run record")
+
+
+def _verify_supervised_aborted_capsule(
+    capsule_root: Path,
+    *,
+    run_id: str,
+    run_spec_hash: str,
+    active_attempts: tuple[dict[str, object], ...],
+) -> None:
+    _verify_terminal_capsule(
+        capsule_root,
+        run_id=run_id,
+        run_spec_hash=run_spec_hash,
+    )
+    run_payload = read_regular_file(capsule_root / "source" / "run" / f"{run_id}.json")
+    if RunRecord.model_validate_json(run_payload).state != RunState.ABORTED:
+        raise ValueError("supervised abort release requires an aborted run record")
+    manifest = CapsuleManifest.model_validate_json(
+        read_regular_file(capsule_root / "capsule-manifest.json")
+    )
+    entries = {entry.relative_path: entry for entry in manifest.source_entries}
+    for pointer in active_attempts:
+        attempt_id_value = pointer["attempt_id"]
+        intent_hash = pointer["intent_record_sha256"]
+        if not isinstance(attempt_id_value, str) or not isinstance(intent_hash, str):
+            raise ValueError("active attempt identity is malformed")
+        relative_path = f"source/attempt-intents/{attempt_id_value}.json"
+        intent_payload = read_regular_file(capsule_root / relative_path)
+        intent = AttemptIntentRecordV3.model_validate_json(intent_payload)
+        if intent_payload != canonical_json_bytes(intent):
+            raise ValueError("active attempt intent is not canonical")
+        if (
+            intent.attempt_id != attempt_id_value
+            or intent.intent_hash != intent_hash
+            or intent.scope_kind != BudgetScopeKindV3.RUN
+            or intent.scope_id != run_id
+        ):
+            raise ValueError("active attempt does not bind the aborted run")
+        entry = entries.get(relative_path)
+        if (
+            entry is None
+            or entry.record_kind != "attempt_intent_record"
+            or entry.record_id != attempt_id_value
+            or entry.sha256 != hashlib.sha256(intent_payload).hexdigest()
+        ):
+            raise ValueError("terminal capsule manifest does not bind active attempt intent")
 
 
 def _seal_close_error(

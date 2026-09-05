@@ -234,6 +234,87 @@ def test_provider_attempt_pointer_blocks_run_release_until_durable_receipt(tmp_p
     assert not (tmp_path / "active-operation").exists()
 
 
+def test_supervised_abort_release_clears_attempts_before_the_operation(tmp_path: Path) -> None:
+    bridge = ProviderLifecycleBridge(tmp_path)
+    authority = bridge.acquire_run(
+        run_id="run-a",
+        provider_project="oamb-providers-test-a",
+        profile_id="mem0-rest-v1",
+        lease_epoch=1,
+        lease_record_hash="a" * 64,
+    )
+    bridge.mark_attempt_dispatched(attempt_id="b" * 64, intent_record_hash="c" * 64)
+    attempt_path = tmp_path / "active-provider-attempts" / f"{'b' * 64}.json"
+    observed: list[tuple[bool, bool, tuple[str, ...]]] = []
+
+    bridge.release_supervised_aborted_run(
+        authority,
+        verify_terminal_abort=lambda attempts: observed.append(
+            (
+                (tmp_path / "active-operation").is_file(),
+                attempt_path.is_file(),
+                tuple(str(item["attempt_id"]) for item in attempts),
+            )
+        ),
+    )
+
+    assert observed == [(True, True, ("b" * 64,))]
+    assert not attempt_path.exists()
+    assert not (tmp_path / "active-operation").exists()
+
+
+def test_supervised_abort_release_validates_every_attempt_before_mutation(tmp_path: Path) -> None:
+    bridge = ProviderLifecycleBridge(tmp_path)
+    authority = bridge.acquire_run(
+        run_id="run-a",
+        provider_project="oamb-providers-test-a",
+        profile_id="mem0-rest-v1",
+        lease_epoch=1,
+        lease_record_hash="a" * 64,
+    )
+    bridge.mark_attempt_dispatched(attempt_id="b" * 64, intent_record_hash="c" * 64)
+    bridge.mark_attempt_dispatched(attempt_id="d" * 64, intent_record_hash="e" * 64)
+    malformed = tmp_path / "active-provider-attempts" / f"{'d' * 64}.json"
+    malformed.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ResumeRejectedError, match="malformed"):
+        bridge.release_supervised_aborted_run(
+            authority,
+            verify_terminal_abort=lambda _attempts: None,
+        )
+
+    assert (tmp_path / "active-provider-attempts" / f"{'b' * 64}.json").is_file()
+    assert malformed.is_file()
+    assert (tmp_path / "active-operation").is_file()
+
+
+def test_supervised_abort_release_keeps_pointers_when_terminal_check_fails(
+    tmp_path: Path,
+) -> None:
+    bridge = ProviderLifecycleBridge(tmp_path)
+    authority = bridge.acquire_run(
+        run_id="run-a",
+        provider_project="oamb-providers-test-a",
+        profile_id="mem0-rest-v1",
+        lease_epoch=1,
+        lease_record_hash="a" * 64,
+    )
+    bridge.mark_attempt_dispatched(attempt_id="b" * 64, intent_record_hash="c" * 64)
+    attempt_path = tmp_path / "active-provider-attempts" / f"{'b' * 64}.json"
+
+    def reject(_attempts: tuple[dict[str, object], ...]) -> None:
+        raise RuntimeError("terminal capsule is not a verified abort")
+
+    with pytest.raises(RuntimeError, match="not a verified abort"):
+        bridge.release_supervised_aborted_run(
+            authority,
+            verify_terminal_abort=reject,
+        )
+
+    assert attempt_path.is_file()
+    assert (tmp_path / "active-operation").is_file()
+
+
 def test_new_process_bridge_cannot_dispatch_under_a_stale_run_pointer(
     tmp_path: Path,
 ) -> None:

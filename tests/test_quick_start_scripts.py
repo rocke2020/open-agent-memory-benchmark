@@ -760,6 +760,73 @@ def test_run_dry_run_validates_without_dispatch(
     ) in result.stdout
 
 
+def test_run_smoke_runs_the_dry_run_gate_before_dispatch(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+
+    result = subprocess.run(
+        [str(script), "--smoke_test"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    doctor_index = calls.index("provider-services doctor")
+    readiness_index = next(
+        index for index, line in enumerate(calls) if "uv run --locked python -" in line
+    )
+    dispatch_index = next(index for index, line in enumerate(calls) if "oamb run" in line)
+    assert doctor_index < readiness_index < dispatch_index
+
+
+@pytest.mark.parametrize(
+    ("arguments", "output_branch"),
+    (([], "smoke-test"), (["--full_test"], "full-test")),
+)
+def test_run_without_resume_starts_a_fresh_execution_every_time(
+    tmp_path: Path,
+    arguments: list[str],
+    output_branch: str,
+) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+
+    first = subprocess.run(
+        [str(script), *arguments],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    first_trace_lines = trace.read_text(encoding="utf-8").splitlines()
+    second = subprocess.run(
+        [str(script), *arguments],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
+    execution_roots = sorted((root / "outputs" / output_branch).iterdir())
+    assert len(execution_roots) == 2
+    assert execution_roots[0] != execution_roots[1]
+    assert "reusing-completed-capsule" not in second.stdout
+    second_trace_lines = trace.read_text(encoding="utf-8").splitlines()[len(first_trace_lines) :]
+    assert any("oamb run" in line for line in second_trace_lines)
+    assert not any(f"{execution_roots[0]}/" in line for line in second_trace_lines)
+
+
 @pytest.mark.parametrize(
     ("arguments", "output_branch"),
     ((["--smoke_test"], "smoke-test"), (["--full_test"], "full-test")),
@@ -842,9 +909,9 @@ def test_run_reports_live_cell_progress_while_provider_is_running(tmp_path: Path
     assert (
         "run: step 1/5 provider=hindsight status=starting (smoke, question 72e3ee87)"
     ) in result.stdout
-    assert "run: providers=hindsight,mem0,openviking status=running" in result.stdout
-    assert "completed_questions=1, question_progress=33% (1/3)" in result.stdout
-    assert "question_progress=100% (3/3)" in result.stdout
+    assert "run: step 1/5 provider=hindsight status=running" in result.stdout
+    assert "completed_questions=1, question_progress=100% (1/1)" in result.stdout
+    assert "question_progress=100% (1/1)" in result.stdout
     assert "run: step 1/5 provider=hindsight status=validating" in result.stdout
     assert "run: step 1/5 provider=hindsight status=completed" in result.stdout
     assert "run: step 2/5 provider=mem0 status=starting" in result.stdout
@@ -873,14 +940,13 @@ def test_run_full_reports_bounded_and_full_question_percentages(tmp_path: Path) 
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "question_progress=0% (0/3)" in result.stdout
-    assert "question_progress=100% (3/3)" in result.stdout
+    assert "question_progress=100% (1/1)" in result.stdout
     assert "question_progress=0% (0/180)" in result.stdout
     assert "question_progress=100% (180/180)" in result.stdout
 
 
 @pytest.mark.parametrize("arguments", (["--smoke_test"], ["--full_test"]))
-def test_run_dispatches_all_provider_cells_together(
+def test_run_dispatches_one_bounded_proof_per_provider_cell(
     tmp_path: Path,
     arguments: list[str],
 ) -> None:
@@ -903,12 +969,14 @@ def test_run_dispatches_all_provider_cells_together(
         for line in trace.read_text(encoding="utf-8").splitlines()
         if "oamb run" in line and "--question 72e3ee87" in line
     ]
-    assert len(bounded_run_calls) == 1
+    assert len(bounded_run_calls) == 3
     for cell in ("hindsight-lme60", "mem0-lme60", "openviking-lme60"):
-        assert f"--cell {cell}" in bounded_run_calls[0]
+        matching_calls = [line for line in bounded_run_calls if f"--cell {cell}" in line]
+        assert len(matching_calls) == 1
+        assert matching_calls[0].count("--cell") == 1
 
 
-def test_run_smoke_reuses_completed_capsule_and_preserves_invalid_validation(
+def test_run_smoke_ignores_old_capsule_and_preserves_invalid_validation(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
@@ -955,16 +1023,14 @@ def test_run_smoke_reuses_completed_capsule_and_preserves_invalid_validation(
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8")
     assert "oamb run" in calls
-    assert "oamb run" in calls and "--cell hindsight-lme60" not in calls
+    assert "--cell hindsight-lme60" in calls
     assert "--cell mem0-lme60" in calls
     assert "--cell openviking-lme60" in calls
     assert invalid_validation.read_text(encoding="utf-8") == '{"disposition":"invalid"}\n'
-    retry_validations = tuple(invalid_validation.parent.glob("bounded-hindsight-retry-*.json"))
-    assert len(retry_validations) == 1
-    assert json.loads(retry_validations[0].read_bytes())["disposition"] == "validated"
+    assert not tuple(invalid_validation.parent.glob("bounded-hindsight-retry-*.json"))
 
 
-def test_run_smoke_reuses_a_successful_combined_retry_result_map_on_third_invocation(
+def test_run_smoke_starts_fresh_on_every_invocation(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
@@ -980,7 +1046,9 @@ def test_run_smoke_reuses_a_successful_combined_retry_result_map_on_third_invoca
         timeout=20,
     )
     assert first.returncode == 0, first.stdout + first.stderr
-    result_map = root / "outputs" / "smoke-test" / "lme60-test" / "results" / "bounded.json"
+    result_map = (
+        root / "outputs" / "smoke-test" / "lme60-test" / "results" / "bounded-hindsight.json"
+    )
     failed = json.loads(result_map.read_bytes())
     failed["status"] = "failed"
     result_map.write_text(json.dumps(failed) + "\n", encoding="utf-8")
@@ -1002,10 +1070,9 @@ def test_run_smoke_reuses_a_successful_combined_retry_result_map_on_third_invoca
         for line in trace.read_text(encoding="utf-8").splitlines()
         if "oamb run" in line and "--question 72e3ee87" in line
     ]
-    assert len(bounded_run_calls) == 2
-    retry_maps = tuple(result_map.parent.glob("bounded-retry-*.json"))
-    assert len(retry_maps) == 1
-    assert json.loads(retry_maps[0].read_bytes())["status"] == "completed"
+    assert len(bounded_run_calls) == 9
+    assert json.loads(result_map.read_bytes())["status"] == "failed"
+    assert not tuple(result_map.parent.glob("bounded-hindsight-retry-*.json"))
 
 
 def test_run_full_test_uses_bounded_proofs_and_validates_sixty_case_report(
@@ -1044,7 +1111,7 @@ def test_run_full_test_uses_bounded_proofs_and_validates_sixty_case_report(
     }
 
 
-def test_run_full_test_reuses_completed_full_capsules_and_preserves_validation(
+def test_run_full_test_ignores_completed_old_capsules_and_preserves_validation(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
@@ -1080,14 +1147,12 @@ def test_run_full_test_reuses_completed_full_capsules_and_preserves_validation(
     full_run_calls = [
         line for line in calls.splitlines() if "oamb run" in line and "--cell" not in line
     ]
-    assert len(full_run_calls) == 1
+    assert len(full_run_calls) == 2
     assert full_validation.read_text(encoding="utf-8") == '{"disposition":"invalid"}\n'
-    retries = tuple(full_validation.parent.glob("full-hindsight-retry-*.json"))
-    assert len(retries) == 1
-    assert json.loads(retries[0].read_bytes())["disposition"] == "validated"
+    assert not tuple(full_validation.parent.glob("full-hindsight-retry-*.json"))
 
 
-def test_run_full_test_retries_instead_of_reusing_failed_full_result_map(
+def test_run_full_test_starts_fresh_instead_of_reusing_failed_result_map(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
@@ -1134,15 +1199,15 @@ def test_run_full_test_retries_instead_of_reusing_failed_full_result_map(
         for line in trace.read_text(encoding="utf-8").splitlines()
         if "oamb run" in line and "--cell" not in line
     ]
-    assert len(full_run_calls) == 2
+    assert len(full_run_calls) == 3
     assert json.loads(full_result.read_bytes())["status"] == "failed"
-    retry_maps = tuple(full_result.parent.glob("full-retry-*.json"))
-    assert len(retry_maps) == 1
-    assert json.loads(retry_maps[0].read_bytes())["status"] == "completed"
+    assert not tuple(full_result.parent.glob("full-retry-*.json"))
 
 
 def _write_interrupted_full_result_map(root: Path, *, suffix: str = "") -> tuple[Path, ...]:
     full = root / "outputs" / "full-test" / "lme60-test"
+    resume_pointer = root / "outputs" / "tmp" / "precheck" / "lme60-test" / "full-test-current"
+    resume_pointer.write_text("lme60-test\n", encoding="utf-8")
     cells = ("hindsight-lme60", "mem0-lme60", "openviking-lme60")
     bounded_roots = tuple(full / "capsules" / "bounded" / cell for cell in cells)
     for bounded_root in bounded_roots:

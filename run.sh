@@ -176,10 +176,9 @@ esac
 PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
 
-if [[ "$DRY_RUN" == true ]]; then
-  "$ROOT/provider-services/bin/provider-services" doctor
-  uv run --locked python - "$PLAN" "$ROOT/.env" "$ROOT/provider-services/.runtime" \
-    "${CELLS[@]}" <<'PY'
+"$ROOT/provider-services/bin/provider-services" doctor
+uv run --locked python - "$PLAN" "$ROOT/.env" "$ROOT/provider-services/.runtime" \
+  "${CELLS[@]}" <<'PY'
 import os
 import sys
 from pathlib import Path
@@ -207,6 +206,7 @@ validate_live_readiness_receipt(
     environment=environment,
 )
 PY
+if [[ "$DRY_RUN" == true ]]; then
   [[ "$MODE" == smoke ]] && QUESTION_COUNT=1 || QUESTION_COUNT=60
   printf 'run: PASS (dry-run, %s, %s questions, 3 providers, zero model/provider calls)\n' \
     "$MODE" "$QUESTION_COUNT"
@@ -214,11 +214,36 @@ PY
 fi
 
 if [[ "$MODE" == "smoke" ]]; then
-  MODE_DIR="$OUTPUTS_ROOT/smoke-test/$RUN_LABEL"
+  MODE_ROOT="$OUTPUTS_ROOT/smoke-test"
 else
-  MODE_DIR="$OUTPUTS_ROOT/full-test/$RUN_LABEL"
+  MODE_ROOT="$OUTPUTS_ROOT/full-test"
+fi
+FULL_RESUME_POINTER="$WORK_DIR/full-test-current"
+if [[ "$RESUME" == true ]]; then
+  [[ -f "$FULL_RESUME_POINTER" && ! -L "$FULL_RESUME_POINTER" ]] || \
+    die "no resumable full run; start one with ./run.sh --full_test"
+  EXECUTION_LABEL="$(<"$FULL_RESUME_POINTER")"
+  case "$EXECUTION_LABEL" in
+    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run resume pointer is invalid" ;;
+  esac
+  MODE_DIR="$MODE_ROOT/$EXECUTION_LABEL"
+  [[ -d "$MODE_DIR" && ! -L "$MODE_DIR" ]] || \
+    die "resumable full-run output is missing: $MODE_DIR"
+else
+  EXECUTION_LABEL="$RUN_LABEL"
+  if [[ -e "$MODE_ROOT/$EXECUTION_LABEL" ]]; then
+    EXECUTION_LABEL="$RUN_LABEL-$(date -u +%Y%m%d-%H%M%S)-$$"
+  fi
+  MODE_DIR="$MODE_ROOT/$EXECUTION_LABEL"
+  mkdir -p "$MODE_ROOT"
+  mkdir "$MODE_DIR" || die "cannot create fresh run output: $MODE_DIR"
 fi
 mkdir -p "$MODE_DIR/results" "$MODE_DIR/validations" "$MODE_DIR/capsules"
+if [[ "$MODE" == "full" && "$RESUME" == false ]]; then
+  resume_pointer_next="$(mktemp "$WORK_DIR/.full-test-current.XXXXXX")"
+  printf '%s\n' "$EXECUTION_LABEL" > "$resume_pointer_next"
+  mv "$resume_pointer_next" "$FULL_RESUME_POINTER"
+fi
 
 BOUNDED_ROOTS=()
 BOUNDED_VALIDATIONS=()
@@ -487,12 +512,11 @@ validate_capsule() {
 
 run_bounded_cells() {
   local cell provider result_map capsule_root validation step_index step_label
-  local combined_result pending_index provider_list
-  local -a pending_cells=()
-  local -a pending_arguments=()
-  local -a pending_providers=()
-  local -a pending_steps=()
-  local -a cell_roots=()
+  local combined_result=""
+  if [[ "$RESUME" == true ]] && \
+    find_reusable_result_map "$MODE_DIR/results/bounded.json" "${CELLS[@]}"; then
+    combined_result=$RESULT_MAP_PATH
+  fi
   step_index=0
   for cell in "${CELLS[@]}"; do
     step_index=$((step_index + 1))
@@ -501,70 +525,32 @@ run_bounded_cells() {
     result_map="$MODE_DIR/results/bounded-$provider.json"
     validation="$MODE_DIR/validations/bounded-$provider.json"
     capsule_root=""
-    if find_reusable_result_map "$result_map" "$cell"; then
-      result_map=$RESULT_MAP_PATH
-      capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$result_map")"
-      printf 'run: %s status=reusing-completed-capsule\n' "$step_label"
-      cell_roots+=("$capsule_root")
-    else
-      pending_cells+=("$cell")
-      pending_providers+=("$provider")
-      pending_steps+=("$step_index")
-      cell_roots+=("")
-    fi
-  done
-
-  combined_result="$MODE_DIR/results/bounded.json"
-  if ((${#pending_cells[@]} > 0)); then
-    if find_reusable_result_map "$combined_result" "${pending_cells[@]}"; then
-      combined_result=$RESULT_MAP_PATH
-      for pending_index in "${!pending_cells[@]}"; do
-        printf 'run: step %s/%s provider=%s status=reusing-completed-capsule\n' \
-          "${pending_steps[$pending_index]}" "$TOTAL_STEPS" \
-          "${pending_providers[$pending_index]}"
-      done
-    else
-      if [[ "$RESUME" == true ]]; then
+    if [[ "$RESUME" == true ]]; then
+      if find_reusable_result_map "$result_map" "$cell"; then
+        result_map=$RESULT_MAP_PATH
+        capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$result_map")"
+      elif [[ -n "$combined_result" ]]; then
+        capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$combined_result")"
+      else
         die "full-test resume requires all completed bounded proof capsules"
       fi
-      if [[ -e "$combined_result" ]]; then
-        combined_result="${combined_result%.json}-retry-$(date -u +%Y%m%d-%H%M%S)-$$.json"
-      fi
-      provider_list=""
-      for pending_index in "${!pending_cells[@]}"; do
-        cell="${pending_cells[$pending_index]}"
-        provider="${pending_providers[$pending_index]}"
-        provider_list="${provider_list}${provider_list:+,}${provider}"
-        pending_arguments+=(--cell "$cell")
-        printf 'run: step %s/%s provider=%s status=starting (%s, question %s)\n' \
-          "${pending_steps[$pending_index]}" "$TOTAL_STEPS" "$provider" "$MODE" "$QUESTION_ID"
-      done
-      run_with_status "providers=$provider_list" "$MODE, question $QUESTION_ID" \
-        "$MODE_DIR/capsules/bounded" "${#pending_cells[@]}" \
+      printf 'run: %s status=reusing-completed-capsule\n' "$step_label"
+    else
+      run_with_status "$step_label" "$MODE, question $QUESTION_ID" \
+        "$MODE_DIR/capsules/bounded/$provider" 1 \
         uv run --locked oamb run "$PLAN" \
-        "${pending_arguments[@]}" --question "$QUESTION_ID" \
-        --run-label "$RUN_LABEL-$MODE-bounded-retry-$$" \
-        --output-root "$MODE_DIR/capsules/bounded" \
-        --result-map "$combined_result"
+        --cell "$cell" --question "$QUESTION_ID" \
+        --run-label "$EXECUTION_LABEL-$MODE-bounded-$provider-$$" \
+        --output-root "$MODE_DIR/capsules/bounded/$provider" \
+        --result-map "$result_map"
+      capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$result_map")"
     fi
-  fi
-
-  step_index=0
-  for cell in "${CELLS[@]}"; do
-    provider="${cell%-lme60}"
-    step_label="step $((step_index + 1))/$TOTAL_STEPS provider=$provider"
-    capsule_root="${cell_roots[$step_index]}"
-    if [[ -z "$capsule_root" ]]; then
-      capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$combined_result")"
-    fi
-    validation="$MODE_DIR/validations/bounded-$provider.json"
     [[ -d "$capsule_root" ]] || die "bounded capsule is missing for $cell"
     printf 'run: %s status=validating\n' "$step_label"
     validate_capsule "$capsule_root" "$validation"
     printf 'run: %s status=completed\n' "$step_label"
     BOUNDED_ROOTS+=("$capsule_root")
     BOUNDED_VALIDATIONS+=("$VALIDATION_PATH")
-    step_index=$((step_index + 1))
   done
 }
 
@@ -576,7 +562,7 @@ run_resume_analysis() {
   local -a arguments=(
     uv run --locked oamb run "$PLAN"
     --cell "$cell"
-    --run-label "$RUN_LABEL-full-resume-analysis-$RESUME_ATTEMPT-$provider"
+    --run-label "$EXECUTION_LABEL-full-resume-analysis-$RESUME_ATTEMPT-$provider"
     --output-root "$MODE_DIR/capsules/resume-analysis-$RESUME_ATTEMPT/$provider"
     --recovery-analysis-output "$analysis_output"
   )
@@ -645,7 +631,7 @@ run_resume_worker() {
   local -a arguments=(
     uv run --locked oamb run "$PLAN"
     --cell "$cell"
-    --run-label "$RUN_LABEL-full-resume-$RESUME_ATTEMPT-$provider"
+    --run-label "$EXECUTION_LABEL-full-resume-$RESUME_ATTEMPT-$provider"
     --output-root "$output_root"
     --result-map "$result_map"
   )
@@ -1055,7 +1041,7 @@ if [[ "$MODE" == "full" ]]; then
     run_with_status "step 4/$TOTAL_STEPS providers=hindsight,mem0,openviking" \
       "60 questions, 3 providers" "$MODE_DIR/capsules/full" 180 \
       uv run --locked oamb run "$PLAN" \
-      --run-label "$RUN_LABEL-full-retry-$$" \
+      --run-label "$EXECUTION_LABEL-full-retry-$$" \
       --output-root "$MODE_DIR/capsules/full" \
       --result-map "$full_result" \
       --bounded-capsule "${CELLS[0]}=${BOUNDED_ROOTS[0]}" \

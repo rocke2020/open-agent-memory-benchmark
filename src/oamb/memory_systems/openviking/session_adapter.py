@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ids import canonical_sha256, openviking_session_id
 from oamb.contracts.ports import (
     ArtifactStorePort,
     CapabilitySet,
@@ -378,7 +378,10 @@ class OpenVikingSessionAdapter:
                 )
             timestamp = _canonical_timestamp(source.occurred_at)
             messages = _parse_messages(source.payload_bytes)
-            session_id = _session_id(source.source_unit_id)
+            session_id = openviking_session_id(
+                binding.ingestion_occurrence_id,
+                source.source_unit_id,
+            )
             dispatch = IngestionDispatch(
                 dispatch_ordinal_1_indexed=source.ordinal_1_indexed,
                 operation_kind=OPENVIKING_SESSION_COMMIT_OPERATION,
@@ -944,10 +947,6 @@ class OpenVikingSessionAdapter:
                 "OpenViking session scope is not allocated by this adapter"
             )
         return binding
-
-
-def _session_id(source_unit_id: str) -> str:
-    return "oamb-" + hashlib.sha256(b"session\0" + source_unit_id.encode("utf-8")).hexdigest()
 
 
 def _canonical_timestamp(value: str | None) -> str:

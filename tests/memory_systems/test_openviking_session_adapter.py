@@ -133,9 +133,15 @@ def _source(source_id: str, ordinal: int, messages: list[dict[str, str]]) -> Sou
 
 
 def _session_id(source: SourceUnit) -> str:
-    return (
-        "oamb-" + hashlib.sha256(b"session\0" + source.source_unit_id.encode("utf-8")).hexdigest()
-    )
+    from oamb.contracts.ids import openviking_session_id
+
+    return openviking_session_id(INGESTION_OCCURRENCE_ID, source.source_unit_id)
+
+
+def test_session_id_is_namespaced_by_ingestion_occurrence() -> None:
+    from oamb.contracts.ids import openviking_session_id
+
+    assert openviking_session_id("run-a", "source-1") != openviking_session_id("run-b", "source-1")
 
 
 @dataclass

@@ -17,7 +17,7 @@ from oamb.contracts.evidence import (
     RunLeaseRecord,
     RunRecord,
 )
-from oamb.contracts.ids import ingestion_occurrence_id
+from oamb.contracts.ids import ingestion_occurrence_id, openviking_session_id
 from oamb.contracts.ports import (
     CasePlan,
     IngestionDispatch,
@@ -267,7 +267,7 @@ def load_openviking_continuation(
         if raw_ref is None or raw_ref not in raw_payloads:
             raise ValueError("OpenViking completed dispatch response is missing")
         source_id = dispatch.ordered_source_units[0].source_unit_id
-        session_id = _openviking_session_id(source_id)
+        session_id = openviking_session_id(partial_occurrence, source_id)
         task_ids = _completed_task_ids(raw_payloads, session_id)
         if len(task_ids) != 1:
             raise ValueError("OpenViking completed source has no exact terminal task")
@@ -298,7 +298,10 @@ def load_openviking_continuation(
         )
 
     failed_source = dispatches[completed_count].ordered_source_units[0]
-    failed_session_id = _openviking_session_id(failed_source.source_unit_id)
+    failed_session_id = openviking_session_id(
+        partial_occurrence,
+        failed_source.source_unit_id,
+    )
     failed_task_ids = _failed_task_ids(raw_payloads, failed_session_id)
     if len(failed_task_ids) != 1:
         raise ValueError("OpenViking failed source has no exact terminal task")
@@ -336,7 +339,10 @@ def _openviking_dispatches(
 ) -> tuple[IngestionDispatch, ...]:
     result = []
     for source in plan.ordered_source_units:
-        session_id = _openviking_session_id(source.source_unit_id)
+        session_id = openviking_session_id(
+            scope.ingestion_occurrence_id,
+            source.source_unit_id,
+        )
         timestamp = source.occurred_at
         result.append(
             IngestionDispatch(
@@ -374,10 +380,6 @@ def _openviking_request_fingerprint(
             timestamp,
         ]
     )
-
-
-def _openviking_session_id(source_unit_id: str) -> str:
-    return "oamb-" + hashlib.sha256(b"session\0" + source_unit_id.encode("utf-8")).hexdigest()
 
 
 def _completed_task_ids(raw_payloads: dict[str, bytes], session_id: str) -> tuple[str, ...]:

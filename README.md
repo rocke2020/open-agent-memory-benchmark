@@ -117,8 +117,9 @@ model and dimensions. Do not continue unless precheck prints `precheck: PASS`.
 
 ### 2. Run
 
-To verify the frozen plan and runtime configuration without model or provider
-calls, run `./run.sh --dry-run`.
+Every smoke/full run first verifies the frozen plan and runtime readiness before
+dispatch. To run only that same gate without model or provider calls, use
+`./run.sh --dry-run`.
 
 Run the smoke comparison. `--smoke_test` is the default, so these are identical:
 

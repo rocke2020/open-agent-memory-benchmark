@@ -2682,6 +2682,59 @@ def test_child_crash_reconstructs_an_aborted_terminal_root(tmp_path: Path) -> No
     assert validate_native_capsule(root).disposition == ValidationDisposition.INVALID
 
 
+def test_supervised_child_crash_releases_lifecycle_for_a_fresh_run(tmp_path: Path) -> None:
+    class CrashingIngestMemory(_RecordedNativeMemory):
+        async def ingest(
+            self,
+            _request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            os._exit(17)
+
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    provider_runtime = (tmp_path / "provider-runtime").resolve()
+    run_id = "native-fixture-supervised-crash"
+    control = _control(
+        run_id=run_id,
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> CrashingIngestMemory:
+        return CrashingIngestMemory(store)
+
+    root = tmp_path / "capsules" / run_id
+    with pytest.raises(NativeRunProcessError, match="status 17|closed its result channel"):
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=run_id,
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=memory_factory,
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="answer-binding",
+            control=control,
+        )
+
+    run_record = json.loads((root / "source" / "run" / f"{run_id}.json").read_bytes())
+    assert run_record["state"] == "aborted"
+    assert not (provider_runtime / "active-operation").exists()
+    attempts = provider_runtime / "active-provider-attempts"
+    assert not attempts.exists() or not tuple(attempts.iterdir())
+
+
 def test_child_crash_after_successful_closes_cannot_leave_a_finalized_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -336,6 +337,33 @@ class ProviderLifecycleBridge:
             _fsync_directory(self._runtime_directory)
         self._active_authority = None
 
+    def release_supervised_aborted_run(
+        self,
+        authority: _RunLeaseAuthority,
+        *,
+        verify_terminal_abort: Callable[[tuple[dict[str, object], ...]], None],
+    ) -> None:
+        """Release only this process's verified terminal abort and its attempts."""
+        if authority is not self._active_authority:
+            raise ResumeRejectedError("run release requires the current lease authority")
+        with self._lifecycle_lock():
+            operation = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
+            if operation.get("kind") != "benchmark_run":
+                raise ResumeRejectedError("active operation is not a benchmark run")
+            if operation.get("lease_record_sha256") != authority.lease_record_hash:
+                raise ResumeRejectedError("active run lease hash does not match")
+            attempts = self._validated_active_run_attempts(operation, authority)
+            verify_terminal_abort(attempts)
+            attempts_directory = self._runtime_directory / self._ACTIVE_ATTEMPTS_DIRECTORY_NAME
+            for attempt in attempts:
+                attempt_id = cast(str, attempt["attempt_id"])
+                (attempts_directory / f"{attempt_id}.json").unlink()
+            if attempts:
+                _fsync_directory(attempts_directory)
+            (self._runtime_directory / self._ACTIVE_OPERATION_NAME).unlink()
+            _fsync_directory(self._runtime_directory)
+        self._active_authority = None
+
     def release_memory_conformance(
         self,
         authority: _MemoryConformanceAuthority,
@@ -522,6 +550,46 @@ class ProviderLifecycleBridge:
             return next(directory.iterdir(), None) is not None
         except OSError as exc:
             raise ResumeRejectedError("active provider attempts cannot be inspected") from exc
+
+    def _validated_active_run_attempts(
+        self,
+        operation: dict[str, object],
+        authority: _RunLeaseAuthority,
+    ) -> tuple[dict[str, object], ...]:
+        legacy = self._runtime_directory / self._LEGACY_ACTIVE_ATTEMPT_NAME
+        if legacy.exists() or legacy.is_symlink():
+            raise ResumeRejectedError("legacy active provider attempt blocks run release")
+        directory = self._runtime_directory / self._ACTIVE_ATTEMPTS_DIRECTORY_NAME
+        if not directory.exists():
+            return ()
+        if directory.is_symlink() or not directory.is_dir():
+            raise ResumeRejectedError("active provider attempts path is unsafe")
+        try:
+            paths = tuple(sorted(directory.iterdir(), key=lambda path: path.name))
+        except OSError as exc:
+            raise ResumeRejectedError("active provider attempts cannot be inspected") from exc
+        attempts: list[dict[str, object]] = []
+        for path in paths:
+            try:
+                mode = path.lstat().st_mode
+            except OSError as exc:
+                raise ResumeRejectedError(
+                    "active provider attempt pointer cannot be inspected"
+                ) from exc
+            if not stat.S_ISREG(mode):
+                raise ResumeRejectedError("active provider attempt pointer is unsafe")
+            document = self._read_attempt_pointer(path)
+            attempt_id = cast(str, document["attempt_id"])
+            if path.name != f"{attempt_id}.json":
+                raise ResumeRejectedError("active provider attempt filename does not match")
+            if (
+                document.get("operation_kind") != "benchmark_run"
+                or document.get("operation_id") != operation.get("run_id")
+                or document.get("operation_record_sha256") != authority.lease_record_hash
+            ):
+                raise ResumeRejectedError("active provider attempt does not bind the run")
+            attempts.append(document)
+        return tuple(attempts)
 
     def _ensure_active_attempts_directory(self) -> Path:
         directory = self._runtime_directory / self._ACTIVE_ATTEMPTS_DIRECTORY_NAME

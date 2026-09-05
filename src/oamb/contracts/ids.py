@@ -58,6 +58,16 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def openviking_session_id(ingestion_occurrence_id: str, source_unit_id: str) -> str:
+    return "oamb-" + canonical_sha256(
+        [
+            "oamb-openviking-native-session-v2",
+            ingestion_occurrence_id,
+            source_unit_id,
+        ]
+    )
+
+
 def sha256_identity(prefix: str, parts: Sequence[Any]) -> str:
     if not prefix:
         raise ValueError("identity prefix must not be empty")
