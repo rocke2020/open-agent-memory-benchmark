@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -22,37 +23,19 @@ def _write_executable(path: Path, body: str) -> None:
 
 
 def _write_configured_environment(root: Path) -> None:
+    configured = (
+        (REPOSITORY_ROOT / ".env.example")
+        .read_text(encoding="utf-8")
+        .replace(
+            "DEEPSEEK_BASE_URL=change-me\nDEEPSEEK_API_KEY=change-me",
+            "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key",
+        )
+    )
     (root / ".env").write_text(
-        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
+        configured,
         encoding="utf-8",
     )
     (root / ".env").chmod(0o600)
-    provider_env = root / "provider-services" / ".env"
-    provider_env.parent.mkdir(parents=True, exist_ok=True)
-    provider_env.write_text(
-        "\n".join(
-            (
-                "OAMB_PROVIDER_PROJECT=oamb-providers-test",
-                f"OAMB_MEM0_SOURCE_CHECKOUT={root / '.local-demo/provider-source/mem0'}",
-                "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1",
-                "OAMB_EMBEDDING_MODEL=qwen3-embedding:0.6b",
-                "OAMB_HINDSIGHT_LLM_BASE_URL=https://models.example/v1",
-                "OAMB_HINDSIGHT_LLM_API_KEY=test-model-key",
-                "OAMB_MEM0_LLM_BASE_URL=https://models.example/v1",
-                "OAMB_MEM0_LLM_API_KEY=test-model-key",
-                "OAMB_MEM0_ADMIN_API_KEY=test-admin-key-long-enough-0001",
-                "OAMB_MEM0_JWT_SECRET=test-jwt-secret-long-enough-0000000000000001",
-                "OAMB_MEM0_POSTGRES_PASSWORD=test-postgres-password",
-                "OAMB_MEM0_INSPECTOR_API_KEY=test-inspector-key-long-enough-01",
-                "OAMB_OPENVIKING_VLM_BASE_URL=https://models.example/v1",
-                "OAMB_OPENVIKING_VLM_API_KEY=test-model-key",
-                "OAMB_OPENVIKING_ROOT_API_KEY=test-openviking-key-long-enough-01",
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    provider_env.chmod(0o600)
 
 
 def _copy_quick_start_script(source: Path, root: Path) -> Path:
@@ -128,7 +111,6 @@ esac
         root / "provider-services" / "bin" / "provider-services",
         'printf \'provider-services %s\\n\' "$*" >> "$OAMB_TEST_TRACE"',
     )
-    (root / "provider-services" / ".env.example").write_text("", encoding="utf-8")
     resolver = root / "provider-services" / "lib" / "host_embedding.sh"
     resolver.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(HOST_EMBEDDING_SCRIPT, resolver)
@@ -196,8 +178,110 @@ def test_precheck_online_embedding_url_skips_local_server(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8")
     assert "embedding start_" not in calls
-    provider_env = (root / "provider-services" / ".env").read_text(encoding="utf-8")
-    assert "OAMB_EMBEDDING_BASE_URL=https://embedding.example/v1" in provider_env
+    root_env = (root / ".env").read_text(encoding="utf-8")
+    assert "OAMB_EMBEDDING_BASE_URL=https://embedding.example/v1" in root_env
+    assert not (root / "provider-services" / ".env").exists()
+
+
+def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    root_template = REPOSITORY_ROOT / ".env.example"
+    configured = root_template.read_text(encoding="utf-8").replace(
+        "DEEPSEEK_BASE_URL=change-me\nDEEPSEEK_API_KEY=change-me",
+        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key",
+    )
+    (root / ".env.example").write_text(root_template.read_text(encoding="utf-8"), encoding="utf-8")
+    (root / ".env").write_text(configured, encoding="utf-8")
+    (root / ".env").chmod(0o600)
+    (root / "provider-services" / ".env").unlink(missing_ok=True)
+    (root / "provider-services" / ".env.example").unlink(missing_ok=True)
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    root_env_path = root / ".env"
+    root_env = root_env_path.read_text(encoding="utf-8")
+    assert "OAMB_HINDSIGHT_PORT=18888" in root_env
+    assert "OAMB_HINDSIGHT_LLM_BASE_URL=https://models.example/v1" in root_env
+    assert "OAMB_HINDSIGHT_LLM_API_KEY=test-model-key" in root_env
+    assert "OAMB_PROVIDER_PROJECT=oamb-providers-lme60-" in root_env
+    assert "OAMB_MEM0_SOURCE_CHECKOUT=" in root_env
+    assert not any(
+        line.split("=", 1)[1].startswith("change-me")
+        for line in root_env.splitlines()
+        if line.startswith("OAMB_") and "=" in line
+    )
+    assert stat.S_IMODE(root_env_path.stat().st_mode) == 0o600
+    assert not (root / "provider-services" / ".env").exists()
+
+
+def test_precheck_upgrades_legacy_two_key_root_env(tmp_path: Path) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    root_env_path = root / ".env"
+    root_env_path.write_text(
+        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
+        encoding="utf-8",
+    )
+    root_env_path.chmod(0o600)
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    root_env = root_env_path.read_text(encoding="utf-8")
+    for expected in (
+        "OAMB_HINDSIGHT_PORT=18888",
+        "OAMB_MEM0_PORT=18889",
+        "OAMB_MEM0_INSPECTOR_PORT=16333",
+        "OAMB_OPENVIKING_PORT=19330",
+        "OAMB_EMBEDDING_MODEL=qwen3-embedding:0.6b",
+        "OAMB_HINDSIGHT_LLM_PROVIDER=openai",
+        "OAMB_HINDSIGHT_LLM_MODEL=deepseek-v4-flash",
+        "OAMB_MEM0_LLM_MODEL=deepseek-v4-flash",
+        "OAMB_OPENVIKING_VLM_PROVIDER=openai",
+        "OAMB_OPENVIKING_VLM_MODEL=deepseek-v4-flash",
+        "OAMB_OPENVIKING_ACCOUNT_ID=oamb-benchmark",
+        "OAMB_OPENVIKING_ADMIN_USER_ID=oamb-admin",
+    ):
+        assert expected in root_env
+    assert not (root / "provider-services" / ".env").exists()
+
+
+def test_precheck_requires_operator_prepared_root_env(tmp_path: Path) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    (root / ".env").unlink()
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "prepare .env from .env.example" in result.stderr
+    assert not (root / ".env").exists()
 
 
 def _write_fake_oamb(fake_bin: Path) -> None:
@@ -280,6 +364,13 @@ def _run_fixture(
         fake_bin / ("open" if system_name == "Darwin" else "xdg-open"),
         'printf \'open %s\\n\' "$*" >> "$OAMB_TEST_TRACE"',
     )
+    _write_executable(
+        root / "provider-services" / "bin" / "provider-services",
+        'printf \'provider-services %s\\n\' "$*" >> "$OAMB_TEST_TRACE"',
+    )
+    (root / "provider-services" / ".runtime").mkdir()
+    (root / ".env").write_text("DEEPSEEK_BASE_URL=test\nDEEPSEEK_API_KEY=test\n", encoding="utf-8")
+    (root / ".env").chmod(0o600)
     work_dir = root / ".local-demo" / "lme60-test"
     plan = work_dir / "plan" / "resolved-plan.json"
     plan.parent.mkdir(parents=True)
@@ -288,7 +379,6 @@ def _run_fixture(
     dataset.parent.mkdir(parents=True)
     dataset.write_text("[]\n", encoding="utf-8")
     state = {
-        "schema_version": 1,
         "run_label": "lme60-test",
         "work_dir": str(work_dir),
         "resolved_plan": str(plan),
@@ -304,6 +394,44 @@ def _run_fixture(
         "OAMB_TEST_PLAN_HASH": RESOLVED_PLAN_HASH,
     }
     return root, env, trace
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_mode", "expected_questions"),
+    ((["--dry-run"], "smoke", 1), (["--full_test", "--dry-run"], "full", 60)),
+)
+def test_run_dry_run_validates_without_dispatch(
+    tmp_path: Path,
+    arguments: list[str],
+    expected_mode: str,
+    expected_questions: int,
+) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+
+    result = subprocess.run(
+        [str(script), *arguments],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8")
+    assert "provider-services doctor" in calls
+    assert "uv run --locked python -" in calls
+    assert "oamb run" not in calls
+    assert "oamb capsule validate" not in calls
+    assert "oamb compare" not in calls
+    assert "open " not in calls
+    assert not (root / ".local-demo" / "lme60-test" / expected_mode).exists()
+    assert (
+        f"run: PASS (dry-run, {expected_mode}, {expected_questions} questions, "
+        "3 providers, zero model/provider calls)"
+    ) in result.stdout
 
 
 def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path) -> None:

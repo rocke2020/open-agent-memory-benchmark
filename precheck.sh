@@ -3,12 +3,19 @@
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROVIDER_ENV="$ROOT/provider-services/.env"
-readonly MODEL_ENV="$ROOT/.env"
+readonly ENV_FILE="$ROOT/.env"
 readonly RUNTIME_DIR="$ROOT/provider-services/.runtime"
 readonly STATE_FILE="$ROOT/.local-demo/quick-start-current.json"
 readonly QUESTION_ID="72e3ee87"
 readonly DEFAULT_EMBEDDING_URL="http://host.docker.internal:18000/v1"
+readonly DEFAULT_EMBEDDING_MODEL="qwen3-embedding:0.6b"
+readonly DEFAULT_PROVIDER_MODEL="deepseek-v4-flash"
+readonly DEFAULT_HINDSIGHT_PORT="18888"
+readonly DEFAULT_MEM0_PORT="18889"
+readonly DEFAULT_MEM0_INSPECTOR_PORT="16333"
+readonly DEFAULT_OPENVIKING_PORT="19330"
+readonly DEFAULT_OPENVIKING_ACCOUNT_ID="oamb-benchmark"
+readonly DEFAULT_OPENVIKING_ADMIN_USER_ID="oamb-admin"
 readonly EMBEDDING_STARTUP_ATTEMPTS="${OAMB_EMBEDDING_STARTUP_ATTEMPTS:-180}"
 
 . "$ROOT/provider-services/lib/host_embedding.sh"
@@ -80,62 +87,77 @@ random_secret() {
   python3 -c 'import secrets; print(secrets.token_hex(32))'
 }
 
-ensure_model_environment() {
-  if [[ ! -f "$MODEL_ENV" ]]; then
-    cp "$ROOT/.env.example" "$MODEL_ENV"
+ensure_env_default() {
+  local key=$1
+  local default_value=$2
+  local current_value
+  current_value="$(read_env_value "$ENV_FILE" "$key" 2>/dev/null || true)"
+  if [[ -z "$current_value" || "$current_value" == change-me* ]]; then
+    set_env_value "$ENV_FILE" "$key" "$default_value"
   fi
-  chmod 600 "$MODEL_ENV"
+}
+
+ensure_model_environment() {
+  [[ -f "$ENV_FILE" ]] || \
+    die "prepare .env from .env.example, set DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY, then rerun"
+  chmod 600 "$ENV_FILE"
 
   local base_url api_key
-  base_url="$(read_env_value "$MODEL_ENV" DEEPSEEK_BASE_URL 2>/dev/null || true)"
-  api_key="$(read_env_value "$MODEL_ENV" DEEPSEEK_API_KEY 2>/dev/null || true)"
+  base_url="$(read_env_value "$ENV_FILE" DEEPSEEK_BASE_URL 2>/dev/null || true)"
+  api_key="$(read_env_value "$ENV_FILE" DEEPSEEK_API_KEY 2>/dev/null || true)"
   if [[ -n "$base_url" && "$base_url" != change-me* && -n "$api_key" && "$api_key" != change-me* ]]; then
     return
   fi
-  [[ -t 0 ]] || die "configure DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY in .env, then rerun"
-  read -r -p "DeepSeek-compatible API URL: " base_url
-  read -r -s -p "DeepSeek-compatible API key: " api_key
-  printf '\n'
-  [[ -n "$base_url" && -n "$api_key" ]] || die "model API URL and key cannot be empty"
-  set_env_value "$MODEL_ENV" DEEPSEEK_BASE_URL "$base_url"
-  set_env_value "$MODEL_ENV" DEEPSEEK_API_KEY "$api_key"
+  die "configure DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY in .env, then rerun"
 }
 
 ensure_provider_environment() {
   local run_label=$1
   local mem0_checkout=$2
-  local created=false
-  if [[ ! -f "$PROVIDER_ENV" ]]; then
-    cp "$ROOT/provider-services/.env.example" "$PROVIDER_ENV"
-    created=true
-  fi
-  chmod 600 "$PROVIDER_ENV"
+  chmod 600 "$ENV_FILE"
 
-  local model_url model_key
-  model_url="$(read_env_value "$MODEL_ENV" DEEPSEEK_BASE_URL)"
-  model_key="$(read_env_value "$MODEL_ENV" DEEPSEEK_API_KEY)"
-  if [[ "$created" == true ]]; then
-    set_env_value "$PROVIDER_ENV" OAMB_PROVIDER_PROJECT "oamb-providers-$run_label"
-    set_env_value "$PROVIDER_ENV" OAMB_MEM0_SOURCE_CHECKOUT "$mem0_checkout"
+  local model_url model_key value
+  model_url="$(read_env_value "$ENV_FILE" DEEPSEEK_BASE_URL)"
+  model_key="$(read_env_value "$ENV_FILE" DEEPSEEK_API_KEY)"
+  value="$(read_env_value "$ENV_FILE" OAMB_PROVIDER_PROJECT 2>/dev/null || true)"
+  if [[ -z "$value" || "$value" == change-me* ]]; then
+    set_env_value "$ENV_FILE" OAMB_PROVIDER_PROJECT "oamb-providers-$run_label"
+  fi
+  value="$(read_env_value "$ENV_FILE" OAMB_MEM0_SOURCE_CHECKOUT 2>/dev/null || true)"
+  if [[ -z "$value" || "$value" == change-me* ]]; then
+    set_env_value "$ENV_FILE" OAMB_MEM0_SOURCE_CHECKOUT "$mem0_checkout"
   fi
 
-  local key value
+  ensure_env_default OAMB_HINDSIGHT_PORT "$DEFAULT_HINDSIGHT_PORT"
+  ensure_env_default OAMB_MEM0_PORT "$DEFAULT_MEM0_PORT"
+  ensure_env_default OAMB_MEM0_INSPECTOR_PORT "$DEFAULT_MEM0_INSPECTOR_PORT"
+  ensure_env_default OAMB_OPENVIKING_PORT "$DEFAULT_OPENVIKING_PORT"
+  ensure_env_default OAMB_EMBEDDING_MODEL "$DEFAULT_EMBEDDING_MODEL"
+  ensure_env_default OAMB_HINDSIGHT_LLM_PROVIDER openai
+  ensure_env_default OAMB_HINDSIGHT_LLM_MODEL "$DEFAULT_PROVIDER_MODEL"
+  ensure_env_default OAMB_MEM0_LLM_MODEL "$DEFAULT_PROVIDER_MODEL"
+  ensure_env_default OAMB_OPENVIKING_VLM_PROVIDER openai
+  ensure_env_default OAMB_OPENVIKING_VLM_MODEL "$DEFAULT_PROVIDER_MODEL"
+  ensure_env_default OAMB_OPENVIKING_ACCOUNT_ID "$DEFAULT_OPENVIKING_ACCOUNT_ID"
+  ensure_env_default OAMB_OPENVIKING_ADMIN_USER_ID "$DEFAULT_OPENVIKING_ADMIN_USER_ID"
+
+  local key
   for key in \
     OAMB_HINDSIGHT_LLM_BASE_URL \
     OAMB_MEM0_LLM_BASE_URL \
     OAMB_OPENVIKING_VLM_BASE_URL; do
-    value="$(read_env_value "$PROVIDER_ENV" "$key" 2>/dev/null || true)"
+    value="$(read_env_value "$ENV_FILE" "$key" 2>/dev/null || true)"
     if [[ -z "$value" || "$value" == change-me* ]]; then
-      set_env_value "$PROVIDER_ENV" "$key" "$model_url"
+      set_env_value "$ENV_FILE" "$key" "$model_url"
     fi
   done
   for key in \
     OAMB_HINDSIGHT_LLM_API_KEY \
     OAMB_MEM0_LLM_API_KEY \
     OAMB_OPENVIKING_VLM_API_KEY; do
-    value="$(read_env_value "$PROVIDER_ENV" "$key" 2>/dev/null || true)"
+    value="$(read_env_value "$ENV_FILE" "$key" 2>/dev/null || true)"
     if [[ -z "$value" || "$value" == change-me* ]]; then
-      set_env_value "$PROVIDER_ENV" "$key" "$model_key"
+      set_env_value "$ENV_FILE" "$key" "$model_key"
     fi
   done
   for key in \
@@ -144,18 +166,15 @@ ensure_provider_environment() {
     OAMB_MEM0_POSTGRES_PASSWORD \
     OAMB_MEM0_INSPECTOR_API_KEY \
     OAMB_OPENVIKING_ROOT_API_KEY; do
-    value="$(read_env_value "$PROVIDER_ENV" "$key" 2>/dev/null || true)"
+    value="$(read_env_value "$ENV_FILE" "$key" 2>/dev/null || true)"
     if [[ -z "$value" || "$value" == change-me* ]]; then
-      set_env_value "$PROVIDER_ENV" "$key" "$(random_secret)"
+      set_env_value "$ENV_FILE" "$key" "$(random_secret)"
     fi
   done
   if [[ -n "$EMBEDDING_API_URL" ]]; then
-    set_env_value "$PROVIDER_ENV" OAMB_EMBEDDING_BASE_URL "$EMBEDDING_API_URL"
+    set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$EMBEDDING_API_URL"
   fi
-  value="$(read_env_value "$PROVIDER_ENV" OAMB_EMBEDDING_BASE_URL 2>/dev/null || true)"
-  if [[ -z "$value" ]]; then
-    set_env_value "$PROVIDER_ENV" OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
-  fi
+  ensure_env_default OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
 }
 
 probe_embedding() {
@@ -233,7 +252,7 @@ start_local_embedding() {
 }
 
 validate_existing_readiness() {
-  uv run --locked python - "$PLAN" "$PROVIDER_ENV" "$MODEL_ENV" "$RUNTIME_DIR" <<'PY'
+  uv run --locked python - "$PLAN" "$ENV_FILE" "$RUNTIME_DIR" <<'PY'
 import sys
 from pathlib import Path
 
@@ -243,11 +262,11 @@ from oamb.live import (
     validate_live_readiness_receipt,
 )
 
-plan_path, provider_env, model_env, runtime = map(Path, sys.argv[1:])
+plan_path, env_file, runtime = map(Path, sys.argv[1:])
 plan = load_resolved_plan_for_run(plan_path)
 environment = load_live_environment(
-    provider_env_path=provider_env,
-    model_env_path=model_env,
+    provider_env_path=env_file,
+    model_env_path=env_file,
     provider_runtime_directory=runtime,
     base_environment={},
 )
@@ -306,7 +325,7 @@ ensure_model_environment
 ensure_provider_environment "$RUN_LABEL" "$MEM0_CHECKOUT"
 
 if [[ "$START_LOCAL_EMBEDDING" == true ]]; then
-  start_local_embedding "$(read_env_value "$PROVIDER_ENV" OAMB_EMBEDDING_BASE_URL)"
+  start_local_embedding "$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)"
 else
   printf 'embedding: local startup skipped; configured API will be verified directly\n'
 fi
@@ -320,7 +339,7 @@ if [[ -f "$RUNTIME_DIR/model-readiness-receipt.json" ]]; then
   validate_existing_readiness
 else
   "$ROOT/provider-services/bin/provider-services" verify --model-readiness \
-    --resolved-plan "$PLAN" --model-env "$MODEL_ENV"
+    --resolved-plan "$PLAN" --model-env "$ENV_FILE"
   validate_existing_readiness
 fi
 "$ROOT/provider-services/bin/provider-services" status
@@ -332,7 +351,7 @@ jq -n \
   --arg plan "$PLAN" \
   --arg dataset "$DATASET_SOURCE" \
   --arg question "$QUESTION_ID" \
-  '{schema_version: 1, run_label: $run_label, work_dir: $work_dir,
+  '{run_label: $run_label, work_dir: $work_dir,
     resolved_plan: $plan, dataset_source: $dataset, question_id: $question}' \
   > "$state_temporary"
 mv "$state_temporary" "$STATE_FILE"

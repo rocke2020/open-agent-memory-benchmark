@@ -6,12 +6,18 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = ROOT.parent
 
 
 class ServiceBundleContractTests(unittest.TestCase):
     def read(self, relative_path: str) -> str:
         path = ROOT / relative_path
         self.assertTrue(path.is_file(), f"missing required file: {relative_path}")
+        return path.read_text(encoding="utf-8")
+
+    def read_root_env_example(self) -> str:
+        path = REPOSITORY_ROOT / ".env.example"
+        self.assertTrue(path.is_file(), "missing required root .env.example")
         return path.read_text(encoding="utf-8")
 
     def test_release_and_image_pins_are_immutable(self) -> None:
@@ -76,7 +82,7 @@ class ServiceBundleContractTests(unittest.TestCase):
 
     def test_inspector_uses_private_postgres_without_runner_credentials(self) -> None:
         compose = self.read("compose.yaml")
-        env_example = self.read(".env.example")
+        env_example = self.read_root_env_example()
         self.assertIn("OAMB_MEM0_INSPECTOR_API_KEY", compose)
         self.assertIn("POSTGRES_HOST: mem0-postgres", compose)
         self.assertIn("POSTGRES_DB: postgres", compose)
@@ -263,7 +269,7 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn(".user_id == $user", script)
 
     def test_example_env_has_placeholders_not_credentials(self) -> None:
-        example = self.read(".env.example")
+        example = self.read_root_env_example()
         values = dict(
             line.split("=", 1) for line in example.splitlines() if line and not line.startswith("#")
         )

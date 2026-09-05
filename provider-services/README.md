@@ -64,19 +64,18 @@ service-only acceptance may use clearly named nonfunctional values and a
 reuse another provider's tracked or local config.
 
 ```bash
-cd provider-services
 cp .env.example .env
 chmod 600 .env
-# Edit .env. Set OAMB_MEM0_SOURCE_CHECKOUT to your official Mem0 checkout.
+# Edit the root .env and replace every change-me value.
 
-./bin/provider-services doctor
-./bin/provider-services build
-./bin/provider-services up
-./bin/provider-services verify --services
-./bin/provider-services verify --model-readiness \
+./provider-services/bin/provider-services doctor
+./provider-services/bin/provider-services build
+./provider-services/bin/provider-services up
+./provider-services/bin/provider-services verify --services
+./provider-services/bin/provider-services verify --model-readiness \
   --resolved-plan /path/to/resolved-plan.json \
-  --model-env /path/to/.env
-./bin/provider-services status
+  --model-env .env
+./provider-services/bin/provider-services status
 ```
 
 The bundle accepts a deliberately small dotenv grammar: one unique
@@ -180,8 +179,9 @@ The contract suite is credential-free and performs no provider or database
 writes:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py' -v
-docker compose --env-file /path/to/canary.env -f compose.yaml config --quiet
+python3 -m unittest discover -s provider-services/tests -p 'test_*.py' -v
+docker compose --env-file /path/to/canary.env \
+  -f provider-services/compose.yaml config --quiet
 ```
 
 The second command still requires a mode-`0600` canary env containing all

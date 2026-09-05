@@ -245,8 +245,8 @@ def run_command(
     ] = Path("provider-services/.runtime"),
     provider_env: Annotated[
         Path,
-        typer.Option("--provider-env", help="Provider service dotenv file."),
-    ] = Path("provider-services/.env"),
+        typer.Option("--provider-env", help="Root provider-service dotenv file."),
+    ] = Path(".env"),
     model_env: Annotated[
         Path,
         typer.Option("--model-env", help="Answer and judge dotenv file."),

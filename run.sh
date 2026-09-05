@@ -7,13 +7,16 @@ readonly STATE_FILE="$ROOT/.local-demo/quick-start-current.json"
 readonly CELLS=("hindsight-lme60" "mem0-lme60" "openviking-lme60")
 
 MODE="smoke"
+MODE_SELECTED=false
+DRY_RUN=false
 
 usage() {
   cat <<'EOF'
-Usage: ./run.sh [--smoke_test | --full_test]
+Usage: ./run.sh [--smoke_test | --full_test] [--dry-run]
 
 --smoke_test  Run one LME-60 question on every provider (default).
 --full_test   Run the bounded proof, then all 60 questions on every provider.
+--dry-run     Validate configuration and readiness with zero model/provider calls.
 EOF
 }
 
@@ -35,16 +38,28 @@ open_report() {
   esac
 }
 
-if [[ $# -gt 1 ]]; then
-  usage >&2
-  exit 2
-fi
-case "${1:---smoke_test}" in
-  --smoke_test) MODE="smoke" ;;
-  --full_test) MODE="full" ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --smoke_test|--full_test)
+      [[ "$MODE_SELECTED" == false ]] || die "choose only one of --smoke_test or --full_test"
+      [[ "$1" == --smoke_test ]] && MODE="smoke" || MODE="full"
+      MODE_SELECTED=true
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 command -v jq >/dev/null 2>&1 || die "required command not found: jq"
 command -v uv >/dev/null 2>&1 || die "required command not found: uv"
@@ -62,6 +77,42 @@ esac
 [[ -f "$PLAN" ]] || die "resolved plan is missing; rerun ./precheck.sh"
 [[ -f "$DATASET_SOURCE" ]] || die "dataset is missing; rerun ./precheck.sh"
 PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
+
+if [[ "$DRY_RUN" == true ]]; then
+  "$ROOT/provider-services/bin/provider-services" doctor
+  uv run --locked python - "$PLAN" "$ROOT/.env" "$ROOT/provider-services/.runtime" \
+    "${CELLS[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+from oamb.config.doctor import load_resolved_plan_for_run
+from oamb.live import load_live_environment, validate_live_readiness_receipt
+
+plan_path = Path(sys.argv[1])
+env_file = Path(sys.argv[2])
+runtime = Path(sys.argv[3])
+expected_cells = tuple(sys.argv[4:])
+plan = load_resolved_plan_for_run(plan_path)
+actual_cells = tuple(cell.cell_id for cell in plan.cells)
+if actual_cells != expected_cells:
+    raise SystemExit(f"unexpected plan cells: {actual_cells!r}")
+environment = load_live_environment(
+    provider_env_path=env_file,
+    model_env_path=env_file,
+    provider_runtime_directory=runtime,
+    base_environment={},
+)
+validate_live_readiness_receipt(
+    plan=plan,
+    provider_runtime_directory=runtime,
+    environment=environment,
+)
+PY
+  [[ "$MODE" == smoke ]] && QUESTION_COUNT=1 || QUESTION_COUNT=60
+  printf 'run: PASS (dry-run, %s, %s questions, 3 providers, zero model/provider calls)\n' \
+    "$MODE" "$QUESTION_COUNT"
+  exit 0
+fi
 
 MODE_DIR="$WORK_DIR/$MODE"
 mkdir -p "$MODE_DIR/results" "$MODE_DIR/validations" "$MODE_DIR/capsules"

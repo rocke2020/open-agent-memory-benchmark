@@ -27,17 +27,16 @@ def _lme6_plan() -> ResolvedPlan:
     )
 
 
-def test_root_model_environment_template_contains_only_placeholders() -> None:
+def test_root_environment_template_contains_model_placeholders_without_credentials() -> None:
     entries = {}
     for line in (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
         if line and not line.startswith("#"):
             key, value = line.split("=", 1)
             entries[key] = value
 
-    assert entries == {
-        "DEEPSEEK_BASE_URL": "change-me",
-        "DEEPSEEK_API_KEY": "change-me",
-    }
+    assert entries["DEEPSEEK_BASE_URL"] == "change-me"
+    assert entries["DEEPSEEK_API_KEY"] == "change-me"
+    assert not any(value.startswith("sk-") for value in entries.values())
 
 
 def test_live_question_run_writes_machine_readable_result_map(

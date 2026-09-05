@@ -63,21 +63,25 @@ def _environment() -> dict[str, str]:
         "OAMB_HINDSIGHT_BASE_URL": "http://127.0.0.1:64888",
         "OAMB_HINDSIGHT_LLM_BASE_URL": "https://model.example/v1",
         "OAMB_HINDSIGHT_LLM_API_KEY": "provider-model-key",
+        "OAMB_HINDSIGHT_LLM_MODEL": "deepseek-v4-flash",
         "OAMB_MEM0_BASE_URL": "http://127.0.0.1:64889",
         "OAMB_MEM0_ADMIN_API_KEY": "mem0-key",
         "OAMB_MEM0_LLM_BASE_URL": "https://model.example/v1",
         "OAMB_MEM0_LLM_API_KEY": "provider-model-key",
+        "OAMB_MEM0_LLM_MODEL": "deepseek-v4-flash",
         "OAMB_MEM0_INSPECTOR_BASE_URL": "http://127.0.0.1:64333",
         "OAMB_MEM0_INSPECTOR_API_KEY": "inspector-key",
         "OAMB_OPENVIKING_BASE_URL": "http://127.0.0.1:64930",
         "OAMB_OPENVIKING_USER_API_KEY": "openviking-key",
         "OAMB_OPENVIKING_VLM_BASE_URL": "https://model.example/v1",
         "OAMB_OPENVIKING_VLM_API_KEY": "provider-model-key",
+        "OAMB_OPENVIKING_VLM_MODEL": "deepseek-v4-flash",
         "OAMB_OPENVIKING_ACCOUNT_ID": "benchmark-account",
         "OAMB_OPENVIKING_ADMIN_USER_ID": "benchmark-user",
         "OAMB_DEEPSEEK_BASE_URL": "https://model.example/v1",
         "OAMB_DEEPSEEK_API_KEY": "answer-key",
         "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
+        "OAMB_EMBEDDING_MODEL": "qwen3-embedding:0.6b",
     }
 
 
@@ -997,6 +1001,14 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
             plan=plan,
             provider_runtime_directory=runtime,
             environment=drifted_environment,
+        )
+
+    drifted_embedding = {**environment, "OAMB_EMBEDDING_MODEL": "different-embedding"}
+    with pytest.raises(live.LiveConfigurationError, match="embedding.*model"):
+        live.validate_live_readiness_receipt(
+            plan=plan,
+            provider_runtime_directory=runtime,
+            environment=drifted_embedding,
         )
 
     receipt["provider_internal_retries"] = 1

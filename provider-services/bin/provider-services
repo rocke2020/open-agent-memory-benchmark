@@ -3,8 +3,9 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+REPOSITORY_ROOT=$(CDPATH= cd -- "$ROOT/.." && pwd)
 COMPOSE_FILE="$ROOT/compose.yaml"
-ENV_FILE="$ROOT/.env"
+ENV_FILE="$REPOSITORY_ROOT/.env"
 VERSIONS_FILE="$ROOT/versions.env"
 RUNTIME_DIR="$ROOT/.runtime"
 BUILD_DIR="$ROOT/.build"
@@ -49,7 +50,7 @@ compose() {
 }
 
 check_env_file() {
-    [ -f "$ENV_FILE" ] || die "copy .env.example to .env and configure it"
+    [ -f "$ENV_FILE" ] || die "prepare $ENV_FILE from $REPOSITORY_ROOT/.env.example"
     mode=$(read_file_mode "$ENV_FILE" || true)
     [ "$mode" = "600" ] || die "$ENV_FILE must have mode 0600 (found ${mode:-unknown})"
     validate_env_file "$ENV_FILE" || die "$ENV_FILE uses duplicate keys or unsupported dotenv syntax"

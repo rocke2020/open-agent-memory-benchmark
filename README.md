@@ -80,20 +80,26 @@ the Docker bridge gateway needed by the provider containers, not to LAN interfac
 
 ### 1. Precheck
 
-Clone OAMB and run the single precheck command from its root:
+Clone OAMB and enter its root:
 
 ```bash
 git clone https://github.com/rocke2020/open-agent-memory-benchmark.git && \
-  cd open-agent-memory-benchmark && \
-  ./precheck.sh
+  cd open-agent-memory-benchmark
 ```
 
-On first use, `precheck.sh` securely prompts for the model API URL and key. It
-then installs locked dependencies, downloads and verifies LongMemEval, clones
-and verifies the pinned Mem0 source, creates private local service credentials,
+Prepare the ignored root `.env` from `./.env.example`, set `DEEPSEEK_BASE_URL`
+and `DEEPSEEK_API_KEY`, and keep the file mode `0600`. Then run:
+
+```bash
+./precheck.sh
+```
+
+`precheck.sh` reads and completes that same `.env` with provider defaults and
+generated local service credentials. It then installs locked dependencies,
+downloads and verifies LongMemEval, clones and verifies the pinned Mem0 source,
 starts the OS-specific embedding server when needed, starts all three memory
 providers, freezes `configs/benchmark.yml`, and verifies every runtime role.
-Existing configured `.env` files and provider data are reused, not overwritten.
+Existing configured values and provider data are reused, not overwritten.
 
 To use an OpenAI-compatible online embedding endpoint directly, pass its base
 URL. The endpoint must accept the profile's `oamb-local-embedding` bearer value:
@@ -108,6 +114,9 @@ readiness gate still sends a real embedding request and validates the returned
 model and dimensions. Do not continue unless precheck prints `precheck: PASS`.
 
 ### 2. Run
+
+To verify the frozen plan and runtime configuration without model or provider
+calls, run `./run.sh --dry-run`.
 
 Run the smoke comparison. `--smoke_test` is the default, so these are identical:
 

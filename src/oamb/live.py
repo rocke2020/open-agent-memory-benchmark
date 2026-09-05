@@ -323,6 +323,21 @@ def _expected_provider_models(plan: ResolvedPlan) -> dict[str, str]:
     }
 
 
+def _validate_live_configured_models(
+    plan: ResolvedPlan,
+    environment: Mapping[str, str],
+) -> None:
+    configured_model_variables: tuple[tuple[ModelRoleId, str], ...] = (
+        ("hindsight_extraction", "OAMB_HINDSIGHT_LLM_MODEL"),
+        ("mem0_extraction", "OAMB_MEM0_LLM_MODEL"),
+        ("openviking_semantic_understanding", "OAMB_OPENVIKING_VLM_MODEL"),
+        ("embedding", "OAMB_EMBEDDING_MODEL"),
+    )
+    for role_id, variable in configured_model_variables:
+        if environment.get(variable) != _model_plan(plan, role_id).configured_model:
+            raise LiveConfigurationError(f"{role_id} configured model differs from the plan")
+
+
 def resolve_service_verification_receipt(
     provider_runtime_directory: Path,
     *,
@@ -392,6 +407,8 @@ def validate_live_readiness_receipt(
     environment: Mapping[str, str],
 ) -> Path:
     """Reopen the all-role preflight receipt and its durable dispatch ledger."""
+
+    _validate_live_configured_models(plan, environment)
 
     receipt_path = provider_runtime_directory / "model-readiness-receipt.json"
     attempt_path = provider_runtime_directory / "model-readiness-attempt.json"

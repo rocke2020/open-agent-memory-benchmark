@@ -220,8 +220,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Provider-service local credentials, state, and prepared source archives
-provider-services/.env
+# Provider-service local state and prepared source archives
 provider-services/.runtime/
 provider-services/.runtime-*/
 provider-services/.runtime-archives/

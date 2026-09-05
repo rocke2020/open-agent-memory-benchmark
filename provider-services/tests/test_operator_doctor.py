@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = ROOT.parent
 MEM0_COMMIT = "dc82354e143c2581d505d581a00286d6ef8c3605"
 TARGET_PROVIDER_MODEL = "deepseek-v4-flash"
 PROVIDER_MODEL_VARIABLES = (
@@ -41,7 +42,6 @@ class OperatorDoctorTests(unittest.TestCase):
         directory = Path(temporary.name)
         bundle = directory / "provider-services"
         for relative_path in (
-            ".env.example",
             "bin/provider-services",
             "compose.yaml",
             "lib/env.sh",
@@ -68,7 +68,7 @@ class OperatorDoctorTests(unittest.TestCase):
             **model_overrides,
         }
         lines: list[str] = []
-        for line in (bundle / ".env.example").read_text(encoding="utf-8").splitlines():
+        for line in (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
             if not line or line.startswith("#"):
                 lines.append(line)
                 continue
@@ -78,7 +78,7 @@ class OperatorDoctorTests(unittest.TestCase):
             elif value.startswith("change-me"):
                 value = f"test-value-{name.lower()}"
             lines.append(f"{name}={value}")
-        env_file = bundle / ".env"
+        env_file = directory / ".env"
         env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         env_file.chmod(0o600)
 
