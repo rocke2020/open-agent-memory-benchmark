@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def readiness_plan_document(
         provider_env_path=provider_env_path,
         model_env_path=model_env_path,
         provider_runtime_directory=provider_runtime_directory,
-        base_environment={},
+        base_environment=os.environ,
     )
     service_receipt_path = resolve_service_verification_receipt(provider_runtime_directory)
     validate_live_service_verification_receipt(

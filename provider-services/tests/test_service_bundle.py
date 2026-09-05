@@ -217,21 +217,36 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertNotIn('"rerank"', config)
         self.assertNotIn("~/.openviking", compose)
 
-    def test_all_provider_internal_model_calls_pin_low_reasoning_effort(self) -> None:
+    def test_provider_internal_thinking_effort_comes_from_plan_environment(self) -> None:
         compose = self.read("compose.yaml")
         mem0_bootstrap = self.read("mem0/bootstrap.sh")
         openviking_config = self.read("openviking/ov.conf")
         operator = self.read("bin/provider-services")
+        plan_environment = self.read("lib/plan_environment.sh")
 
-        self.assertIn('HINDSIGHT_API_LLM_REASONING_EFFORT: "low"', compose)
-        self.assertIn('reasoning_effort: "low"', mem0_bootstrap)
+        self.assertIn(
+            "HINDSIGHT_API_LLM_REASONING_EFFORT: ${OAMB_HINDSIGHT_LLM_REASONING_EFFORT:?required}",
+            compose,
+        )
+        self.assertIn("OAMB_MEM0_LLM_REASONING_EFFORT", mem0_bootstrap)
+        self.assertIn("reasoning_effort: $llm_effort", mem0_bootstrap)
         self.assertIn("is_reasoning_model: true", mem0_bootstrap)
-        self.assertIn('"extra_request_body": {"reasoning_effort": "low"}', openviking_config)
+        self.assertIn(
+            '"extra_request_body": {"reasoning_effort": "${OAMB_OPENVIKING_VLM_REASONING_EFFORT}"}',
+            openviking_config,
+        )
+        for variable in (
+            "OAMB_HINDSIGHT_LLM_REASONING_EFFORT",
+            "OAMB_MEM0_LLM_REASONING_EFFORT",
+            "OAMB_OPENVIKING_VLM_REASONING_EFFORT",
+        ):
+            self.assertIn(variable, plan_environment)
         self.assertIn("reasoning_effort: $effort", operator)
         self.assertIn("hindsight-model-config.json", operator)
         self.assertIn("openviking-model-config.json", operator)
-        self.assertEqual(operator.count('--arg target_model "$TARGET_PROVIDER_MODEL"'), 3)
-        self.assertEqual(operator.count("'.model == $target_model"), 2)
+        self.assertNotIn("TARGET_PROVIDER_MODEL", operator)
+        self.assertEqual(operator.count(".model == $target_model"), 3)
+        self.assertEqual(operator.count("$target_effort"), 3)
         self.assertIn(".llm.config.model == $target_model", operator)
 
     def test_all_provider_internal_retry_paths_are_disabled_and_proven(self) -> None:
@@ -255,11 +270,18 @@ class ServiceBundleContractTests(unittest.TestCase):
             self.assertIn(filename, operator)
 
     def test_bootstrap_treats_dotenv_as_data(self) -> None:
-        for script_name in ("mem0/bootstrap.sh", "openviking/bootstrap.sh"):
-            script = self.read(script_name)
+        mem0 = self.read("mem0/bootstrap.sh")
+        openviking = self.read("openviking/bootstrap.sh")
+        operator = self.read("bin/provider-services")
+        for script in (mem0, openviking):
             self.assertNotIn('. "$ENV_FILE"', script)
             self.assertIn("env_value()", script)
-            self.assertIn('read_env_value "$ENV_FILE" "$1"', script)
+        self.assertIn('read_runtime_env_value "$ENV_FILE" "$1"', mem0)
+        self.assertNotIn("qwen3-embedding:0.6b", mem0)
+        self.assertIn('read_env_value "$ENV_FILE" "$1"', openviking)
+        self.assertIn('. "$ROOT/lib/compose.sh"', mem0)
+        self.assertIn('. "$ROOT/lib/compose.sh"', operator)
+        self.assertNotIn("docker compose", mem0)
 
     def test_openviking_bootstrap_proves_full_non_root_identity(self) -> None:
         script = self.read("openviking/bootstrap.sh")
@@ -282,11 +304,20 @@ class ServiceBundleContractTests(unittest.TestCase):
         ):
             self.assertRegex(example, rf"(?m)^{name}=.*$")
         for name in (
+            "OMBA_ANSWER_LLM",
+            "OMBA_ANSWER_MODEL",
+            "OMBA_JUDGE_LLM",
+            "OMBA_JUDGE_MODEL",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_KEY",
+            "OAMB_EMBEDDING_MODEL",
+            "OAMB_HINDSIGHT_LLM_PROVIDER",
             "OAMB_HINDSIGHT_LLM_MODEL",
             "OAMB_MEM0_LLM_MODEL",
+            "OAMB_OPENVIKING_VLM_PROVIDER",
             "OAMB_OPENVIKING_VLM_MODEL",
         ):
-            self.assertRegex(example, rf"(?m)^{name}=deepseek-v4-flash$")
+            self.assertNotIn(name, values)
         for name in (
             "OAMB_HINDSIGHT_LLM_BASE_URL",
             "OAMB_MEM0_LLM_BASE_URL",
@@ -294,9 +325,6 @@ class ServiceBundleContractTests(unittest.TestCase):
         ):
             self.assertRegex(example, rf"(?m)^{name}=change-me$")
         self.assertNotRegex(example, r"sk-[A-Za-z0-9]{12,}")
-        self.assertEqual(values["OAMB_HINDSIGHT_LLM_MODEL"], "deepseek-v4-flash")
-        self.assertEqual(values["OAMB_MEM0_LLM_MODEL"], "deepseek-v4-flash")
-        self.assertEqual(values["OAMB_OPENVIKING_VLM_MODEL"], "deepseek-v4-flash")
 
 
 if __name__ == "__main__":

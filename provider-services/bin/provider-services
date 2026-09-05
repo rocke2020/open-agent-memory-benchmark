@@ -9,6 +9,7 @@ ENV_FILE="$REPOSITORY_ROOT/.env"
 VERSIONS_FILE="$ROOT/versions.env"
 RUNTIME_DIR="$ROOT/.runtime"
 BUILD_DIR="$ROOT/.build"
+QUICK_START_STATE="$REPOSITORY_ROOT/.local-demo/quick-start-current.json"
 MEM0_IMAGE="oamb/mem0-api:2.0.19-dc82354"
 PROJECT_ATTESTATION="$RUNTIME_DIR/provider-project.attestation"
 LIFECYCLE_LOCK="$RUNTIME_DIR/provider-lifecycle.lock"
@@ -16,13 +17,14 @@ LIFECYCLE_LOCK_HELD=false
 OPENVIKING_QUIESCED=false
 MODEL_READINESS_RESERVED_CALLS=7
 MODEL_READINESS_CHAT_MAX_TOKENS=1024
-TARGET_PROVIDER_MODEL=deepseek-v4-flash
 
 # Public, tracked values only.
 . "$VERSIONS_FILE"
 . "$ROOT/lib/env.sh"
+. "$ROOT/lib/compose.sh"
 . "$ROOT/lib/host_embedding.sh"
 . "$ROOT/lib/lifecycle.sh"
+. "$ROOT/lib/plan_environment.sh"
 
 die() {
     printf 'provider-services: %s\n' "$*" >&2
@@ -34,7 +36,14 @@ need_command() {
 }
 
 env_value() {
-    read_env_value "$ENV_FILE" "$1"
+    case "$1" in
+        OAMB_EMBEDDING_MODEL|OAMB_HINDSIGHT_LLM_MODEL|OAMB_HINDSIGHT_LLM_REASONING_EFFORT|OAMB_MEM0_LLM_MODEL|OAMB_MEM0_LLM_REASONING_EFFORT|OAMB_OPENVIKING_VLM_MODEL|OAMB_OPENVIKING_VLM_REASONING_EFFORT)
+            read_runtime_env_value "$ENV_FILE" "$1"
+            ;;
+        *)
+            read_env_value "$ENV_FILE" "$1"
+            ;;
+    esac
 }
 
 require_env_value() {
@@ -46,7 +55,7 @@ require_env_value() {
 }
 
 compose() {
-    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+    oamb_compose "$ROOT" "$ENV_FILE" "$@"
 }
 
 check_env_file() {
@@ -54,6 +63,33 @@ check_env_file() {
     mode=$(read_file_mode "$ENV_FILE" || true)
     [ "$mode" = "600" ] || die "$ENV_FILE must have mode 0600 (found ${mode:-unknown})"
     validate_env_file "$ENV_FILE" || die "$ENV_FILE uses duplicate keys or unsupported dotenv syntax"
+    reject_plan_owned_env_values "$ENV_FILE" || die "$ENV_FILE contains plan-owned configuration"
+}
+
+ensure_plan_model_environment() {
+    missing_plan_environment=false
+    for variable in \
+        OAMB_HINDSIGHT_LLM_MODEL \
+        OAMB_HINDSIGHT_LLM_REASONING_EFFORT \
+        OAMB_MEM0_LLM_MODEL \
+        OAMB_MEM0_LLM_REASONING_EFFORT \
+        OAMB_OPENVIKING_VLM_MODEL \
+        OAMB_OPENVIKING_VLM_REASONING_EFFORT \
+        OAMB_EMBEDDING_MODEL
+    do
+        [ -n "$(printenv "$variable" 2>/dev/null)" ] || missing_plan_environment=true
+    done
+    [ "${missing_plan_environment:-false}" = false ] && return
+    command -v jq >/dev/null 2>&1 || die "required command not found: jq"
+    [ -f "$QUICK_START_STATE" ] || die "run ./precheck.sh or load a frozen plan first"
+    resolved_plan=$(jq -er '.resolved_plan | select(type == "string" and length > 0)' \
+        "$QUICK_START_STATE") || die "quick-start state has no resolved plan"
+    case "$resolved_plan" in
+        "$REPOSITORY_ROOT/.local-demo/"*) ;;
+        *) die "quick-start state resolved plan is outside .local-demo" ;;
+    esac
+    load_plan_model_environment "$resolved_plan" || \
+        die "cannot load model configuration from resolved plan"
 }
 
 check_tools() {
@@ -105,17 +141,6 @@ check_project_name() {
     project=$(env_value OAMB_PROVIDER_PROJECT) || die "missing OAMB_PROVIDER_PROJECT"
     printf '%s' "$project" | grep -Eq '^oamb-providers-[a-z0-9-]{8,48}$' || \
         die "OAMB_PROVIDER_PROJECT must be a unique oamb-providers-* identifier"
-}
-
-check_provider_model_profile() {
-    for variable in \
-        OAMB_HINDSIGHT_LLM_MODEL \
-        OAMB_MEM0_LLM_MODEL \
-        OAMB_OPENVIKING_VLM_MODEL
-    do
-        [ "$(env_value "$variable")" = "$TARGET_PROVIDER_MODEL" ] || \
-            die "$variable must be $TARGET_PROVIDER_MODEL"
-    done
 }
 
 project_resources() {
@@ -181,25 +206,22 @@ doctor_full() {
     for name in \
         OAMB_PROVIDER_PROJECT \
         OAMB_EMBEDDING_BASE_URL OAMB_EMBEDDING_MODEL \
-        OAMB_HINDSIGHT_LLM_PROVIDER OAMB_HINDSIGHT_LLM_MODEL \
+        OAMB_HINDSIGHT_LLM_MODEL OAMB_HINDSIGHT_LLM_REASONING_EFFORT \
         OAMB_HINDSIGHT_LLM_BASE_URL OAMB_HINDSIGHT_LLM_API_KEY \
-        OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_BASE_URL OAMB_MEM0_LLM_API_KEY \
+        OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_REASONING_EFFORT \
+        OAMB_MEM0_LLM_BASE_URL OAMB_MEM0_LLM_API_KEY \
         OAMB_MEM0_ADMIN_API_KEY OAMB_MEM0_JWT_SECRET \
         OAMB_MEM0_POSTGRES_PASSWORD \
-        OAMB_MEM0_INSPECTOR_API_KEY OAMB_OPENVIKING_VLM_PROVIDER \
-        OAMB_OPENVIKING_VLM_MODEL OAMB_OPENVIKING_VLM_BASE_URL \
+        OAMB_MEM0_INSPECTOR_API_KEY \
+        OAMB_OPENVIKING_VLM_MODEL OAMB_OPENVIKING_VLM_REASONING_EFFORT \
+        OAMB_OPENVIKING_VLM_BASE_URL \
         OAMB_OPENVIKING_VLM_API_KEY OAMB_OPENVIKING_ROOT_API_KEY \
         OAMB_OPENVIKING_ACCOUNT_ID OAMB_OPENVIKING_ADMIN_USER_ID
     do
         require_env_value "$name"
     done
-    check_provider_model_profile
     check_project_name
     check_project_ownership
-    [ "$(env_value OAMB_HINDSIGHT_LLM_PROVIDER)" = "openai" ] || \
-        die "this fixed profile requires OAMB_HINDSIGHT_LLM_PROVIDER=openai"
-    [ "$(env_value OAMB_OPENVIKING_VLM_PROVIDER)" = "openai" ] || \
-        die "this fixed profile requires OAMB_OPENVIKING_VLM_PROVIDER=openai"
     check_ports
     compose config --quiet
     printf 'doctor: PASS (configuration resolved; secrets not printed)\n'
@@ -363,8 +385,9 @@ verify_services() {
     compose exec -T hindsight python -c \
         'import json,os; print(json.dumps({"model":os.environ["HINDSIGHT_API_LLM_MODEL"],"reasoning_effort":os.environ["HINDSIGHT_API_LLM_REASONING_EFFORT"]},sort_keys=True,separators=(",",":")))' \
         > "$proof_dir/hindsight-model-config.json"
-    jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
-        '.model == $target_model and .reasoning_effort == "low"' \
+    jq -e --arg target_model "$(env_value OAMB_HINDSIGHT_LLM_MODEL)" \
+        --arg target_effort "$(env_value OAMB_HINDSIGHT_LLM_REASONING_EFFORT)" \
+        '.model == $target_model and .reasoning_effort == $target_effort' \
         "$proof_dir/hindsight-model-config.json" >/dev/null
     compose exec -T hindsight python -c \
         'import json,openai; from hindsight_api.config import get_config; c=get_config(); print(json.dumps({"llm_max_retries":c.llm_max_retries,"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT,"retain_llm_max_retries":c.retain_llm_max_retries,"worker_max_retries":c.worker_max_retries},sort_keys=True,separators=(",",":")))' \
@@ -393,7 +416,8 @@ verify_services() {
     jq -e '.count == 0 and .points == [] and .next_cursor == null' \
         "$proof_dir/mem0-empty-projection.json" >/dev/null
     cp "$RUNTIME_DIR/mem0-config-redacted.json" "$proof_dir/mem0-config-redacted.json"
-    jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
+    jq -e --arg target_model "$(env_value OAMB_MEM0_LLM_MODEL)" \
+          --arg target_effort "$(env_value OAMB_MEM0_LLM_REASONING_EFFORT)" \
           '.vector_store.provider == "pgvector" and
            .vector_store.config.host == "mem0-postgres" and
            .vector_store.config.port == 5432 and
@@ -405,7 +429,7 @@ verify_services() {
            .vector_store.config.diskann == false and
            .vector_store.config.hnsw == true and
            .llm.config.model == $target_model and
-           .llm.config.reasoning_effort == "low" and
+           .llm.config.reasoning_effort == $target_effort and
            .llm.config.is_reasoning_model == true' \
         "$proof_dir/mem0-config-redacted.json" >/dev/null
     compose exec -T mem0 python -c \
@@ -418,8 +442,9 @@ verify_services() {
     compose exec -T openviking python -c \
         'import json; from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton; c=OpenVikingConfigSingleton.get_instance().vlm; print(json.dumps({"model":c.model,"provider":c.provider,"reasoning_effort":c.extra_request_body.get("reasoning_effort")},sort_keys=True,separators=(",",":")))' \
         > "$proof_dir/openviking-model-config.json"
-    jq -e --arg target_model "$TARGET_PROVIDER_MODEL" \
-          '.model == $target_model and .reasoning_effort == "low" and
+    jq -e --arg target_model "$(env_value OAMB_OPENVIKING_VLM_MODEL)" \
+          --arg target_effort "$(env_value OAMB_OPENVIKING_VLM_REASONING_EFFORT)" \
+          '.model == $target_model and .reasoning_effort == $target_effort and
            .provider == "openai"' \
         "$proof_dir/openviking-model-config.json" >/dev/null
     compose exec -T openviking python -c \
@@ -686,18 +711,18 @@ usage() {
 }
 
 case "${1:-}" in
-    doctor) doctor_full ;;
-    build) build_images ;;
-    up) start_services ;;
+    doctor) ensure_plan_model_environment; doctor_full ;;
+    build) ensure_plan_model_environment; build_images ;;
+    up) ensure_plan_model_environment; start_services ;;
     verify)
         shift
         case "${1:-}" in
-            --services) [ "$#" -eq 1 ] || usage; verify_services ;;
-            --model-readiness) shift; verify_model_readiness "$@" ;;
+            --services) [ "$#" -eq 1 ] || usage; ensure_plan_model_environment; verify_services ;;
+            --model-readiness) shift; ensure_plan_model_environment; verify_model_readiness "$@" ;;
             *) usage ;;
         esac
         ;;
-    status) check_env_file; compose ps ;;
-    stop) stop_services ;;
+    status) ensure_plan_model_environment; check_env_file; compose ps ;;
+    stop) ensure_plan_model_environment; stop_services ;;
     *) usage ;;
 esac

@@ -246,6 +246,7 @@ def load_live_provider_evidence(
         expected_project_attestation_sha256=attestation_hash,
         controlled_embeddings={profile_id: embedding for profile_id in profile_ids},
         expected_provider_models=_expected_provider_models(plan),
+        expected_provider_thinking_efforts=_expected_provider_thinking_efforts(plan),
     )
     evidence_by_provider: dict[str, SourceEvidenceBinding] = {}
     for binding in bindings:
@@ -283,6 +284,7 @@ def validate_live_service_verification_receipt(
             expected_project=provider_project,
             expected_project_attestation_sha256=attestation_hash,
             expected_provider_models=_expected_provider_models(plan),
+            expected_provider_thinking_efforts=_expected_provider_thinking_efforts(plan),
         )
     except (OSError, ProviderServiceBindingError) as exc:
         raise LiveConfigurationError(
@@ -320,6 +322,16 @@ def _expected_provider_models(plan: ResolvedPlan) -> dict[str, str]:
         "openviking-rest-v1": _model_plan(
             plan, "openviking_semantic_understanding"
         ).configured_model,
+    }
+
+
+def _expected_provider_thinking_efforts(plan: ResolvedPlan) -> dict[str, str]:
+    return {
+        "hindsight-rest-v1": _model_plan(plan, "hindsight_extraction").thinking_effort,
+        "mem0-rest-v1": _model_plan(plan, "mem0_extraction").thinking_effort,
+        "openviking-rest-v1": _model_plan(
+            plan, "openviking_semantic_understanding"
+        ).thinking_effort,
     }
 
 
@@ -509,6 +521,12 @@ def validate_live_readiness_receipt(
         )
     ):
         raise LiveConfigurationError("live readiness attempt ledger is incomplete")
+    validate_live_service_verification_receipt(
+        plan=plan,
+        provider_runtime_directory=provider_runtime_directory,
+        environment=environment,
+        service_receipt_path=service_receipt_path,
+    )
     return service_receipt_path
 
 

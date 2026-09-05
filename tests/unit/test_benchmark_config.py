@@ -215,30 +215,43 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
     )
 
 
-@pytest.mark.parametrize(
-    "role_id,target_model,drifted_model",
-    (
-        ("hindsight_extraction", "deepseek-v4-flash", "deepseek-v4-pro"),
-        ("mem0_extraction", "deepseek-v4-flash", "deepseek-v4-pro"),
-        ("openviking_semantic_understanding", "deepseek-v4-flash", "deepseek-v4-pro"),
-        ("answer", "deepseek-v4-pro", "deepseek-v4-flash"),
-        ("judge", "deepseek-v4-flash", "deepseek-v4-pro"),
-    ),
-)
-def test_loader_rejects_drift_from_target_generative_model_profile(
-    tmp_path: Path,
-    role_id: str,
-    target_model: str,
-    drifted_model: str,
-) -> None:
-    target_binding = f"  {role_id}:\n    model: {target_model}\n    runtime_model: {target_model}\n"
-    drifted_binding = (
-        f"  {role_id}:\n    model: {drifted_model}\n    runtime_model: {drifted_model}\n"
+def test_loader_uses_benchmark_yaml_as_the_model_source(tmp_path: Path) -> None:
+    content = _valid_configuration_yaml().replace(
+        "  mem0_extraction:\n    model: deepseek-v4-flash\n    runtime_model: deepseek-v4-flash\n",
+        "  mem0_extraction:\n"
+        "    model: configured-by-benchmark\n"
+        "    runtime_model: configured-by-benchmark\n",
+        1,
     )
-    content = _valid_configuration_yaml().replace(target_binding, drifted_binding, 1)
 
-    with pytest.raises(BenchmarkConfigurationError, match="model profile"):
-        _load(_write_configuration(tmp_path, content))
+    configuration = _load(_write_configuration(tmp_path, content))
+
+    assert configuration.models.mem0_extraction.model == "configured-by-benchmark"
+    assert configuration.models.mem0_extraction.runtime_model == "configured-by-benchmark"
+
+
+def test_loader_uses_benchmark_yaml_as_the_thinking_effort_source(tmp_path: Path) -> None:
+    content = _valid_configuration_yaml().replace(
+        "  mem0_extraction:\n    model: deepseek-v4-flash\n"
+        "    runtime_model: deepseek-v4-flash\n    thinking_effort: low\n"
+        "    endpoint_variable: OAMB_MEM0_LLM_BASE_URL\n"
+        "    credential_variable: OAMB_MEM0_LLM_API_KEY\n"
+        "    recipient: deepseek-api\n    execution_owner: provider_internal\n"
+        "    proof_kind: effective_config_and_outbound_request\n"
+        "    proof_reference: reasoning_effort=low\n",
+        "  mem0_extraction:\n    model: deepseek-v4-flash\n"
+        "    runtime_model: deepseek-v4-flash\n    thinking_effort: high\n"
+        "    endpoint_variable: OAMB_MEM0_LLM_BASE_URL\n"
+        "    credential_variable: OAMB_MEM0_LLM_API_KEY\n"
+        "    recipient: deepseek-api\n    execution_owner: provider_internal\n"
+        "    proof_kind: effective_config_and_outbound_request\n"
+        "    proof_reference: reasoning_effort=high\n",
+        1,
+    )
+
+    configuration = _load(_write_configuration(tmp_path, content))
+
+    assert configuration.models.mem0_extraction.thinking_effort == "high"
 
 
 def test_checked_in_configuration_freezes_generation_free_retrieval_bindings() -> None:

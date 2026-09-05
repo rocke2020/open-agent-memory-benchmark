@@ -4,9 +4,13 @@ set -eu
 ROOT=${1:?provider-services root required}
 ENV_FILE=${2:?provider-services env file required}
 . "$ROOT/lib/env.sh"
+. "$ROOT/lib/compose.sh"
 
 env_value() {
-  read_env_value "$ENV_FILE" "$1"
+  case "$1" in
+    OAMB_EMBEDDING_MODEL|OAMB_MEM0_LLM_MODEL|OAMB_MEM0_LLM_REASONING_EFFORT) read_runtime_env_value "$ENV_FILE" "$1" ;;
+    *) read_env_value "$ENV_FILE" "$1" ;;
+  esac
 }
 
 required_env_value() {
@@ -18,13 +22,17 @@ required_env_value() {
 OAMB_MEM0_PORT=$(env_value OAMB_MEM0_PORT || printf '18889')
 OAMB_MEM0_LLM_API_KEY=$(required_env_value OAMB_MEM0_LLM_API_KEY)
 OAMB_MEM0_LLM_MODEL=$(required_env_value OAMB_MEM0_LLM_MODEL)
+OAMB_MEM0_LLM_REASONING_EFFORT=$(required_env_value OAMB_MEM0_LLM_REASONING_EFFORT)
 OAMB_MEM0_LLM_BASE_URL=$(required_env_value OAMB_MEM0_LLM_BASE_URL)
-OAMB_EMBEDDING_MODEL=$(env_value OAMB_EMBEDDING_MODEL || printf 'qwen3-embedding:0.6b')
+OAMB_EMBEDDING_MODEL=$(required_env_value OAMB_EMBEDDING_MODEL)
 OAMB_EMBEDDING_BASE_URL=$(env_value OAMB_EMBEDDING_BASE_URL || printf 'http://host.docker.internal:18000/v1')
 OAMB_MEM0_POSTGRES_PASSWORD=$(required_env_value OAMB_MEM0_POSTGRES_PASSWORD)
 OAMB_MEM0_ADMIN_API_KEY=$(required_env_value OAMB_MEM0_ADMIN_API_KEY)
 
-COMPOSE="docker compose --env-file $ENV_FILE -f $ROOT/compose.yaml"
+compose() {
+  oamb_compose "$ROOT" "$ENV_FILE" "$@"
+}
+
 BASE_URL="http://127.0.0.1:$OAMB_MEM0_PORT"
 RUNTIME_DIR="$ROOT/.runtime"
 mkdir -p "$RUNTIME_DIR"
@@ -39,6 +47,7 @@ chmod 600 "$ADMIN_HEADER_FILE"
 jq -n \
   --arg llm_key "$OAMB_MEM0_LLM_API_KEY" \
   --arg llm_model "$OAMB_MEM0_LLM_MODEL" \
+  --arg llm_effort "$OAMB_MEM0_LLM_REASONING_EFFORT" \
   --arg llm_base "$OAMB_MEM0_LLM_BASE_URL" \
   --arg embed_model "$OAMB_EMBEDDING_MODEL" \
   --arg embed_base "$OAMB_EMBEDDING_BASE_URL" \
@@ -54,7 +63,7 @@ jq -n \
     llm: {provider: "openai", config: {
       api_key: $llm_key, model: $llm_model, openai_base_url: $llm_base,
       temperature: 0.0, max_tokens: 2000,
-      reasoning_effort: "low", is_reasoning_model: true
+      reasoning_effort: $llm_effort, is_reasoning_model: true
     }},
     embedder: {provider: "openai", config: {
       api_key: "oamb-local-embedding", model: $embed_model,
@@ -84,11 +93,11 @@ readback() {
 }
 
 readback
-$COMPOSE exec -T mem0-postgres psql -U oamb_mem0 -d mem0_app -tAc \
+compose exec -T mem0-postgres psql -U oamb_mem0 -d mem0_app -tAc \
   "SELECT count(*) = 1 FROM settings WHERE key = 'config_overrides' AND value <> '';" | \
   grep -qx 't'
-$COMPOSE exec -T mem0 alembic current | grep -Eq '^006( |$)'
-$COMPOSE restart mem0 >/dev/null
+compose exec -T mem0 alembic current | grep -Eq '^006( |$)'
+compose restart mem0 >/dev/null
 
 attempts=0
 until curl --noproxy '*' --fail --silent --show-error --connect-timeout 2 --max-time 5 \

@@ -83,6 +83,24 @@ def test_default_profile_selects_vllm_metal_endpoint_and_ignores_legacy_name(
     }
 
 
+def test_default_profile_ignores_plan_owned_model_configuration(tmp_path: Path) -> None:
+    from oamb.runtime.provider_env import load_t10_provider_environment
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OAMB_EMBEDDING_MODEL=file-embedding\n"
+        "OAMB_HINDSIGHT_LLM_MODEL=file-hindsight\n"
+        "OAMB_HINDSIGHT_LLM_REASONING_EFFORT=max\n"
+        "OAMB_MEM0_LLM_MODEL=file-mem0\n"
+        "OAMB_MEM0_LLM_REASONING_EFFORT=max\n"
+        "OAMB_OPENVIKING_VLM_MODEL=file-openviking\n"
+        "OAMB_OPENVIKING_VLM_REASONING_EFFORT=max\n",
+        encoding="utf-8",
+    )
+
+    assert load_t10_provider_environment(env_file) == {}
+
+
 def test_unselected_values_do_not_block_loading_selected_inert_data(tmp_path: Path) -> None:
     from oamb.runtime.provider_env import load_t10_provider_environment
 

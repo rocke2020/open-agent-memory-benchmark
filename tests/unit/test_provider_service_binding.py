@@ -23,6 +23,11 @@ EXPECTED_PROVIDER_MODELS = {
     "mem0-rest-v1": "deepseek-v4-flash",
     "openviking-rest-v1": "deepseek-v4-flash",
 }
+EXPECTED_PROVIDER_THINKING_EFFORTS = {
+    "hindsight-rest-v1": "low",
+    "mem0-rest-v1": "low",
+    "openviking-rest-v1": "low",
+}
 PROFILE_FILES = {
     "hindsight-rest-v1": (
         "hindsight-health.json",
@@ -263,7 +268,11 @@ def _controlled_embeddings() -> dict[str, ControlledEmbeddingDescriptor]:
     }
 
 
-def _load(receipt_path: Path) -> tuple[ProviderServiceProfileBinding, ...]:
+def _load(
+    receipt_path: Path,
+    *,
+    expected_provider_thinking_efforts: dict[str, str] | None = None,
+) -> tuple[ProviderServiceProfileBinding, ...]:
     from oamb.config.provider_services import load_provider_service_bindings
 
     return load_provider_service_bindings(
@@ -272,6 +281,9 @@ def _load(receipt_path: Path) -> tuple[ProviderServiceProfileBinding, ...]:
         expected_project_attestation_sha256=HASH_A,
         controlled_embeddings=_controlled_embeddings(),
         expected_provider_models=EXPECTED_PROVIDER_MODELS,
+        expected_provider_thinking_efforts=(
+            expected_provider_thinking_efforts or EXPECTED_PROVIDER_THINKING_EFFORTS
+        ),
     )
 
 
@@ -805,6 +817,24 @@ def test_consumer_rejects_pro_runtime_model_proofs(
         _load(receipt_path)
 
 
+def test_consumer_uses_plan_expected_provider_thinking_effort(tmp_path: Path) -> None:
+    filename = "mem0-config-redacted.json"
+    document = json.loads(_proof_bytes(filename))
+    document["llm"]["config"]["reasoning_effort"] = "high"
+    receipt_path = _write_service_artifacts(
+        tmp_path,
+        payload_overrides={filename: _canonical_bytes(document)},
+    )
+    expected_efforts = {**EXPECTED_PROVIDER_THINKING_EFFORTS, "mem0-rest-v1": "high"}
+
+    bindings = _load(
+        receipt_path,
+        expected_provider_thinking_efforts=expected_efforts,
+    )
+
+    assert len(bindings) == 3
+
+
 @pytest.mark.parametrize(
     "case",
     (
@@ -888,6 +918,7 @@ def test_receipt_rejects_invalid_identity_gate_hash_and_shape(
             expected_project_attestation_sha256=expected_attestation,
             controlled_embeddings=_controlled_embeddings(),
             expected_provider_models=EXPECTED_PROVIDER_MODELS,
+            expected_provider_thinking_efforts=EXPECTED_PROVIDER_THINKING_EFFORTS,
         )
 
 

@@ -94,11 +94,13 @@ and `DEEPSEEK_API_KEY`, and keep the file mode `0600`. Then run:
 ./precheck.sh
 ```
 
-`precheck.sh` reads and completes that same `.env` with provider defaults and
-generated local service credentials. It then installs locked dependencies,
-downloads and verifies LongMemEval, clones and verifies the pinned Mem0 source,
-starts the OS-specific embedding server when needed, starts all three memory
-providers, freezes `configs/benchmark.yml`, and verifies every runtime role.
+`configs/benchmark.yml` is the only source for model names, roles, and thinking
+effort; those values are never copied into `.env`. `precheck.sh` completes the
+private endpoint, credential, and host-runtime inputs in `.env`, freezes the
+benchmark plan, and exports its model settings to the provider processes. It
+then installs locked dependencies, downloads and verifies LongMemEval, clones
+and verifies the pinned Mem0 source, starts the OS-specific embedding server
+when needed, starts all three memory providers, and verifies every runtime role.
 Existing configured values and provider data are reused, not overwritten.
 
 To use an OpenAI-compatible online embedding endpoint directly, pass its base

@@ -56,3 +56,30 @@ read_env_value() {
          END {if (count != 1) exit 1; print value}' \
         "$env_file"
 }
+
+# Plan-derived non-secret values must be exported by the frozen-plan loader.
+# They never fall back to the private dotenv file.
+read_runtime_env_value() {
+    _env_file=$1
+    wanted_name=$2
+    printenv "$wanted_name" 2>/dev/null
+}
+
+reject_plan_owned_env_values() {
+    awk '
+        BEGIN {
+            split("OMBA_ANSWER_LLM OMBA_ANSWER_MODEL OMBA_JUDGE_LLM OMBA_JUDGE_MODEL OPENAI_BASE_URL OPENAI_API_KEY OAMB_EMBEDDING_MODEL OAMB_HINDSIGHT_LLM_PROVIDER OAMB_HINDSIGHT_LLM_MODEL OAMB_HINDSIGHT_LLM_REASONING_EFFORT OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_REASONING_EFFORT OAMB_OPENVIKING_VLM_PROVIDER OAMB_OPENVIKING_VLM_MODEL OAMB_OPENVIKING_VLM_REASONING_EFFORT", names)
+            for (i in names) forbidden[names[i]] = 1
+        }
+        /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
+        {
+            separator = index($0, "=")
+            key = substr($0, 1, separator - 1)
+            if (forbidden[key]) {
+                print "plan-owned or stale key is forbidden in dotenv: " key > "/dev/stderr"
+                failed = 1
+            }
+        }
+        END { exit failed ? 1 : 0 }
+    ' "$1"
+}

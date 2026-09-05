@@ -125,22 +125,6 @@ _EXPECTED_RETRIEVAL_BINDINGS = (
         "source_verified_endpoint_and_complete_outbound_trace",
     ),
 )
-_EXPECTED_EFFORTS: dict[ModelRoleId, ThinkingEffort] = {
-    "hindsight_extraction": "low",
-    "mem0_extraction": "low",
-    "openviking_semantic_understanding": "low",
-    "answer": "low",
-    "judge": "high",
-    "embedding": "not_applicable",
-}
-_EXPECTED_MODELS: dict[ModelRoleId, str] = {
-    "hindsight_extraction": "deepseek-v4-flash",
-    "mem0_extraction": "deepseek-v4-flash",
-    "openviking_semantic_understanding": "deepseek-v4-flash",
-    "answer": "deepseek-v4-pro",
-    "judge": "deepseek-v4-flash",
-    "embedding": "qwen3-embedding:0.6b",
-}
 MODEL_EXECUTION_OWNER_BY_ROLE: dict[ModelRoleId, ExecutionOwner] = {
     "hindsight_extraction": "provider_internal",
     "mem0_extraction": "provider_internal",
@@ -505,14 +489,14 @@ def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfigura
     effort = document["thinking_effort"]
     if type(effort) is not str or effort not in (*DEEPSEEK_THINKING_EFFORT_SCALE, "not_applicable"):
         raise BenchmarkConfigurationError(f"model role {role_id} has an invalid thinking effort")
-    if effort != _EXPECTED_EFFORTS[role_id]:
+    effort = cast(ThinkingEffort, effort)
+    if role_id == "embedding" and effort != "not_applicable":
         raise BenchmarkConfigurationError(
-            f"model role {role_id} does not match the T10 effort profile"
+            "model role embedding requires not_applicable thinking effort"
         )
-    expected_model = _EXPECTED_MODELS[role_id]
-    if model != expected_model:
+    if role_id != "embedding" and effort == "not_applicable":
         raise BenchmarkConfigurationError(
-            f"model role {role_id} does not match the T10 model profile"
+            f"generative model role {role_id} requires a DeepSeek thinking effort"
         )
     endpoint_variable = _require_environment_reference(
         document["endpoint_variable"], f"model role {role_id} endpoint"
@@ -527,10 +511,6 @@ def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfigura
         raise BenchmarkConfigurationError(
             f"model role {role_id} requires the same configured and runtime model "
             "because provider proof exposes one model identity"
-        )
-    if runtime_model != expected_model:
-        raise BenchmarkConfigurationError(
-            f"model role {role_id} does not match the T10 model profile"
         )
     proof_kind = _require_text(document["proof_kind"], f"model role {role_id} proof kind")
     expected_proof_kind = (

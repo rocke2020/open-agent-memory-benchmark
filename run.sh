@@ -5,6 +5,9 @@ set -euo pipefail
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly STATE_FILE="$ROOT/.local-demo/quick-start-current.json"
 readonly CELLS=("hindsight-lme60" "mem0-lme60" "openviking-lme60")
+readonly STATUS_INTERVAL_SECONDS=30
+
+. "$ROOT/provider-services/lib/plan_environment.sh"
 
 MODE="smoke"
 MODE_SELECTED=false
@@ -23,6 +26,72 @@ EOF
 die() {
   printf 'run: FAIL: %s\n' "$*" >&2
   exit 1
+}
+
+count_progress_artifacts() {
+  local output_root=$1
+  local artifact_kind=$2
+  if [[ ! -d "$output_root" ]]; then
+    printf '0\n'
+    return
+  fi
+  find "$output_root" -type f \
+    -path "*/source/$artifact_kind/*.json" -print 2>/dev/null | \
+    wc -l | tr -d ' '
+}
+
+status_heartbeat() {
+  local label=$1
+  local output_root=$2
+  local initial_attempts=$3
+  local initial_cases=$4
+  local total_questions=$5
+  local elapsed_seconds=0
+  local timer_pid=""
+  local attempts cases completed_operations completed_questions question_progress
+  trap '[ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true; exit 0' TERM INT HUP
+  while :; do
+    sleep "$STATUS_INTERVAL_SECONDS" &
+    timer_pid=$!
+    wait "$timer_pid" || exit 0
+    elapsed_seconds=$((elapsed_seconds + STATUS_INTERVAL_SECONDS))
+    attempts="$(count_progress_artifacts "$output_root" attempts)"
+    cases="$(count_progress_artifacts "$output_root" cases)"
+    completed_operations=$((attempts - initial_attempts))
+    completed_questions=$((cases - initial_cases))
+    ((completed_operations >= 0)) || completed_operations=0
+    ((completed_questions >= 0)) || completed_questions=0
+    question_progress=$((completed_questions * 100 / total_questions))
+    ((question_progress <= 100)) || question_progress=100
+    printf 'run: %s status=running, elapsed=%ss, completed_operations=%s, completed_questions=%s, question_progress=%s%% (%s/%s)\n' \
+      "$label" "$elapsed_seconds" "$completed_operations" "$completed_questions" \
+      "$question_progress" "$completed_questions" "$total_questions"
+  done
+}
+
+run_with_status() {
+  local label=$1
+  local context=$2
+  local output_root=$3
+  local total_questions=$4
+  shift 4
+  local initial_attempts initial_cases heartbeat_pid command_code
+  initial_attempts="$(count_progress_artifacts "$output_root" attempts)"
+  initial_cases="$(count_progress_artifacts "$output_root" cases)"
+  printf 'run: %s status=starting (%s)\n' "$label" "$context"
+  status_heartbeat \
+    "$label" "$output_root" "$initial_attempts" "$initial_cases" "$total_questions" &
+  heartbeat_pid=$!
+  command_code=0
+  "$@" || command_code=$?
+  kill "$heartbeat_pid" 2>/dev/null || true
+  wait "$heartbeat_pid" 2>/dev/null || true
+  if ((command_code != 0)); then
+    printf 'run: %s status=failed\n' "$label" >&2
+    return "$command_code"
+  fi
+  printf 'run: %s status=execution-completed, question_progress=100%% (%s/%s)\n' \
+    "$label" "$total_questions" "$total_questions"
 }
 
 open_report() {
@@ -61,6 +130,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$MODE" == "smoke" ]]; then
+  readonly TOTAL_STEPS=5
+  readonly COMPARISON_STEP=4
+  readonly REPORT_STEP=5
+else
+  readonly TOTAL_STEPS=6
+  readonly COMPARISON_STEP=5
+  readonly REPORT_STEP=6
+fi
+
 command -v jq >/dev/null 2>&1 || die "required command not found: jq"
 command -v uv >/dev/null 2>&1 || die "required command not found: uv"
 [[ -f "$STATE_FILE" ]] || die "run ./precheck.sh first"
@@ -77,11 +156,13 @@ esac
 [[ -f "$PLAN" ]] || die "resolved plan is missing; rerun ./precheck.sh"
 [[ -f "$DATASET_SOURCE" ]] || die "dataset is missing; rerun ./precheck.sh"
 PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
+load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
 
 if [[ "$DRY_RUN" == true ]]; then
   "$ROOT/provider-services/bin/provider-services" doctor
   uv run --locked python - "$PLAN" "$ROOT/.env" "$ROOT/provider-services/.runtime" \
     "${CELLS[@]}" <<'PY'
+import os
 import sys
 from pathlib import Path
 
@@ -100,7 +181,7 @@ environment = load_live_environment(
     provider_env_path=env_file,
     model_env_path=env_file,
     provider_runtime_directory=runtime,
-    base_environment={},
+    base_environment=os.environ,
 )
 validate_live_readiness_receipt(
     plan=plan,
@@ -193,35 +274,82 @@ validate_capsule() {
 }
 
 run_bounded_cells() {
-  local cell provider result_map capsule_root validation
-  # These small proof slices stay serial because they share one operator-provided
-  # model/embedding endpoint without a separate smoke-test rate budget.
+  local cell provider result_map capsule_root validation step_index step_label
+  local combined_result pending_index provider_list
+  local -a pending_cells=()
+  local -a pending_arguments=()
+  local -a pending_providers=()
+  local -a pending_steps=()
+  local -a cell_roots=()
+  step_index=0
   for cell in "${CELLS[@]}"; do
+    step_index=$((step_index + 1))
     provider="${cell%-lme60}"
+    step_label="step $step_index/$TOTAL_STEPS provider=$provider"
     result_map="$MODE_DIR/results/bounded-$provider.json"
     validation="$MODE_DIR/validations/bounded-$provider.json"
     capsule_root=""
     if find_reusable_result_map "$result_map" "$cell"; then
       result_map=$RESULT_MAP_PATH
       capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$result_map")"
-    fi
-    if [[ -z "$capsule_root" || ! -d "$capsule_root" ]]; then
-      if [[ -e "$result_map" ]]; then
-        result_map="${result_map%.json}-retry-$(date -u +%Y%m%d-%H%M%S)-$$.json"
-      fi
-      uv run --locked oamb run "$PLAN" \
-        --cell "$cell" --question "$QUESTION_ID" \
-        --run-label "$RUN_LABEL-$MODE-bounded-$provider-retry-$$" \
-        --output-root "$MODE_DIR/capsules/bounded" \
-        --result-map "$result_map"
-      capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$result_map")"
+      printf 'run: %s status=reusing-completed-capsule\n' "$step_label"
+      cell_roots+=("$capsule_root")
     else
-      printf 'run: reusing completed %s capsule\n' "$cell"
+      pending_cells+=("$cell")
+      pending_providers+=("$provider")
+      pending_steps+=("$step_index")
+      cell_roots+=("")
     fi
+  done
+
+  combined_result="$MODE_DIR/results/bounded.json"
+  if ((${#pending_cells[@]} > 0)); then
+    if find_reusable_result_map "$combined_result" "${pending_cells[@]}"; then
+      combined_result=$RESULT_MAP_PATH
+      for pending_index in "${!pending_cells[@]}"; do
+        printf 'run: step %s/%s provider=%s status=reusing-completed-capsule\n' \
+          "${pending_steps[$pending_index]}" "$TOTAL_STEPS" \
+          "${pending_providers[$pending_index]}"
+      done
+    else
+      if [[ -e "$combined_result" ]]; then
+        combined_result="${combined_result%.json}-retry-$(date -u +%Y%m%d-%H%M%S)-$$.json"
+      fi
+      provider_list=""
+      for pending_index in "${!pending_cells[@]}"; do
+        cell="${pending_cells[$pending_index]}"
+        provider="${pending_providers[$pending_index]}"
+        provider_list="${provider_list}${provider_list:+,}${provider}"
+        pending_arguments+=(--cell "$cell")
+        printf 'run: step %s/%s provider=%s status=starting (%s, question %s)\n' \
+          "${pending_steps[$pending_index]}" "$TOTAL_STEPS" "$provider" "$MODE" "$QUESTION_ID"
+      done
+      run_with_status "providers=$provider_list" "$MODE, question $QUESTION_ID" \
+        "$MODE_DIR/capsules/bounded" "${#pending_cells[@]}" \
+        uv run --locked oamb run "$PLAN" \
+        "${pending_arguments[@]}" --question "$QUESTION_ID" \
+        --run-label "$RUN_LABEL-$MODE-bounded-retry-$$" \
+        --output-root "$MODE_DIR/capsules/bounded" \
+        --result-map "$combined_result"
+    fi
+  fi
+
+  step_index=0
+  for cell in "${CELLS[@]}"; do
+    provider="${cell%-lme60}"
+    step_label="step $((step_index + 1))/$TOTAL_STEPS provider=$provider"
+    capsule_root="${cell_roots[$step_index]}"
+    if [[ -z "$capsule_root" ]]; then
+      capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$combined_result")"
+    fi
+    validation="$MODE_DIR/validations/bounded-$provider.json"
     [[ -d "$capsule_root" ]] || die "bounded capsule is missing for $cell"
+    printf 'run: %s status=validating\n' "$step_label"
     validate_capsule "$capsule_root" "$validation"
+    printf 'run: %s status=completed\n' "$step_label"
     BOUNDED_ROOTS+=("$capsule_root")
     BOUNDED_VALIDATIONS+=("$VALIDATION_PATH")
+    step_index=$((step_index + 1))
   done
 }
 
@@ -243,6 +371,8 @@ build_comparison() {
   if [[ -e "$comparison" ]]; then
     comparison="$MODE_DIR/comparison-retry-$(date -u +%Y%m%d-%H%M%S)-$$"
   fi
+  printf 'run: step %s/%s status=building-comparison\n' \
+    "$COMPARISON_STEP" "$TOTAL_STEPS"
   if [[ "$MODE" == "smoke" ]]; then
     uv run --locked oamb compare "$PLAN" \
       --cell-root "${CELLS[0]}=${roots[0]}" \
@@ -275,7 +405,10 @@ build_comparison() {
        "provider_specific_result_count": $results
      }' "$comparison/report.json" >/dev/null || die "comparison coverage is invalid"
   [[ -s "$comparison/report.html" ]] || die "comparison HTML is missing or empty"
+  printf 'run: step %s/%s status=completed\n' "$COMPARISON_STEP" "$TOTAL_STEPS"
+  printf 'run: step %s/%s status=opening-report\n' "$REPORT_STEP" "$TOTAL_STEPS"
   open_report "$comparison/report.html"
+  printf 'run: step %s/%s status=completed\n' "$REPORT_STEP" "$TOTAL_STEPS"
   printf 'run: PASS (%s, %s questions, %s provider results)\n' \
     "$MODE" "$expected_cases" "$expected_results"
   printf 'report: %s\n' "$comparison/report.html"
@@ -294,12 +427,15 @@ if [[ "$MODE" == "full" ]]; then
     full_complete=true
   fi
   if [[ "$full_complete" == true ]]; then
-    printf 'run: reusing completed full capsules\n'
+    printf 'run: step 4/%s providers=hindsight,mem0,openviking status=reusing-completed-capsules\n' \
+      "$TOTAL_STEPS"
   else
     if [[ -e "$full_result" ]]; then
       full_result="${full_result%.json}-retry-$(date -u +%Y%m%d-%H%M%S)-$$.json"
     fi
-    uv run --locked oamb run "$PLAN" \
+    run_with_status "step 4/$TOTAL_STEPS providers=hindsight,mem0,openviking" \
+      "60 questions, 3 providers" "$MODE_DIR/capsules/full" 180 \
+      uv run --locked oamb run "$PLAN" \
       --run-label "$RUN_LABEL-full-retry-$$" \
       --output-root "$MODE_DIR/capsules/full" \
       --result-map "$full_result" \
@@ -310,6 +446,8 @@ if [[ "$MODE" == "full" ]]; then
       --bounded-validation "${CELLS[1]}=${BOUNDED_VALIDATIONS[1]}" \
       --bounded-validation "${CELLS[2]}=${BOUNDED_VALIDATIONS[2]}"
   fi
+  printf 'run: step 4/%s providers=hindsight,mem0,openviking status=validating\n' \
+    "$TOTAL_STEPS"
   for cell in "${CELLS[@]}"; do
     provider="${cell%-lme60}"
     capsule_root="$(jq -er --arg cell "$cell" '.capsule_roots[$cell]' "$full_result")"
@@ -319,6 +457,8 @@ if [[ "$MODE" == "full" ]]; then
     FULL_ROOTS+=("$capsule_root")
     FULL_VALIDATIONS+=("$VALIDATION_PATH")
   done
+  printf 'run: step 4/%s providers=hindsight,mem0,openviking status=completed\n' \
+    "$TOTAL_STEPS"
 fi
 
 build_comparison

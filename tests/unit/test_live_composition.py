@@ -904,32 +904,25 @@ def test_live_model_env_file_overrides_process_aliases(
     assert environment["OAMB_DEEPSEEK_API_KEY"] == "file-answer-key"
 
 
-def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
-    tmp_path: Path,
-) -> None:
+def _write_model_readiness_evidence(
+    runtime: Path,
+    *,
+    plan: ResolvedPlan,
+    environment: dict[str, str],
+    project: str,
+    service_bytes: bytes,
+) -> tuple[Path, dict[str, object], Path]:
     from oamb import live
     from oamb.config.benchmark import MODEL_ROLE_IDS
 
-    plan = _lme60_plan()
-    environment = _environment()
-    runtime = tmp_path / "runtime"
     receipts = runtime / "service-verification-receipts"
     receipts.mkdir(parents=True)
-    service_receipt = {"provider_project": "oamb-providers-readiness-test"}
-    service_bytes = json.dumps(service_receipt).encode()
     service_hash = hashlib.sha256(service_bytes).hexdigest()
     service_path = receipts / f"{service_hash}.json"
     service_path.write_bytes(service_bytes)
-    unrelated_bytes = json.dumps({"provider_project": "unrelated-history"}).encode()
-    unrelated_hash = hashlib.sha256(unrelated_bytes).hexdigest()
-    (receipts / f"{unrelated_hash}.json").write_bytes(unrelated_bytes)
-    (receipts / "malformed-history.json").write_text("not json", encoding="utf-8")
-    (receipts / "service-verification-current.sha256").write_text(
-        "malformed current selection\n", encoding="utf-8"
-    )
     attempt = {
         "schema_version": "oamb-provider-model-readiness-attempt-v1",
-        "provider_project": "oamb-providers-readiness-test",
+        "provider_project": project,
         "resolved_plan_hash": plan.resolved_plan_hash,
         "started_at_utc": "2026-09-02T00:00:00Z",
         "calls_reserved": 7,
@@ -960,7 +953,7 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
     (runtime / "model-readiness-attempt.json").write_bytes(attempt_bytes)
     receipt = {
         "schema_version": "oamb-provider-model-readiness-receipt-v1",
-        "provider_project": "oamb-providers-readiness-test",
+        "provider_project": project,
         "resolved_plan_hash": plan.resolved_plan_hash,
         "service_verification_receipt_sha256": service_hash,
         "attempt_sha256": hashlib.sha256(attempt_bytes).hexdigest(),
@@ -976,6 +969,39 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
     }
     receipt_path = runtime / "model-readiness-receipt.json"
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    return service_path, receipt, receipt_path
+
+
+def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+
+    monkeypatch.setattr(
+        live,
+        "validate_live_service_verification_receipt",
+        lambda **_kwargs: None,
+    )
+
+    plan = _lme60_plan()
+    environment = _environment()
+    runtime = tmp_path / "runtime"
+    service_path, receipt, receipt_path = _write_model_readiness_evidence(
+        runtime,
+        plan=plan,
+        environment=environment,
+        project="oamb-providers-readiness-test",
+        service_bytes=json.dumps({"provider_project": "oamb-providers-readiness-test"}).encode(),
+    )
+    receipts = service_path.parent
+    unrelated_bytes = json.dumps({"provider_project": "unrelated-history"}).encode()
+    unrelated_hash = hashlib.sha256(unrelated_bytes).hexdigest()
+    (receipts / f"{unrelated_hash}.json").write_bytes(unrelated_bytes)
+    (receipts / "malformed-history.json").write_text("not json", encoding="utf-8")
+    (receipts / "service-verification-current.sha256").write_text(
+        "malformed current selection\n", encoding="utf-8"
+    )
 
     assert (
         live.validate_live_readiness_receipt(
@@ -1019,6 +1045,56 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
             provider_runtime_directory=runtime,
             environment=environment,
         )
+
+
+def test_live_readiness_rejects_bound_service_receipt_with_stale_attestation(
+    tmp_path: Path,
+) -> None:
+    from oamb import live
+    from oamb.config.provider_services import ProviderServiceBindingError
+
+    plan = _lme60_plan()
+    environment = _environment()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    project = "oamb-providers-readiness-test"
+    attestation = f"project={project}\n".encode()
+    (runtime / "provider-project.attestation").write_bytes(attestation)
+    actual_attestation_hash = hashlib.sha256(attestation).hexdigest()
+    stale_attestation_hash = "a" * 64
+    assert stale_attestation_hash != actual_attestation_hash
+    service_bytes = json.dumps(
+        {
+            "profiles": [],
+            "project_attestation_sha256": stale_attestation_hash,
+            "provider_project": project,
+            "schema_name": "oamb_provider_service_verification",
+            "schema_version": 1,
+            "verified_at_utc": "2026-09-02T00:00:00Z",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    _write_model_readiness_evidence(
+        runtime,
+        plan=plan,
+        environment=environment,
+        project=project,
+        service_bytes=service_bytes,
+    )
+
+    with pytest.raises(
+        live.LiveConfigurationError,
+        match="selected service verification receipt or proof is malformed",
+    ) as failure:
+        live.validate_live_readiness_receipt(
+            plan=plan,
+            provider_runtime_directory=runtime,
+            environment=environment,
+        )
+
+    assert isinstance(failure.value.__cause__, ProviderServiceBindingError)
+    assert str(failure.value.__cause__) == "provider project attestation hash does not match"
 
 
 def test_service_receipt_resolution_uses_current_selection_or_explicit_binding(

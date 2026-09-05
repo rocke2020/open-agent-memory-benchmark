@@ -8,8 +8,6 @@ readonly RUNTIME_DIR="$ROOT/provider-services/.runtime"
 readonly STATE_FILE="$ROOT/.local-demo/quick-start-current.json"
 readonly QUESTION_ID="72e3ee87"
 readonly DEFAULT_EMBEDDING_URL="http://host.docker.internal:18000/v1"
-readonly DEFAULT_EMBEDDING_MODEL="qwen3-embedding:0.6b"
-readonly DEFAULT_PROVIDER_MODEL="deepseek-v4-flash"
 readonly DEFAULT_HINDSIGHT_PORT="18888"
 readonly DEFAULT_MEM0_PORT="18889"
 readonly DEFAULT_MEM0_INSPECTOR_PORT="16333"
@@ -19,6 +17,7 @@ readonly DEFAULT_OPENVIKING_ADMIN_USER_ID="oamb-admin"
 readonly EMBEDDING_STARTUP_ATTEMPTS="${OAMB_EMBEDDING_STARTUP_ATTEMPTS:-180}"
 
 . "$ROOT/provider-services/lib/host_embedding.sh"
+. "$ROOT/provider-services/lib/plan_environment.sh"
 
 START_LOCAL_EMBEDDING=true
 EMBEDDING_API_URL=""
@@ -87,6 +86,60 @@ random_secret() {
   python3 -c 'import secrets; print(secrets.token_hex(32))'
 }
 
+remove_plan_owned_environment_values() {
+  OAMB_ENV_FILE="$ENV_FILE" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["OAMB_ENV_FILE"])
+plan_owned = {
+    "OMBA_ANSWER_LLM",
+    "OMBA_ANSWER_MODEL",
+    "OMBA_JUDGE_LLM",
+    "OMBA_JUDGE_MODEL",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OAMB_EMBEDDING_MODEL",
+    "OAMB_HINDSIGHT_LLM_PROVIDER",
+    "OAMB_HINDSIGHT_LLM_MODEL",
+    "OAMB_HINDSIGHT_LLM_REASONING_EFFORT",
+    "OAMB_MEM0_LLM_MODEL",
+    "OAMB_MEM0_LLM_REASONING_EFFORT",
+    "OAMB_OPENVIKING_VLM_PROVIDER",
+    "OAMB_OPENVIKING_VLM_MODEL",
+    "OAMB_OPENVIKING_VLM_REASONING_EFFORT",
+}
+stale_comment_lines = {
+    "# AMB's OpenAI-compatible adapter consumes these names.",
+    "# tcai deepseek url and keys",
+    "# legacy alternate credentials",
+}
+
+
+def keep(line: str) -> bool:
+    stripped = line.strip()
+    if stripped in stale_comment_lines:
+        return False
+    if stripped.startswith("#"):
+        commented = stripped[1:].strip()
+        if "=" in commented and commented.split("=", 1)[0] in {
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        }:
+            return False
+        return True
+    return "=" not in line or line.split("=", 1)[0] not in plan_owned
+
+
+lines = path.read_text(encoding="utf-8").splitlines()
+kept = [line for line in lines if keep(line)]
+temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+temporary.write_text("\n".join(kept) + "\n", encoding="utf-8")
+temporary.chmod(0o600)
+temporary.replace(path)
+PY
+}
+
 ensure_env_default() {
   local key=$1
   local default_value=$2
@@ -101,6 +154,7 @@ ensure_model_environment() {
   [[ -f "$ENV_FILE" ]] || \
     die "prepare .env from .env.example, set DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY, then rerun"
   chmod 600 "$ENV_FILE"
+  remove_plan_owned_environment_values
 
   local base_url api_key
   base_url="$(read_env_value "$ENV_FILE" DEEPSEEK_BASE_URL 2>/dev/null || true)"
@@ -132,12 +186,6 @@ ensure_provider_environment() {
   ensure_env_default OAMB_MEM0_PORT "$DEFAULT_MEM0_PORT"
   ensure_env_default OAMB_MEM0_INSPECTOR_PORT "$DEFAULT_MEM0_INSPECTOR_PORT"
   ensure_env_default OAMB_OPENVIKING_PORT "$DEFAULT_OPENVIKING_PORT"
-  ensure_env_default OAMB_EMBEDDING_MODEL "$DEFAULT_EMBEDDING_MODEL"
-  ensure_env_default OAMB_HINDSIGHT_LLM_PROVIDER openai
-  ensure_env_default OAMB_HINDSIGHT_LLM_MODEL "$DEFAULT_PROVIDER_MODEL"
-  ensure_env_default OAMB_MEM0_LLM_MODEL "$DEFAULT_PROVIDER_MODEL"
-  ensure_env_default OAMB_OPENVIKING_VLM_PROVIDER openai
-  ensure_env_default OAMB_OPENVIKING_VLM_MODEL "$DEFAULT_PROVIDER_MODEL"
   ensure_env_default OAMB_OPENVIKING_ACCOUNT_ID "$DEFAULT_OPENVIKING_ACCOUNT_ID"
   ensure_env_default OAMB_OPENVIKING_ADMIN_USER_ID "$DEFAULT_OPENVIKING_ADMIN_USER_ID"
 
@@ -180,7 +228,8 @@ ensure_provider_environment() {
 probe_embedding() {
   local base_url=$1
   local request
-  request='{"model":"qwen3-embedding:0.6b","input":"OAMB startup probe","dimensions":1024}'
+  request="$(jq -cn --arg model "$OAMB_EMBEDDING_MODEL" \
+    '{model: $model, input: "OAMB startup probe", dimensions: 1024}')"
   curl --noproxy '*' --fail --silent --show-error \
     --connect-timeout 2 --max-time 10 \
     -H 'Authorization: Bearer oamb-local-embedding' \
@@ -253,6 +302,7 @@ start_local_embedding() {
 
 validate_existing_readiness() {
   uv run --locked python - "$PLAN" "$ENV_FILE" "$RUNTIME_DIR" <<'PY'
+import os
 import sys
 from pathlib import Path
 
@@ -268,7 +318,7 @@ environment = load_live_environment(
     provider_env_path=env_file,
     model_env_path=env_file,
     provider_runtime_directory=runtime,
-    base_environment={},
+    base_environment=os.environ,
 )
 validate_live_readiness_receipt(
     plan=plan,
@@ -324,13 +374,15 @@ fi
 ensure_model_environment
 ensure_provider_environment "$RUN_LABEL" "$MEM0_CHECKOUT"
 
+uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan"
+load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
+
 if [[ "$START_LOCAL_EMBEDDING" == true ]]; then
   start_local_embedding "$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)"
 else
   printf 'embedding: local startup skipped; configured API will be verified directly\n'
 fi
 
-uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan"
 "$ROOT/provider-services/bin/provider-services" doctor
 "$ROOT/provider-services/bin/provider-services" build
 "$ROOT/provider-services/bin/provider-services" up

@@ -296,6 +296,22 @@ def _require_provider_model_mapping(value: Mapping[str, object]) -> dict[str, st
     return models
 
 
+def _require_provider_effort_mapping(value: Mapping[str, object]) -> dict[str, str]:
+    if set(value) != set(_DEFAULT_REST_PROFILE_IDS):
+        raise ProviderServiceBindingError(
+            "expected provider thinking efforts must name exactly the three REST profiles"
+        )
+    efforts: dict[str, str] = {}
+    for profile_id in _DEFAULT_REST_PROFILE_IDS:
+        effort = value[profile_id]
+        if effort not in {"low", "high", "max"}:
+            raise ProviderServiceBindingError(
+                f"expected provider thinking effort is invalid for {profile_id}"
+            )
+        efforts[profile_id] = effort
+    return efforts
+
+
 def _read_regular_proof_file(path: Path, label: str, *, trusted_root: Path) -> bytes:
     path = path.absolute()
     trusted_root = trusted_root.absolute()
@@ -481,6 +497,7 @@ def _validate_proof_semantics(
     value: object,
     *,
     expected_model: str,
+    expected_thinking_effort: str,
 ) -> None:
     if not isinstance(value, dict):
         raise _semantic_error(filename)
@@ -490,7 +507,10 @@ def _validate_proof_semantics(
     elif filename == "hindsight-version.json":
         valid = value.get("api_version") == "0.9.2" and isinstance(value.get("features"), dict)
     elif filename == "hindsight-model-config.json":
-        valid = value.get("model") == expected_model and value.get("reasoning_effort") == "low"
+        valid = (
+            value.get("model") == expected_model
+            and value.get("reasoning_effort") == expected_thinking_effort
+        )
     elif filename == "hindsight-retry-config.json":
         valid = value == {
             "llm_max_retries": 0,
@@ -534,7 +554,7 @@ def _validate_proof_semantics(
             and embedder_config.get("embedding_dims") == 1024
             and isinstance(llm_config, dict)
             and llm_config.get("model") == expected_model
-            and llm_config.get("reasoning_effort") == "low"
+            and llm_config.get("reasoning_effort") == expected_thinking_effort
             and llm_config.get("is_reasoning_model") is True
             and value.get("reranker") is None
         )
@@ -573,7 +593,7 @@ def _validate_proof_semantics(
         valid = (
             value.get("provider") == "openai"
             and value.get("model") == expected_model
-            and value.get("reasoning_effort") == "low"
+            and value.get("reasoning_effort") == expected_thinking_effort
         )
     elif filename == "openviking-retry-config.json":
         valid = value == {
@@ -592,6 +612,7 @@ def _validate_profile_proof_store(
     manifest_hash: str,
     *,
     expected_model: str,
+    expected_thinking_effort: str,
 ) -> None:
     proof_store = receipt_path.parent / "proofs"
     manifest_path = proof_store / "manifests" / f"{manifest_hash}.json"
@@ -652,7 +673,12 @@ def _validate_profile_proof_store(
             raise ProviderServiceBindingError("provider proof blob byte count does not match")
         filename = str(entry["relative_path"])
         proof = _parse_secret_free_proof(blob_bytes, filename=filename)
-        _validate_proof_semantics(filename, proof, expected_model=expected_model)
+        _validate_proof_semantics(
+            filename,
+            proof,
+            expected_model=expected_model,
+            expected_thinking_effort=expected_thinking_effort,
+        )
 
 
 def _parse_canonical_receipt(content: bytes) -> dict[str, Any]:
@@ -716,6 +742,7 @@ def _validated_provider_service_receipt(
     expected_project: str,
     expected_project_attestation_sha256: str,
     expected_provider_models: Mapping[str, str],
+    expected_provider_thinking_efforts: Mapping[str, str],
 ) -> tuple[str, datetime, tuple[dict[str, Any], ...]]:
     content = _read_regular_proof_file(
         receipt_path,
@@ -746,6 +773,7 @@ def _validated_provider_service_receipt(
     verified_at = _parse_verified_at(receipt["verified_at_utc"])
     profile_records = _validated_profile_records(receipt["profiles"])
     provider_models = _require_provider_model_mapping(expected_provider_models)
+    provider_efforts = _require_provider_effort_mapping(expected_provider_thinking_efforts)
     for exact_profile, profile_record in zip(
         DEFAULT_REST_PROFILES,
         profile_records,
@@ -759,6 +787,7 @@ def _validated_provider_service_receipt(
                 "profile proof manifest hash",
             ),
             expected_model=provider_models[exact_profile.profile_id],
+            expected_thinking_effort=provider_efforts[exact_profile.profile_id],
         )
     return receipt_sha256, verified_at, profile_records
 
@@ -769,12 +798,14 @@ def validate_provider_service_receipt(
     expected_project: str,
     expected_project_attestation_sha256: str,
     expected_provider_models: Mapping[str, str],
+    expected_provider_thinking_efforts: Mapping[str, str],
 ) -> str:
     receipt_sha256, _verified_at, _profile_records = _validated_provider_service_receipt(
         receipt_path,
         expected_project=expected_project,
         expected_project_attestation_sha256=expected_project_attestation_sha256,
         expected_provider_models=expected_provider_models,
+        expected_provider_thinking_efforts=expected_provider_thinking_efforts,
     )
     return receipt_sha256
 
@@ -786,12 +817,14 @@ def load_provider_service_bindings(
     expected_project_attestation_sha256: str,
     controlled_embeddings: Mapping[str, ControlledEmbeddingDescriptor],
     expected_provider_models: Mapping[str, str],
+    expected_provider_thinking_efforts: Mapping[str, str],
 ) -> tuple[ProviderServiceProfileBinding, ...]:
     receipt_sha256, verified_at, profile_records = _validated_provider_service_receipt(
         receipt_path,
         expected_project=expected_project,
         expected_project_attestation_sha256=expected_project_attestation_sha256,
         expected_provider_models=expected_provider_models,
+        expected_provider_thinking_efforts=expected_provider_thinking_efforts,
     )
     embeddings = _require_embedding_mapping(
         controlled_embeddings,
