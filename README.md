@@ -143,15 +143,18 @@ then runs all 60 questions on every provider for 180 provider-specific results.
 It freshly validates each full capsule before building and opening the final
 comparison report.
 
-Both modes print the report path under `.local-demo/<run-label>/`. Set
+Smoke reports are written under `outputs/smoke-test/<run-label>/`; full-study
+reports are written under `outputs/full-test/<run-label>/`. Set
 `OAMB_NO_OPEN=1` only in a headless environment; the HTML is still built and
 validated, and its path is printed.
 
 ## If a run stops or fails
 
-Preserve `.local-demo`, `provider-services/.runtime`, and all provider state.
-Do not delete or overwrite them. Inspect the printed result-map paths first;
-they retain canonical outcomes and every completed capsule root.
+Preserve `outputs/smoke-test`, `outputs/full-test`, `provider-services/.runtime`,
+and all provider state. Do not delete or overwrite them. Inspect the printed
+result-map paths first; they retain canonical outcomes and every completed
+capsule root. `outputs/tmp` contains shared preparation state and reproducible
+scratch outputs, not successful-run evidence.
 
 A readiness failure whose runtime is already bound to a provider project needs
 a separate fresh clone and provider project. Stop the old project without

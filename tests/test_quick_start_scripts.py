@@ -63,7 +63,7 @@ def _quick_start_fixture(tmp_path: Path, *, system_name: str) -> tuple[Path, dic
     (root / "datasets" / "longmemeval-cleaned" / "longmemeval_s_cleaned.json").write_text(
         "[]\n", encoding="utf-8"
     )
-    (root / ".local-demo" / "provider-source" / "mem0" / ".git").mkdir(parents=True)
+    (root / "outputs" / "tmp" / "provider-source" / "mem0" / ".git").mkdir(parents=True)
 
     _write_executable(fake_bin / "uname", f"printf '%s\\n' {system_name}")
     _write_executable(fake_bin / "docker", "printf '%s\\n' 172.17.0.1")
@@ -173,9 +173,34 @@ def test_precheck_routes_default_local_embedding_by_operating_system(
     assert "provider-services verify --model-readiness" in calls
     if system_name == "Linux":
         assert "http://172.17.0.1:18000/v1/embeddings" in calls
-    state = json.loads((root / ".local-demo" / "quick-start-current.json").read_bytes())
+    state = json.loads((root / "outputs" / "tmp" / "quick-start-current.json").read_bytes())
     assert Path(state["resolved_plan"]).is_file()
     assert state["question_id"] == "72e3ee87"
+
+
+def test_precheck_publishes_state_and_plan_below_outputs_root(tmp_path: Path) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    state = json.loads(state_path.read_bytes())
+    outputs_root = (root / "outputs").resolve()
+    work_dir = Path(state["work_dir"])
+    resolved_plan = Path(state["resolved_plan"])
+    assert work_dir.parent == outputs_root / "tmp" / "precheck"
+    assert resolved_plan == work_dir / "plan" / "resolved-plan.json"
+    assert not (root / ".local-demo").exists()
 
 
 def test_precheck_online_embedding_url_skips_local_server(tmp_path: Path) -> None:
@@ -476,7 +501,7 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
     (root / "provider-services" / ".runtime").mkdir()
     (root / ".env").write_text("DEEPSEEK_BASE_URL=test\nDEEPSEEK_API_KEY=test\n", encoding="utf-8")
     (root / ".env").chmod(0o600)
-    work_dir = root / ".local-demo" / "lme60-test"
+    work_dir = root / "outputs" / "tmp" / "precheck" / "lme60-test"
     plan = work_dir / "plan" / "resolved-plan.json"
     plan.parent.mkdir(parents=True)
     plan.write_text(
@@ -520,7 +545,7 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         "dataset_source": str(dataset),
         "question_id": "72e3ee87",
     }
-    state_path = root / ".local-demo" / "quick-start-current.json"
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
     state_path.write_text(json.dumps(state), encoding="utf-8")
     env = {
         **os.environ,
@@ -566,11 +591,40 @@ def test_run_dry_run_validates_without_dispatch(
     assert "oamb capsule validate" not in calls
     assert "oamb compare" not in calls
     assert "open " not in calls
-    assert not (root / ".local-demo" / "lme60-test" / expected_mode).exists()
+    output_branch = "smoke-test" if expected_mode == "smoke" else "full-test"
+    assert not (root / "outputs" / output_branch / "lme60-test").exists()
     assert (
         f"run: PASS (dry-run, {expected_mode}, {expected_questions} questions, "
         "3 providers, zero model/provider calls)"
     ) in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("arguments", "output_branch"),
+    ((["--smoke_test"], "smoke-test"), (["--full_test"], "full-test")),
+)
+def test_run_routes_results_to_mode_specific_outputs_directory(
+    tmp_path: Path,
+    arguments: list[str],
+    output_branch: str,
+) -> None:
+    root, env, _trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+
+    result = subprocess.run(
+        [str(script), *arguments],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = root / "outputs" / output_branch / "lme60-test" / "comparison" / "report.json"
+    assert report.is_file()
+    assert not (root / ".local-demo").exists()
 
 
 def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path) -> None:
@@ -594,9 +648,9 @@ def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path
     assert "--question 72e3ee87" in calls
     assert calls.count("oamb capsule validate") == 3
     assert "oamb compare" in calls and "--diagnostic" in calls
-    assert "open " in calls and "/smoke/comparison/report.html" in calls
+    assert "open " in calls and "/outputs/smoke-test/lme60-test/comparison/report.html" in calls
     report = json.loads(
-        (root / ".local-demo" / "lme60-test" / "smoke" / "comparison" / "report.json").read_bytes()
+        (root / "outputs" / "smoke-test" / "lme60-test" / "comparison" / "report.json").read_bytes()
     )
     assert report["coverage"] == {
         "cell_count": 3,
@@ -698,7 +752,7 @@ def test_run_smoke_reuses_completed_capsule_and_preserves_invalid_validation(
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
-    smoke = root / ".local-demo" / "lme60-test" / "smoke"
+    smoke = root / "outputs" / "smoke-test" / "lme60-test"
     capsule = smoke / "capsules" / "bounded" / "hindsight-completed"
     capsule.mkdir(parents=True)
     result_map = smoke / "results" / "bounded-hindsight.json"
@@ -765,7 +819,7 @@ def test_run_smoke_reuses_a_successful_combined_retry_result_map_on_third_invoca
         timeout=20,
     )
     assert first.returncode == 0, first.stdout + first.stderr
-    result_map = root / ".local-demo" / "lme60-test" / "smoke" / "results" / "bounded.json"
+    result_map = root / "outputs" / "smoke-test" / "lme60-test" / "results" / "bounded.json"
     failed = json.loads(result_map.read_bytes())
     failed["status"] = "failed"
     result_map.write_text(json.dumps(failed) + "\n", encoding="utf-8")
@@ -820,7 +874,7 @@ def test_run_full_test_uses_bounded_proofs_and_validates_sixty_case_report(
     comparison_call = next(line for line in calls.splitlines() if "oamb compare" in line)
     assert "--diagnostic" not in comparison_call
     report = json.loads(
-        (root / ".local-demo" / "lme60-test" / "full" / "comparison" / "report.json").read_bytes()
+        (root / "outputs" / "full-test" / "lme60-test" / "comparison" / "report.json").read_bytes()
     )
     assert report["coverage"] == {
         "cell_count": 3,
@@ -846,7 +900,7 @@ def test_run_full_test_reuses_completed_full_capsules_and_preserves_validation(
     )
     assert first.returncode == 0, first.stdout + first.stderr
     full_validation = (
-        root / ".local-demo" / "lme60-test" / "full" / "validations" / "full-hindsight.json"
+        root / "outputs" / "full-test" / "lme60-test" / "validations" / "full-hindsight.json"
     )
     full_validation.write_text('{"disposition":"invalid"}\n', encoding="utf-8")
 
@@ -888,7 +942,7 @@ def test_run_full_test_retries_instead_of_reusing_failed_full_result_map(
         timeout=20,
     )
     assert first.returncode == 0, first.stdout + first.stderr
-    full_result = root / ".local-demo" / "lme60-test" / "full" / "results" / "full.json"
+    full_result = root / "outputs" / "full-test" / "lme60-test" / "results" / "full.json"
     failed = json.loads(full_result.read_bytes())
     failed["status"] = "failed"
     full_result.write_text(json.dumps(failed) + "\n", encoding="utf-8")

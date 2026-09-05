@@ -72,7 +72,7 @@ class OperatorDoctorTests(unittest.TestCase):
         _write_executable(
             fake_bin / "docker",
             "#!/bin/sh\n"
-            'printf \'%s|%s|%s\\n\' "$OAMB_PROVIDER_PROJECT" '
+            "printf '%s|%s|%s\\n' \"$OAMB_PROVIDER_PROJECT\" "
             '"$OAMB_MEM0_POSTGRES_PASSWORD" "$*" >> "$OAMB_TEST_TRACE"\n'
             'case "$*" in\n'
             "  *' psql '*) printf 't\\n' ;;\n"
@@ -166,7 +166,7 @@ class OperatorDoctorTests(unittest.TestCase):
         env_file.write_text("\n".join(lines) + "\n" + env_extra, encoding="utf-8")
         env_file.chmod(0o600)
 
-        plan = directory / ".local-demo" / "operator-plan" / "resolved-plan.json"
+        plan = directory / "outputs" / "tmp" / "precheck" / "operator-plan" / "resolved-plan.json"
         plan.parent.mkdir(parents=True)
         plan.write_text(
             json.dumps(
@@ -198,7 +198,7 @@ class OperatorDoctorTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        state = directory / ".local-demo" / "quick-start-current.json"
+        state = directory / "outputs" / "tmp" / "quick-start-current.json"
         state.write_text(json.dumps({"resolved_plan": str(plan)}) + "\n", encoding="utf-8")
 
         runtime = bundle / ".runtime"

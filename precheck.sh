@@ -5,7 +5,9 @@ set -euo pipefail
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ENV_FILE="$ROOT/.env"
 readonly RUNTIME_DIR="$ROOT/provider-services/.runtime"
-readonly STATE_FILE="$ROOT/.local-demo/quick-start-current.json"
+readonly OUTPUTS_ROOT="$ROOT/outputs"
+readonly TMP_ROOT="$OUTPUTS_ROOT/tmp"
+readonly STATE_FILE="$TMP_ROOT/quick-start-current.json"
 readonly QUESTION_ID="72e3ee87"
 readonly DEFAULT_EMBEDDING_URL="http://host.docker.internal:18000/v1"
 readonly DEFAULT_HINDSIGHT_PORT="18888"
@@ -355,11 +357,11 @@ done
 
 cd "$ROOT"
 readonly RUN_LABEL="lme60-$(date -u +%Y%m%d-%H%M%S)-$$"
-readonly WORK_DIR="$ROOT/.local-demo/$RUN_LABEL"
-readonly MEM0_CHECKOUT="$ROOT/.local-demo/provider-source/mem0"
+readonly WORK_DIR="$TMP_ROOT/precheck/$RUN_LABEL"
+readonly MEM0_CHECKOUT="$TMP_ROOT/provider-source/mem0"
 readonly DATASET_SOURCE="$ROOT/datasets/longmemeval-cleaned/longmemeval_s_cleaned.json"
 readonly PLAN="$WORK_DIR/plan/resolved-plan.json"
-mkdir -p "$WORK_DIR/plan" "$ROOT/.local-demo/provider-source"
+mkdir -p "$WORK_DIR/plan" "$TMP_ROOT/provider-source"
 
 uv sync --locked --all-groups
 "$ROOT/scripts/download/longmemeval.sh"

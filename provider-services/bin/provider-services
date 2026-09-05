@@ -9,7 +9,8 @@ ENV_FILE="$REPOSITORY_ROOT/.env"
 VERSIONS_FILE="$ROOT/versions.env"
 RUNTIME_DIR="$ROOT/.runtime"
 BUILD_DIR="$ROOT/.build"
-QUICK_START_STATE="$REPOSITORY_ROOT/.local-demo/quick-start-current.json"
+QUICK_START_PRECHECK_ROOT="$REPOSITORY_ROOT/outputs/tmp/precheck"
+QUICK_START_STATE="$REPOSITORY_ROOT/outputs/tmp/quick-start-current.json"
 MEM0_IMAGE="oamb/mem0-api:2.0.19-dc82354"
 PROJECT_ATTESTATION="$RUNTIME_DIR/provider-project.attestation"
 LIFECYCLE_LOCK="$RUNTIME_DIR/provider-lifecycle.lock"
@@ -85,8 +86,8 @@ ensure_plan_model_environment() {
     resolved_plan=$(jq -er '.resolved_plan | select(type == "string" and length > 0)' \
         "$QUICK_START_STATE") || die "quick-start state has no resolved plan"
     case "$resolved_plan" in
-        "$REPOSITORY_ROOT/.local-demo/"*) ;;
-        *) die "quick-start state resolved plan is outside .local-demo" ;;
+        "$QUICK_START_PRECHECK_ROOT/"*) ;;
+        *) die "quick-start state resolved plan is outside outputs/tmp/precheck" ;;
     esac
     load_plan_model_environment "$resolved_plan" || \
         die "cannot load model configuration from resolved plan"

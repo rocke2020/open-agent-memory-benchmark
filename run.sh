@@ -3,7 +3,9 @@
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly STATE_FILE="$ROOT/.local-demo/quick-start-current.json"
+readonly OUTPUTS_ROOT="$ROOT/outputs"
+readonly PRECHECK_ROOT="$OUTPUTS_ROOT/tmp/precheck"
+readonly STATE_FILE="$OUTPUTS_ROOT/tmp/quick-start-current.json"
 readonly CELLS=("hindsight-lme60" "mem0-lme60" "openviking-lme60")
 readonly STATUS_INTERVAL_SECONDS=30
 
@@ -149,10 +151,13 @@ WORK_DIR="$(jq -er '.work_dir | select(type == "string" and length > 0)' "$STATE
 PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
 DATASET_SOURCE="$(jq -er '.dataset_source | select(type == "string" and length > 0)' "$STATE_FILE")"
 QUESTION_ID="$(jq -er '.question_id | select(type == "string" and length > 0)' "$STATE_FILE")"
-case "$WORK_DIR" in
-  "$ROOT/.local-demo/"*) ;;
-  *) die "precheck state points outside .local-demo" ;;
+case "$RUN_LABEL" in
+  ""|"."|".."|*[!A-Za-z0-9._-]*) die "precheck state has invalid run label" ;;
 esac
+[[ "$WORK_DIR" == "$PRECHECK_ROOT/$RUN_LABEL" ]] || \
+  die "precheck state work directory is outside outputs/tmp/precheck"
+[[ "$PLAN" == "$WORK_DIR/plan/resolved-plan.json" ]] || \
+  die "precheck state resolved plan is outside its work directory"
 [[ -f "$PLAN" ]] || die "resolved plan is missing; rerun ./precheck.sh"
 [[ -f "$DATASET_SOURCE" ]] || die "dataset is missing; rerun ./precheck.sh"
 PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
@@ -195,7 +200,11 @@ PY
   exit 0
 fi
 
-MODE_DIR="$WORK_DIR/$MODE"
+if [[ "$MODE" == "smoke" ]]; then
+  MODE_DIR="$OUTPUTS_ROOT/smoke-test/$RUN_LABEL"
+else
+  MODE_DIR="$OUTPUTS_ROOT/full-test/$RUN_LABEL"
+fi
 mkdir -p "$MODE_DIR/results" "$MODE_DIR/validations" "$MODE_DIR/capsules"
 
 BOUNDED_ROOTS=()

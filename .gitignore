@@ -8,7 +8,6 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-.local-demo/
 build/
 develop-eggs/
 dist/
@@ -226,8 +225,6 @@ provider-services/.runtime-*/
 provider-services/.runtime-archives/
 provider-services/.build/
 
-# Downloaded benchmark datasets
+# Downloaded benchmark datasets and generated outputs
 /datasets
-
-# Local operator reports and manual-review notes
-/personal/
+/outputs
