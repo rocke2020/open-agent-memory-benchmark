@@ -18,11 +18,14 @@ fi
 : "${DEEPSEEK_API_KEY:?FAIL: set DEEPSEEK_API_KEY or add it to $ENV_FILE}"
 
 MODEL="${DEEPSEEK_TEST_MODEL:-deepseek-chat}"
+MODEL_URL="${DEEPSEEK_BASE_URL%/}/chat/completions"
 PROMPT='Reply with exactly OAMB_DEEPSEEK_OK'
 EXPECTED_CONTENT='OAMB_DEEPSEEK_OK'
 
 printf 'input_prompt=%s\n' "$PROMPT"
 printf 'expected_content=%s\n' "$EXPECTED_CONTENT"
+printf 'model_url=%s\n' "$MODEL_URL"
+printf 'api_key_prefix=%.6s\n' "$DEEPSEEK_API_KEY"
 
 if ! RESPONSE="$(curl --silent --show-error --fail-with-body \
   --connect-timeout 15 \
@@ -35,7 +38,7 @@ if ! RESPONSE="$(curl --silent --show-error --fail-with-body \
     max_tokens: 1024,
     stream: false
   }')" \
-  "${DEEPSEEK_BASE_URL%/}/chat/completions")"; then
+  "$MODEL_URL")"; then
   printf 'FAIL: DeepSeek request failed.\n' >&2
   exit 1
 fi
