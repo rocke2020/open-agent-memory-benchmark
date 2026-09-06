@@ -58,6 +58,11 @@ _FAILURE_DETAIL = (
     "Fact extraction failed: 1/1 chunks failed. "
     "First failures: chunk 0: APIConnectionError: Connection error."
 )
+_INVALID_JSON_DETAIL = (
+    "Fact extraction failed: 1/1 chunks failed. "
+    "First failures: chunk 0: JSONDecodeError: Invalid control character at: "
+    "line 8 column 36 (char 243)"
+)
 
 
 def _two_source_workload() -> LongMemEvalWorkload:
@@ -102,6 +107,7 @@ class _RebuildingHindsightService(_RecordedHindsightService):
         fail_first_history: bool,
         old_partial_count: int | None,
         journal: Path,
+        failure_detail: str = _FAILURE_DETAIL,
     ) -> None:
         assert len(plans) == 1 and len(plans[0].ordered_source_units) == 2
         self.plan = plans[0]
@@ -119,6 +125,7 @@ class _RebuildingHindsightService(_RecordedHindsightService):
         super().__init__({bank: self.plan.ordered_source_units for bank in self.banks})
         self.fail_first_history = fail_first_history
         self.old_partial_count = old_partial_count
+        self.failure_detail = failure_detail
         self.retains: list[tuple[str, dict[str, Any]]] = []
         self.recalls: list[str] = []
         self.failed_scope_state: dict[str, object] = {}
@@ -148,7 +155,7 @@ class _RebuildingHindsightService(_RecordedHindsightService):
                     "accepted_source_ids": [self.plan.ordered_source_units[0].source_unit_id],
                 }
                 self.capture("failure", state=self.failed_scope_state)
-                return httpx.Response(500, json={"detail": _FAILURE_DETAIL})
+                return httpx.Response(500, json={"detail": self.failure_detail})
         if request.method == "POST" and request.url.path.endswith("/memories/recall"):
             assert bank is not None
             assert bank != self.failed_scope_state.get("bank_id")
@@ -169,6 +176,7 @@ def _run(
     occurrence_run_id: str | None = None,
     recovery_parts: tuple[Path, ...] = (),
     stop_during_backoff: bool = False,
+    failure_detail: str = _FAILURE_DETAIL,
 ) -> tuple[native.NativeRunArtifacts, _RebuildingHindsightService, list[int]]:
     workload = _two_source_workload()
     dataset = workload.resolve_sources()
@@ -192,6 +200,7 @@ def _run(
         fail_first_history=fail_first_history,
         old_partial_count=old_partial_count,
         journal=tmp_path / f"{run_id}-requests.jsonl",
+        failure_detail=failure_detail,
     )
     waits: list[int] = []
 
@@ -261,16 +270,26 @@ def _run(
 
 
 @pytest.mark.parametrize("old_partial_count", (0, 3, None))
+@pytest.mark.parametrize(
+    ("failure_detail", "failure_kind"),
+    (
+        (_FAILURE_DETAIL, "supplier_connection"),
+        (_INVALID_JSON_DETAIL, "supplier_invalid_json_output"),
+    ),
+)
 def test_original_hindsight_failure_rebuilds_complete_history_in_fresh_bank(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     old_partial_count: int | None,
+    failure_detail: str,
+    failure_kind: str,
 ) -> None:
     completed, service, waits = _run(
         tmp_path,
         monkeypatch,
         run_id="recorded-history-rebuild",
         old_partial_count=old_partial_count,
+        failure_detail=failure_detail,
     )
     old_bank, fresh_bank, _unused_bank = service.banks
     assert service.created_bank_ids == {old_bank, fresh_bank}
@@ -296,6 +315,7 @@ def test_original_hindsight_failure_rebuilds_complete_history_in_fresh_bank(
         key=lambda value: value["history_attempt_ordinal"],
     )
     assert [record["status"] for record in histories] == ["retryable_failed_settled", "ready"]
+    assert histories[0]["failure_kind"] == failure_kind
     runs = [
         json.loads(path.read_bytes())
         for path in (completed.capsule_root / "source/run").glob("*.json")
@@ -333,14 +353,52 @@ def test_incorrect_answer_judge_no_and_empty_native_memory_do_not_rebuild(
     assert not list((completed.capsule_root / "source/history-retries").glob("*.json"))
 
 
+@pytest.mark.parametrize(
+    "changes", ({"failure_kind": "supplier_connection"}, {"settlement_status_code": 200})
+)
+def test_validator_rechecks_invalid_json_failure_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changes: dict[str, object]
+) -> None:
+    from oamb.contracts.evidence import history_attempt_id
+    from oamb.contracts.ids import canonical_json_bytes
+    from tests.e2e.test_native_fixture_vertical_slice import _reseal_manifest
+
+    completed, _service, _waits = _run(
+        tmp_path,
+        monkeypatch,
+        run_id="recorded-invalid-json-classification-tamper",
+        failure_detail=_INVALID_JSON_DETAIL,
+    )
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+    history_path = next(
+        path
+        for path in (completed.capsule_root / "source/history-attempts").glob("*.json")
+        if json.loads(path.read_bytes())["status"] == "retryable_failed_settled"
+    )
+    history = json.loads(history_path.read_bytes())
+    history.update(changes)
+    fields = {key: value for key, value in history.items() if key != "history_attempt_id"}
+    history["history_attempt_id"] = history_attempt_id(fields)
+    history_path.write_bytes(canonical_json_bytes(history))
+    _reseal_manifest(completed.capsule_root)
+
+    invalid = validate_native_capsule(completed.capsule_root)
+    assert invalid.disposition != ValidationDisposition.VALIDATED
+    assert "history-failure-classification-mismatch" in {issue.code for issue in invalid.issues}
+
+
+@pytest.mark.parametrize("failure_detail", (_FAILURE_DETAIL, _INVALID_JSON_DETAIL))
 def test_rebuilt_native_capsule_publishes_one_result_and_retains_failed_attempts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure_detail: str,
 ) -> None:
     completed, service, _waits = _run(
         tmp_path,
         monkeypatch,
         run_id="recorded-rebuild-publication",
+        failure_detail=failure_detail,
     )
     validation = validate_native_capsule(completed.capsule_root)
     assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues

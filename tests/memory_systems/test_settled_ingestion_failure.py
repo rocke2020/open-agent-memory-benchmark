@@ -47,6 +47,11 @@ HINDSIGHT_DETAIL = (
     "Fact extraction failed: 1/1 chunks failed. "
     "First failures: chunk 0: APIConnectionError: Connection error."
 )
+HINDSIGHT_INVALID_JSON_DETAIL = (
+    "Fact extraction failed: 1/1 chunks failed. "
+    "First failures: chunk 0: JSONDecodeError: Invalid control character at: "
+    "line 8 column 36 (char 243)"
+)
 TASK_ID = "11111111-1111-4111-8111-111111111111"
 SESSION_ID = "oamb-native-session-fixture"
 
@@ -93,6 +98,24 @@ def _classify(basis: str, body: bytes, status: int, **options: Any) -> str | Non
     ("basis", "status", "body", "expected"),
     (
         (HINDSIGHT_BASIS, 500, _raw({"detail": HINDSIGHT_DETAIL}), "supplier_connection"),
+        (
+            HINDSIGHT_BASIS,
+            500,
+            _raw({"detail": HINDSIGHT_INVALID_JSON_DETAIL}),
+            "supplier_invalid_json_output",
+        ),
+        (
+            HINDSIGHT_BASIS,
+            500,
+            _raw(
+                {
+                    "detail": "Fact extraction failed: 2/3 chunks failed. First failures: "
+                    "chunk 0: JSONDecodeError: Invalid control character at: line 1 column 1 (char 0), "
+                    "chunk 2: JSONDecodeError: Invalid control character at: line 8 column 36 (char 243)"
+                }
+            ),
+            "supplier_invalid_json_output",
+        ),
         (
             HINDSIGHT_BASIS,
             500,
@@ -143,6 +166,7 @@ def test_exact_pinned_terminal_receipts_have_one_normalized_reason(
     ("basis", "status", "body"),
     (
         (HINDSIGHT_BASIS, 500, _raw({"detail": HINDSIGHT_DETAIL})),
+        (HINDSIGHT_BASIS, 500, _raw({"detail": HINDSIGHT_INVALID_JSON_DETAIL})),
         (
             MEM0_BASIS,
             502,
@@ -175,6 +199,33 @@ def test_missing_or_nonzero_internal_retry_proof_cannot_qualify(
     ),
 )
 def test_hindsight_requires_complete_unambiguous_connection_failures(detail: str) -> None:
+    assert _classify(HINDSIGHT_BASIS, _raw({"detail": detail}), 500) is None
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("Invalid control character at:", "Expecting value:"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("line 8", "line 0"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("line 8", "line 08"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("column 36", "column 0"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("column 36", "column -1"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("char 243", "char -1"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("char 243", "char 0243"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("1/1", "2/2"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("1/1", "6/6"),
+        HINDSIGHT_INVALID_JSON_DETAIL.replace("chunk 0", "chunk 1"),
+        HINDSIGHT_INVALID_JSON_DETAIL + " trailing data",
+        HINDSIGHT_INVALID_JSON_DETAIL + " AuthenticationError: denied",
+        "Fact extraction failed: 2/2 chunks failed. First failures: "
+        "chunk 0: JSONDecodeError: Invalid control character at: line 8 column 36 (char 243), "
+        "chunk 1: APIConnectionError: Connection error.",
+        "Fact extraction failed: 2/2 chunks failed. First failures: "
+        "chunk 0: JSONDecodeError: Invalid control character at: line 8 column 36 (char 243), "
+        "chunk 0: JSONDecodeError: Invalid control character at: line 8 column 36 (char 243)",
+    ),
+)
+def test_hindsight_invalid_json_rebuild_requires_exact_uniform_diagnostics(detail: str) -> None:
     assert _classify(HINDSIGHT_BASIS, _raw({"detail": detail}), 500) is None
 
 
@@ -236,9 +287,10 @@ def test_malformed_or_generic_http_errors_are_not_settlement_proof(body: bytes) 
         assert _classify(basis, body, status) is None
 
 
-@pytest.mark.parametrize("status", (400, 401, 429, 502, 503))
-def test_hindsight_status_must_match_the_pinned_sync_route(status: int) -> None:
-    assert _classify(HINDSIGHT_BASIS, _raw({"detail": HINDSIGHT_DETAIL}), status) is None
+@pytest.mark.parametrize("status", (200, 400, 401, 429, 502, 503))
+@pytest.mark.parametrize("detail", (HINDSIGHT_DETAIL, HINDSIGHT_INVALID_JSON_DETAIL))
+def test_hindsight_status_must_match_the_pinned_sync_route(status: int, detail: str) -> None:
+    assert _classify(HINDSIGHT_BASIS, _raw({"detail": detail}), status) is None
 
 
 def test_duplicate_failure_fields_are_rejected() -> None:
@@ -251,13 +303,22 @@ def test_duplicate_failure_fields_are_rejected() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("proof_count", (None, 0))
+@pytest.mark.parametrize(
+    ("detail", "failure_kind"),
+    (
+        (HINDSIGHT_DETAIL, "supplier_connection"),
+        (HINDSIGHT_INVALID_JSON_DETAIL, "supplier_invalid_json_output"),
+    ),
+)
 async def test_hindsight_adapter_preserves_exact_terminal_receipt_and_proof_gate(
     proof_count: int | None,
+    detail: str,
+    failure_kind: str,
 ) -> None:
     from oamb.memory_systems.hindsight import HindsightAdapter
 
     service = _HindsightFixtureService("occurrence-1")
-    raw = _raw({"detail": HINDSIGHT_DETAIL})
+    raw = _raw({"detail": detail})
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path.endswith("/memories"):
@@ -290,6 +351,9 @@ async def test_hindsight_adapter_preserves_exact_terminal_receipt_and_proof_gate
     assert error.raw_response_bytes == raw
     assert error.raw_reference is not None
     assert error.raw_reference.sha256 == hashlib.sha256(raw).hexdigest()
+    assert error.status_code == 500
+    if proof_count == 0:
+        assert error.failure_kind == failure_kind
     await adapter.close()
 
 

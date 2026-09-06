@@ -23,10 +23,16 @@ _HINDSIGHT_AGGREGATE = re.compile(
 _HINDSIGHT_CONNECTION_FAILURE = re.compile(
     r"chunk (0|[1-9][0-9]*): APIConnectionError: Connection error\."
 )
+_HINDSIGHT_INVALID_JSON_FAILURE = re.compile(
+    r"chunk (0|[1-9][0-9]*): JSONDecodeError: Invalid control character at: "
+    r"line [1-9][0-9]* column [1-9][0-9]* \(char (?:0|[1-9][0-9]*)\)"
+)
 _MEM0_REQUEST_ID = re.compile(r"[0-9a-f]{8}")
 _OPENVIKING_WRAPPER_FIELDS = frozenset({"status", "result", "error", "profile", "telemetry"})
 
-SettledFailureKind = Literal["supplier_connection", "supplier_rate_limit"]
+SettledFailureKind = Literal[
+    "supplier_connection", "supplier_rate_limit", "supplier_invalid_json_output"
+]
 
 
 def classify_settled_ingestion_failure(
@@ -60,8 +66,8 @@ def classify_settled_ingestion_failure(
         return None
 
     if settlement_basis == HINDSIGHT_SETTLEMENT_BASIS:
-        if status_code == 500 and _hindsight_connection_failure(value):
-            return "supplier_connection"
+        if status_code == 500:
+            return _hindsight_extraction_failure(value)
     elif settlement_basis == MEM0_SETTLEMENT_BASIS:
         if (
             status_code != 502
@@ -101,31 +107,37 @@ def classify_settled_ingestion_failure(
     return None
 
 
-def _hindsight_connection_failure(value: dict[str, object]) -> bool:
+def _hindsight_extraction_failure(value: dict[str, object]) -> SettledFailureKind | None:
     if set(value) != {"detail"} or not isinstance(value["detail"], str):
-        return False
+        return None
     aggregate = _HINDSIGHT_AGGREGATE.fullmatch(value["detail"])
     if aggregate is None:
-        return False
+        return None
     try:
         failed, total = int(aggregate[1]), int(aggregate[2])
         if failed > min(total, _HINDSIGHT_FAILURE_SUMMARY_LIMIT):
-            return False
+            return None
         failures = aggregate[3].split(", ")
         if len(failures) != failed:
-            return False
+            return None
         indices: set[int] = set()
+        failure_kind: SettledFailureKind | None = None
         for failure in failures:
             match = _HINDSIGHT_CONNECTION_FAILURE.fullmatch(failure)
+            member_kind: SettledFailureKind = "supplier_connection"
             if match is None:
-                return False
+                match = _HINDSIGHT_INVALID_JSON_FAILURE.fullmatch(failure)
+                member_kind = "supplier_invalid_json_output"
+            if match is None or (failure_kind is not None and member_kind != failure_kind):
+                return None
             index = int(match[1])
             if index >= total or index in indices:
-                return False
+                return None
             indices.add(index)
+            failure_kind = member_kind
     except ValueError:
-        return False
-    return True
+        return None
+    return failure_kind
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

@@ -27,12 +27,12 @@ from .ids import (
 )
 
 INGESTION_RETRY_UNIT = "whole_history_through_ready_projection"
-INGESTION_RECOVERY_STRATEGY = "fresh_scope_full_history_rebuild"
+INGESTION_RECOVERY_STRATEGY = "fresh_scope_full_history_rebuild_v2"
 INFRASTRUCTURE_RETRY_BACKOFF_SECONDS = (1, 2)
 INFRASTRUCTURE_MAX_TOTAL_RETRIES = len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
 INFRASTRUCTURE_RETRY_POLICY_HASH = canonical_sha256(
     [
-        "oamb-infrastructure-retry-policy-v1",
+        "oamb-infrastructure-retry-policy-v2",
         INFRASTRUCTURE_RETRY_BACKOFF_SECONDS,
         INFRASTRUCTURE_MAX_TOTAL_RETRIES,
         INGESTION_RETRY_UNIT,

@@ -157,7 +157,7 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
     assert document["execution"] == {
         "comparison_max_operation_attempt_count": 28_677,
         "comparison_max_owner_authorization_count": 79_725,
-        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild",
+        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild_v2",
         "ingestion_retry_unit": "whole_history_through_ready_projection",
         "max_parallel_datasets": 1,
         "max_parallel_history_ingestions_per_provider": 2,
@@ -189,7 +189,7 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
     assert document["execution"] == {
         "comparison_max_operation_attempt_count": 3_027,
         "comparison_max_owner_authorization_count": 8_445,
-        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild",
+        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild_v2",
         "ingestion_retry_unit": "whole_history_through_ready_projection",
         "max_parallel_datasets": 1,
         "max_parallel_history_ingestions_per_provider": 3,
@@ -229,7 +229,7 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "decision: accuracy delta >= 0.05 and exact McNemar p <= 0.05" in result.output
     assert "evaluation controls: retries=2; operation timeout=900s" in result.output
     assert "ingestion retry unit: whole_history_through_ready_projection" in result.output
-    assert "ingestion recovery strategy: fresh_scope_full_history_rebuild" in result.output
+    assert "ingestion recovery strategy: fresh_scope_full_history_rebuild_v2" in result.output
     assert "per-cell authorization: 9559 calls; 26575 owner allocations" in result.output
     assert "three-cell authorization: 28677 calls; 79725 owner allocations" in result.output
     assert "credential values: [REDACTED]" in result.output
