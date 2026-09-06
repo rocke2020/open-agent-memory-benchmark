@@ -137,8 +137,8 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         ("deepseek-v4-flash", "low", 1, None),
         ("deepseek-v4-flash", "low", 1, None),
         ("deepseek-v4-flash", "low", 1, None),
-        ("deepseek-v4-pro", "low", 1, 8192),
-        ("deepseek-v4-flash", "high", 2, 1024),
+        ("deepseek-v4-pro", "low", 1, None),
+        ("deepseek-v4-flash", "high", 2, None),
         ("qwen3-embedding:0.6b", "not_applicable", None, None),
     )
     assert document["retrieval"]["generation"] == "disabled"

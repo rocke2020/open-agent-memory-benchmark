@@ -199,10 +199,11 @@ class OpenAICompatibleModelClient:
             "n": request.candidate_count,
             "temperature": float(request.temperature),
             "top_p": float(request.top_p),
-            "max_tokens": request.max_output_tokens,
             "stop": list(request.stop) if request.stop is not None else None,
             "reasoning_effort": request.thinking_effort,
         }
+        if request.max_output_tokens is not None:
+            payload["max_tokens"] = request.max_output_tokens
         try:
             async with asyncio.timeout(self._total_timeout_seconds):
                 response = await self._client.post(self._url, json=payload)
@@ -312,7 +313,8 @@ class OpenAICompatibleModelClient:
                 supplier_status_code=response.status_code,
             ) from exc
         if (
-            supplier_output_tokens is not None
+            request.max_output_tokens is not None
+            and supplier_output_tokens is not None
             and supplier_output_tokens > request.max_output_tokens
         ):
             raise ModelCallFailure(
@@ -416,8 +418,11 @@ class OpenAICompatibleModelClient:
             )
         if request.candidate_count != 1:
             raise ValueError("model request requires exactly one candidate")
-        if request.max_output_tokens < 1:
-            raise ValueError("model request requires a positive output ceiling")
+        if request.stage == "model_readiness":
+            if request.max_output_tokens is None or request.max_output_tokens < 1:
+                raise ValueError("model readiness requires a positive output ceiling")
+        elif request.max_output_tokens is not None:
+            raise ValueError("non-probe model requests must omit the output ceiling")
         if request.temperature != "0" or request.top_p != "1":
             raise ValueError("model request sampling must be temperature=0 and top_p=1")
         if canonical_sha256(request.messages) != request.messages_sha256:

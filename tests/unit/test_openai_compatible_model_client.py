@@ -74,7 +74,7 @@ def _request(*, stage: str = "answer", thinking_effort: ThinkingEffort = "low") 
         messages_sha256=canonical_sha256(messages),
         messages=messages,
         output_contract_id="lme-answer-text-v1",
-        max_output_tokens=128,
+        max_output_tokens=None,
         candidate_count=1,
         temperature="0",
         top_p="1",
@@ -91,7 +91,7 @@ def test_model_request_fingerprint_binds_output_and_sampling_controls() -> None:
         request.request_fingerprint
         != replace(
             request,
-            max_output_tokens=request.max_output_tokens + 1,
+            max_output_tokens=128,
         ).request_fingerprint
     )
     assert (
@@ -199,7 +199,7 @@ def _client(
 
 
 @pytest.mark.asyncio
-async def test_answer_sends_request_bound_low_effort_and_seals_raw_usage() -> None:
+async def test_answer_omits_output_ceiling_and_seals_raw_usage() -> None:
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -216,7 +216,11 @@ async def test_answer_sends_request_bound_low_effort_and_seals_raw_usage() -> No
                         "finish_reason": "stop",
                     }
                 ],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 2, "total_tokens": 13},
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 9000,
+                    "total_tokens": 9011,
+                },
             },
         )
 
@@ -237,7 +241,7 @@ async def test_answer_sends_request_bound_low_effort_and_seals_raw_usage() -> No
     assert calls[0].url == httpx.URL("https://models.example/v1/chat/completions")
     assert sent["model"] == "answer-model"
     assert sent["n"] == 1
-    assert sent["max_tokens"] == 128
+    assert "max_tokens" not in sent
     assert sent["reasoning_effort"] == "low"
     assert "tools" not in sent
     assert receipt.output_text == "answer"
@@ -248,8 +252,8 @@ async def test_answer_sends_request_bound_low_effort_and_seals_raw_usage() -> No
     assert store.raw[0].sha256 == hashlib.sha256(store.raw[0].payload_bytes).hexdigest()
     usage = json.loads(store.records[0].canonical_bytes)
     assert usage["input_tokens"] == 11
-    assert usage["visible_output_tokens"] == 2
-    assert usage["supplier_reported_total_tokens"] == 13
+    assert usage["visible_output_tokens"] == 9000
+    assert usage["supplier_reported_total_tokens"] == 9011
     await client.close()
 
 
@@ -263,8 +267,12 @@ async def test_judge_sends_request_bound_high_effort() -> None:
             200,
             json={
                 "model": "judge-model",
-                "choices": [{"index": 0, "message": {"content": "1"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 8, "completion_tokens": 1, "total_tokens": 9},
+                "choices": [{"index": 0, "message": {"content": "yes"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 2048,
+                    "total_tokens": 2056,
+                },
             },
         )
 
@@ -278,7 +286,53 @@ async def test_judge_sends_request_bound_high_effort() -> None:
 
     await client.complete(_request(stage="judge", thinking_effort="high"))
 
-    assert json.loads(calls[0].content)["reasoning_effort"] == "high"
+    sent = json.loads(calls[0].content)
+    assert sent["reasoning_effort"] == "high"
+    assert "max_tokens" not in sent
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "role", "parent_kind", "thinking_effort"),
+    (
+        ("memory_ingest", ModelRole.MEMORY_EXTRACTION, "ingestion_plan", "low"),
+        ("answer", ModelRole.ANSWER, "case", "low"),
+        ("judge", ModelRole.JUDGE, "case", "high"),
+    ),
+)
+async def test_non_probe_model_requests_reject_an_output_ceiling_before_dispatch(
+    stage: str,
+    role: ModelRole,
+    parent_kind: str,
+    thinking_effort: ThinkingEffort,
+) -> None:
+    calls = 0
+
+    def handler(_request_value: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    binding_id = f"{stage}-binding"
+    client = _client(
+        CapturingStore(),
+        handler,
+        role=role,
+        binding_id=binding_id,
+        thinking_effort=thinking_effort,
+    )
+    request = replace(
+        _request(stage=stage, thinking_effort=thinking_effort),
+        parent_kind=cast(Any, parent_kind),
+        parent_id="parent-1",
+        role_binding_id=binding_id,
+        max_output_tokens=128,
+    )
+
+    with pytest.raises(ValueError, match="non-probe model requests must omit"):
+        await client.complete(request)
+    assert calls == 0
     await client.close()
 
 
@@ -499,7 +553,10 @@ async def test_answer_client_rejects_a_judge_request_before_dispatch() -> None:
 
 @pytest.mark.asyncio
 async def test_model_readiness_usage_supports_its_explicit_parent_kind() -> None:
+    calls: list[httpx.Request] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
         return httpx.Response(
             200,
             json={
@@ -522,10 +579,12 @@ async def test_model_readiness_usage_supports_its_explicit_parent_kind() -> None
         parent_id="readiness-1",
         stage="model_readiness",
         role_binding_id="model_readiness-binding",
+        max_output_tokens=128,
     )
 
     await client.complete(request)
 
+    assert json.loads(calls[0].content)["max_tokens"] == 128
     usage = json.loads(store.records[0].canonical_bytes)
     assert usage["parent_kind"] == "model_readiness"
     assert usage["stage"] == "model_readiness"
@@ -832,10 +891,23 @@ async def test_supplier_usage_cannot_exceed_the_requested_output_ceiling() -> No
         )
 
     store = CapturingStore()
-    client = _client(store, handler)
+    client = _client(
+        store,
+        handler,
+        role=ModelRole.MEMORY_EXTRACTION,
+        binding_id="model_readiness-binding",
+    )
+    request = replace(
+        _request(),
+        parent_kind="model_readiness",
+        parent_id="readiness-1",
+        stage="model_readiness",
+        role_binding_id="model_readiness-binding",
+        max_output_tokens=128,
+    )
 
     with pytest.raises(ModelCallFailure) as failure:
-        await client.complete(_request())
+        await client.complete(request)
 
     assert failure.value.failure_kind == "output_contract_error"
     assert failure.value.supplier_status_code == 200

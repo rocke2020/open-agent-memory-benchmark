@@ -17,10 +17,6 @@ from oamb.workloads.longmemeval import (
     LME60_EXPECTED_QUESTION_IDS,
     LME60_EXPECTED_SESSION_COUNT,
 )
-from oamb.workloads.metrics import (
-    LME_ANSWER_MAX_OUTPUT_TOKENS,
-    LME_JUDGE_MAX_OUTPUT_TOKENS,
-)
 
 from .benchmark import (
     DEEPSEEK_THINKING_EFFORT_SCALE,
@@ -583,11 +579,7 @@ def _decision_document(decision: DecisionConfiguration) -> dict[str, object]:
     return {key: getattr(decision, key) for key in sorted(_DECISION_KEYS)}
 
 
-def _maximum_output_tokens_per_call(role_id: ModelRoleId) -> int | None:
-    if role_id == "answer":
-        return LME_ANSWER_MAX_OUTPUT_TOKENS
-    if role_id == "judge":
-        return LME_JUDGE_MAX_OUTPUT_TOKENS
+def _maximum_output_tokens_per_call(_role_id: ModelRoleId) -> int | None:
     return None
 
 

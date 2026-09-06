@@ -290,7 +290,7 @@ class ModelRequest:
     messages: tuple[tuple[str, str], ...]
     thinking_effort: ThinkingEffort
     output_contract_id: str = "fake-output-v1"
-    max_output_tokens: int = 1
+    max_output_tokens: int | None = 1
     candidate_count: int = 1
     temperature: str = "0"
     top_p: str = "1"
@@ -316,7 +316,7 @@ class ModelRequest:
         messages: tuple[tuple[str, str], ...],
         thinking_effort: ThinkingEffort,
         output_contract_id: str = "fake-output-v1",
-        max_output_tokens: int = 1,
+        max_output_tokens: int | None = 1,
         candidate_count: int = 1,
         temperature: str = "0",
         top_p: str = "1",

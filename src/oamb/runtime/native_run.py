@@ -2827,7 +2827,7 @@ async def _execute_cases_serial(
                 role_binding_id=answer_role_binding_id,
             ),
             output_contract_id=case_plan.output_contract_id,
-            max_output_tokens=case_plan.answer_max_output_tokens,
+            max_output_tokens=None,
         )
         answer_attempt_id = answer_request.attempt_id
         prepared_answer = _prepare_native_attempt(
@@ -2924,7 +2924,7 @@ async def _execute_cases_serial(
                     role_binding_id=judge_role_binding_id,
                 ),
                 output_contract_id=evaluation.output_contract_id,
-                max_output_tokens=evaluation.max_output_tokens,
+                max_output_tokens=None,
             )
             judge_attempt_id = judge_request.attempt_id
             prepared_judge = _prepare_native_attempt(

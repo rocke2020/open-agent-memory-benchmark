@@ -1963,14 +1963,16 @@ def test_native_judge_path_uses_a_separately_bound_model_client(tmp_path: Path) 
         async def complete(self, request: ModelRequest) -> ModelReceipt:
             if request.stage != "answer":
                 raise AssertionError("answer client received a non-answer request")
+            if request.max_output_tokens is not None:
+                raise AssertionError("answer client received an output ceiling")
             return await super().complete(request)
 
     class JudgeOnlyModel(_RecordedNativeModel):
         async def complete(self, request: ModelRequest) -> ModelReceipt:
             if request.stage != "judge":
                 raise AssertionError("judge client received a non-judge request")
-            if request.max_output_tokens != 1024:
-                raise AssertionError("judge client received the wrong output ceiling")
+            if request.max_output_tokens is not None:
+                raise AssertionError("judge client received an output ceiling")
             return await super().complete(request)
 
     completed = run_native_vertical_slice(
