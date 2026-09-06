@@ -290,16 +290,15 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn(".account_id == $account", script)
         self.assertIn(".user_id == $user", script)
 
-    def test_example_env_has_placeholders_not_credentials(self) -> None:
+    def test_example_env_has_one_deepseek_connection_pair_without_credentials(self) -> None:
         example = self.read_root_env_example()
         values = dict(
             line.split("=", 1) for line in example.splitlines() if line and not line.startswith("#")
         )
         for name in (
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
             "OAMB_PROVIDER_PROJECT",
-            "OAMB_HINDSIGHT_LLM_API_KEY",
-            "OAMB_MEM0_LLM_API_KEY",
-            "OAMB_OPENVIKING_VLM_API_KEY",
             "OAMB_MEM0_INSPECTOR_API_KEY",
         ):
             self.assertRegex(example, rf"(?m)^{name}=.*$")
@@ -313,17 +312,19 @@ class ServiceBundleContractTests(unittest.TestCase):
             "OAMB_EMBEDDING_MODEL",
             "OAMB_HINDSIGHT_LLM_PROVIDER",
             "OAMB_HINDSIGHT_LLM_MODEL",
+            "OAMB_HINDSIGHT_LLM_BASE_URL",
+            "OAMB_HINDSIGHT_LLM_API_KEY",
             "OAMB_MEM0_LLM_MODEL",
+            "OAMB_MEM0_LLM_BASE_URL",
+            "OAMB_MEM0_LLM_API_KEY",
             "OAMB_OPENVIKING_VLM_PROVIDER",
             "OAMB_OPENVIKING_VLM_MODEL",
+            "OAMB_OPENVIKING_VLM_BASE_URL",
+            "OAMB_OPENVIKING_VLM_API_KEY",
         ):
             self.assertNotIn(name, values)
-        for name in (
-            "OAMB_HINDSIGHT_LLM_BASE_URL",
-            "OAMB_MEM0_LLM_BASE_URL",
-            "OAMB_OPENVIKING_VLM_BASE_URL",
-        ):
-            self.assertRegex(example, rf"(?m)^{name}=change-me$")
+        self.assertEqual(values["DEEPSEEK_BASE_URL"], "change-me")
+        self.assertEqual(values["DEEPSEEK_API_KEY"], "change-me")
         self.assertNotRegex(example, r"sk-[A-Za-z0-9]{12,}")
 
 

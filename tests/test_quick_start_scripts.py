@@ -16,7 +16,17 @@ PRECHECK_SCRIPT = REPOSITORY_ROOT / "precheck.sh"
 RUN_SCRIPT = REPOSITORY_ROOT / "run.sh"
 HOST_EMBEDDING_SCRIPT = REPOSITORY_ROOT / "provider-services" / "lib" / "host_embedding.sh"
 PLAN_ENVIRONMENT_SCRIPT = REPOSITORY_ROOT / "provider-services" / "lib" / "plan_environment.sh"
+PROVIDER_ENVIRONMENT_SCRIPT = REPOSITORY_ROOT / "provider-services" / "lib" / "env.sh"
 RESOLVED_PLAN_HASH = "a" * 64
+
+PROVIDER_MODEL_CONNECTION_ALIASES = (
+    "OAMB_HINDSIGHT_LLM_BASE_URL",
+    "OAMB_HINDSIGHT_LLM_API_KEY",
+    "OAMB_MEM0_LLM_BASE_URL",
+    "OAMB_MEM0_LLM_API_KEY",
+    "OAMB_OPENVIKING_VLM_BASE_URL",
+    "OAMB_OPENVIKING_VLM_API_KEY",
+)
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -50,6 +60,78 @@ def _copy_quick_start_script(source: Path, root: Path) -> Path:
         helper.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(PLAN_ENVIRONMENT_SCRIPT, helper)
     return destination
+
+
+def test_root_env_template_owns_one_deepseek_connection_pair() -> None:
+    assignment_names = [
+        line.split("=", 1)[0]
+        for line in (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+
+    assert assignment_names.count("DEEPSEEK_BASE_URL") == 1
+    assert assignment_names.count("DEEPSEEK_API_KEY") == 1
+    assert set(assignment_names).isdisjoint(PROVIDER_MODEL_CONNECTION_ALIASES)
+
+
+def test_provider_shell_derives_model_connections_from_deepseek_pair(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
+        encoding="utf-8",
+    )
+    requested = " ".join(PROVIDER_MODEL_CONNECTION_ALIASES)
+
+    result = subprocess.run(
+        [
+            "sh",
+            "-c",
+            f'. "{PROVIDER_ENVIRONMENT_SCRIPT}"; '
+            f'for name in {requested}; do printf "%s=" "$name"; '
+            'read_env_value "$1" "$name"; done',
+            "sh",
+            str(env_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines() == [
+        "OAMB_HINDSIGHT_LLM_BASE_URL=https://models.example/v1",
+        "OAMB_HINDSIGHT_LLM_API_KEY=test-model-key",
+        "OAMB_MEM0_LLM_BASE_URL=https://models.example/v1",
+        "OAMB_MEM0_LLM_API_KEY=test-model-key",
+        "OAMB_OPENVIKING_VLM_BASE_URL=https://models.example/v1",
+        "OAMB_OPENVIKING_VLM_API_KEY=test-model-key",
+    ]
+
+
+def test_live_environment_derives_provider_connections_from_deepseek_pair(
+    tmp_path: Path,
+) -> None:
+    from oamb.live import load_live_environment
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
+        encoding="utf-8",
+    )
+
+    environment = load_live_environment(
+        provider_env_path=env_file,
+        model_env_path=env_file,
+        provider_runtime_directory=tmp_path / "runtime",
+        base_environment={
+            "OAMB_MEM0_LLM_BASE_URL": "https://stale.example/v1",
+            "OAMB_MEM0_LLM_API_KEY": "stale-model-key",
+        },
+    )
+
+    for name in PROVIDER_MODEL_CONNECTION_ALIASES:
+        expected = "https://models.example/v1" if name.endswith("BASE_URL") else "test-model-key"
+        assert environment[name] == expected
 
 
 def _quick_start_fixture(tmp_path: Path, *, system_name: str) -> tuple[Path, dict[str, str], Path]:
@@ -236,8 +318,20 @@ def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path
         "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key",
     )
     (root / ".env.example").write_text(root_template.read_text(encoding="utf-8"), encoding="utf-8")
+    configured_lines = [
+        line
+        for line in configured.splitlines()
+        if line.split("=", 1)[0] not in PROVIDER_MODEL_CONNECTION_ALIASES
+    ]
+    legacy_provider_connections = "\n".join(
+        f"{name}=" + ("https://legacy.example/v1" if name.endswith("BASE_URL") else "legacy-key")
+        for name in PROVIDER_MODEL_CONNECTION_ALIASES
+    )
     (root / ".env").write_text(
-        configured
+        "\n".join(configured_lines)
+        + "\n"
+        + legacy_provider_connections
+        + "\n"
         + "OMBA_ANSWER_LLM=openai\n"
         + "OMBA_ANSWER_MODEL=legacy-answer\n"
         + "OPENAI_BASE_URL=https://legacy.example/v1\n"
@@ -265,8 +359,8 @@ def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path
     root_env_path = root / ".env"
     root_env = root_env_path.read_text(encoding="utf-8")
     assert "OAMB_HINDSIGHT_PORT=18888" in root_env
-    assert "OAMB_HINDSIGHT_LLM_BASE_URL=https://models.example/v1" in root_env
-    assert "OAMB_HINDSIGHT_LLM_API_KEY=test-model-key" in root_env
+    for alias in PROVIDER_MODEL_CONNECTION_ALIASES:
+        assert f"{alias}=" not in root_env
     assert "OAMB_PROVIDER_PROJECT=oamb-providers-lme60-" in root_env
     assert "OAMB_MEM0_SOURCE_CHECKOUT=" in root_env
     for plan_owned in (

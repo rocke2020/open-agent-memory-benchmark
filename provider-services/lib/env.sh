@@ -47,10 +47,19 @@ validate_env_file() {
     ' "$1"
 }
 
-# Read one unique dotenv assignment as inert text. This helper never evaluates values.
+# Read one unique dotenv assignment as inert text. Provider model connection
+# aliases are derived from the canonical DeepSeek pair and never stored again.
 read_env_value() {
     env_file=$1
     wanted_name=$2
+    case "$wanted_name" in
+        OAMB_HINDSIGHT_LLM_BASE_URL|OAMB_MEM0_LLM_BASE_URL|OAMB_OPENVIKING_VLM_BASE_URL)
+            wanted_name=DEEPSEEK_BASE_URL
+            ;;
+        OAMB_HINDSIGHT_LLM_API_KEY|OAMB_MEM0_LLM_API_KEY|OAMB_OPENVIKING_VLM_API_KEY)
+            wanted_name=DEEPSEEK_API_KEY
+            ;;
+    esac
     awk -F= -v wanted="$wanted_name" \
         '$1 == wanted {sub(/^[^=]*=/, ""); value=$0; count+=1}
          END {if (count != 1) exit 1; print value}' \
@@ -68,7 +77,7 @@ read_runtime_env_value() {
 reject_plan_owned_env_values() {
     awk '
         BEGIN {
-            split("OMBA_ANSWER_LLM OMBA_ANSWER_MODEL OMBA_JUDGE_LLM OMBA_JUDGE_MODEL OPENAI_BASE_URL OPENAI_API_KEY OAMB_EMBEDDING_MODEL OAMB_HINDSIGHT_LLM_PROVIDER OAMB_HINDSIGHT_LLM_MODEL OAMB_HINDSIGHT_LLM_REASONING_EFFORT OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_REASONING_EFFORT OAMB_OPENVIKING_VLM_PROVIDER OAMB_OPENVIKING_VLM_MODEL OAMB_OPENVIKING_VLM_REASONING_EFFORT", names)
+            split("OMBA_ANSWER_LLM OMBA_ANSWER_MODEL OMBA_JUDGE_LLM OMBA_JUDGE_MODEL OPENAI_BASE_URL OPENAI_API_KEY OAMB_EMBEDDING_MODEL OAMB_HINDSIGHT_LLM_PROVIDER OAMB_HINDSIGHT_LLM_MODEL OAMB_HINDSIGHT_LLM_REASONING_EFFORT OAMB_MEM0_LLM_MODEL OAMB_MEM0_LLM_REASONING_EFFORT OAMB_OPENVIKING_VLM_PROVIDER OAMB_OPENVIKING_VLM_MODEL OAMB_OPENVIKING_VLM_REASONING_EFFORT OAMB_HINDSIGHT_LLM_BASE_URL OAMB_HINDSIGHT_LLM_API_KEY OAMB_MEM0_LLM_BASE_URL OAMB_MEM0_LLM_API_KEY OAMB_OPENVIKING_VLM_BASE_URL OAMB_OPENVIKING_VLM_API_KEY", names)
             for (i in names) forbidden[names[i]] = 1
         }
         /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
@@ -76,7 +85,7 @@ reject_plan_owned_env_values() {
             separator = index($0, "=")
             key = substr($0, 1, separator - 1)
             if (forbidden[key]) {
-                print "plan-owned or stale key is forbidden in dotenv: " key > "/dev/stderr"
+                print "plan-owned, derived, or stale key is forbidden in dotenv: " key > "/dev/stderr"
                 failed = 1
             }
         }
