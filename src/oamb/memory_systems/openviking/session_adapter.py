@@ -15,6 +15,10 @@ from typing import Any
 import httpx
 
 from oamb.contracts.ids import canonical_sha256, openviking_session_id
+from oamb.contracts.ingestion_failures import (
+    OPENVIKING_SETTLEMENT_BASIS,
+    classify_settled_ingestion_failure,
+)
 from oamb.contracts.ports import (
     ArtifactStorePort,
     CapabilitySet,
@@ -35,6 +39,7 @@ from oamb.contracts.ports import (
     RuntimeResolution,
     ScopeAllocationRequest,
     ScopeReceipt,
+    SettledTransientIngestionFailure,
     SourceUnit,
     StateDigestReceipt,
 )
@@ -131,6 +136,7 @@ class OpenVikingSessionAdapter:
         task_poll_timeout_seconds: float = DEFAULT_TASK_POLL_TIMEOUT_SECONDS,
         read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
         total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
+        internal_retry_count: int | None = None,
     ) -> None:
         for label, value in (
             ("api_key", api_key),
@@ -151,6 +157,7 @@ class OpenVikingSessionAdapter:
         self._benchmark_account = benchmark_account
         self._benchmark_user = benchmark_user
         self._runtime_binding_hash = runtime_binding_hash
+        self._internal_retry_count = internal_retry_count
         self._task_poll_interval_seconds = task_poll_interval_seconds
         self._maximum_task_polls = maximum_task_polls
         self._task_poll_timeout_seconds = task_poll_timeout_seconds
@@ -515,6 +522,7 @@ class OpenVikingSessionAdapter:
             session_id=planned.session_id,
             archive_uri=archive_uri,
             headers=headers,
+            preceding_raw_references=tuple(evidence_references),
         )
         evidence_references.extend(task_references)
         _require_usage_snapshot(task_result)
@@ -716,6 +724,7 @@ class OpenVikingSessionAdapter:
         session_id: str,
         archive_uri: str,
         headers: dict[str, str],
+        preceding_raw_references: tuple[RawReferenceHandle, ...],
     ) -> tuple[dict[str, Any], tuple[RawReferenceHandle, ...]]:
         references: list[RawReferenceHandle] = []
         loop = asyncio.get_running_loop()
@@ -765,6 +774,30 @@ class OpenVikingSessionAdapter:
                     )
                 return terminal_result, tuple(references)
             if status in _TERMINAL_FAILURE_TASK_STATUSES:
+                reason = classify_settled_ingestion_failure(
+                    settlement_basis=OPENVIKING_SETTLEMENT_BASIS,
+                    status_code=response.status_code,
+                    raw_response_bytes=response.raw_bytes,
+                    internal_retry_count=self._internal_retry_count,
+                    expected_task_id=task_id,
+                    expected_session_id=session_id,
+                )
+                if reason is not None and self._internal_retry_count is not None:
+                    raise SettledTransientIngestionFailure(
+                        "OpenViking commit task settled with a supplier failure",
+                        failure_kind=reason,
+                        raw_reference=response.raw_reference,
+                        raw_response_bytes=response.raw_bytes,
+                        supporting_raw_references=(
+                            *preceding_raw_references,
+                            *references[:-1],
+                        ),
+                        status_code=response.status_code,
+                        settlement_basis=OPENVIKING_SETTLEMENT_BASIS,
+                        internal_retry_count=self._internal_retry_count,
+                        expected_task_id=task_id,
+                        expected_session_id=session_id,
+                    )
                 raise OpenVikingSessionProfileError(
                     f"OpenViking session commit task ended as {status}"
                 )

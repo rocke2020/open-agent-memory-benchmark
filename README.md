@@ -51,11 +51,9 @@ complete runtime, then `run.sh --full_test` runs all three providers in
 parallel, validates their capsules, builds the comparison, and opens its offline
 report. Smoke mode is an optional one-question diagnostic.
 
-The checked-in runtime controls allow two additional safe attempts per eligible
-operation and a 900-second timeout per external attempt. They do not impose a
-whole-run, aggregate-token, storage, resource, memory, or cost cap. Tokens,
-latency, storage, resources, and cost are measured results; unavailable
-measurements remain unavailable rather than becoming zero.
+`execution.max_retries_per_operation` in `configs/benchmark.yml` accepts `0`, `1`, or `2` additional attempts; the default is `2`. After an eligible ingestion or readiness failure has settled, OAMB rebuilds the question group's complete frozen history in a fresh provider scope, including previously successful source sessions. Incorrect answers, a judge's `no`, and valid empty memory do not trigger a history rebuild. Every attempt's available token usage, resource measurements, and actual billing evidence remain in the operational totals.
+
+The 900-second timeout applies to each external attempt. These controls do not impose a whole-run, aggregate-token, storage, resource, memory, or cost cap. Tokens, latency, storage, resources, and cost are measured results; unavailable measurements remain unavailable rather than becoming zero.
 
 Retrieval generation is disabled in v0.1.0. Query embedding is allowed, but
 query rewriting, decomposition, reflection, generative reranking, and fallback
@@ -104,6 +102,8 @@ and verifies the pinned Mem0 source, starts the OS-specific embedding server
 when needed, starts all three memory providers, and verifies every runtime role.
 Existing configured values and provider data are reused, not overwritten.
 
+Provider applications derive their `NO_PROXY` list from the host in the root `LLM_BASE_URL`, together with the required local service hosts, so requests to that model endpoint bypass proxy routing.
+
 To use an OpenAI-compatible online embedding endpoint directly, pass its base
 URL. The endpoint must accept the profile's `oamb-local-embedding` bearer value:
 
@@ -128,11 +128,7 @@ Run the complete balanced LME-60 comparison with:
 ./run.sh --full_test
 ```
 
-Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each
-provider runs the same 60 questions in isolated state and reports its own
-progress from `0/60` through `60/60`. OAMB freshly validates each capsule before
-building and opening the final 180-result comparison report. Full mode does not
-require or consume a smoke run.
+Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. Smoke, full, and resume progress show `history_rebuild_attempts` separately from `completed_questions`; a retry still waiting in backoff does not count as admitted. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
 
 For optional debugging, run the frozen question `72e3ee87` once on all three
 providers in parallel. `--smoke_test` is the default, so these are identical:

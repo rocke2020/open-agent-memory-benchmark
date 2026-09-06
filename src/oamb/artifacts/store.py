@@ -163,7 +163,21 @@ class ArtifactStore:
             if not path.is_file():
                 continue
             relative_path = path.relative_to(self.root).as_posix()
-            if relative_path.startswith("source/raw/"):
+            if relative_path.startswith("source/parts/"):
+                record_kind = "embedded_part_file"
+                components = Path(relative_path).parts
+                if len(components) < 4:
+                    raise ArtifactCollisionError("embedded part path is incomplete")
+                capsule_id = components[2]
+                inner_path = Path(*components[3:]).as_posix()
+                record_id = canonical_sha256(
+                    [
+                        "oamb-embedded-part-file-v1",
+                        capsule_id,
+                        "manifest" if inner_path == "capsule-manifest.json" else inner_path,
+                    ]
+                )
+            elif relative_path.startswith("source/raw/"):
                 record_kind = "raw_payload"
                 record_id = path.name.removesuffix(".json.gz")
             else:

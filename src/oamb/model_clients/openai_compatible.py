@@ -155,6 +155,7 @@ class OpenAICompatibleModelClient:
                 pool=pool_timeout_seconds,
             ),
             transport=self._transport,
+            trust_env=False,
             follow_redirects=False,
         )
         self._accepting_operations = True

@@ -413,12 +413,14 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
             captured.update(kwargs)
 
     def record_memory_factory(**kwargs: object) -> object:
+        assert kwargs["recovery_parts"] == (tmp_path / "predecessor",)
         memory_factory = kwargs["memory_factory"]
         assert callable(memory_factory)
         memory_factory(object(), object())
         return SimpleNamespace(capsule_root=tmp_path / "capsule")
 
     monkeypatch.setattr(import_module(adapter_module), adapter_name, RecordingAdapter)
+    monkeypatch.setattr(live, "_validated_cell_internal_retry_count", lambda _cell: 0)
     monkeypatch.setattr(native_run, "run_native_vertical_slice", record_memory_factory)
     monkeypatch.setattr(live, "build_longmemeval_bundle", lambda _path, _selection: object())
     monkeypatch.setattr(
@@ -437,12 +439,14 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
         run_label="timeout-wiring",
         observed_at=NOW,
         code_revision="source-tree-test",
+        recovery_parts=(tmp_path / "predecessor",),
     )
 
     live.execute_live_cell(built)
 
     assert captured["read_timeout_seconds"] == 900.0
     assert captured["total_timeout_seconds"] == 900.0
+    assert captured["internal_retry_count"] == 0
     if cell_id == "openviking-lme6":
         assert captured["maximum_task_polls"] == 9_000
 
@@ -724,7 +728,7 @@ def test_lme60_cells_use_their_frozen_workload_and_producer_role(
     assert built.control.run_spec.case_manifest_hash == (
         "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
     )
-    assert built.control.budget.max_attempts == 9_259
+    assert built.control.budget.max_attempts == 26_575
     assert built.control.max_retries_per_operation == 2
     attempts_by_binding = {
         ceiling.role_binding_id: ceiling.max_attempts
@@ -732,8 +736,8 @@ def test_lme60_cells_use_their_frozen_workload_and_producer_role(
     }
     binding_by_role = dict(zip(built.role_ids, built.control.role_bindings, strict=True))
     assert attempts_by_binding == {
-        binding_by_role[producer_role_id].binding_id: 2_826,
-        binding_by_role["embedding"].binding_id: 2_886,
+        binding_by_role[producer_role_id].binding_id: 8_478,
+        binding_by_role["embedding"].binding_id: 8_538,
         binding_by_role["answer"].binding_id: 180,
         binding_by_role["judge"].binding_id: 180,
     }
@@ -1053,14 +1057,15 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
             environment=drifted_embedding,
         )
 
-    receipt["provider_internal_retries"] = 1
-    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-    with pytest.raises(live.LiveConfigurationError, match="resolved plan"):
-        live.validate_live_readiness_receipt(
-            plan=plan,
-            provider_runtime_directory=runtime,
-            environment=environment,
-        )
+    for invalid in (None, True, False, 1):
+        receipt["provider_internal_retries"] = invalid
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        with pytest.raises(live.LiveConfigurationError, match="resolved plan"):
+            live.validate_live_readiness_receipt(
+                plan=plan,
+                provider_runtime_directory=runtime,
+                environment=environment,
+            )
 
 
 def test_live_readiness_rejects_bound_service_receipt_with_stale_attestation(

@@ -66,6 +66,26 @@ read_env_value() {
         "$env_file"
 }
 
+# Derive the producer-only application proxy bypass from the canonical LLM endpoint.
+derive_llm_no_proxy() {
+    llm_endpoint=$1
+    case "$llm_endpoint" in
+        http://*|https://*) ;;
+        *) return 1 ;;
+    esac
+    llm_authority=${llm_endpoint#*://}
+    llm_authority=${llm_authority%%/*}
+    case "$llm_authority" in
+        ""|*@*|*','*|*' '*|*'['*|*']'*) return 1 ;;
+    esac
+    llm_host=${llm_authority%%:*}
+    case "$llm_host" in
+        ""|.*|*.|*..*|*[!A-Za-z0-9.-]*) return 1 ;;
+    esac
+    printf '127.0.0.1,localhost,host.docker.internal,%s\n' "$llm_host"
+    unset llm_endpoint llm_authority llm_host
+}
+
 # Plan-derived non-secret values must be exported by the frozen-plan loader.
 # They never fall back to the private dotenv file.
 read_runtime_env_value() {

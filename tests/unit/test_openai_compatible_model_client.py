@@ -191,6 +191,29 @@ def _client(
     )
 
 
+def test_model_client_explicitly_disables_environment_proxy_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    original = httpx.AsyncClient
+
+    class RecordingClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", RecordingClient)
+    try:
+        OpenAICompatibleModelClient(
+            store=CapturingStore(),
+            base_url="https://api.deepseek.com",
+            api_key="secret",
+            role_binding=_binding(),
+        )
+    finally:
+        monkeypatch.setattr(httpx, "AsyncClient", original)
+    assert captured["trust_env"] is False
+
+
 @pytest.mark.asyncio
 async def test_answer_omits_output_ceiling_and_seals_raw_usage() -> None:
     calls: list[httpx.Request] = []

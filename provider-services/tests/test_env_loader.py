@@ -10,6 +10,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EnvLoaderTests(unittest.TestCase):
+    def test_llm_no_proxy_is_derived_from_the_single_endpoint_host(self) -> None:
+        command = '. "$1"; derive_llm_no_proxy "$2"'
+        result = subprocess.run(
+            ["sh", "-c", command, "sh", str(ROOT / "lib" / "env.sh"), "https://api.deepseek.com/v1"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.stdout,
+            "127.0.0.1,localhost,host.docker.internal,api.deepseek.com\n",
+        )
+
+    def test_llm_no_proxy_rejects_ambiguous_or_injectable_endpoints(self) -> None:
+        command = '. "$1"; derive_llm_no_proxy "$2"'
+        for endpoint in (
+            "change-me",
+            "https://user@example.com/v1",
+            "https://example.com,evil/v1",
+            "https://example.com bad/v1",
+            "https:///v1",
+        ):
+            with self.subTest(endpoint=endpoint):
+                result = subprocess.run(
+                    ["sh", "-c", command, "sh", str(ROOT / "lib" / "env.sh"), endpoint],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+
     def test_file_mode_ignores_failed_stat_stdout_before_portable_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

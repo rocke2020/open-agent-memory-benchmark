@@ -63,6 +63,9 @@ from oamb.contracts.evidence import (
     CaseEvaluationDisposition,
     CaseRecordV3,
     CloseErrorRecord,
+    HistoryAttemptRecord,
+    HistoryRetryCarryRecord,
+    HistoryRetryEvent,
     InfrastructureRetryEvent,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
@@ -79,6 +82,7 @@ from oamb.contracts.ids import (
     case_occurrence_id,
     ingestion_occurrence_id,
 )
+from oamb.contracts.ingestion_failures import classify_settled_ingestion_failure
 from oamb.contracts.ports import NativeEvidenceCandidate
 from oamb.contracts.specifications import (
     INFRASTRUCTURE_MAX_TOTAL_RETRIES,
@@ -273,6 +277,8 @@ def _load_native_capsule(root: Path) -> _NativeCapsuleSnapshot:
                 failures.append(entry.relative_path)
                 continue
             documents[entry.relative_path] = content
+            if entry.record_kind == "embedded_part_file":
+                continue
             if entry.record_kind == "raw_payload":
                 try:
                     payload = gzip.decompress(content) if path.name.endswith(".gz") else content
@@ -339,6 +345,12 @@ def _parse_native_contract(document: dict[str, Any], content: bytes) -> BaseMode
         return IngestionPlanRecordV3.model_validate_json(content)
     if identity == ("infrastructure_retry_event", 1):
         return InfrastructureRetryEvent.model_validate_json(content)
+    if identity == ("history_attempt_record", 1):
+        return HistoryAttemptRecord.model_validate_json(content)
+    if identity == ("history_retry_event", 1):
+        return HistoryRetryEvent.model_validate_json(content)
+    if identity == ("history_retry_carry_record", 1):
+        return HistoryRetryCarryRecord.model_validate_json(content)
     if identity == ("occurrence_claim_record", 1):
         return OccurrenceClaimRecord.model_validate_json(content)
     if identity == ("run_lease_record", 1):
@@ -393,6 +405,9 @@ def _source_record_id(document: dict[str, Any]) -> str | None:
         "close_error_record": "close_error_id",
         "ingestion_plan_record": "ingestion_occurrence_id",
         "infrastructure_retry_event": "retry_event_id",
+        "history_attempt_record": "history_attempt_id",
+        "history_retry_event": "history_retry_event_id",
+        "history_retry_carry_record": "carry_record_id",
         "occurrence_claim_record": "claim_id",
         "run_lease_record": "lease_record_hash",
         "run_record": "run_id",
@@ -647,13 +662,24 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         )
         plan_occurrences: list[str] = []
         case_occurrences: list[str] = []
+        manifest_history_attempts = _contracts(snapshot, HistoryAttemptRecord)
         if inventory_closed:
             for manifest_plan in selected_manifest_plans:
                 plan_record = plan_records_by_id[manifest_plan.ingestion_plan_id]
-                plan_occurrence = ingestion_occurrence_id(
-                    manifest.run_id,
-                    plan_record.memory_system_id,
-                    manifest_plan.ingestion_plan_id,
+                selected_ready_attempts = tuple(
+                    item
+                    for item in manifest_history_attempts
+                    if item.ingestion_plan_id == manifest_plan.ingestion_plan_id
+                    and item.status == "ready"
+                )
+                plan_occurrence = (
+                    selected_ready_attempts[0].ingestion_occurrence_id
+                    if len(selected_ready_attempts) == 1
+                    else ingestion_occurrence_id(
+                        manifest.run_id,
+                        plan_record.memory_system_id,
+                        manifest_plan.ingestion_plan_id,
+                    )
                 )
                 plan_occurrences.append(plan_occurrence)
                 planned_case_occurrences = tuple(
@@ -692,7 +718,39 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         issues.append(_issue(rule_id, manifest.capsule_id, "native-run-terminal-mismatch"))
     else:
         run = runs[0]
-        expected_plan_ids = set(expected_plan_occurrence_ids)
+        local_history_attempts = _contracts(snapshot, HistoryAttemptRecord)
+        try:
+            carried_history_attempts, carried_history_events = _carried_history_records(snapshot)
+        except ValueError:
+            carried_history_attempts, carried_history_events = (), ()
+            issues.append(_issue(rule_id, "history-carry", "history-carry-source-mismatch"))
+        history_attempts = (*carried_history_attempts, *local_history_attempts)
+        history_issues = _history_closure_issues(
+            snapshot,
+            plans,
+            history_attempts,
+            (*carried_history_events, *_contracts(snapshot, HistoryRetryEvent)),
+            frozenset(item.history_attempt_id for item in local_history_attempts),
+        )
+        issues.extend(history_issues)
+        issues.extend(_history_carry_issues(snapshot))
+        expected_plan_ids = (
+            {item.ingestion_occurrence_id for item in local_history_attempts}
+            if local_history_attempts
+            else set(expected_plan_occurrence_ids)
+        )
+        expected_history_sequence = tuple(
+            item.ingestion_occurrence_id
+            for manifest_plan in case_manifests[0].ingestion_plans
+            for item in sorted(
+                (
+                    candidate
+                    for candidate in local_history_attempts
+                    if candidate.ingestion_plan_id == manifest_plan.ingestion_plan_id
+                ),
+                key=lambda candidate: candidate.history_attempt_ordinal,
+            )
+        )
         expected_case_ids = set(expected_case_occurrence_ids)
         if (
             run.run_id != manifest.run_id
@@ -700,6 +758,8 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
             or run.state != RunState.FINALIZED
             or len(run.ingestion_occurrence_ids) != len(expected_plan_ids)
             or set(run.ingestion_occurrence_ids) != expected_plan_ids
+            or bool(local_history_attempts)
+            and run.ingestion_occurrence_ids != expected_history_sequence
             or len(run.case_occurrence_ids) != len(expected_case_ids)
             or set(run.case_occurrence_ids) != expected_case_ids
         ):
@@ -853,6 +913,303 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
     return tuple(issues)
 
 
+def _history_closure_issues(
+    snapshot: _NativeCapsuleSnapshot,
+    plans: tuple[NativePlanRecord, ...],
+    attempts: tuple[HistoryAttemptRecord, ...],
+    events: tuple[HistoryRetryEvent, ...],
+    local_attempt_ids: frozenset[str],
+) -> tuple[ValidationIssue, ...]:
+    if not attempts:
+        return ()
+    rule_id = "native.manifest-schema.v1"
+    issues: list[ValidationIssue] = []
+    operation_attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
+    events_by_id = {item.history_retry_event_id: item for item in events}
+    attempts_by_id = {item.history_attempt_id: item for item in attempts}
+    plans_by_id = {item.ingestion_plan_id: item for item in plans}
+    if len(events_by_id) != len(events) or len(
+        {item.history_attempt_id for item in attempts}
+    ) != len(attempts):
+        return (_issue(rule_id, "history", "history-record-identity-duplicate"),)
+    for event in events:
+        failed = attempts_by_id.get(event.failed_history_attempt_id)
+        successor = next(
+            (
+                item
+                for item in attempts
+                if item.previous_retry_event_id == event.history_retry_event_id
+            ),
+            None,
+        )
+        if (
+            failed is None
+            or failed.status != "retryable_failed_settled"
+            or failed.history_attempt_ordinal != event.failed_history_attempt_ordinal
+            or failed.ingestion_plan_id != event.ingestion_plan_id
+            or failed.retry_policy_hash != event.retry_policy_hash
+            or failed.max_retries_per_operation != event.max_retries_per_operation
+            or event.retry_scheduled
+            and successor is not None
+            and successor.ingestion_occurrence_id != event.successor_ingestion_occurrence_id
+            or not event.retry_scheduled
+            and successor is not None
+        ):
+            issues.append(
+                _issue(rule_id, event.history_retry_event_id, "history-retry-event-mismatch")
+            )
+    for plan_id in {item.ingestion_plan_id for item in attempts}:
+        chain = tuple(
+            sorted(
+                (item for item in attempts if item.ingestion_plan_id == plan_id),
+                key=lambda item: item.history_attempt_ordinal,
+            )
+        )
+        first = chain[0]
+        if tuple(item.history_attempt_ordinal for item in chain) != tuple(
+            range(1, len(chain) + 1)
+        ) or any(
+            (
+                item.memory_system_id,
+                item.runtime_binding_hash,
+                item.retry_policy_hash,
+                item.max_retries_per_operation,
+                item.history_input_hash,
+            )
+            != (
+                first.memory_system_id,
+                first.runtime_binding_hash,
+                first.retry_policy_hash,
+                first.max_retries_per_operation,
+                first.history_input_hash,
+            )
+            for item in chain
+        ):
+            issues.append(_issue(rule_id, plan_id, "history-attempt-chain-mismatch"))
+        for previous, current in zip(chain, chain[1:], strict=False):
+            link_event = events_by_id.get(current.previous_retry_event_id or "")
+            if (
+                link_event is None
+                or not link_event.retry_scheduled
+                or link_event.failed_history_attempt_id != previous.history_attempt_id
+                or link_event.successor_ingestion_occurrence_id != current.ingestion_occurrence_id
+                or link_event.successor_execution_run_id != current.execution_run_id
+            ):
+                issues.append(
+                    _issue(rule_id, current.history_attempt_id, "history-retry-link-mismatch")
+                )
+            if current.history_attempt_id not in local_attempt_ids:
+                # Embedded parts validate their own claim payloads against their local run.
+                continue
+            claim = _raw_object(snapshot, current.admission_claim_raw_ref)
+            fixture_claim = _matches(
+                claim,
+                operation="fixture_history_successor_admission",
+                retry_event_id=(
+                    link_event.history_retry_event_id if link_event is not None else None
+                ),
+                retry_event_sha256=(
+                    canonical_sha256(link_event) if link_event is not None else None
+                ),
+                ingestion_plan_id=plan_id,
+                successor_ingestion_occurrence_id=current.ingestion_occurrence_id,
+                claimant_run_id=current.run_id,
+            )
+            lifecycle_claim = bool(
+                claim is not None
+                and claim.get("schema_name") == "oamb_history_successor_claim"
+                and claim.get("schema_version") == 1
+                and claim.get("retry_event_id")
+                == (link_event.history_retry_event_id if link_event is not None else None)
+                and claim.get("retry_event_sha256")
+                == (canonical_sha256(link_event) if link_event is not None else None)
+                and claim.get("ingestion_plan_id") == plan_id
+                and claim.get("successor_ingestion_occurrence_id")
+                == current.ingestion_occurrence_id
+                and claim.get("claimant_run_id") == current.run_id
+                and claim.get("claimant_capsule_id") == current.run_id
+            )
+            if not fixture_claim and not lifecycle_claim:
+                issues.append(
+                    _issue(rule_id, current.history_attempt_id, "history-admission-claim-mismatch")
+                )
+        ready = tuple(item for item in chain if item.status == "ready")
+        local_ready = tuple(item for item in ready if item.history_attempt_id in local_attempt_ids)
+        plan = plans_by_id.get(plan_id)
+        if local_ready and (
+            len(ready) != 1
+            or len(local_ready) != 1
+            or plan is None
+            or local_ready[0].ingestion_occurrence_id != plan.ingestion_occurrence_id
+            or local_ready[0].ingestion_plan_record_hash != canonical_sha256(plan)
+        ):
+            issues.append(_issue(rule_id, plan_id, "history-ready-selection-mismatch"))
+        if not local_ready and plan is not None:
+            issues.append(_issue(rule_id, plan_id, "history-ready-selection-mismatch"))
+        for history_attempt in chain:
+            if history_attempt.history_attempt_id not in local_attempt_ids:
+                continue
+            if any(
+                reference not in snapshot.raw_payloads
+                for reference in history_attempt.scope_raw_refs
+            ):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        history_attempt.history_attempt_id,
+                        "history-scope-evidence-missing",
+                    )
+                )
+            if any(
+                reference not in snapshot.raw_payloads
+                for reference in history_attempt.settlement_evidence_refs
+            ):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        history_attempt.history_attempt_id,
+                        "history-settlement-evidence-missing",
+                    )
+                )
+            if any(
+                operation_attempts.get(attempt_id) is None
+                or operation_attempts[attempt_id].parent_id
+                != history_attempt.ingestion_occurrence_id
+                for attempt_id in history_attempt.operation_attempt_ids
+            ):
+                issues.append(
+                    _issue(
+                        rule_id,
+                        history_attempt.history_attempt_id,
+                        "history-operation-inventory-mismatch",
+                    )
+                )
+            if history_attempt.status == "retryable_failed_settled":
+                terminal = operation_attempts.get(history_attempt.terminal_failure_attempt_id or "")
+                raw_ref = terminal.raw_error_ref if terminal is not None else None
+                raw = snapshot.raw_payloads.get(raw_ref or "")
+                classified = (
+                    classify_settled_ingestion_failure(
+                        settlement_basis=history_attempt.settlement_basis or "",
+                        status_code=history_attempt.settlement_status_code or 0,
+                        raw_response_bytes=raw or b"",
+                        internal_retry_count=history_attempt.internal_retry_count,
+                        expected_task_id=history_attempt.settlement_task_id,
+                        expected_session_id=history_attempt.settlement_session_id,
+                    )
+                    if raw is not None
+                    else None
+                )
+                if (
+                    raw_ref not in history_attempt.settlement_evidence_refs
+                    or classified != history_attempt.failure_kind
+                ):
+                    issues.append(
+                        _issue(
+                            rule_id,
+                            history_attempt.history_attempt_id,
+                            "history-failure-classification-mismatch",
+                        )
+                    )
+    return tuple(issues)
+
+
+def _carried_history_records(
+    snapshot: _NativeCapsuleSnapshot,
+    seen: dict[str, str] | None = None,
+) -> tuple[tuple[HistoryAttemptRecord, ...], tuple[HistoryRetryEvent, ...]]:
+    if seen is None:
+        seen = {}
+    attempts: list[HistoryAttemptRecord] = []
+    events: list[HistoryRetryEvent] = []
+    for carry in _contracts(snapshot, HistoryRetryCarryRecord):
+        for binding in carry.source_part_bindings:
+            embedded = snapshot.root / binding.embedded_root
+            embedded_snapshot = _load_native_capsule(embedded)
+            manifest_hash = hashlib.sha256(embedded_snapshot.manifest_bytes).hexdigest()
+            previous_hash = seen.get(binding.capsule_id)
+            if previous_hash is not None:
+                if previous_hash != manifest_hash:
+                    raise ValueError("carried history capsule identity collides")
+                continue
+            seen[binding.capsule_id] = manifest_hash
+            attempts.extend(_contracts(embedded_snapshot, HistoryAttemptRecord))
+            events.extend(_contracts(embedded_snapshot, HistoryRetryEvent))
+            nested_attempts, nested_events = _carried_history_records(embedded_snapshot, seen)
+            attempts.extend(nested_attempts)
+            events.extend(nested_events)
+    return tuple(attempts), tuple(events)
+
+
+def _history_carry_issues(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
+    carries = _contracts(snapshot, HistoryRetryCarryRecord)
+    if not carries:
+        return ()
+    rule_id = "native.manifest-schema.v1"
+    if len(carries) != 1 or snapshot.manifest is None:
+        return (_issue(rule_id, "history-carry", "history-carry-inventory-mismatch"),)
+    carry = carries[0]
+    partitions = _contracts(snapshot, CasePartitionSpec)
+    if (
+        carry.run_id != snapshot.manifest.run_id
+        or len(partitions) != 1
+        or carry.retry_policy_hash != partitions[0].retry_policy_hash
+        or {item.ingestion_plan_id for item in carry.allowances}
+        != set(partitions[0].selected_ingestion_plan_ids)
+    ):
+        return (_issue(rule_id, carry.carry_record_id, "history-carry-binding-mismatch"),)
+    for binding in carry.source_part_bindings:
+        embedded = snapshot.root / binding.embedded_root
+        try:
+            manifest_bytes = read_regular_file(embedded / "capsule-manifest.json")
+            manifest = CapsuleManifest.model_validate_json(manifest_bytes)
+        except Exception:
+            return (_issue(rule_id, binding.capsule_id, "history-carry-source-missing"),)
+        if (
+            manifest.capsule_id != binding.capsule_id
+            or manifest.run_id != binding.run_id
+            or hashlib.sha256(manifest_bytes).hexdigest() != binding.manifest_sha256
+            or validate_partition_capsule(embedded).disposition != ValidationDisposition.VALIDATED
+        ):
+            return (_issue(rule_id, binding.capsule_id, "history-carry-source-mismatch"),)
+    try:
+        predecessor_attempts, predecessor_events = _carried_history_records(snapshot)
+    except ValueError:
+        return (_issue(rule_id, carry.carry_record_id, "history-carry-source-mismatch"),)
+    events_by_id = {item.history_retry_event_id: item for item in predecessor_events}
+    attempts_by_id = {item.history_attempt_id: item for item in predecessor_attempts}
+    issues: list[ValidationIssue] = []
+    for allowance in carry.allowances:
+        group_attempts = tuple(
+            item
+            for item in predecessor_attempts
+            if item.ingestion_plan_id == allowance.ingestion_plan_id
+        )
+        if allowance.consumed_retries == 0:
+            closes = not group_attempts and allowance.execution_run_id == carry.run_id
+        else:
+            predecessor = attempts_by_id.get(allowance.predecessor_history_attempt_id or "")
+            event = events_by_id.get(allowance.previous_retry_event_id or "")
+            closes = bool(
+                predecessor is not None
+                and event is not None
+                and predecessor.status == "retryable_failed_settled"
+                and event.retry_scheduled
+                and event.failed_history_attempt_id == predecessor.history_attempt_id
+                and event.successor_execution_run_id == allowance.execution_run_id
+                and event.successor_history_attempt_ordinal
+                == allowance.next_history_attempt_ordinal
+                and allowance.consumed_retries == event.retry_ordinal
+                and max(item.history_attempt_ordinal for item in group_attempts)
+                == predecessor.history_attempt_ordinal
+            )
+        if not closes:
+            issues.append(
+                _issue(rule_id, allowance.ingestion_plan_id, "history-carry-allowance-mismatch")
+            )
+    return tuple(issues)
+
+
 def _infrastructure_retry_issues(
     snapshot: _NativeCapsuleSnapshot,
     attempts: dict[str, NativeAttemptRecord],
@@ -861,8 +1218,33 @@ def _infrastructure_retry_issues(
 ) -> tuple[ValidationIssue, ...]:
     rule_id = "native.manifest-schema.v1"
     events = _contracts(snapshot, InfrastructureRetryEvent)
+    expected_policy_hash = (
+        partitions[0].retry_policy_hash
+        if len(partitions) == 1
+        else INFRASTRUCTURE_RETRY_POLICY_HASH
+    )
+    histories = {
+        item.history_attempt_id: item for item in _contracts(snapshot, HistoryAttemptRecord)
+    }
+    history_exhausted = any(
+        not event.retry_scheduled
+        and len(runs) == 1
+        and event.run_id == runs[0].run_id
+        and event.retry_policy_hash == expected_policy_hash == INFRASTRUCTURE_RETRY_POLICY_HASH
+        and (history := histories.get(event.failed_history_attempt_id)) is not None
+        and history.run_id == event.run_id
+        and history.ingestion_plan_id == event.ingestion_plan_id
+        and history.status == "retryable_failed_settled"
+        and history.history_attempt_ordinal == event.failed_history_attempt_ordinal
+        and history.max_retries_per_operation == event.max_retries_per_operation
+        for event in _contracts(snapshot, HistoryRetryEvent)
+    )
     if not events:
-        if len(runs) == 1 and runs[0].state == RunState.INFRASTRUCTURE_BLOCKED:
+        if (
+            len(runs) == 1
+            and runs[0].state == RunState.INFRASTRUCTURE_BLOCKED
+            and not history_exhausted
+        ):
             return (
                 _issue(
                     rule_id,
@@ -872,11 +1254,6 @@ def _infrastructure_retry_issues(
             )
         return ()
     usage_by_id = {usage.usage_record_id: usage for usage in _token_usage_records(snapshot)}
-    expected_policy_hash = (
-        partitions[0].retry_policy_hash
-        if len(partitions) == 1
-        else INFRASTRUCTURE_RETRY_POLICY_HASH
-    )
     issues: list[ValidationIssue] = []
     by_attempt: dict[str, list[InfrastructureRetryEvent]] = {}
     supplier_call_ids: list[str] = []
@@ -986,6 +1363,7 @@ def _infrastructure_retry_issues(
             len(runs) != 1
             or runs[0].state != RunState.INFRASTRUCTURE_BLOCKED
             or any(not event.retry_scheduled for event in events)
+            or history_exhausted
         )
     )
     if not run_retry_closes:

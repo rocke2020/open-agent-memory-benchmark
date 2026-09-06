@@ -71,6 +71,8 @@ def doctor_command(
         f"retries={plan.execution.max_retries_per_operation}; "
         f"operation timeout={plan.execution.operation_timeout_seconds}s"
     )
+    typer.echo(f"ingestion retry unit: {plan.execution.ingestion_retry_unit}")
+    typer.echo(f"ingestion recovery strategy: {plan.execution.ingestion_recovery_strategy}")
     typer.echo(
         "per-cell authorization: "
         f"{plan.execution.per_cell_max_operation_attempt_count} calls; "
@@ -421,6 +423,7 @@ def run_command(
                         observed_at=observed_at,
                         code_revision=code_revision,
                         requested_case_manifest_entry_ids=(recovery_case_ids or selected_case_ids),
+                        recovery_parts=tuple(recover_from or ()),
                     )
                 )
         if recover_from:

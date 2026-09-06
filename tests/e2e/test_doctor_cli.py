@@ -155,8 +155,10 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
     )
     assert "rerank=false" not in (output / "resolved-plan.json").read_text(encoding="utf-8")
     assert document["execution"] == {
-        "comparison_max_operation_attempt_count": 10_641,
-        "comparison_max_owner_authorization_count": 27_777,
+        "comparison_max_operation_attempt_count": 28_677,
+        "comparison_max_owner_authorization_count": 79_725,
+        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild",
+        "ingestion_retry_unit": "whole_history_through_ready_projection",
         "max_parallel_datasets": 1,
         "max_parallel_history_ingestions_per_provider": 2,
         "max_parallel_providers_per_dataset": 3,
@@ -165,9 +167,9 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         "operation_timeout_seconds": 900,
         "per_cell_base_operation_count": 3_307,
         "per_cell_base_owner_authorization_count": 9_019,
-        "per_cell_max_operation_attempt_count": 3_547,
-        "per_cell_max_owner_authorization_count": 9_259,
-        "per_cell_retry_eligible_operation_count": 120,
+        "per_cell_max_operation_attempt_count": 9_559,
+        "per_cell_max_owner_authorization_count": 26_575,
+        "per_cell_retry_eligible_operation_count": 3_126,
     }
     assert all(cell["recipient"] for cell in document["cells"])
     assert all(role["recipient"] for role in document["model_roles"])
@@ -185,8 +187,10 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
     assert document["dataset"]["selection"] == "lme6"
     assert document["decision"] is None
     assert document["execution"] == {
-        "comparison_max_operation_attempt_count": 1_119,
-        "comparison_max_owner_authorization_count": 2_937,
+        "comparison_max_operation_attempt_count": 3_027,
+        "comparison_max_owner_authorization_count": 8_445,
+        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild",
+        "ingestion_retry_unit": "whole_history_through_ready_projection",
         "max_parallel_datasets": 1,
         "max_parallel_history_ingestions_per_provider": 3,
         "max_parallel_providers_per_dataset": 3,
@@ -195,9 +199,9 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
         "operation_timeout_seconds": 900,
         "per_cell_base_operation_count": 349,
         "per_cell_base_owner_authorization_count": 955,
-        "per_cell_max_operation_attempt_count": 373,
-        "per_cell_max_owner_authorization_count": 979,
-        "per_cell_retry_eligible_operation_count": 12,
+        "per_cell_max_operation_attempt_count": 1_009,
+        "per_cell_max_owner_authorization_count": 2_815,
+        "per_cell_retry_eligible_operation_count": 330,
     }
     assert tuple(cell["cell_id"] for cell in document["cells"]) == (
         "hindsight-lme6",
@@ -224,8 +228,10 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "recipient=llm-api" in result.output
     assert "decision: accuracy delta >= 0.05 and exact McNemar p <= 0.05" in result.output
     assert "evaluation controls: retries=2; operation timeout=900s" in result.output
-    assert "per-cell authorization: 3547 calls; 9259 owner allocations" in result.output
-    assert "three-cell authorization: 10641 calls; 27777 owner allocations" in result.output
+    assert "ingestion retry unit: whole_history_through_ready_projection" in result.output
+    assert "ingestion recovery strategy: fresh_scope_full_history_rebuild" in result.output
+    assert "per-cell authorization: 9559 calls; 26575 owner allocations" in result.output
+    assert "three-cell authorization: 28677 calls; 79725 owner allocations" in result.output
     assert "credential values: [REDACTED]" in result.output
     assert "api_key" not in result.output.lower()
     assert "authorization: bearer" not in result.output.lower()

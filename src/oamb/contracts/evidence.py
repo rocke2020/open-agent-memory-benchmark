@@ -18,8 +18,14 @@ from .base import (
     StrictContract,
     UtcDateTime,
 )
-from .ids import canonical_sha256
+from .ids import canonical_sha256, ingestion_occurrence_id
+from .ingestion_failures import (
+    HINDSIGHT_SETTLEMENT_BASIS,
+    MEM0_SETTLEMENT_BASIS,
+    OPENVIKING_SETTLEMENT_BASIS,
+)
 from .specifications import (
+    INFRASTRUCTURE_RETRY_BACKOFF_SECONDS,
     MEMORY_CONFORMANCE_ROUTE_STAGES,
     BudgetScopeKindV2,
     BudgetScopeKindV3,
@@ -1321,6 +1327,259 @@ class CapsuleCompositionPartBinding(StrictContract):
         )
         if self.part_binding_hash != expected:
             raise ValueError("composition part binding hash does not match its fields")
+        return self
+
+
+def history_attempt_id(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-history-attempt-initial-v1", fields])
+
+
+class HistoryAttemptRecord(StrictContract):
+    schema_name: Literal["history_attempt_record"] = "history_attempt_record"
+    schema_version: Literal[1] = 1
+    history_attempt_id: Sha256
+    run_id: NonEmptyStr
+    execution_run_id: NonEmptyStr
+    ingestion_plan_id: Sha256
+    history_attempt_ordinal: PositiveInt
+    ingestion_occurrence_id: Sha256
+    memory_system_id: NonEmptyStr
+    runtime_binding_hash: Sha256
+    retry_policy_hash: Sha256
+    max_retries_per_operation: NonNegativeInt
+    history_input_hash: Sha256
+    scope_id: NonEmptyStr | None
+    scope_raw_refs: tuple[Sha256, ...]
+    previous_retry_event_id: Sha256 | None
+    admission_claim_raw_ref: Sha256 | None
+    status: Literal["ready", "retryable_failed_settled", "failed", "unknown", "cancelled"]
+    operation_attempt_ids: tuple[Sha256, ...]
+    terminal_failure_attempt_id: Sha256 | None
+    settlement_basis: NonEmptyStr | None
+    settlement_evidence_refs: tuple[Sha256, ...]
+    settlement_status_code: int | None
+    settlement_task_id: NonEmptyStr | None
+    settlement_session_id: NonEmptyStr | None
+    internal_retry_count: NonNegativeInt | None
+    failure_kind: NonEmptyStr | None
+    ingestion_plan_record_hash: Sha256 | None
+    started_at: UtcDateTime
+    ended_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def history_attempt_is_closed(self) -> Self:
+        if self.max_retries_per_operation not in {0, 1, 2}:
+            raise ValueError("history attempt retry limit must be 0, 1, or 2")
+        if self.history_attempt_ordinal > self.max_retries_per_operation + 1:
+            raise ValueError("history attempt ordinal exceeds its retry allowance")
+        if self.history_attempt_ordinal == 1:
+            if self.previous_retry_event_id is not None or self.admission_claim_raw_ref is not None:
+                raise ValueError("first history attempt cannot name retry admission evidence")
+        elif self.previous_retry_event_id is None or self.admission_claim_raw_ref is None:
+            raise ValueError("successor history attempt requires retry event and admission claim")
+        expected_occurrence = ingestion_occurrence_id(
+            self.execution_run_id,
+            self.memory_system_id,
+            self.ingestion_plan_id,
+            history_attempt_ordinal=self.history_attempt_ordinal,
+        )
+        if self.ingestion_occurrence_id != expected_occurrence:
+            raise ValueError("history attempt ingestion occurrence identity does not match")
+        if len(set(self.operation_attempt_ids)) != len(self.operation_attempt_ids):
+            raise ValueError("history attempt operation IDs must be unique")
+        for references in (self.scope_raw_refs, self.settlement_evidence_refs):
+            if len(set(references)) != len(references):
+                raise ValueError("history attempt evidence references must be unique")
+        if self.ended_at < self.started_at:
+            raise ValueError("history attempt end precedes its start")
+        if self.status == "ready":
+            if self.scope_id is None or self.ingestion_plan_record_hash is None:
+                raise ValueError("ready history attempt requires scope and ingestion plan record")
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.terminal_failure_attempt_id,
+                        self.settlement_basis,
+                        self.settlement_status_code,
+                        self.settlement_task_id,
+                        self.settlement_session_id,
+                        self.internal_retry_count,
+                        self.failure_kind,
+                    )
+                )
+                or self.settlement_evidence_refs
+            ):
+                raise ValueError("ready history attempt cannot retain terminal failure fields")
+        if self.status == "retryable_failed_settled":
+            if (
+                self.terminal_failure_attempt_id not in self.operation_attempt_ids
+                or self.settlement_basis is None
+                or not self.settlement_evidence_refs
+                or self.settlement_status_code is None
+                or self.internal_retry_count != 0
+                or self.failure_kind is None
+                or self.ingestion_plan_record_hash is not None
+            ):
+                raise ValueError("retryable failed history lacks settled zero-retry evidence")
+            expected_basis = {
+                "hindsight": HINDSIGHT_SETTLEMENT_BASIS,
+                "mem0": MEM0_SETTLEMENT_BASIS,
+                "openviking": OPENVIKING_SETTLEMENT_BASIS,
+            }.get(self.memory_system_id)
+            if self.settlement_basis != expected_basis:
+                raise ValueError("retryable failed history has the wrong provider settlement basis")
+            task_session = (self.settlement_task_id, self.settlement_session_id)
+            if self.memory_system_id == "openviking":
+                if any(value is None for value in task_session):
+                    raise ValueError(
+                        "OpenViking settled history requires task and session identity"
+                    )
+            elif any(value is not None for value in task_session):
+                raise ValueError(
+                    "non-OpenViking settled history cannot name task or session identity"
+                )
+        elif (
+            any(
+                value is not None
+                for value in (
+                    self.settlement_basis,
+                    self.settlement_status_code,
+                    self.settlement_task_id,
+                    self.settlement_session_id,
+                    self.internal_retry_count,
+                    self.failure_kind,
+                )
+            )
+            or self.settlement_evidence_refs
+        ):
+            raise ValueError("non-settled history cannot retain settlement fields")
+        expected_id = history_attempt_id(
+            self.model_dump(mode="python", exclude={"history_attempt_id"})
+        )
+        if self.history_attempt_id != expected_id:
+            raise ValueError("history attempt identity does not match its fields")
+        return self
+
+
+def history_retry_event_id(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-history-retry-event-initial-v1", fields])
+
+
+class HistoryRetryEvent(StrictContract):
+    schema_name: Literal["history_retry_event"] = "history_retry_event"
+    schema_version: Literal[1] = 1
+    history_retry_event_id: Sha256
+    run_id: NonEmptyStr
+    ingestion_plan_id: Sha256
+    failed_history_attempt_id: Sha256
+    failed_history_attempt_ordinal: PositiveInt
+    retry_ordinal: PositiveInt
+    retry_scheduled: bool
+    successor_ingestion_occurrence_id: Sha256 | None
+    successor_execution_run_id: NonEmptyStr | None
+    successor_history_attempt_ordinal: PositiveInt | None
+    retry_policy_hash: Sha256
+    max_retries_per_operation: NonNegativeInt
+    backoff_seconds: PositiveInt | None
+    observed_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def retry_event_is_closed(self) -> Self:
+        if self.max_retries_per_operation not in {0, 1, 2}:
+            raise ValueError("history retry event limit must be 0, 1, or 2")
+        if self.retry_ordinal != self.failed_history_attempt_ordinal:
+            raise ValueError("history retry ordinal must equal the failed attempt ordinal")
+        successor_values = (
+            self.successor_ingestion_occurrence_id,
+            self.successor_execution_run_id,
+            self.successor_history_attempt_ordinal,
+        )
+        if self.retry_scheduled:
+            if self.retry_ordinal > self.max_retries_per_operation:
+                raise ValueError("scheduled history retry exceeds its allowance")
+            if any(value is None for value in successor_values):
+                raise ValueError("scheduled history retry requires successor identity")
+            if self.successor_history_attempt_ordinal != self.failed_history_attempt_ordinal + 1:
+                raise ValueError("scheduled history retry successor ordinal is invalid")
+            expected_backoff = INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[self.retry_ordinal - 1]
+            if self.backoff_seconds != expected_backoff:
+                raise ValueError("scheduled history retry backoff is invalid")
+        elif (
+            self.failed_history_attempt_ordinal != self.max_retries_per_operation + 1
+            or any(value is not None for value in successor_values)
+            or self.backoff_seconds is not None
+        ):
+            raise ValueError("exhausted history retry event must omit successor and wait")
+        expected_id = history_retry_event_id(
+            self.model_dump(mode="python", exclude={"history_retry_event_id"})
+        )
+        if self.history_retry_event_id != expected_id:
+            raise ValueError("history retry event identity does not match its fields")
+        return self
+
+
+class HistoryRetryAllowance(StrictContract):
+    schema_name: Literal["history_retry_allowance"] = "history_retry_allowance"
+    schema_version: Literal[1] = 1
+    ingestion_plan_id: Sha256
+    next_history_attempt_ordinal: PositiveInt
+    execution_run_id: NonEmptyStr
+    previous_retry_event_id: Sha256 | None
+    predecessor_history_attempt_id: Sha256 | None
+    consumed_retries: NonNegativeInt
+
+    @model_validator(mode="after")
+    def allowance_is_closed(self) -> Self:
+        if self.consumed_retries not in {0, 1, 2}:
+            raise ValueError("history retry allowance consumed count must be 0, 1, or 2")
+        if self.next_history_attempt_ordinal != self.consumed_retries + 1:
+            raise ValueError("history retry allowance next ordinal does not match consumption")
+        retry_references = (self.previous_retry_event_id, self.predecessor_history_attempt_id)
+        if self.consumed_retries == 0 and any(value is not None for value in retry_references):
+            raise ValueError("unused history retry allowance cannot name predecessor evidence")
+        if self.consumed_retries > 0 and any(value is None for value in retry_references):
+            raise ValueError("consumed history retry allowance requires predecessor evidence")
+        return self
+
+
+def history_retry_carry_id(fields: Mapping[str, Any]) -> str:
+    return canonical_sha256(["oamb-history-retry-carry-initial-v1", fields])
+
+
+class HistoryRetryCarryRecord(StrictContract):
+    schema_name: Literal["history_retry_carry_record"] = "history_retry_carry_record"
+    schema_version: Literal[1] = 1
+    carry_record_id: Sha256
+    run_id: NonEmptyStr
+    source_part_bindings: tuple[CapsuleCompositionPartBinding, ...]
+    allowances: tuple[HistoryRetryAllowance, ...]
+    retry_policy_hash: Sha256
+    max_retries_per_operation: NonNegativeInt
+
+    @model_validator(mode="after")
+    def carry_is_closed(self) -> Self:
+        if self.max_retries_per_operation not in {0, 1, 2}:
+            raise ValueError("history retry carry limit must be 0, 1, or 2")
+        capsule_ids = tuple(item.capsule_id for item in self.source_part_bindings)
+        plan_ids = tuple(item.ingestion_plan_id for item in self.allowances)
+        if not capsule_ids or capsule_ids != tuple(sorted(capsule_ids)):
+            raise ValueError("history retry carry source parts must be non-empty canonical order")
+        if len(set(capsule_ids)) != len(capsule_ids):
+            raise ValueError("history retry carry source parts must be unique")
+        if (
+            not plan_ids
+            or plan_ids != tuple(sorted(plan_ids))
+            or len(set(plan_ids)) != len(plan_ids)
+        ):
+            raise ValueError("history retry carry allowances must be unique canonical order")
+        if any(item.consumed_retries > self.max_retries_per_operation for item in self.allowances):
+            raise ValueError("history retry carry allowance exceeds policy")
+        expected_id = history_retry_carry_id(
+            self.model_dump(mode="python", exclude={"carry_record_id"})
+        )
+        if self.carry_record_id != expected_id:
+            raise ValueError("history retry carry identity does not match its fields")
         return self
 
 

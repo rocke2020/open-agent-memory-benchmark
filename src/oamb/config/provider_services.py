@@ -44,6 +44,7 @@ class ProviderServiceProfileBinding:
     provider_project: str
     project_attestation_sha256: str
     profile_proof_manifest_sha256: str
+    internal_retry_count: int
     verified_at_utc: datetime
     exact_profile: ExactAdapterProfile
     adapter_profile: AdapterProfileDescriptor
@@ -492,6 +493,18 @@ def _semantic_error(filename: str) -> ProviderServiceBindingError:
     return ProviderServiceBindingError(f"provider proof semantic/model check failed: {filename}")
 
 
+def _valid_llm_no_proxy_proof(value: dict[str, object]) -> bool:
+    host = value.get("llm_base_url_host")
+    expected = f"127.0.0.1,localhost,host.docker.internal,{host}"
+    return (
+        isinstance(host, str)
+        and bool(host)
+        and re.fullmatch(r"[A-Za-z0-9.-]+", host) is not None
+        and value.get("NO_PROXY") == expected
+        and value.get("no_proxy") == expected
+    )
+
+
 def _validate_proof_semantics(
     filename: str,
     value: object,
@@ -512,12 +525,24 @@ def _validate_proof_semantics(
             and value.get("reasoning_effort") == expected_thinking_effort
         )
     elif filename == "hindsight-retry-config.json":
-        valid = value == {
+        expected = {
+            "llm_base_url_host": value.get("llm_base_url_host"),
             "llm_max_retries": 0,
+            "NO_PROXY": value.get("NO_PROXY"),
+            "no_proxy": value.get("no_proxy"),
             "openai_sdk_max_retries": 0,
             "retain_llm_max_retries": 0,
             "worker_max_retries": 0,
         }
+        valid = (
+            set(value) == set(expected)
+            and _valid_llm_no_proxy_proof(value)
+            and all(
+                type(value[key]) is int and value[key] == expected[key]
+                for key in expected
+                if key.endswith("_retries")
+            )
+        )
     elif filename == "mem0-openapi.json":
         paths = value.get("paths")
         valid = isinstance(paths, dict) and all(path in paths for path in ("/memories", "/search"))
@@ -559,7 +584,20 @@ def _validate_proof_semantics(
             and value.get("reranker") is None
         )
     elif filename == "mem0-retry-config.json":
-        valid = value == {"openai_sdk_max_retries": 0}
+        valid = (
+            set(value)
+            == {
+                "llm_base_url_host",
+                "NO_PROXY",
+                "no_proxy",
+                "openai_sdk_max_retries",
+            }
+            and _valid_llm_no_proxy_proof(value)
+            and (
+                type(value["openai_sdk_max_retries"]) is int
+                and value["openai_sdk_max_retries"] == 0
+            )
+        )
     elif filename == "openviking-health.json":
         valid = (
             value.get("status") == "ok"
@@ -596,12 +634,24 @@ def _validate_proof_semantics(
             and value.get("reasoning_effort") == expected_thinking_effort
         )
     elif filename == "openviking-retry-config.json":
-        valid = value == {
+        expected = {
             "embedding_max_retries": 0,
+            "llm_base_url_host": value.get("llm_base_url_host"),
             "memory_extraction_max_retries": 0,
+            "NO_PROXY": value.get("NO_PROXY"),
+            "no_proxy": value.get("no_proxy"),
             "openai_sdk_max_retries": 0,
             "vlm_max_retries": 0,
         }
+        valid = (
+            set(value) == set(expected)
+            and _valid_llm_no_proxy_proof(value)
+            and all(
+                type(value[key]) is int and value[key] == expected[key]
+                for key in expected
+                if key.endswith("_retries")
+            )
+        )
     if not valid:
         raise _semantic_error(filename)
 
@@ -613,7 +663,7 @@ def _validate_profile_proof_store(
     *,
     expected_model: str,
     expected_thinking_effort: str,
-) -> None:
+) -> int:
     proof_store = receipt_path.parent / "proofs"
     manifest_path = proof_store / "manifests" / f"{manifest_hash}.json"
     manifest_bytes = _read_regular_proof_file(
@@ -654,6 +704,7 @@ def _validate_profile_proof_store(
         raise ProviderServiceBindingError(
             "provider proof manifest file set must contain exact relative filenames"
         )
+    internal_retry_count: int | None = None
     for entry in entries:
         blob_hash = _require_sha256(entry["sha256"], "provider proof blob hash")
         byte_count = entry["byte_count"]
@@ -679,6 +730,11 @@ def _validate_profile_proof_store(
             expected_model=expected_model,
             expected_thinking_effort=expected_thinking_effort,
         )
+        if filename.endswith("-retry-config.json"):
+            internal_retry_count = 0
+    if internal_retry_count is None:
+        raise ProviderServiceBindingError("provider retry proof is missing")
+    return internal_retry_count
 
 
 def _parse_canonical_receipt(content: bytes) -> dict[str, Any]:
@@ -743,7 +799,7 @@ def _validated_provider_service_receipt(
     expected_project_attestation_sha256: str,
     expected_provider_models: Mapping[str, str],
     expected_provider_thinking_efforts: Mapping[str, str],
-) -> tuple[str, datetime, tuple[dict[str, Any], ...]]:
+) -> tuple[str, datetime, tuple[dict[str, Any], ...], tuple[int, ...]]:
     content = _read_regular_proof_file(
         receipt_path,
         "provider service receipt",
@@ -774,11 +830,7 @@ def _validated_provider_service_receipt(
     profile_records = _validated_profile_records(receipt["profiles"])
     provider_models = _require_provider_model_mapping(expected_provider_models)
     provider_efforts = _require_provider_effort_mapping(expected_provider_thinking_efforts)
-    for exact_profile, profile_record in zip(
-        DEFAULT_REST_PROFILES,
-        profile_records,
-        strict=True,
-    ):
+    internal_retry_counts = tuple(
         _validate_profile_proof_store(
             receipt_path,
             exact_profile,
@@ -789,7 +841,13 @@ def _validated_provider_service_receipt(
             expected_model=provider_models[exact_profile.profile_id],
             expected_thinking_effort=provider_efforts[exact_profile.profile_id],
         )
-    return receipt_sha256, verified_at, profile_records
+        for exact_profile, profile_record in zip(
+            DEFAULT_REST_PROFILES,
+            profile_records,
+            strict=True,
+        )
+    )
+    return receipt_sha256, verified_at, profile_records, internal_retry_counts
 
 
 def validate_provider_service_receipt(
@@ -800,12 +858,14 @@ def validate_provider_service_receipt(
     expected_provider_models: Mapping[str, str],
     expected_provider_thinking_efforts: Mapping[str, str],
 ) -> str:
-    receipt_sha256, _verified_at, _profile_records = _validated_provider_service_receipt(
-        receipt_path,
-        expected_project=expected_project,
-        expected_project_attestation_sha256=expected_project_attestation_sha256,
-        expected_provider_models=expected_provider_models,
-        expected_provider_thinking_efforts=expected_provider_thinking_efforts,
+    receipt_sha256, _verified_at, _profile_records, _internal_retry_counts = (
+        _validated_provider_service_receipt(
+            receipt_path,
+            expected_project=expected_project,
+            expected_project_attestation_sha256=expected_project_attestation_sha256,
+            expected_provider_models=expected_provider_models,
+            expected_provider_thinking_efforts=expected_provider_thinking_efforts,
+        )
     )
     return receipt_sha256
 
@@ -819,21 +879,24 @@ def load_provider_service_bindings(
     expected_provider_models: Mapping[str, str],
     expected_provider_thinking_efforts: Mapping[str, str],
 ) -> tuple[ProviderServiceProfileBinding, ...]:
-    receipt_sha256, verified_at, profile_records = _validated_provider_service_receipt(
-        receipt_path,
-        expected_project=expected_project,
-        expected_project_attestation_sha256=expected_project_attestation_sha256,
-        expected_provider_models=expected_provider_models,
-        expected_provider_thinking_efforts=expected_provider_thinking_efforts,
+    receipt_sha256, verified_at, profile_records, internal_retry_counts = (
+        _validated_provider_service_receipt(
+            receipt_path,
+            expected_project=expected_project,
+            expected_project_attestation_sha256=expected_project_attestation_sha256,
+            expected_provider_models=expected_provider_models,
+            expected_provider_thinking_efforts=expected_provider_thinking_efforts,
+        )
     )
     embeddings = _require_embedding_mapping(
         controlled_embeddings,
         "controlled embedding descriptors",
     )
     bindings: list[ProviderServiceProfileBinding] = []
-    for exact_profile, profile_record in zip(
+    for exact_profile, profile_record, internal_retry_count in zip(
         DEFAULT_REST_PROFILES,
         profile_records,
+        internal_retry_counts,
         strict=True,
     ):
         profile_id = exact_profile.profile_id
@@ -859,6 +922,7 @@ def load_provider_service_bindings(
                 provider_project=expected_project,
                 project_attestation_sha256=expected_project_attestation_sha256,
                 profile_proof_manifest_sha256=proof_manifest_sha256,
+                internal_retry_count=internal_retry_count,
                 verified_at_utc=verified_at,
                 exact_profile=exact_profile,
                 adapter_profile=build_adapter_profile_descriptor(

@@ -396,9 +396,9 @@ verify_services() {
         '.model == $target_model and .reasoning_effort == $target_effort' \
         "$proof_dir/hindsight-model-config.json" >/dev/null
     compose exec -T hindsight python -c \
-        'import json,openai; from hindsight_api.config import get_config; c=get_config(); print(json.dumps({"llm_max_retries":c.llm_max_retries,"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT,"retain_llm_max_retries":c.retain_llm_max_retries,"worker_max_retries":c.worker_max_retries},sort_keys=True,separators=(",",":")))' \
+        'import json,openai,os,urllib.parse; from hindsight_api.config import get_config; c=get_config(); print(json.dumps({"llm_base_url_host":urllib.parse.urlsplit(os.environ["HINDSIGHT_API_LLM_BASE_URL"]).hostname,"llm_max_retries":c.llm_max_retries,"no_proxy":os.environ.get("no_proxy"),"NO_PROXY":os.environ.get("NO_PROXY"),"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT,"retain_llm_max_retries":c.retain_llm_max_retries,"worker_max_retries":c.worker_max_retries},sort_keys=True,separators=(",",":")))' \
         > "$proof_dir/hindsight-retry-config.json"
-    jq -e '.llm_max_retries == 0 and .retain_llm_max_retries == 0 and
+    jq -e '.NO_PROXY == ("127.0.0.1,localhost,host.docker.internal," + .llm_base_url_host) and .no_proxy == .NO_PROXY and .llm_max_retries == 0 and .retain_llm_max_retries == 0 and
             .worker_max_retries == 0 and .openai_sdk_max_retries == 0' \
         "$proof_dir/hindsight-retry-config.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
@@ -439,9 +439,9 @@ verify_services() {
            .llm.config.is_reasoning_model == true' \
         "$proof_dir/mem0-config-redacted.json" >/dev/null
     compose exec -T mem0 python -c \
-        'import json,openai; print(json.dumps({"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT},sort_keys=True,separators=(",",":")))' \
+        'import json,openai,os,urllib.parse; print(json.dumps({"llm_base_url_host":urllib.parse.urlsplit(os.environ["OAMB_MEM0_LLM_BASE_URL"]).hostname,"no_proxy":os.environ.get("no_proxy"),"NO_PROXY":os.environ.get("NO_PROXY"),"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT},sort_keys=True,separators=(",",":")))' \
         > "$proof_dir/mem0-retry-config.json"
-    jq -e '.openai_sdk_max_retries == 0' \
+    jq -e '.NO_PROXY == ("127.0.0.1,localhost,host.docker.internal," + .llm_base_url_host) and .no_proxy == .NO_PROXY and .openai_sdk_max_retries == 0' \
         "$proof_dir/mem0-retry-config.json" >/dev/null
     "$ROOT/openviking/bootstrap.sh" "$ROOT" "$ENV_FILE" \
         "$proof_dir/openviking-auth-identity.json"
@@ -454,9 +454,9 @@ verify_services() {
            .provider == "openai"' \
         "$proof_dir/openviking-model-config.json" >/dev/null
     compose exec -T openviking python -c \
-        'import json,openai; import openviking.session.session as s; from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton; c=OpenVikingConfigSingleton.get_instance(); print(json.dumps({"embedding_max_retries":c.embedding.max_retries,"memory_extraction_max_retries":s._MEMORY_EXTRACTION_MAX_RETRIES,"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT,"vlm_max_retries":c.vlm.max_retries},sort_keys=True,separators=(",",":")))' \
+        'import json,openai,os,urllib.parse; import openviking.session.session as s; from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton; c=OpenVikingConfigSingleton.get_instance(); print(json.dumps({"embedding_max_retries":c.embedding.max_retries,"llm_base_url_host":urllib.parse.urlsplit(os.environ["OAMB_OPENVIKING_VLM_BASE_URL"]).hostname,"memory_extraction_max_retries":s._MEMORY_EXTRACTION_MAX_RETRIES,"no_proxy":os.environ.get("no_proxy"),"NO_PROXY":os.environ.get("NO_PROXY"),"openai_sdk_max_retries":openai.OAMB_INTERNAL_RETRY_COUNT,"vlm_max_retries":c.vlm.max_retries},sort_keys=True,separators=(",",":")))' \
         > "$proof_dir/openviking-retry-config.json"
-    jq -e '.embedding_max_retries == 0 and .memory_extraction_max_retries == 0 and
+    jq -e '.NO_PROXY == ("127.0.0.1,localhost,host.docker.internal," + .llm_base_url_host) and .no_proxy == .NO_PROXY and .embedding_max_retries == 0 and .memory_extraction_max_retries == 0 and
             .openai_sdk_max_retries == 0 and .vlm_max_retries == 0' \
         "$proof_dir/openviking-retry-config.json" >/dev/null
     trap 'restore_openviking_on_exit $?' 0

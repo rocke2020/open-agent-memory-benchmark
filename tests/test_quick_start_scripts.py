@@ -1285,6 +1285,7 @@ def test_run_reports_live_cell_progress_while_provider_is_running(tmp_path: Path
             if f"provider={provider} status=running" in line
         )
         assert progress_line.startswith(f"provider={provider} status=running, elapsed=")
+        assert "history_rebuild_attempts=0" in progress_line
         assert progress_line.endswith("completed_questions=1 (1/1, 100%)")
         assert f"run: provider={provider} status=validating" in result.stdout
         assert f"run: provider={provider} status=completed" in result.stdout
@@ -1330,6 +1331,7 @@ def test_run_full_reports_progress_per_provider_out_of_sixty(tmp_path: Path) -> 
             if f"provider={provider} status=running" in line
         )
         assert progress_line.startswith(f"provider={provider} status=running, elapsed=")
+        assert "history_rebuild_attempts=0" in progress_line
         assert progress_line.endswith(
             f"completed_questions={completed} ({completed}/60, {percentage}%)"
         )

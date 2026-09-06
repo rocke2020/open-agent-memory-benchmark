@@ -347,7 +347,12 @@ def test_recovery_analysis_output_closes_current_execution_without_dispatch(
         "load_live_provider_evidence",
         lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
     )
-    monkeypatch.setattr(live, "build_live_cell", lambda **_kwargs: object())
+
+    def build_recovery_cell(**kwargs: object) -> object:
+        assert kwargs["recovery_parts"] == (recovery_root,)
+        return object()
+
+    monkeypatch.setattr(live, "build_live_cell", build_recovery_cell)
     monkeypatch.setattr(live, "live_composition_target", lambda _cell: object())
 
     def execute(_cells: object) -> tuple[live.LiveCellCompletion, ...]:

@@ -21,6 +21,7 @@ from typing import Any
 
 from oamb.artifacts.atomic import read_regular_file, sha256_file
 from oamb.artifacts.capsule import publish_with_last_marker, verify_published_directory
+from oamb.artifacts.capsule_graph import read_capsule_graph
 from oamb.artifacts.composition import inspect_embedded_composition
 from oamb.artifacts.validation.composition import declares_composition
 from oamb.artifacts.validation.openviking_session_evidence import (
@@ -145,6 +146,7 @@ class _CellSnapshot:
     cases: tuple[dict[str, Any], ...]
     ingestion_plans: tuple[dict[str, Any], ...]
     attempts: tuple[dict[str, Any], ...]
+    history_attempts: tuple[dict[str, Any], ...]
     token_usage: tuple[dict[str, Any], ...]
     resources: tuple[dict[str, Any], ...]
     costs: tuple[dict[str, Any], ...]
@@ -372,7 +374,14 @@ def _load_cell_snapshot(
             supplied_validation,
         )
 
-    documents, raw_payloads = _read_source_documents(root, manifest, cell.cell_id)
+    document_graph = _read_part_document_graph(root, cell.cell_id, {})
+    documents, raw_payloads = document_graph[0]
+    operational_documents = tuple(part_documents for part_documents, _raw in document_graph)
+    for _documents, nested_raw in document_graph[1:]:
+        for raw_id, payload in nested_raw.items():
+            previous = raw_payloads.setdefault(raw_id, payload)
+            if previous != payload:
+                raise ComparisonProjectError(f"cell {cell.cell_id} embedded raw identity collides")
 
     run_spec = _exact_document(documents, "run_spec", cell.cell_id)
     preflight = _exact_document(documents, "run_preflight_record", cell.cell_id)
@@ -381,12 +390,13 @@ def _load_cell_snapshot(
     run_record = _exact_document(documents, "run_record", cell.cell_id)
     case_records = tuple(item[1] for item in documents.get("case_record", ()))
     ingestion_plans = tuple(item[1] for item in documents.get("ingestion_plan_record", ()))
-    attempts = tuple(item[1] for item in documents.get("attempt_record", ()))
-    token_usage = tuple(item[1] for item in documents.get("token_usage_record", ()))
-    resources = tuple(item[1] for item in documents.get("resource_usage_record", ()))
-    costs = tuple(item[1] for item in documents.get("cost_record", ()))
-    infrastructure_retries = tuple(
-        item[1] for item in documents.get("infrastructure_retry_event", ())
+    attempts = _operational_records(operational_documents, "attempt_record")
+    history_attempts = _operational_records(operational_documents, "history_attempt_record")
+    token_usage = _operational_records(operational_documents, "token_usage_record")
+    resources = _operational_records(operational_documents, "resource_usage_record")
+    costs = _operational_records(operational_documents, "cost_record")
+    infrastructure_retries = _operational_records(
+        operational_documents, "infrastructure_retry_event"
     )
 
     if manifest.run_id != run_spec.get("run_id") or run_record.get("run_id") != manifest.run_id:
@@ -477,6 +487,7 @@ def _load_cell_snapshot(
         cases=ordered_cases,
         ingestion_plans=ingestion_plans,
         attempts=attempts,
+        history_attempts=history_attempts,
         token_usage=token_usage,
         resources=resources,
         costs=costs,
@@ -509,6 +520,8 @@ def _load_composed_cell_snapshot(
     case_manifest: dict[str, Any] | None = None
     starts: list[str] = []
     ends: list[str] = []
+    operational_documents: list[dict[str, list[tuple[bytes, dict[str, Any]]]]] = []
+    seen_operational_parts: dict[str, str] = {}
     for binding, embedded_root in zip(composition.ordered_parts, embedded_roots, strict=True):
         embedded_manifest = CapsuleManifest.model_validate_json(
             read_regular_file(embedded_root / "capsule-manifest.json")
@@ -522,6 +535,16 @@ def _load_composed_cell_snapshot(
             embedded_manifest,
             cell.cell_id,
         )
+        for nested_documents, nested_raw in _read_part_document_graph(
+            embedded_root, cell.cell_id, seen_operational_parts
+        ):
+            operational_documents.append(nested_documents)
+            for raw_id, payload in nested_raw.items():
+                previous = merged_raw_payloads.setdefault(raw_id, payload)
+                if previous != payload:
+                    raise ComparisonProjectError(
+                        f"cell {cell.cell_id} embedded raw identity collides"
+                    )
         part_documents[binding.capsule_id] = documents
         for raw_id, payload in raw_payloads.items():
             previous = merged_raw_payloads.setdefault(raw_id, payload)
@@ -620,33 +643,18 @@ def _load_composed_cell_snapshot(
         ingestion_occurrence_ids.append(contribution.ingestion_occurrence_id)
         case_occurrence_ids.extend(contribution.case_occurrence_ids)
 
-    all_attempts = tuple(
-        item[1]
-        for binding in composition.ordered_parts
-        for item in part_documents[binding.capsule_id].get("attempt_record", ())
-    )
-    all_usage = tuple(
-        item[1]
-        for binding in composition.ordered_parts
-        for item in part_documents[binding.capsule_id].get("token_usage_record", ())
-    )
-    all_resources = tuple(
-        item[1]
-        for binding in composition.ordered_parts
-        for item in part_documents[binding.capsule_id].get("resource_usage_record", ())
-    )
-    all_costs = tuple(
-        item[1]
-        for binding in composition.ordered_parts
-        for item in part_documents[binding.capsule_id].get("cost_record", ())
-    )
-    all_infrastructure_retries = tuple(
-        item[1]
-        for binding in composition.ordered_parts
-        for item in part_documents[binding.capsule_id].get("infrastructure_retry_event", ())
+    operational_parts = tuple(operational_documents)
+    all_attempts = _operational_records(operational_parts, "attempt_record")
+    all_history_attempts = _operational_records(operational_parts, "history_attempt_record")
+    all_usage = _operational_records(operational_parts, "token_usage_record")
+    all_resources = _operational_records(operational_parts, "resource_usage_record")
+    all_costs = _operational_records(operational_parts, "cost_record")
+    all_infrastructure_retries = _operational_records(
+        operational_parts, "infrastructure_retry_event"
     )
     for values, identity, label in (
         (all_attempts, "attempt_id", "composed attempt"),
+        (all_history_attempts, "history_attempt_id", "composed history attempt"),
         (all_usage, "usage_record_id", "composed token usage"),
         (all_resources, "resource_record_id", "composed resource usage"),
         (all_costs, "cost_record_id", "composed cost"),
@@ -701,6 +709,7 @@ def _load_composed_cell_snapshot(
         cases=ordered_cases,
         ingestion_plans=tuple(selected_ingestion_plans),
         attempts=all_attempts,
+        history_attempts=all_history_attempts,
         token_usage=all_usage,
         resources=all_resources,
         costs=all_costs,
@@ -728,6 +737,8 @@ def _read_source_documents(
             raise ComparisonProjectError(f"cell {cell_id} source entry cannot be reopened") from exc
         if hashlib.sha256(content).hexdigest() != entry.sha256:
             raise ComparisonProjectError(f"cell {cell_id} source entry hash drifted")
+        if entry.record_kind == "embedded_part_file":
+            continue
         if entry.record_kind == "raw_payload":
             try:
                 payload = (
@@ -751,6 +762,28 @@ def _read_source_documents(
             raise ComparisonProjectError(f"cell {cell_id} source record kind drifted")
         documents.setdefault(entry.record_kind, []).append((content, document))
     return documents, raw_payloads
+
+
+def _read_part_document_graph(
+    root: Path,
+    cell_id: str,
+    seen: dict[str, str],
+) -> tuple[tuple[dict[str, list[tuple[bytes, dict[str, Any]]]], dict[str, bytes]], ...]:
+    try:
+        graph = read_capsule_graph(root, seen)
+    except (OSError, ValueError) as exc:
+        raise ComparisonProjectError(f"cell {cell_id} embedded capsule graph is invalid") from exc
+    return tuple(
+        _read_source_documents(part_root, part_manifest, cell_id)
+        for part_root, part_manifest in graph
+    )
+
+
+def _operational_records(
+    documents: tuple[dict[str, list[tuple[bytes, dict[str, Any]]]], ...],
+    schema_name: str,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(item[1] for part in documents for item in part.get(schema_name, ()))
 
 
 def _require_shared_case_manifest(
@@ -1023,12 +1056,27 @@ def _indexing_token_stage_document(
         logical_attempt_ids.extend(attempt_ids)
     if len(set(logical_attempt_ids)) != len(logical_attempt_ids):
         raise ComparisonProjectError("logical indexing dispatch attempt is duplicated")
+    attempts_by_id = _unique_by(getattr(snapshot, "attempts", ()), "attempt_id", "attempt")
+    physical_attempt_ids = tuple(
+        dict.fromkeys(
+            (
+                *logical_attempt_ids,
+                *(
+                    attempt_id
+                    for history in getattr(snapshot, "history_attempts", ())
+                    for attempt_id in history.get("operation_attempt_ids", ())
+                    if isinstance(attempt_id, str)
+                    and attempts_by_id.get(attempt_id, {}).get("stage") == "memory_ingest"
+                ),
+            )
+        )
+    )
 
     model_usage_by_attempt: dict[str, list[dict[str, Any]]] = {
-        attempt_id: [] for attempt_id in logical_attempt_ids
+        attempt_id: [] for attempt_id in physical_attempt_ids
     }
     operation_usage_by_attempt: dict[str, list[dict[str, Any]]] = {
-        attempt_id: [] for attempt_id in logical_attempt_ids
+        attempt_id: [] for attempt_id in physical_attempt_ids
     }
     for record in snapshot.token_usage:
         attempt_id = record.get("attempt_id")
@@ -1045,7 +1093,7 @@ def _indexing_token_stage_document(
             operation_usage_by_attempt[attempt_id].append(record)
 
     selected: list[dict[str, Any]] = []
-    for attempt_id in logical_attempt_ids:
+    for attempt_id in physical_attempt_ids:
         model_records = model_usage_by_attempt[attempt_id]
         operation_records = operation_usage_by_attempt[attempt_id]
         if len(model_records) == 1:
@@ -1072,7 +1120,7 @@ def _indexing_token_stage_document(
             )
         except ValueError as exc:
             raise ComparisonProjectError("OpenViking indexing usage evidence is invalid") from exc
-        if tuple(item.attempt_id for item in recovered) != tuple(logical_attempt_ids):
+        if tuple(item.attempt_id for item in recovered) != physical_attempt_ids:
             raise ComparisonProjectError("OpenViking indexing usage ledger does not close")
         selected = [
             {

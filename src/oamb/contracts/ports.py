@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final, Literal, Protocol, runtime_checkable
@@ -10,6 +11,7 @@ from typing import Final, Literal, Protocol, runtime_checkable
 from .accounting import TokenUsageRecordV3
 from .evidence import CaseRecord, IngestionPlanRecord, LogicalContextRecord
 from .ids import attempt_id, canonical_sha256
+from .ingestion_failures import classify_settled_ingestion_failure
 from .specifications import CaseManifest, DatasetManifest, GenerativeThinkingEffort
 
 ThinkingEffort = GenerativeThinkingEffort
@@ -500,6 +502,49 @@ class MemorySystemCallFailure(RuntimeError):
         self.raw_response_bytes = raw_response_bytes
         self.supporting_raw_references = supporting_raw_references
         self.status_code = status_code
+
+
+class SettledTransientIngestionFailure(MemorySystemCallFailure):
+    """A pinned ingestion failure whose related provider work is proven settled."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        settlement_basis: str,
+        internal_retry_count: int,
+        failure_kind: str,
+        raw_reference: RawReferenceHandle,
+        raw_response_bytes: bytes,
+        status_code: int,
+        expected_task_id: str | None = None,
+        expected_session_id: str | None = None,
+        supporting_raw_references: tuple[RawReferenceHandle, ...] = (),
+    ) -> None:
+        if raw_reference.sha256 != hashlib.sha256(raw_response_bytes).hexdigest():
+            raise ValueError("settled ingestion failure raw reference does not match response")
+        classified = classify_settled_ingestion_failure(
+            settlement_basis=settlement_basis,
+            status_code=status_code,
+            raw_response_bytes=raw_response_bytes,
+            internal_retry_count=internal_retry_count,
+            expected_task_id=expected_task_id,
+            expected_session_id=expected_session_id,
+        )
+        if classified is None or classified != failure_kind:
+            raise ValueError("ingestion failure is not an exact settled transient failure")
+        super().__init__(
+            message,
+            failure_kind=failure_kind,
+            raw_reference=raw_reference,
+            raw_response_bytes=raw_response_bytes,
+            supporting_raw_references=supporting_raw_references,
+            status_code=status_code,
+        )
+        self.settlement_basis = settlement_basis
+        self.internal_retry_count = internal_retry_count
+        self.expected_task_id = expected_task_id
+        self.expected_session_id = expected_session_id
 
 
 class MemorySystemCallUnknownOutcome(RuntimeError):

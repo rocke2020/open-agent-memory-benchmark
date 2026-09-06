@@ -22,6 +22,8 @@ services:
       HINDSIGHT_API_ENABLE_RERANKING: "false"
       HINDSIGHT_API_RERANKER_PROVIDER: rrf
       HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true"
+      NO_PROXY: ${OAMB_LLM_NO_PROXY:?required}
+      no_proxy: ${OAMB_LLM_NO_PROXY:?required}
       HINDSIGHT_API_WORKER_ID: oamb-hindsight-v0-9-2
       PYTHONPATH: /opt/oamb
     extra_hosts:
@@ -74,7 +76,10 @@ services:
       HISTORY_DB_PATH: /app/history/history.db
       OPENAI_API_KEY: ${OAMB_MEM0_LLM_API_KEY:?required}
       MEM0_DEFAULT_LLM_MODEL: ${OAMB_MEM0_LLM_MODEL:?required}
+      OAMB_MEM0_LLM_BASE_URL: ${OAMB_MEM0_LLM_BASE_URL:?required}
       MEM0_DEFAULT_EMBEDDER_MODEL: ${OAMB_EMBEDDING_MODEL:?required}
+      NO_PROXY: ${OAMB_LLM_NO_PROXY:?required}
+      no_proxy: ${OAMB_LLM_NO_PROXY:?required}
       PYTHONPATH: /opt/oamb
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -132,6 +137,8 @@ services:
       OAMB_OPENVIKING_VLM_BASE_URL: ${OAMB_OPENVIKING_VLM_BASE_URL:?required}
       OAMB_OPENVIKING_VLM_API_KEY: ${OAMB_OPENVIKING_VLM_API_KEY:?required}
       OAMB_OPENVIKING_ROOT_API_KEY: ${OAMB_OPENVIKING_ROOT_API_KEY:?required}
+      NO_PROXY: ${OAMB_LLM_NO_PROXY:?required}
+      no_proxy: ${OAMB_LLM_NO_PROXY:?required}
       PYTHONPATH: /opt/oamb
     extra_hosts:
       - "host.docker.internal:host-gateway"

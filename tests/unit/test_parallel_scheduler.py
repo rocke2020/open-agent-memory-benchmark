@@ -39,7 +39,7 @@ def test_ready_history_releases_questions_while_other_histories_keep_ingesting(
     scopes = {name: object() for name in history_releases}
 
     async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         plan_id = plan.ingestion_plan_id
         history_started.append(plan_id)
         history_events[plan_id].set()
@@ -57,7 +57,7 @@ def test_ready_history_releases_questions_while_other_histories_keep_ingesting(
         await question_releases[case_id].wait()
         return (f"record-{case_id}",)
 
-    monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
     monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
 
     async def scenario() -> None:
@@ -146,7 +146,7 @@ def test_questions_sharing_one_ready_history_overlap_without_reingestion(
     async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
         nonlocal ingestion_count
         ingestion_count += 1
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         return ("history-record",), {plan.ingestion_plan_id: shared_scope}
 
     async def execute_one_question(**kwargs: Any) -> tuple[str]:
@@ -159,7 +159,7 @@ def test_questions_sharing_one_ready_history_overlap_without_reingestion(
         await release.wait()
         return (case.case_manifest_entry_id,)
 
-    monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
     monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
 
     async def scenario() -> None:
@@ -216,7 +216,7 @@ def test_fatal_history_stops_queued_admission_but_active_sibling_settles(
     sibling_settled = asyncio.Event()
 
     async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         plan_id = plan.ingestion_plan_id
         started.append(plan_id)
         if len(started) == 2:
@@ -230,7 +230,7 @@ def test_fatal_history_stops_queued_admission_but_active_sibling_settles(
             sibling_settled.set()
         return (f"record-{plan_id}",), {plan_id: object()}
 
-    monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -287,14 +287,14 @@ def test_malformed_history_result_stops_queued_admission_before_releasing_the_pe
     started: list[str] = []
 
     async def ingest_one(**kwargs: Any) -> tuple[tuple[str, ...], dict[str, object]]:
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         plan_id = plan.ingestion_plan_id
         started.append(plan_id)
         if plan_id == "plan-a":
             return (), {plan_id: object()}
         return (f"record-{plan_id}",), {plan_id: object()}
 
-    monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -340,7 +340,7 @@ def test_malformed_question_result_stops_queued_admission_before_releasing_the_p
     scope = object()
 
     async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         return ("history-record",), {plan.ingestion_plan_id: scope}
 
     async def execute_one_question(**kwargs: Any) -> tuple[str, ...]:
@@ -351,7 +351,7 @@ def test_malformed_question_result_stops_queued_admission_before_releasing_the_p
             return ()
         return (f"record-{case_id}",)
 
-    monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
     monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
 
     async def scenario() -> None:
@@ -402,7 +402,7 @@ def test_parent_cancellation_drains_active_histories_and_preserves_cleanup_error
     started: list[str] = []
 
     async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         plan_id = plan.ingestion_plan_id
         started.append(plan_id)
         if len(started) == 2:
@@ -415,7 +415,7 @@ def test_parent_cancellation_drains_active_histories_and_preserves_cleanup_error
             raise
         raise AssertionError("unreachable")
 
-    monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -470,7 +470,7 @@ def test_parent_cancellation_preserves_every_sibling_cancellation_evidence_error
     started: list[str] = []
 
     async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         plan_id = plan.ingestion_plan_id
         started.append(plan_id)
         if len(started) == 2:
@@ -485,7 +485,7 @@ def test_parent_cancellation_preserves_every_sibling_cancellation_evidence_error
             ) from None
         raise AssertionError("unreachable")
 
-    monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -629,6 +629,7 @@ def test_source_writes_are_serial_within_history_and_overlap_across_histories(
     plans = (make_plan("a"), make_plan("b"))
     memory = ObservedSourceMemory(ArtifactStore(tmp_path / "raw"))
     serial_ingest = native_run._execute_ingestion_plans_serial
+    history_ingest = native_run._execute_history_with_rebuild
     serial_states = {
         plan.ingestion_plan_id: native_run._NativeExecutionState(
             store=ArtifactStore(tmp_path / plan.ingestion_plan_id),
@@ -640,14 +641,14 @@ def test_source_writes_are_serial_within_history_and_overlap_across_histories(
     }
 
     async def ingest_one_with_isolated_state(**kwargs: Any) -> Any:
-        plan = kwargs["plans"][0]
+        plan = kwargs["plan"]
         delegated = dict(kwargs)
         delegated["state"] = serial_states[plan.ingestion_plan_id]
-        return await serial_ingest(**delegated)
+        return await history_ingest(**delegated)
 
     monkeypatch.setattr(
         native_run,
-        "_execute_ingestion_plans_serial",
+        "_execute_history_with_rebuild",
         ingest_one_with_isolated_state,
     )
 
@@ -815,7 +816,7 @@ def test_limits_one_and_two_return_the_same_canonical_semantics(
         scopes = {plan.ingestion_plan_id: object() for plan in plans}
 
         async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
-            plan = kwargs["plans"][0]
+            plan = kwargs["plan"]
             if limit == 2 and plan.ingestion_plan_id == "plan-a":
                 await history_b_started.wait()
             if plan.ingestion_plan_id == "plan-b":
@@ -832,7 +833,7 @@ def test_limits_one_and_two_return_the_same_canonical_semantics(
                 case_b_started.set()
             return (f"record-{case.case_manifest_entry_id}",)
 
-        monkeypatch.setattr(native_run, "_execute_ingestion_plans_serial", ingest_one)
+        monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
         monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
         state = SimpleNamespace(
             control=SimpleNamespace(

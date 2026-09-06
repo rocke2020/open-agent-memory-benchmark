@@ -45,21 +45,10 @@ finish_logging() {
   exit "$run_exit_code"
 }
 
-count_progress_artifacts() {
-  local output_root=$1
-  local artifact_kind=$2
-  if [[ ! -d "$output_root" ]]; then
-    printf '0\n'
-    return
-  fi
-  find "$output_root" -type f \
-    -path "*/source/$artifact_kind/*.json" -print 2>/dev/null | \
-    wc -l | tr -d ' '
-}
-
 report_provider_progress() {
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
+  python3 - "$@" <<'PY'
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -68,12 +57,133 @@ output_root = Path(sys.argv[1])
 total_questions = int(sys.argv[2])
 elapsed_seconds = int(sys.argv[3])
 command_active = sys.argv[4] == "true"
-provider_specs = {provider: [] for provider in ("hindsight", "mem0", "openviking")}
+resume_label = sys.argv[5] if len(sys.argv) == 9 else None
+reused, remaining, quarantined = map(int, sys.argv[6:9]) if resume_label else (0, 0, 0)
+providers = (resume_label.removesuffix("-lme60"),) if resume_label else ("hindsight", "mem0", "openviking")
+provider_specs = {provider: [] for provider in providers}
 terminal_statuses = {
     "finalized": "execution-completed",
     "aborted": "aborted",
     "infrastructure_blocked": "infrastructure_blocked",
 }
+
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate evidence field")
+        value[key] = item
+    return value
+
+
+def sha256(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def progress_records(root, folder, schema, versions, identity):
+    directory = root / "source" / folder
+    if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
+        raise ValueError("invalid progress evidence directory")
+    for path in directory.glob("*.json"):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("invalid progress evidence file")
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_name") != schema
+            or type(value.get("schema_version")) is not int
+            or value["schema_version"] not in versions
+            or not sha256(value.get(identity))
+            or path.stem != value[identity]
+        ):
+            raise ValueError("invalid progress evidence identity")
+        yield value
+
+
+def history_rebuild_attempts(root, run_id, provider):
+    try:
+        histories = {}
+        history_positions = set()
+        for record in progress_records(root, "history-attempts", "history_attempt_record", {1}, "history_attempt_id"):
+            occurrence = record.get("ingestion_occurrence_id")
+            ordinal = record.get("history_attempt_ordinal")
+            if (
+                record.get("run_id") != run_id or record.get("memory_system_id") != provider
+                or not sha256(occurrence) or occurrence in histories
+                or not sha256(record.get("ingestion_plan_id"))
+                or type(ordinal) is not int or ordinal not in {1, 2, 3}
+                or (record["ingestion_plan_id"], ordinal) in history_positions
+                or record.get("status") not in {"ready", "retryable_failed_settled", "failed", "unknown", "cancelled"}
+                or (ordinal > 1 and not sha256(record.get("previous_retry_event_id")))
+            ):
+                raise ValueError("invalid history progress record")
+            histories[occurrence] = record
+            history_positions.add((record["ingestion_plan_id"], ordinal))
+        successors = {}
+        for event in progress_records(root, "history-retries", "history_retry_event", {1}, "history_retry_event_id"):
+            scheduled = event.get("retry_scheduled")
+            ordinal = event.get("failed_history_attempt_ordinal")
+            limit = event.get("max_retries_per_operation")
+            occurrence = event.get("successor_ingestion_occurrence_id")
+            if (
+                event.get("run_id") != run_id or type(scheduled) is not bool
+                or not sha256(event.get("ingestion_plan_id"))
+                or type(ordinal) is not int or type(limit) is not int
+                or type(event.get("retry_ordinal")) is not int
+                or limit not in {0, 1, 2} or event["retry_ordinal"] != ordinal
+            ):
+                raise ValueError("invalid history retry event")
+            if not scheduled:
+                if ordinal != limit + 1 or any(event.get(key) is not None for key in (
+                    "successor_ingestion_occurrence_id", "successor_execution_run_id",
+                    "successor_history_attempt_ordinal", "backoff_seconds",
+                )):
+                    raise ValueError("invalid exhausted history event")
+                continue
+            if (
+                ordinal not in {1, 2} or ordinal > limit
+                or not sha256(occurrence) or occurrence in successors
+                or event.get("successor_execution_run_id") != run_id
+                or type(event.get("successor_history_attempt_ordinal")) is not int
+                or event["successor_history_attempt_ordinal"] != ordinal + 1
+                or type(event.get("backoff_seconds")) is not int
+                or event.get("backoff_seconds") != ordinal
+            ):
+                raise ValueError("invalid pending history successor")
+            successors[occurrence] = event
+            record = histories.get(occurrence)
+            if record and (
+                record["ingestion_plan_id"] != event["ingestion_plan_id"]
+                or record["history_attempt_ordinal"] != ordinal + 1
+                or record["previous_retry_event_id"] != event["history_retry_event_id"]
+            ):
+                raise ValueError("history successor evidence disagrees")
+        admitted = {key for key, value in histories.items() if value["history_attempt_ordinal"] > 1}
+        has_carried_parts = (root / "source/parts").exists()
+        if successors or has_carried_parts:
+            allocations = set()
+            for intent in progress_records(root, "attempt-intents", "attempt_intent_record", {1, 3}, "attempt_id"):
+                if intent.get("stage") != "scope_allocate":
+                    continue
+                occurrence = intent.get("parent_id")
+                if (
+                    intent.get("parent_kind") != "ingestion_plan" or not sha256(occurrence)
+                    or occurrence in allocations
+                    or (intent["schema_version"] == 3 and (
+                        intent.get("scope_kind") != "run" or intent.get("scope_id") != run_id
+                    ))
+                ):
+                    raise ValueError("ambiguous history scope admission")
+                allocations.add(occurrence)
+            if has_carried_parts and allocations - histories.keys() - successors.keys():
+                raise ValueError("carried successor has no local ordinal evidence yet")
+            admitted.update(allocations & successors.keys())
+        return str(len(admitted))
+    except (OSError, ValueError, KeyError, TypeError):
+        return "unavailable"
+
+
 for path in output_root.glob("*/source/specs/run-spec.json"):
     try:
         spec = json.loads(path.read_text(encoding="utf-8"))
@@ -84,12 +194,13 @@ for path in output_root.glob("*/source/specs/run-spec.json"):
         continue
 
 for provider, specs in provider_specs.items():
-    status = elapsed = progress = "unavailable"
+    status = elapsed = progress = rebuilds = "unavailable"
+    completed = None
     if len(specs) == 1:
         capsule_root, spec = specs[0]
         completed = min(
             sum(path.is_file() for path in (capsule_root / "source/cases").glob("*.json")),
-            total_questions,
+            remaining if resume_label else total_questions,
         )
         progress = f"{completed} ({completed}/{total_questions}, {completed * 100 // total_questions}%)"
         records = list((capsule_root / "source/run").glob("*.json"))
@@ -97,6 +208,7 @@ for provider, specs in provider_specs.items():
             run_id = spec["run_id"]
             if not isinstance(run_id, str) or not run_id:
                 raise ValueError("missing run identity")
+            rebuilds = history_rebuild_attempts(capsule_root, run_id, provider)
             if len(records) == 1:
                 record = json.loads(records[0].read_text(encoding="utf-8"))
                 if (
@@ -118,7 +230,13 @@ for provider, specs in provider_specs.items():
                 elapsed = f"{elapsed_seconds}s"
         except (OSError, ValueError, KeyError, TypeError):
             pass
-    print(f"provider={provider} status={status}, elapsed={elapsed}, completed_questions={progress}")
+    if resume_label:
+        unfinished = remaining - completed if completed is not None else "unavailable"
+        done = reused + completed if completed is not None else "unavailable"
+        question_progress = f"{done * 100 // total_questions}% ({done}/{total_questions})" if isinstance(done, int) else "unavailable"
+        print(f"run: {resume_label} status={status}, elapsed={elapsed}, reused={reused}, remaining={unfinished}, running=unavailable, completed={completed if completed is not None else 'unavailable'}, failed=unavailable, quarantined={quarantined}, history_rebuild_attempts={rebuilds}, completed_questions={done}, question_progress={question_progress}")
+    else:
+        print(f"provider={provider} status={status}, elapsed={elapsed}, history_rebuild_attempts={rebuilds}, completed_questions={progress}")
 PY
 }
 
@@ -146,7 +264,7 @@ run_provider_cells_with_status() {
   local started_seconds=$SECONDS
   printf 'run: providers=hindsight,mem0,openviking status=starting (%s)\n' "$context"
   for provider in hindsight mem0 openviking; do
-    printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s)\n' \
+    printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s), history_rebuild_attempts=0\n' \
       "$provider" "$total_questions"
   done
   provider_status_heartbeat "$output_root" "$total_questions" &
@@ -558,20 +676,14 @@ resume_status_heartbeat() {
   local quarantined=$5
   local elapsed_seconds=0
   local timer_pid=""
-  local completed unfinished progress
   trap '[ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true; exit 0' TERM INT HUP
   while :; do
     sleep "$STATUS_INTERVAL_SECONDS" &
     timer_pid=$!
     wait "$timer_pid" || exit 0
     elapsed_seconds=$((elapsed_seconds + STATUS_INTERVAL_SECONDS))
-    completed="$(count_progress_artifacts "$output_root" cases)"
-    ((completed <= remaining)) || completed=$remaining
-    unfinished=$((remaining - completed))
-    progress=$(((reused + completed) * 100 / 60))
-    printf 'run: %s status=running, elapsed=%ss, reused=%s, remaining=%s, running=unavailable, completed=%s, failed=unavailable, quarantined=%s, question_progress=%s%% (%s/60)\n' \
-      "$label" "$elapsed_seconds" "$reused" "$unfinished" "$completed" \
-      "$quarantined" "$progress" "$((reused + completed))"
+    report_provider_progress "$output_root" 60 "$elapsed_seconds" true \
+      "$label" "$reused" "$remaining" "$quarantined"
   done
 }
 
@@ -600,6 +712,7 @@ run_resume_worker() {
   local command_pid=""
   local heartbeat_pid=""
   local command_code=0
+  local started_seconds=$SECONDS
   local part
   local -a arguments=(
     uv run --locked oamb run "$PLAN"
@@ -631,6 +744,8 @@ run_resume_worker() {
   done
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
+  report_provider_progress "$output_root" 60 "$((SECONDS - started_seconds))" false \
+    "$cell" "$reused" "$remaining" "$quarantined"
   if ((command_code != 0)); then
     printf 'run: %s status=failed\n' "$cell" >> "$log_path"
     return "$command_code"

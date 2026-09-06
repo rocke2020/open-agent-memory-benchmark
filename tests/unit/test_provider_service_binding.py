@@ -87,7 +87,10 @@ def _proof_bytes(filename: str) -> bytes:
             "reasoning_effort": "low",
         },
         "hindsight-retry-config.json": {
+            "llm_base_url_host": "api.deepseek.com",
             "llm_max_retries": 0,
+            "NO_PROXY": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
+            "no_proxy": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
             "openai_sdk_max_retries": 0,
             "retain_llm_max_retries": 0,
             "worker_max_retries": 0,
@@ -124,7 +127,12 @@ def _proof_bytes(filename: str) -> bytes:
             },
             "version": "v1.1",
         },
-        "mem0-retry-config.json": {"openai_sdk_max_retries": 0},
+        "mem0-retry-config.json": {
+            "llm_base_url_host": "api.deepseek.com",
+            "NO_PROXY": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
+            "no_proxy": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
+            "openai_sdk_max_retries": 0,
+        },
         "openviking-health.json": {
             "auth_mode": "api_key",
             "healthy": True,
@@ -154,7 +162,10 @@ def _proof_bytes(filename: str) -> bytes:
         },
         "openviking-retry-config.json": {
             "embedding_max_retries": 0,
+            "llm_base_url_host": "api.deepseek.com",
             "memory_extraction_max_retries": 0,
+            "NO_PROXY": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
+            "no_proxy": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
             "openai_sdk_max_retries": 0,
             "vlm_max_retries": 0,
         },
@@ -296,6 +307,33 @@ def _read_receipt(receipt_path: Path) -> dict[str, object]:
     value = json.loads(receipt_path.read_bytes())
     assert isinstance(value, dict)
     return value
+
+
+def test_profile_bindings_carry_only_strict_zero_from_validated_retry_proofs(
+    tmp_path: Path,
+) -> None:
+    from oamb.config.provider_services import ProviderServiceBindingError
+
+    valid = _write_service_artifacts(tmp_path / "valid")
+    assert tuple(binding.internal_retry_count for binding in _load(valid)) == (0, 0, 0)
+
+    invalid_payloads = (
+        b'{"NO_PROXY":"127.0.0.1,localhost,host.docker.internal,api.deepseek.com",'
+        b'"llm_base_url_host":"api.deepseek.com","no_proxy":"127.0.0.1,localhost,'
+        b'host.docker.internal,api.deepseek.com","openai_sdk_max_retries":false}',
+        b'{"NO_PROXY":"127.0.0.1,localhost,host.docker.internal,api.deepseek.com",'
+        b'"llm_base_url_host":"api.deepseek.com","openai_sdk_max_retries":0}',
+        b'{"NO_PROXY":"127.0.0.1,localhost,host.docker.internal,other.example",'
+        b'"llm_base_url_host":"api.deepseek.com","no_proxy":"127.0.0.1,localhost,'
+        b'host.docker.internal,other.example","openai_sdk_max_retries":0}',
+    )
+    for index, payload in enumerate(invalid_payloads):
+        invalid = _write_service_artifacts(
+            tmp_path / f"invalid-{index}",
+            payload_overrides={"mem0-retry-config.json": payload},
+        )
+        with pytest.raises(ProviderServiceBindingError):
+            _load(invalid)
 
 
 def _rewrite_profile_manifest(

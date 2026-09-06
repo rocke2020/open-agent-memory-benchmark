@@ -13,6 +13,8 @@ from oamb.artifacts.atomic import atomic_write_bytes, read_regular_file, sha256_
 from oamb.artifacts.store import ArtifactStore
 from oamb.artifacts.validation.native import validate_partition_capsule
 from oamb.contracts.evidence import (
+    AttemptIntentRecord,
+    AttemptIntentRecordV3,
     AttemptRecordV2,
     AttemptRecordV4,
     CapsuleCompositionContribution,
@@ -21,6 +23,9 @@ from oamb.contracts.evidence import (
     CapsuleManifest,
     CapsuleManifestEntry,
     CaseRecordV3,
+    HistoryAttemptRecord,
+    HistoryRetryCarryRecord,
+    HistoryRetryEvent,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
     RunRecord,
@@ -96,6 +101,10 @@ class _PartSnapshot:
     plans: tuple[IngestionPlanRecordV2 | IngestionPlanRecordV3, ...]
     cases: tuple[CaseRecordV3, ...]
     attempts: tuple[AttemptRecordV2 | AttemptRecordV4, ...]
+    intents: tuple[AttemptIntentRecord | AttemptIntentRecordV3, ...]
+    history_attempts: tuple[HistoryAttemptRecord, ...]
+    history_retry_events: tuple[HistoryRetryEvent, ...]
+    history_retry_carries: tuple[HistoryRetryCarryRecord, ...]
     run_spec: RunSpec | None
     preflight: RunPreflightRecord | RunPreflightRecordV2 | None
     budget: BudgetSpecV4 | None
@@ -191,6 +200,7 @@ def analyze_capsule_recovery(
         raise CapsuleCompositionError("unknown selected recovery group")
     if not set(contributions_by_plan) <= set(target_plan_ids):
         raise CapsuleCompositionError("unknown recovery contribution")
+    _require_attempted_groups_recoverable(parts, contributions_by_plan)
     reusable = tuple(plan_id for plan_id in target_plan_ids if plan_id in contributions_by_plan)
     quarantined = tuple(
         plan_id
@@ -213,6 +223,39 @@ def analyze_capsule_recovery(
             case_id for plan in remaining_plans for case_id in plan.ordered_case_manifest_entry_ids
         ),
     )
+
+
+def _require_attempted_groups_recoverable(
+    parts: tuple[_PartSnapshot, ...],
+    contributions_by_plan: dict[str, CapsuleCompositionContribution],
+) -> None:
+    attempts = tuple(item for part in parts for item in part.history_attempts)
+    events = tuple(item for part in parts for item in part.history_retry_events)
+    intents = tuple(item for part in parts for item in part.intents)
+    for plan_id in {item.ingestion_plan_id for item in attempts} - set(contributions_by_plan):
+        plan_attempts = sorted(
+            (item for item in attempts if item.ingestion_plan_id == plan_id),
+            key=lambda item: item.history_attempt_ordinal,
+        )
+        last = plan_attempts[-1]
+        pending = tuple(
+            event
+            for event in events
+            if event.ingestion_plan_id == plan_id
+            and event.failed_history_attempt_id == last.history_attempt_id
+            and event.retry_scheduled
+        )
+        if (
+            last.status != "retryable_failed_settled"
+            or len(pending) != 1
+            or any(
+                intent.parent_id == pending[0].successor_ingestion_occurrence_id
+                for intent in intents
+            )
+        ):
+            raise CapsuleCompositionError(
+                "attempted history group has no eligible pending retry allowance"
+            )
 
 
 def load_composition_record(root: Path) -> CapsuleCompositionRecord:
@@ -269,7 +312,7 @@ def _load_part(root: Path) -> _PartSnapshot:
         path = root / entry.relative_path
         if path.is_symlink() or sha256_file(path) != entry.sha256:
             raise CapsuleCompositionError("modified composition part")
-        if entry.record_kind == "raw_payload":
+        if entry.record_kind in {"raw_payload", "embedded_part_file"}:
             continue
         content = read_regular_file(path)
         document = json.loads(content)
@@ -288,6 +331,14 @@ def _load_part(root: Path) -> _PartSnapshot:
     cases = tuple(item for item in contracts if isinstance(item, CaseRecordV3))
     attempts = tuple(
         item for item in contracts if isinstance(item, (AttemptRecordV2, AttemptRecordV4))
+    )
+    intents = tuple(
+        item for item in contracts if isinstance(item, (AttemptIntentRecord, AttemptIntentRecordV3))
+    )
+    history_attempts = tuple(item for item in contracts if isinstance(item, HistoryAttemptRecord))
+    history_retry_events = tuple(item for item in contracts if isinstance(item, HistoryRetryEvent))
+    history_retry_carries = tuple(
+        item for item in contracts if isinstance(item, HistoryRetryCarryRecord)
     )
     run_specs = tuple(item for item in contracts if isinstance(item, RunSpec))
     preflights = tuple(
@@ -309,6 +360,10 @@ def _load_part(root: Path) -> _PartSnapshot:
         plans=plans,
         cases=cases,
         attempts=attempts,
+        intents=intents,
+        history_attempts=history_attempts,
+        history_retry_events=history_retry_events,
+        history_retry_carries=history_retry_carries,
         run_spec=run_specs[0] if run_specs else None,
         preflight=preflights[0] if preflights else None,
         budget=budgets[0] if budgets else None,
@@ -319,6 +374,9 @@ def _load_part(root: Path) -> _PartSnapshot:
 def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecord:
     first = parts[0]
     compatibility = _require_compatible_parts(parts)
+    operation_attempt_ids = tuple(attempt.attempt_id for part in parts for attempt in part.attempts)
+    if len(set(operation_attempt_ids)) != len(operation_attempt_ids):
+        raise CapsuleCompositionError("duplicate operation attempt across composition parts")
     part_bindings = tuple(
         sorted((_part_binding(part) for part in parts), key=lambda item: item.capsule_id)
     )
@@ -524,6 +582,19 @@ def _terminal_contributions(
     for plan in part.plans:
         if plan.state != IngestionPlanState.SEALED:
             continue
+        physical_history = tuple(
+            item
+            for item in part.history_attempts
+            if item.ingestion_plan_id == plan.ingestion_plan_id
+        )
+        if physical_history:
+            selected_ready = tuple(item for item in physical_history if item.status == "ready")
+            if (
+                len(selected_ready) != 1
+                or selected_ready[0].ingestion_occurrence_id != plan.ingestion_occurrence_id
+                or selected_ready[0].ingestion_plan_record_hash != canonical_sha256(plan)
+            ):
+                raise CapsuleCompositionError("history ready selection does not close")
         cases = tuple(
             cases_by_occurrence.get(case_id) for case_id in plan.ordered_case_occurrence_ids
         )

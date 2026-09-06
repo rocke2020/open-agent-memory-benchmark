@@ -59,6 +59,8 @@ class OperatorDoctorTests(unittest.TestCase):
                 value = "file-project"
             elif name == "OAMB_MEM0_POSTGRES_PASSWORD":
                 value = "file-postgres-password"
+            elif name == "LLM_BASE_URL":
+                value = "https://api.deepseek.com"
             elif value.startswith("change-me"):
                 value = f"file-value-{name.lower()}"
             values.append(f"{name}={value}")
@@ -162,6 +164,8 @@ class OperatorDoctorTests(unittest.TestCase):
                 value = file_overrides[name]
             elif dotenv_overrides is not None and name in dotenv_overrides:
                 value = dotenv_overrides[name]
+            elif name == "LLM_BASE_URL":
+                value = "https://api.deepseek.com"
             elif value.startswith("change-me"):
                 value = f"test-value-{name.lower()}"
             lines.append(f"{name}={value}")

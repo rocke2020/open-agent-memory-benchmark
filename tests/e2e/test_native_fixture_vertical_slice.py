@@ -37,6 +37,7 @@ from oamb.contracts.evidence import (
     IngestionPlanRecordV3,
     OccurrenceClaimRecord,
     RunLeaseRecord,
+    history_attempt_id,
     infrastructure_retry_event_id,
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
@@ -658,7 +659,7 @@ def test_native_model_429_retries_remain_separate_from_normal_attempts(
         with calls.get_lock():
             calls.value += 1
             call_number = calls.value
-        if call_number <= 3:
+        if call_number <= 2:
             return httpx.Response(429, content=rejection)
         return httpx.Response(
             200,
@@ -706,11 +707,11 @@ def test_native_model_429_retries_remain_separate_from_normal_attempts(
         for path in (completed.capsule_root / "source/usage").glob("*.json")
         for record in (json.loads(path.read_bytes()),)
     }
-    assert calls.value == 6
+    assert calls.value == 5
     assert [
         event["backoff_seconds"]
         for event in sorted(events, key=lambda item: item["supplier_call_ordinal"])
-    ] == [1, 2, 4]
+    ] == [1, 2]
     assert all(event["retry_scheduled"] is True for event in events)
     assert len({event["supplier_call_id"] for event in events}) == len(events)
     assert all(
@@ -821,12 +822,12 @@ def test_native_model_429_exhaustion_is_infrastructure_blocked(
     )
     resources = tuple((root / "source/resources").glob("*.json"))
     costs = tuple((root / "source/costs").glob("*.json"))
-    assert calls.value == 4
+    assert calls.value == 3
     assert run["state"] == "infrastructure_blocked"
     assert [
         event["backoff_seconds"]
         for event in sorted(events, key=lambda item: item["supplier_call_ordinal"])
-    ] == [1, 2, 4, None]
+    ] == [1, 2, None]
     assert len(resources) == len(costs)
     assert validate_source_root(root).disposition == ValidationDisposition.VALIDATED
     assert not (provider_runtime / "active-operation").exists()
@@ -1675,6 +1676,46 @@ def test_live_validation_accepts_multiple_provider_usage_records_with_model_role
     plan_usage_ids = list(plan_document["usage_record_ids"])
     plan_usage_ids[usage_index : usage_index + 1] = [additional_usage_id, original_usage_id]
     _mutate_source_document(root, plan_path, usage_record_ids=plan_usage_ids)
+    capsule_manifest_path = root / "capsule-manifest.json"
+    capsule_manifest = CapsuleManifest.model_validate_json(capsule_manifest_path.read_bytes())
+    history_entry = next(
+        entry
+        for entry in capsule_manifest.source_entries
+        if entry.record_kind == "history_attempt_record"
+        and json.loads((root / entry.relative_path).read_bytes())["ingestion_occurrence_id"]
+        == plan.ingestion_occurrence_id
+    )
+    history_path = root / history_entry.relative_path
+    history_document = json.loads(history_path.read_bytes())
+    history_document["ingestion_plan_record_hash"] = canonical_sha256(
+        json.loads(plan_path.read_bytes())
+    )
+    history_document.pop("history_attempt_id")
+    history_id = history_attempt_id(history_document)
+    history_document["history_attempt_id"] = history_id
+    new_history_path = history_path.with_name(f"{history_id}.json")
+    history_path.rename(new_history_path)
+    new_history_path.write_bytes(canonical_json_bytes(history_document))
+    capsule_manifest_path.write_bytes(
+        canonical_json_bytes(
+            capsule_manifest.model_copy(
+                update={
+                    "source_entries": tuple(
+                        entry.model_copy(
+                            update={
+                                "record_id": history_id,
+                                "relative_path": new_history_path.relative_to(root).as_posix(),
+                            }
+                        )
+                        if entry == history_entry
+                        else entry
+                        for entry in capsule_manifest.source_entries
+                    )
+                }
+            )
+        )
+    )
+    _reseal_manifest(root)
     cost_path = next(
         path
         for path in (root / "source/costs").glob("*.json")

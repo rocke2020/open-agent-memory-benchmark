@@ -291,6 +291,15 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn('. "$ROOT/lib/compose.sh"', operator)
         self.assertNotIn("docker compose", mem0)
 
+    def test_producer_containers_freeze_derived_no_proxy_without_global_proxy_changes(self) -> None:
+        compose = self.read("compose.yaml")
+        compose_driver = self.read("lib/compose.sh")
+        self.assertEqual(compose.count("NO_PROXY: ${OAMB_LLM_NO_PROXY:?required}"), 3)
+        self.assertEqual(compose.count("no_proxy: ${OAMB_LLM_NO_PROXY:?required}"), 3)
+        self.assertIn('derive_llm_no_proxy "$(read_env_value "$oamb_compose_env_file" LLM_BASE_URL)"', compose_driver)
+        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            self.assertNotIn(f"{variable}:", compose)
+
     def test_openviking_bootstrap_proves_full_non_root_identity(self) -> None:
         script = self.read("openviking/bootstrap.sh")
         self.assertIn('"$BASE_URL/health"', script)

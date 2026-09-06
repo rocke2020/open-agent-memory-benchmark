@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TypeVar, cast
 
 from oamb.artifacts.atomic import read_regular_file
+from oamb.artifacts.capsule_graph import read_capsule_graph
 from oamb.artifacts.validation.native import validate_native_capsule
 from oamb.artifacts.validation.reduction import (
     AccountingValidationInput,
@@ -30,6 +31,7 @@ from oamb.contracts.evidence import (
     CapsuleManifest,
     CaseEvaluationDisposition,
     CaseRecordV3,
+    HistoryAttemptRecord,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
     ValidationResult,
@@ -90,9 +92,11 @@ class _NativeReportRecords:
     plans: tuple[NativePlanRecord, ...]
     cases: tuple[CaseRecordV3, ...]
     attempts: tuple[AttemptRecordV2, ...]
+    history_attempts: tuple[HistoryAttemptRecord, ...]
     tokens: tuple[TokenRecord, ...]
     resources: tuple[ResourceUsageRecord, ...]
     costs: tuple[CostRecord, ...]
+    raw_paths: dict[str, Path]
     source_schema_versions: tuple[str, ...]
 
 
@@ -204,6 +208,7 @@ def reduce_native_run_report(
         records.resources,
         records.costs,
         plans,
+        records.history_attempts,
     )
     metrics = _metric_summaries(cases)
     mab65_reduction = _build_native_mab65_report_reduction(
@@ -463,14 +468,26 @@ def _load_report_records(
     plans: list[NativePlanRecord] = []
     cases: list[CaseRecordV3] = []
     attempts: list[AttemptRecordV2] = []
+    history_attempts: list[HistoryAttemptRecord] = []
     tokens: list[TokenRecord] = []
     resources: list[ResourceUsageRecord] = []
     costs: list[CostRecord] = []
+    raw_paths: dict[str, Path] = {}
     source_schema_versions = ["capsule_manifest@1"]
-    for entry in manifest.source_entries:
-        path = root / entry.relative_path
-        content = read_regular_file(path)
-        if entry.record_kind != "raw_payload":
+    graph = read_capsule_graph(root)
+    for graph_index, (capsule_root, capsule_manifest) in enumerate(graph):
+        for entry in capsule_manifest.source_entries:
+            path = capsule_root / entry.relative_path
+            content = read_regular_file(path)
+            if entry.record_kind == "embedded_part_file":
+                continue
+            if entry.record_kind == "raw_payload":
+                previous = raw_paths.setdefault(entry.record_id, path)
+                if read_regular_file(previous) != content:
+                    raise NativeReportReductionError(
+                        "raw payload identity collides across capsules"
+                    )
+                continue
             try:
                 document = json.loads(content)
                 schema_name = document["schema_name"]
@@ -482,27 +499,31 @@ def _load_report_records(
                     "native report source record has no exact schema identity"
                 ) from exc
             source_schema_versions.append(f"{schema_name}@{schema_version}")
-        if entry.record_kind == "case_manifest":
-            case_manifests.append(CaseManifest.model_validate_json(content))
-        elif entry.record_kind == "run_spec":
-            run_specs.append(RunSpec.model_validate_json(content))
-        elif entry.record_kind == "ingestion_plan_record":
-            if document["schema_version"] == 2:
-                plans.append(IngestionPlanRecordV2.model_validate_json(content))
-            elif document["schema_version"] == 3:
-                plans.append(IngestionPlanRecordV3.model_validate_json(content))
-            else:
-                raise NativeReportReductionError("unsupported native ingestion-plan record version")
-        elif entry.record_kind == "case_record":
-            cases.append(CaseRecordV3.model_validate_json(content))
-        elif entry.record_kind == "attempt_record":
-            attempts.append(AttemptRecordV2.model_validate_json(content))
-        elif entry.record_kind == "token_usage_record":
-            tokens.append(_parse_token_usage(content))
-        elif entry.record_kind == "resource_usage_record":
-            resources.append(ResourceUsageRecord.model_validate_json(content))
-        elif entry.record_kind == "cost_record":
-            costs.append(CostRecord.model_validate_json(content))
+            if graph_index == 0 and entry.record_kind == "case_manifest":
+                case_manifests.append(CaseManifest.model_validate_json(content))
+            elif graph_index == 0 and entry.record_kind == "run_spec":
+                run_specs.append(RunSpec.model_validate_json(content))
+            elif graph_index == 0 and entry.record_kind == "ingestion_plan_record":
+                if document["schema_version"] == 2:
+                    plans.append(IngestionPlanRecordV2.model_validate_json(content))
+                elif document["schema_version"] == 3:
+                    plans.append(IngestionPlanRecordV3.model_validate_json(content))
+                else:
+                    raise NativeReportReductionError(
+                        "unsupported native ingestion-plan record version"
+                    )
+            elif graph_index == 0 and entry.record_kind == "case_record":
+                cases.append(CaseRecordV3.model_validate_json(content))
+            elif entry.record_kind == "attempt_record":
+                attempts.append(AttemptRecordV2.model_validate_json(content))
+            elif entry.record_kind == "history_attempt_record":
+                history_attempts.append(HistoryAttemptRecord.model_validate_json(content))
+            elif entry.record_kind == "token_usage_record":
+                tokens.append(_parse_token_usage(content))
+            elif entry.record_kind == "resource_usage_record":
+                resources.append(ResourceUsageRecord.model_validate_json(content))
+            elif entry.record_kind == "cost_record":
+                costs.append(CostRecord.model_validate_json(content))
     if len(case_manifests) != 1 or len(run_specs) > 1 or not plans or not cases:
         raise NativeReportReductionError("native capsule report inventory is incomplete")
     return _NativeReportRecords(
@@ -511,9 +532,11 @@ def _load_report_records(
         plans=tuple(plans),
         cases=tuple(cases),
         attempts=tuple(attempts),
+        history_attempts=tuple(history_attempts),
         tokens=tuple(tokens),
         resources=tuple(resources),
         costs=tuple(costs),
+        raw_paths=raw_paths,
         source_schema_versions=tuple(dict.fromkeys(source_schema_versions)),
     )
 
@@ -592,14 +615,18 @@ def _accounting_summary(
     resources: tuple[ResourceUsageRecord, ...],
     costs: tuple[CostRecord, ...],
     plans: tuple[NativePlanRecord, ...],
+    history_attempts: tuple[HistoryAttemptRecord, ...],
 ) -> AccountingReduction:
-    views = _accounting_record_views(tokens, resources, costs)
+    final_plan_ids = frozenset(item.ingestion_occurrence_id for item in plans)
+    views = _accounting_record_views(tokens, resources, costs, final_plan_ids=final_plan_ids)
     return reduce_accounting_records(
         token_records=tokens,
         resource_records=resources,
         cost_records=costs,
         record_views=views,
-        expected_plan_ids=frozenset(item.ingestion_occurrence_id for item in plans),
+        expected_plan_ids=frozenset(
+            item.ingestion_occurrence_id for item in (*plans, *history_attempts)
+        ),
     )
 
 
@@ -620,8 +647,11 @@ def build_native_accounting_validation_input(
             records.tokens,
             records.resources,
             records.costs,
+            final_plan_ids=frozenset(item.ingestion_occurrence_id for item in plans),
         ),
-        expected_plan_ids=frozenset(item.ingestion_occurrence_id for item in plans),
+        expected_plan_ids=frozenset(
+            item.ingestion_occurrence_id for item in (*plans, *records.history_attempts)
+        ),
         expected_attempt_ids=frozenset(item.attempt_id for item in records.attempts),
         attempts=records.attempts,
         require_attempt_accounting_closure=True,
@@ -632,13 +662,17 @@ def _accounting_record_views(
     tokens: tuple[TokenRecord, ...],
     resources: tuple[ResourceUsageRecord, ...],
     costs: tuple[CostRecord, ...],
+    *,
+    final_plan_ids: frozenset[str],
 ) -> tuple[AccountingRecordView, ...]:
     views = [
         AccountingRecordView(
             record_id=item.usage_record_id,
             owner_kind=_accounting_owner(item.parent_kind),
             indexing_view=(
-                "final_contribution" if item.parent_kind == "ingestion_plan" else "not_applicable"
+                ("final_contribution" if item.parent_id in final_plan_ids else "attempted")
+                if item.parent_kind == "ingestion_plan"
+                else "not_applicable"
             ),
         )
         for item in tokens
@@ -648,7 +682,9 @@ def _accounting_record_views(
             record_id=item.resource_record_id,
             owner_kind=_accounting_owner(item.parent_kind),
             indexing_view=(
-                "final_contribution" if item.parent_kind == "ingestion_plan" else "not_applicable"
+                ("final_contribution" if item.parent_id in final_plan_ids else "attempted")
+                if item.parent_kind == "ingestion_plan"
+                else "not_applicable"
             ),
         )
         for item in resources
@@ -657,9 +693,7 @@ def _accounting_record_views(
         AccountingRecordView(
             record_id=item.cost_record_id,
             owner_kind=_accounting_owner(item.parent_kind),
-            indexing_view=(
-                "final_contribution" if item.parent_kind == "ingestion_plan" else "not_applicable"
-            ),
+            indexing_view=item.indexing_view.value,
         )
         for item in costs
     )
@@ -717,10 +751,15 @@ def _record_projections(
         for raw_reference, media_type in raw_references:
             if raw_reference in previewed_raw_references or preview_bytes_remaining < 1:
                 continue
-            relative_path = f"source/raw/{raw_reference}.json.gz"
+            path = records.raw_paths.get(raw_reference)
+            if path is None:
+                raise NativeReportReductionError(
+                    "native display preview cannot locate sealed raw evidence"
+                )
+            relative_path = path.relative_to(capsule_root.resolve()).as_posix()
             try:
                 preview = build_display_preview(
-                    capsule_root / relative_path,
+                    path,
                     source_reference=relative_path,
                     media_type=media_type,
                     max_bytes=min(

@@ -10,7 +10,7 @@ import signal
 import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from multiprocessing.connection import Connection
@@ -48,6 +48,9 @@ from oamb.contracts.evidence import (
     CaseEvaluationDisposition,
     CaseRecordV3,
     CloseErrorRecord,
+    HistoryAttemptRecord,
+    HistoryRetryAllowance,
+    HistoryRetryEvent,
     InfrastructureRetryEvent,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
@@ -59,6 +62,8 @@ from oamb.contracts.evidence import (
     budget_owner_allocation_hash,
     budget_reservation_v3_hash,
     budget_reservation_v3_id,
+    history_attempt_id,
+    history_retry_event_id,
     infrastructure_retry_event_id,
     infrastructure_supplier_call_id,
 )
@@ -71,6 +76,7 @@ from oamb.contracts.ids import (
     canonical_sha256,
     case_occurrence_id,
     ingestion_occurrence_id,
+    ingestion_payload_hash,
 )
 from oamb.contracts.ports import (
     AnswerValue,
@@ -104,6 +110,7 @@ from oamb.contracts.ports import (
     RetrievalRequest,
     ScopeAllocationRequest,
     ScopeReceipt,
+    SettledTransientIngestionFailure,
     VisibleEvidencePolicy,
     WorkloadPort,
 )
@@ -335,8 +342,10 @@ class NativeRunControl:
             < 1
         ):
             raise ValueError("live native concurrency limits must be positive")
-        if self.max_retries_per_operation < 0:
-            raise ValueError("live native retry limit must be non-negative")
+        if type(
+            self.max_retries_per_operation
+        ) is not int or self.max_retries_per_operation not in {0, 1, 2}:
+            raise ValueError("live native retry limit must be 0, 1, or 2")
         comparison_records = (
             self.runtime_binding,
             self.workload_control,
@@ -569,6 +578,7 @@ class _NativeRunRequest:
     provider_lifecycle: ProviderLifecycleBridge | None = None
     partition: CasePartitionSpec | None = None
     stop_event: _NativeStopSignal | None = None
+    recovery_parts: tuple[Path, ...] = ()
 
 
 class _NativeStopSignal(Protocol):
@@ -615,6 +625,16 @@ class _NativeExecutionState:
     pending_model_usage: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] | None = None
     stop_event: _NativeStopSignal | None = None
     sequence: int = 0
+    operation_records: dict[str, AttemptRecordV2 | AttemptRecordV4] = field(default_factory=dict)
+    history_records: list[HistoryAttemptRecord] = field(default_factory=list)
+    history_scopes: dict[str, ScopeReceipt] = field(default_factory=dict)
+    history_allowances: dict[str, HistoryRetryAllowance] = field(default_factory=dict)
+    history_events: dict[str, HistoryRetryEvent] = field(default_factory=dict)
+    history_claims: dict[str, str] = field(default_factory=dict)
+    history_source_bindings: tuple[tuple[str, str], ...] = ()
+    history_occurrence_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
+    case_occurrence_bindings: dict[str, str] = field(default_factory=dict)
+    publish_history_progress: Callable[[], None] | None = None
 
     def timestamp(self) -> datetime:
         self.sequence += 1
@@ -983,6 +1003,7 @@ def run_native_vertical_slice(
     continuation: NativeContinuation | None = None,
     partition: CasePartitionSpec | None = None,
     stop_event: _NativeStopSignal | None = None,
+    recovery_parts: tuple[Path, ...] = (),
 ) -> NativeRunArtifacts:
     """Compose one deterministic native capsule without selecting any live transport."""
 
@@ -1006,6 +1027,8 @@ def run_native_vertical_slice(
             raise ValueError("live native judge role is outside the preflight inventory")
     if partition is not None and partition.run_id != run_id:
         raise ValueError("case partition run ID does not match the requested run")
+    if recovery_parts and (partition is None or continuation is not None):
+        raise ValueError("history recovery requires a fresh case-partition run")
     capsule_root = Path(output_root) / run_id
     if continuation is not None:
         if control is None:
@@ -1073,6 +1096,7 @@ def run_native_vertical_slice(
         provider_lifecycle=lifecycle,
         partition=partition,
         stop_event=stop_event,
+        recovery_parts=recovery_parts,
     )
     try:
         completed = _run_native_supervised(request)
@@ -1332,6 +1356,7 @@ async def _run_native_with_cell_deadline(
             lifecycle_sender=sender,
             partition=getattr(request, "partition", None),
             stop_event=getattr(request, "stop_event", None),
+            recovery_parts=getattr(request, "recovery_parts", ()),
         )
 
     if request.control is None:
@@ -1675,6 +1700,7 @@ async def _run_native_vertical_slice(
     lifecycle_sender: Connection | None = None,
     partition: CasePartitionSpec | None = None,
     stop_event: _NativeStopSignal | None = None,
+    recovery_parts: tuple[Path, ...] = (),
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
     store = artifact_store_factory(capsule_root)
@@ -1755,6 +1781,31 @@ async def _run_native_vertical_slice(
             )
         )
     try:
+        if recovery_parts:
+            from oamb.artifacts.history_recovery import prepare_history_recovery
+
+            if partition is None or continuation is not None:
+                raise ValueError("history recovery requires a fresh case-partition run")
+            carry, pending_events = prepare_history_recovery(
+                part_roots=recovery_parts,
+                capsule_root=capsule_root,
+                run_id=run_id,
+                selected_ingestion_plan_ids=tuple(
+                    plan.ingestion_plan_id for plan in ingestion_plans
+                ),
+                max_retries_per_operation=control.max_retries_per_operation
+                if control
+                else len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS),
+                memory_system_id=control.run_spec.memory_system_id if control else None,
+            )
+            _seal(state, "history-carries", carry.carry_record_id, carry)
+            state.history_allowances = {item.ingestion_plan_id: item for item in carry.allowances}
+            state.history_events = {item.history_retry_event_id: item for item in pending_events}
+            state.history_source_bindings = tuple(
+                (item.capsule_id, item.manifest_sha256) for item in carry.source_part_bindings
+            )
+            for event in pending_events:
+                _claim_history_successor(state, event)
         memory = memory_factory(store, ingestion_plans)
         model_store: ArtifactStorePort = store
         if state.pending_model_usage is not None:
@@ -1764,8 +1815,8 @@ async def _run_native_vertical_slice(
             judge_model = judge_model_factory(model_store)
         setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = ()
         if control is not None:
-            runtime_parent_id = ingestion_occurrence_id(
-                run_id,
+            runtime_parent_id = _initial_history_occurrence(
+                state,
                 control.run_spec.memory_system_id,
                 ingestion_plans[0].ingestion_plan_id,
             )
@@ -1812,7 +1863,7 @@ async def _run_native_vertical_slice(
                 ]
             )
         ingestion_occurrence_ids = tuple(
-            ingestion_occurrence_id(run_id, runtime.memory_system_id, plan.ingestion_plan_id)
+            _initial_history_occurrence(state, runtime.memory_system_id, plan.ingestion_plan_id)
             for plan in ingestion_plans
         )
         ingestion_occurrence_by_plan = dict(
@@ -1844,6 +1895,21 @@ async def _run_native_vertical_slice(
                     sequence=state.sequence,
                 )
             )
+
+        def publish_history_progress() -> None:
+            if lifecycle_sender is None:
+                return
+            history_ids, case_ids = _executed_occurrence_ids(state, ingestion_plans, case_plans)
+            lifecycle_sender.send(
+                _NativeRunProgress(
+                    run_spec_hash=run_spec_hash,
+                    ingestion_occurrence_ids=history_ids,
+                    case_occurrence_ids=case_ids,
+                    sequence=state.sequence,
+                )
+            )
+
+        state.publish_history_progress = publish_history_progress
         plan_records, case_records = await _execute_history_question_pipeline(
             state=state,
             workload=workload,
@@ -1863,6 +1929,12 @@ async def _run_native_vertical_slice(
         )
     except BaseException as exc:
         execution_error = exc
+    if state.history_occurrence_bindings:
+        ingestion_occurrence_ids, case_occurrence_ids = _executed_occurrence_ids(
+            state,
+            ingestion_plans,
+            case_plans,
+        )
     close_errors = await _close_ports(
         state,
         answer_model=answer_model,
@@ -1929,6 +2001,43 @@ async def _run_native_vertical_slice(
         case_records=case_records,
         sequence=state.sequence,
     )
+
+
+def _initial_history_occurrence(
+    state: _NativeExecutionState,
+    memory_system_id: str,
+    plan_id: str,
+) -> str:
+    allowance = state.history_allowances.get(plan_id)
+    return ingestion_occurrence_id(
+        allowance.execution_run_id if allowance else state.run_id,
+        memory_system_id,
+        plan_id,
+        history_attempt_ordinal=allowance.next_history_attempt_ordinal if allowance else 1,
+    )
+
+
+def _executed_occurrence_ids(
+    state: _NativeExecutionState,
+    plans: tuple[IngestionPlan, ...],
+    case_plans: tuple[CasePlan, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    plan_order = {plan.ingestion_plan_id: index for index, plan in enumerate(plans)}
+    histories = tuple(
+        sorted(
+            state.history_occurrence_bindings,
+            key=lambda occurrence: (
+                plan_order[state.history_occurrence_bindings[occurrence][0]],
+                state.history_occurrence_bindings[occurrence][1],
+            ),
+        )
+    )
+    cases = tuple(
+        state.case_occurrence_bindings[case.case_manifest_entry_id]
+        for case in case_plans
+        if case.case_manifest_entry_id in state.case_occurrence_bindings
+    )
+    return histories, cases
 
 
 async def _close_ports(
@@ -2108,10 +2217,10 @@ async def _execute_history_question_pipeline(
 
     async def execute_history(plan_index: int, plan: IngestionPlan) -> None:
         async def operation() -> tuple[NativeIngestionPlanRecord, ScopeReceipt]:
-            records, scopes = await _execute_ingestion_plans_serial(
+            records, scopes = await _execute_history_with_rebuild(
                 state=state,
                 memory=memory,
-                plans=(plan,),
+                plan=plan,
                 case_plans=case_plans,
                 memory_system_id=memory_system_id,
                 runtime_binding_hash=runtime_binding_hash,
@@ -2223,6 +2332,306 @@ def _raise_pipeline_errors(results: Sequence[object]) -> None:
         raise BaseExceptionGroup("multiple admitted pipeline tasks failed", list(errors))
 
 
+class HistoryRebuildExhausted(RuntimeError):
+    """The settled failed history has consumed its frozen reconstruction allowance."""
+
+
+def _claim_history_successor(state: _NativeExecutionState, event: HistoryRetryEvent) -> str:
+    existing = state.history_claims.get(event.history_retry_event_id)
+    if existing is not None:
+        return existing
+    occurrence = event.successor_ingestion_occurrence_id
+    if occurrence is None or not event.retry_scheduled:
+        raise ValueError("history successor has no scheduled occurrence")
+    if state.control is not None:
+        if state.provider_lifecycle is None:
+            raise ValueError("history successor has no lifecycle authority")
+        payload = state.provider_lifecycle.claim_history_successor(
+            retry_event_id=event.history_retry_event_id,
+            retry_event_sha256=canonical_sha256(event),
+            ingestion_plan_id=event.ingestion_plan_id,
+            successor_ingestion_occurrence_id=occurrence,
+            claimant_run_id=state.run_id,
+            claimant_capsule_id=state.run_id,
+            source_part_manifest_bindings=state.history_source_bindings,
+        )
+    else:
+        payload = canonical_json_bytes(
+            {
+                "operation": "fixture_history_successor_admission",
+                "retry_event_id": event.history_retry_event_id,
+                "retry_event_sha256": canonical_sha256(event),
+                "ingestion_plan_id": event.ingestion_plan_id,
+                "successor_ingestion_occurrence_id": occurrence,
+                "claimant_run_id": state.run_id,
+            }
+        )
+    reference = _seal_raw(state.store, payload, media_type="application/json")
+    state.history_claims[event.history_retry_event_id] = reference
+    return reference
+
+
+def _seal_history_attempt(
+    *,
+    state: _NativeExecutionState,
+    plan: IngestionPlan,
+    memory_system_id: str,
+    runtime_binding_hash: str,
+    execution_run_id: str,
+    ordinal: int,
+    maximum_retries: int,
+    previous_event: HistoryRetryEvent | None,
+    started_at: datetime,
+    ready_record: NativeIngestionPlanRecord | None = None,
+    error: BaseException | None = None,
+) -> HistoryAttemptRecord:
+    occurrence = ingestion_occurrence_id(
+        execution_run_id,
+        memory_system_id,
+        plan.ingestion_plan_id,
+        history_attempt_ordinal=ordinal,
+    )
+    operations = tuple(
+        record
+        for record in state.operation_records.values()
+        if record.parent_kind == "ingestion_plan" and record.parent_id == occurrence
+    )
+    failure = next(
+        (record for record in reversed(operations) if record.outcome != AttemptOutcome.SUCCEEDED),
+        None,
+    )
+    eligible = bool(
+        isinstance(error, SettledTransientIngestionFailure)
+        and failure is not None
+        and failure.outcome == AttemptOutcome.FAILED
+        and failure.stage in {"memory_ingest", "memory_readiness"}
+    )
+    status = (
+        "ready"
+        if ready_record is not None
+        else "retryable_failed_settled"
+        if eligible
+        else "unknown"
+        if error is not None and _contains_unknown_outcome(error)
+        else "cancelled"
+        if isinstance(error, (asyncio.CancelledError, NativeRunInterrupted))
+        else "failed"
+    )
+    scope = state.history_scopes.get(occurrence)
+    settlement = error if eligible and isinstance(error, SettledTransientIngestionFailure) else None
+    fields = {
+        "schema_name": "history_attempt_record",
+        "schema_version": 1,
+        "run_id": state.run_id,
+        "execution_run_id": execution_run_id,
+        "ingestion_plan_id": plan.ingestion_plan_id,
+        "history_attempt_ordinal": ordinal,
+        "ingestion_occurrence_id": occurrence,
+        "memory_system_id": memory_system_id,
+        "runtime_binding_hash": runtime_binding_hash,
+        "retry_policy_hash": INFRASTRUCTURE_RETRY_POLICY_HASH,
+        "max_retries_per_operation": maximum_retries,
+        "history_input_hash": ingestion_payload_hash(
+            tuple(s.payload_sha256 for s in plan.ordered_source_units)
+        ),
+        "scope_id": scope.scope_id if scope is not None else None,
+        "scope_raw_refs": (
+            tuple(
+                dict.fromkeys(
+                    (
+                        scope.raw_reference.sha256,
+                        *(r.sha256 for r in scope.supporting_raw_references),
+                    )
+                )
+            )
+            if scope is not None
+            else ()
+        ),
+        "previous_retry_event_id": previous_event.history_retry_event_id
+        if previous_event
+        else None,
+        "admission_claim_raw_ref": state.history_claims.get(previous_event.history_retry_event_id)
+        if previous_event
+        else None,
+        "status": status,
+        "operation_attempt_ids": tuple(record.attempt_id for record in operations),
+        "terminal_failure_attempt_id": failure.attempt_id if failure is not None else None,
+        "settlement_basis": settlement.settlement_basis if settlement else None,
+        "settlement_status_code": settlement.status_code if settlement else None,
+        "settlement_task_id": settlement.expected_task_id if settlement else None,
+        "settlement_session_id": settlement.expected_session_id if settlement else None,
+        "settlement_evidence_refs": tuple(
+            dict.fromkeys(
+                (
+                    settlement.raw_reference.sha256,
+                    *(r.sha256 for r in settlement.supporting_raw_references),
+                )
+            )
+        )
+        if settlement and settlement.raw_reference
+        else (),
+        "internal_retry_count": settlement.internal_retry_count if settlement else None,
+        "failure_kind": settlement.failure_kind if settlement else None,
+        "ingestion_plan_record_hash": canonical_sha256(ready_record)
+        if ready_record is not None
+        else None,
+        "started_at": started_at,
+        "ended_at": state.timestamp(),
+    }
+    record = HistoryAttemptRecord.model_validate(
+        {"history_attempt_id": history_attempt_id(fields), **fields}
+    )
+    _seal(state, "history-attempts", record.history_attempt_id, record)
+    state.history_records.append(record)
+    return record
+
+
+def _seal_history_retry(
+    state: _NativeExecutionState,
+    failed: HistoryAttemptRecord,
+    *,
+    scheduled: bool,
+) -> HistoryRetryEvent:
+    ordinal = failed.history_attempt_ordinal
+    fields = {
+        "schema_name": "history_retry_event",
+        "schema_version": 1,
+        "run_id": state.run_id,
+        "ingestion_plan_id": failed.ingestion_plan_id,
+        "failed_history_attempt_id": failed.history_attempt_id,
+        "failed_history_attempt_ordinal": ordinal,
+        "retry_ordinal": ordinal,
+        "retry_scheduled": scheduled,
+        "successor_ingestion_occurrence_id": ingestion_occurrence_id(
+            state.run_id,
+            failed.memory_system_id,
+            failed.ingestion_plan_id,
+            history_attempt_ordinal=ordinal + 1,
+        )
+        if scheduled
+        else None,
+        "successor_execution_run_id": state.run_id if scheduled else None,
+        "successor_history_attempt_ordinal": ordinal + 1 if scheduled else None,
+        "retry_policy_hash": INFRASTRUCTURE_RETRY_POLICY_HASH,
+        "max_retries_per_operation": failed.max_retries_per_operation,
+        "backoff_seconds": INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[ordinal - 1] if scheduled else None,
+        "observed_at": state.timestamp(),
+    }
+    event = HistoryRetryEvent.model_validate(
+        {"history_retry_event_id": history_retry_event_id(fields), **fields}
+    )
+    _seal(state, "history-retries", event.history_retry_event_id, event)
+    state.history_events[event.history_retry_event_id] = event
+    return event
+
+
+async def _execute_history_with_rebuild(
+    *,
+    state: _NativeExecutionState,
+    memory: MemorySystemPort,
+    plan: IngestionPlan,
+    case_plans: tuple[CasePlan, ...],
+    memory_system_id: str,
+    runtime_binding_hash: str,
+    adapter_profile_id: str,
+    setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
+    continuation: PartialPlanContinuation | None = None,
+) -> tuple[tuple[NativeIngestionPlanRecord, ...], dict[str, ScopeReceipt]]:
+    maximum = (
+        state.control.max_retries_per_operation
+        if state.control
+        else len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
+    )
+    controller = InfrastructureRetryController(maximum_total_retries=maximum)
+    allowance = state.history_allowances.get(plan.ingestion_plan_id)
+    ordinal = allowance.next_history_attempt_ordinal if allowance else 1
+    execution_run_id = allowance.execution_run_id if allowance else state.run_id
+    previous_event = (
+        state.history_events.get(allowance.previous_retry_event_id)
+        if allowance and allowance.previous_retry_event_id
+        else None
+    )
+    if ordinal > 1 and (previous_event is None or not await controller.reserve(ordinal - 1)):
+        raise ValueError("history recovery allowance has no closed pending retry")
+    if previous_event is not None:
+        _raise_if_native_stop_requested(state)
+        assert previous_event.backoff_seconds is not None
+        await _infrastructure_retry_sleep(previous_event.backoff_seconds)
+    while True:
+        _raise_if_native_stop_requested(state)
+        if previous_event is not None:
+            _claim_history_successor(state, previous_event)
+        started_at = state.timestamp()
+        occurrence = ingestion_occurrence_id(
+            execution_run_id,
+            memory_system_id,
+            plan.ingestion_plan_id,
+            history_attempt_ordinal=ordinal,
+        )
+        if occurrence in state.history_occurrence_bindings:
+            raise ValueError("history execution occurrence was already admitted")
+        state.history_occurrence_bindings[occurrence] = (plan.ingestion_plan_id, ordinal)
+        if state.publish_history_progress is not None:
+            state.publish_history_progress()
+        try:
+            records, scopes = await _execute_ingestion_plans_serial(
+                state=state,
+                memory=memory,
+                plans=(plan,),
+                case_plans=case_plans,
+                memory_system_id=memory_system_id,
+                runtime_binding_hash=runtime_binding_hash,
+                adapter_profile_id=adapter_profile_id,
+                setup_artifacts=setup_artifacts
+                if ordinal == (allowance.next_history_attempt_ordinal if allowance else 1)
+                else (),
+                continuation=continuation if ordinal == 1 else None,
+                history_attempt_ordinal=ordinal,
+                execution_run_id=execution_run_id,
+            )
+        except BaseException as error:
+            failed = _seal_history_attempt(
+                state=state,
+                plan=plan,
+                memory_system_id=memory_system_id,
+                runtime_binding_hash=runtime_binding_hash,
+                execution_run_id=execution_run_id,
+                ordinal=ordinal,
+                maximum_retries=maximum,
+                previous_event=previous_event,
+                started_at=started_at,
+                error=error,
+            )
+            if failed.status != "retryable_failed_settled":
+                raise
+            _raise_if_native_stop_requested(state)
+            scheduled = await controller.reserve(1)
+            previous_event = _seal_history_retry(state, failed, scheduled=scheduled)
+            if not scheduled:
+                raise HistoryRebuildExhausted(
+                    "history reconstruction retry limit exhausted"
+                ) from error
+            assert previous_event.backoff_seconds is not None
+            await _infrastructure_retry_sleep(previous_event.backoff_seconds)
+            _raise_if_native_stop_requested(state)
+            ordinal += 1
+            execution_run_id = state.run_id
+            continue
+        _seal_history_attempt(
+            state=state,
+            plan=plan,
+            memory_system_id=memory_system_id,
+            runtime_binding_hash=runtime_binding_hash,
+            execution_run_id=execution_run_id,
+            ordinal=ordinal,
+            maximum_retries=maximum,
+            previous_event=previous_event,
+            started_at=started_at,
+            ready_record=records[0],
+        )
+        return records, scopes
+
+
 async def _execute_ingestion_plans_serial(
     *,
     state: _NativeExecutionState,
@@ -2234,6 +2643,8 @@ async def _execute_ingestion_plans_serial(
     adapter_profile_id: str,
     setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
     continuation: PartialPlanContinuation | None = None,
+    history_attempt_ordinal: int = 1,
+    execution_run_id: str | None = None,
 ) -> tuple[tuple[NativeIngestionPlanRecord, ...], dict[str, ScopeReceipt]]:
     case_ids = {case.case_manifest_entry_id for case in case_plans}
     records: list[NativeIngestionPlanRecord] = []
@@ -2242,9 +2653,10 @@ async def _execute_ingestion_plans_serial(
         if not set(plan.ordered_case_manifest_entry_ids) <= case_ids:
             raise ValueError("native ingestion plan references an unknown case")
         occurrence_id = ingestion_occurrence_id(
-            state.run_id,
+            execution_run_id or state.run_id,
             memory_system_id,
             plan.ingestion_plan_id,
+            history_attempt_ordinal=history_attempt_ordinal,
         )
         scope_request = ScopeAllocationRequest(
             ingestion_occurrence_id=occurrence_id,
@@ -2306,6 +2718,11 @@ async def _execute_ingestion_plans_serial(
             plan_artifacts.append(scope_artifacts)
         else:
             scope = await memory.allocate_ingestion_scope(scope_request)
+        if scope.ingestion_occurrence_id != occurrence_id:
+            raise ValueError("allocated history scope has a foreign occurrence")
+        if any(existing.scope_id == scope.scope_id for existing in state.history_scopes.values()):
+            raise ValueError("allocated history scope was already used by another attempt")
+        state.history_scopes[occurrence_id] = scope
         scopes[plan.ingestion_plan_id] = scope
         dispatches = memory.plan_ingestion(
             IngestionRequest(scope=scope, ordered_source_units=plan.ordered_source_units)
@@ -2679,16 +3096,15 @@ async def _execute_cases_serial(
         selected_plan = plan_by_case.get(case_plan.case_manifest_entry_id)
         if selected_plan is None:
             raise ValueError("native case has no ingestion plan")
-        ingestion_occurrence = ingestion_occurrence_id(
-            state.run_id,
-            memory_system_id,
-            selected_plan.ingestion_plan_id,
-        )
+        scope = scopes[selected_plan.ingestion_plan_id]
+        ingestion_occurrence = scope.ingestion_occurrence_id
         case_occurrence = case_occurrence_id(
             ingestion_occurrence,
             case_plan.case_manifest_entry_id,
         )
-        scope = scopes[selected_plan.ingestion_plan_id]
+        state.case_occurrence_bindings[case_plan.case_manifest_entry_id] = case_occurrence
+        if state.publish_history_progress is not None:
+            state.publish_history_progress()
         query = workload.render_retrieval_query(case_plan)
         query_fingerprint = canonical_sha256(
             ["oamb-native-query-v1", case_occurrence, hashlib.sha256(query).hexdigest()]
@@ -4344,7 +4760,7 @@ def _contains_infrastructure_retry_exhausted(error: BaseException) -> bool:
 def _is_pure_infrastructure_retry_exhaustion(error: BaseException) -> bool:
     """Return true only when every terminal root is one safe retry exhaustion."""
 
-    if isinstance(error, InfrastructureRetryExhausted):
+    if isinstance(error, (InfrastructureRetryExhausted, HistoryRebuildExhausted)):
         return True
     if isinstance(error, BaseExceptionGroup):
         return bool(error.exceptions) and all(
@@ -4582,6 +4998,8 @@ def _seal(
         record_id=record_id,
         record=record,
     )
+    if isinstance(record, (AttemptRecordV2, AttemptRecordV4)):
+        state.operation_records[record.attempt_id] = record
 
 
 def _require_safe_component(value: str, label: str) -> None:

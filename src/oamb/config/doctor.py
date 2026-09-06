@@ -11,6 +11,7 @@ from typing import cast
 
 from oamb.artifacts.atomic import read_regular_file
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from oamb.contracts.specifications import INGESTION_RECOVERY_STRATEGY, INGESTION_RETRY_UNIT
 from oamb.workloads.longmemeval import (
     LME6_EXPECTED_QUESTION_IDS,
     LME6_EXPECTED_SESSION_COUNT,
@@ -105,6 +106,8 @@ _RETRIEVAL_BINDING_KEYS = frozenset(
     }
 )
 _EXECUTION_KEYS = (
+    "ingestion_retry_unit",
+    "ingestion_recovery_strategy",
     "max_retries_per_operation",
     "operation_timeout_seconds",
     "max_parallel_datasets",
@@ -207,6 +210,8 @@ class ResolvedRetrieval:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedExecution:
+    ingestion_retry_unit: str
+    ingestion_recovery_strategy: str
     max_retries_per_operation: int
     operation_timeout_seconds: int
     max_parallel_datasets: int
@@ -555,6 +560,8 @@ def _authorization_document(execution: ResolvedExecution) -> dict[str, object]:
     return {
         key: getattr(execution, key)
         for key in (
+            "ingestion_retry_unit",
+            "ingestion_recovery_strategy",
             "max_retries_per_operation",
             "operation_timeout_seconds",
             "per_cell_base_operation_count",
@@ -574,6 +581,16 @@ def _maximum_output_tokens_per_call(_role_id: ModelRoleId) -> int | None:
     return None
 
 
+def _history_rebuild_ingress_budget(
+    *,
+    group_count: int,
+    source_count: int,
+) -> tuple[int, int]:
+    if group_count < 1 or source_count < group_count:
+        raise ValueError("history rebuild inventory must contain every non-empty group")
+    return source_count + 3 * group_count, 3 * source_count + 3 * group_count
+
+
 def _resolve_execution(
     selection: str,
     controls: EvaluationControls,
@@ -590,16 +607,23 @@ def _resolve_execution(
         question_concurrency = 2
     else:
         raise ResolvedPlanError(f"unsupported resolved execution selection: {selection}")
+    ingress_operations, ingress_owner_authorizations = _history_rebuild_ingress_budget(
+        group_count=case_count,
+        source_count=source_count,
+    )
     base_operations = 1 + source_count + 8 * case_count
-    retry_eligible_operations = 2 * case_count
+    retry_eligible_operations = ingress_operations + 2 * case_count
     base_owner_authorizations = base_operations + 2 * source_count + case_count
     maximum_operations = (
         base_operations + retry_eligible_operations * controls.max_retries_per_operation
     )
     maximum_owner_authorizations = (
-        base_owner_authorizations + retry_eligible_operations * controls.max_retries_per_operation
+        base_owner_authorizations
+        + (ingress_owner_authorizations + 2 * case_count) * controls.max_retries_per_operation
     )
     return ResolvedExecution(
+        ingestion_retry_unit=INGESTION_RETRY_UNIT,
+        ingestion_recovery_strategy=INGESTION_RECOVERY_STRATEGY,
         max_retries_per_operation=controls.max_retries_per_operation,
         operation_timeout_seconds=controls.operation_timeout_seconds,
         max_parallel_datasets=1,

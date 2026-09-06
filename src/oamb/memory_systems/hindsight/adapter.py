@@ -10,6 +10,10 @@ import httpx
 
 from oamb.config.provider_services import HINDSIGHT_RETAIN_BATCH_LIMIT
 from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ingestion_failures import (
+    HINDSIGHT_SETTLEMENT_BASIS,
+    classify_settled_ingestion_failure,
+)
 from oamb.contracts.ports import (
     ArtifactStorePort,
     CapabilitySet,
@@ -30,6 +34,7 @@ from oamb.contracts.ports import (
     RuntimeResolution,
     ScopeAllocationRequest,
     ScopeReceipt,
+    SettledTransientIngestionFailure,
     SourceUnit,
     StateDigestReceipt,
 )
@@ -73,6 +78,7 @@ class HindsightAdapter:
         transport: httpx.AsyncBaseTransport | None = None,
         read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
         total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
+        internal_retry_count: int | None = None,
     ) -> None:
         if not extraction_model:
             raise ValueError("Hindsight extraction model is required")
@@ -81,6 +87,7 @@ class HindsightAdapter:
         self._store = store
         self._extraction_model = extraction_model
         self._runtime_binding_hash = runtime_binding_hash
+        self._internal_retry_count = internal_retry_count
         self._resolved = False
         self._known_bank_ids: set[str] = set()
         self._bank_inventory_baseline_initialized = False
@@ -374,6 +381,31 @@ class HindsightAdapter:
             response = await self._client.retain(request.scope.scope_id, items)
         except MemorySystemCallCancelledBeforeDispatch:
             self._attempted_dispatches.remove(dispatch_key)
+            raise
+        except MemorySystemCallFailure as exc:
+            if (
+                exc.status_code is not None
+                and exc.raw_response_bytes is not None
+                and exc.raw_reference is not None
+                and self._internal_retry_count is not None
+            ):
+                reason = classify_settled_ingestion_failure(
+                    settlement_basis=HINDSIGHT_SETTLEMENT_BASIS,
+                    status_code=exc.status_code,
+                    raw_response_bytes=exc.raw_response_bytes,
+                    internal_retry_count=self._internal_retry_count,
+                )
+                if reason is not None:
+                    raise SettledTransientIngestionFailure(
+                        "Hindsight synchronous extraction settled with a supplier failure",
+                        failure_kind=reason,
+                        raw_reference=exc.raw_reference,
+                        raw_response_bytes=exc.raw_response_bytes,
+                        supporting_raw_references=exc.supporting_raw_references,
+                        status_code=exc.status_code,
+                        settlement_basis=HINDSIGHT_SETTLEMENT_BASIS,
+                        internal_retry_count=self._internal_retry_count,
+                    ) from exc
             raise
         with bind_sealed_response_validation(
             response,

@@ -353,7 +353,7 @@ def test_composition_part_binding_rejects_noncanonical_embedded_root(
         )
 
 
-def test_aborted_part_contributes_only_its_complete_whole_plan(tmp_path: Path) -> None:
+def test_recovery_rejects_ordinary_failed_history_without_retry_allowance(tmp_path: Path) -> None:
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
     manifest = workload.build_case_manifest(dataset)
@@ -375,10 +375,6 @@ def test_aborted_part_contributes_only_its_complete_whole_plan(tmp_path: Path) -
     aborted_partition = partition(
         "aborted-part",
         tuple(case.case_manifest_entry_id for case in manifest.cases),
-    )
-    recovery_partition = partition(
-        "recovery-part",
-        (manifest.ingestion_plans[1].ordered_case_manifest_entry_ids[0],),
     )
     failed_plan_id = manifest.ingestion_plans[1].ingestion_plan_id
 
@@ -417,40 +413,10 @@ def test_aborted_part_contributes_only_its_complete_whole_plan(tmp_path: Path) -
             answer_role_binding_id="recorded-answer-v1",
             partition=aborted_partition,
         )
-    recovery_plan = composition_module.analyze_capsule_recovery(
-        (tmp_path / "aborted-parts" / aborted_partition.run_id,)
-    )
-    assert recovery_plan.reusable_ingestion_plan_ids == (
-        manifest.ingestion_plans[0].ingestion_plan_id,
-    )
-    assert recovery_plan.remaining_ingestion_plan_ids == (failed_plan_id,)
-    assert recovery_plan.remaining_case_manifest_entry_ids == (
-        manifest.ingestion_plans[1].ordered_case_manifest_entry_ids
-    )
-    recovery = run_native_vertical_slice(
-        output_root=tmp_path / "aborted-parts",
-        run_id=recovery_partition.run_id,
-        adapter_profile_id="recorded-native-fixture-v1",
-        workload=workload,
-        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
-        artifact_store_factory=ArtifactStore,
-        memory_factory=_memory_factory,
-        model_factory=_RecordedNativeModel,
-        answer_role_binding_id="recorded-answer-v1",
-        partition=recovery_partition,
-    )
-    composed = compose_capsules(
-        (tmp_path / "aborted-parts" / aborted_partition.run_id, recovery.capsule_root),
-        tmp_path / "aborted-composed",
-    )
-
-    assert validate_source_root(composed.capsule_root).disposition == (
-        ValidationDisposition.VALIDATED
-    )
-    assert tuple(
-        contribution.ingestion_plan_id
-        for contribution in composed.composition.ordered_contributions
-    ) == tuple(plan.ingestion_plan_id for plan in manifest.ingestion_plans)
+    with pytest.raises(CapsuleCompositionError, match="no eligible pending retry allowance"):
+        composition_module.analyze_capsule_recovery(
+            (tmp_path / "aborted-parts" / aborted_partition.run_id,)
+        )
 
 
 @pytest.mark.parametrize(
@@ -572,12 +538,8 @@ def test_process_signal_drains_and_seals_completed_groups_for_fresh_scope_recove
 
     capsule_root = tmp_path / "sigint-parts" / run_id
     assert validate_source_root(capsule_root).disposition == ValidationDisposition.VALIDATED
-    recovery_plan = composition_module.analyze_capsule_recovery((capsule_root,))
-    assert recovery_plan.reusable_ingestion_plan_ids == (
-        manifest.ingestion_plans[0].ingestion_plan_id,
-    )
-    assert recovery_plan.remaining_ingestion_plan_ids == (second_plan_id,)
-    assert recovery_plan == composition_module.analyze_capsule_recovery((capsule_root,))
+    with pytest.raises(CapsuleCompositionError, match="no eligible pending retry allowance"):
+        composition_module.analyze_capsule_recovery((capsule_root,))
     interrupted_second_occurrence_id = ingestion_occurrence_id(
         run_id,
         "fake-memory",
@@ -591,54 +553,6 @@ def test_process_signal_drains_and_seals_completed_groups_for_fresh_scope_recove
         and document["stage"] == "memory_ingest"
     )
     assert tuple(document["outcome"] for document in interrupted_second_ingests) == ("succeeded",)
-
-    recovery_run_id = f"{run_id}-recovery"
-    recovery_partition = build_case_partition_spec(
-        run_id=recovery_run_id,
-        resolved_plan_hash=partition.resolved_plan_hash,
-        cell_spec_hash=partition.cell_spec_hash,
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=case_plans,
-        requested_case_manifest_entry_ids=(recovery_plan.remaining_case_manifest_entry_ids),
-        budget_policy_hash=partition.budget_policy_hash,
-        retry_policy_hash=partition.retry_policy_hash,
-    )
-    recovered = run_native_vertical_slice(
-        output_root=tmp_path / "sigint-parts",
-        run_id=recovery_run_id,
-        adapter_profile_id="recorded-native-fixture-v1",
-        workload=workload,
-        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
-        artifact_store_factory=ArtifactStore,
-        memory_factory=_memory_factory,
-        model_factory=_RecordedNativeModel,
-        answer_role_binding_id="recorded-answer-v1",
-        partition=recovery_partition,
-    )
-    assert tuple(record.ingestion_plan_id for record in recovered.ingestion_plan_records) == (
-        second_plan_id,
-    )
-    interrupted_second_scope_id = canonical_sha256(
-        [
-            "oamb-fake-scope-v1",
-            interrupted_second_occurrence_id,
-            second_plan_id,
-        ]
-    )
-    assert interrupted_second_scope_id != recovered.ingestion_plan_records[0].scope_id
-
-    composed = compose_capsules(
-        (capsule_root, recovered.capsule_root),
-        tmp_path / f"{run_id}-composed",
-    )
-    assert validate_source_root(composed.capsule_root).disposition == (
-        ValidationDisposition.VALIDATED
-    )
-    assert tuple(
-        contribution.ingestion_plan_id
-        for contribution in composed.composition.ordered_contributions
-    ) == tuple(plan.ingestion_plan_id for plan in manifest.ingestion_plans)
 
 
 def test_recovery_run_derives_remaining_groups_before_loading_runtime(

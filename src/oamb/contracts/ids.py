@@ -147,8 +147,18 @@ def ingestion_plan_id(plan_manifest_id: str, payload_hash: str) -> str:
     return sha256_identity("oamb-ingestion-plan-v1", (plan_manifest_id, payload_hash))
 
 
-def ingestion_occurrence_id(run_id: str, memory_system_id: str, plan_id: str) -> str:
-    return sha256_identity("oamb-ingestion-occurrence-v1", (run_id, memory_system_id, plan_id))
+def ingestion_occurrence_id(
+    run_id: str,
+    memory_system_id: str,
+    plan_id: str,
+    *,
+    history_attempt_ordinal: int = 1,
+) -> str:
+    _require_positive_ordinal(history_attempt_ordinal)
+    parts: tuple[Any, ...] = (run_id, memory_system_id, plan_id)
+    if history_attempt_ordinal > 1:
+        parts = (*parts, history_attempt_ordinal)
+    return sha256_identity("oamb-ingestion-occurrence-v1", parts)
 
 
 def case_occurrence_id(ingestion_occurrence: str, case_manifest_id: str) -> str:

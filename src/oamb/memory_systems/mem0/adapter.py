@@ -13,6 +13,10 @@ from typing import Any, Never, Protocol
 import httpx
 
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from oamb.contracts.ingestion_failures import (
+    MEM0_SETTLEMENT_BASIS,
+    classify_settled_ingestion_failure,
+)
 from oamb.contracts.ports import (
     ArtifactStorePort,
     CapabilitySet,
@@ -35,6 +39,7 @@ from oamb.contracts.ports import (
     RuntimeResolution,
     ScopeAllocationRequest,
     ScopeReceipt,
+    SettledTransientIngestionFailure,
     SourceUnit,
     StateDigestReceipt,
 )
@@ -215,6 +220,7 @@ class Mem0RestAdapter:
         inspector_transport: httpx.AsyncBaseTransport | None = None,
         read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
         total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
+        internal_retry_count: int | None = None,
     ) -> None:
         for label, value in (
             ("api_key", api_key),
@@ -227,6 +233,7 @@ class Mem0RestAdapter:
             raise ValueError("Mem0 runtime binding hash must be lowercase SHA-256")
         self._store = store
         self._runtime_binding_hash = runtime_binding_hash
+        self._internal_retry_count = internal_retry_count
         self._public_client = SealedRestClient(
             store=store,
             base_url=base_url,
@@ -407,6 +414,31 @@ class Mem0RestAdapter:
                 )
             except MemorySystemCallCancelledBeforeDispatch:
                 self._attempted_dispatches.remove(dispatch_key)
+                raise
+            except MemorySystemCallFailure as exc:
+                if (
+                    exc.status_code is not None
+                    and exc.raw_response_bytes is not None
+                    and exc.raw_reference is not None
+                    and self._internal_retry_count is not None
+                ):
+                    reason = classify_settled_ingestion_failure(
+                        settlement_basis=MEM0_SETTLEMENT_BASIS,
+                        status_code=exc.status_code,
+                        raw_response_bytes=exc.raw_response_bytes,
+                        internal_retry_count=self._internal_retry_count,
+                    )
+                    if reason is not None:
+                        raise SettledTransientIngestionFailure(
+                            "Mem0 synchronous add settled with a supplier failure",
+                            failure_kind=reason,
+                            raw_reference=exc.raw_reference,
+                            raw_response_bytes=exc.raw_response_bytes,
+                            supporting_raw_references=exc.supporting_raw_references,
+                            status_code=exc.status_code,
+                            settlement_basis=MEM0_SETTLEMENT_BASIS,
+                            internal_retry_count=self._internal_retry_count,
+                        ) from exc
                 raise
             with bind_sealed_response_validation(
                 response,

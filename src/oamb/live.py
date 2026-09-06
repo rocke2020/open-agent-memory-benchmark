@@ -140,6 +140,7 @@ class LiveCell:
     environment: Mapping[str, str] = field(repr=False, compare=False)
     requested_case_manifest_entry_ids: tuple[str, ...] = ()
     continuation: InitializedContinuation | None = None
+    recovery_parts: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,6 +475,7 @@ def validate_live_readiness_receipt(
         or receipt["operation_timeout_seconds"] != plan.execution.operation_timeout_seconds
         or receipt["model_calls_dispatched"] != 7
         or receipt["role_ids"] != list(MODEL_ROLE_IDS)
+        or type(receipt["provider_internal_retries"]) is not int
         or receipt["provider_internal_retries"] != 0
         or receipt["billing_complete"] is not False
         or receipt["cost_usd"] is not None
@@ -617,6 +619,23 @@ def live_composition_target(cell: LiveCell) -> CapsuleCompositionTarget:
     )
 
 
+def _validated_cell_internal_retry_count(cell: LiveCell) -> int:
+    provider_runtime_directory = cell.control.provider_lifecycle_coordination_directory
+    if provider_runtime_directory is None:
+        raise LiveConfigurationError("provider retry proof directory is unavailable")
+    service_receipt_path = validate_live_readiness_receipt(
+        plan=cell.plan,
+        provider_runtime_directory=provider_runtime_directory,
+        environment=cell.environment,
+    )
+    expected_hash = cell.control.preflight_record.provider_service_evidence.validation_result_hash
+    if service_receipt_path.stem != expected_hash:
+        raise LiveConfigurationError(
+            "live readiness selected a different provider verification receipt"
+        )
+    return 0
+
+
 def execute_live_cell(
     cell: LiveCell,
     *,
@@ -654,6 +673,7 @@ def execute_live_cell(
     def memory_factory(store: object, _plans: object) -> object:
         environment = cell.environment
         provider = cell.cell.provider_id
+        internal_retry_count = _validated_cell_internal_retry_count(cell)
         if provider == "hindsight":
             producer = _model_plan(cell.plan, "hindsight_extraction")
             return HindsightAdapter(
@@ -662,6 +682,7 @@ def execute_live_cell(
                 authorization=None,
                 extraction_model=producer.model,
                 runtime_binding_hash=cell.control.run_spec.runtime_binding_hash,
+                internal_retry_count=internal_retry_count,
                 read_timeout_seconds=memory_timeout_seconds,
                 total_timeout_seconds=memory_timeout_seconds,
             )
@@ -673,6 +694,7 @@ def execute_live_cell(
                 inspector_base_url=environment["OAMB_MEM0_INSPECTOR_BASE_URL"],
                 inspector_api_key=environment["OAMB_MEM0_INSPECTOR_API_KEY"],
                 runtime_binding_hash=cell.control.run_spec.runtime_binding_hash,
+                internal_retry_count=internal_retry_count,
                 read_timeout_seconds=memory_timeout_seconds,
                 total_timeout_seconds=memory_timeout_seconds,
             )
@@ -684,6 +706,7 @@ def execute_live_cell(
                 benchmark_account=environment["OAMB_OPENVIKING_ACCOUNT_ID"],
                 benchmark_user=environment["OAMB_OPENVIKING_ADMIN_USER_ID"],
                 runtime_binding_hash=cell.control.run_spec.runtime_binding_hash,
+                internal_retry_count=internal_retry_count,
                 maximum_task_polls=maximum_task_polls_for_timeout(operation_timeout_seconds),
                 task_poll_timeout_seconds=memory_timeout_seconds,
                 read_timeout_seconds=memory_timeout_seconds,
@@ -729,6 +752,7 @@ def execute_live_cell(
         continuation=continuation,
         partition=partition,
         stop_event=stop_event,
+        recovery_parts=cell.recovery_parts,
     )
 
 
@@ -1059,6 +1083,7 @@ def build_live_cell(
     observed_at: datetime,
     code_revision: str,
     requested_case_manifest_entry_ids: tuple[str, ...] = (),
+    recovery_parts: tuple[Path, ...] = (),
 ) -> LiveCell:
     """Close one live cell without constructing provider or model clients."""
 
@@ -1219,6 +1244,7 @@ def build_live_cell(
         control=control,
         environment=resolved_environment,
         requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
+        recovery_parts=recovery_parts,
     )
 
 
@@ -1468,8 +1494,8 @@ def _budget(
     retry_multiplier = plan.execution.max_retries_per_operation + 1
     operation_timeout_seconds = plan.execution.operation_timeout_seconds
     role_attempts: dict[str, int] = {
-        provider_role_id: source_count,
-        "embedding": source_count + case_count,
+        provider_role_id: source_count * retry_multiplier,
+        "embedding": source_count * retry_multiplier + case_count,
         "answer": case_count * retry_multiplier,
         "judge": case_count * retry_multiplier,
     }
@@ -1519,10 +1545,10 @@ def _budget(
     role_ceilings = tuple(role_ceilings_list)
     operation_attempts = {
         "runtime_resolve": 1,
-        "scope_allocate": case_count,
-        "memory_ingest": source_count,
-        "memory_readiness": case_count,
-        "memory_projection": case_count,
+        "scope_allocate": case_count * retry_multiplier,
+        "memory_ingest": source_count * retry_multiplier,
+        "memory_readiness": case_count * retry_multiplier,
+        "memory_projection": case_count * retry_multiplier,
         "pre_query_projection": case_count,
         "memory_query": case_count,
         "post_query_projection": case_count,
