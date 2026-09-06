@@ -99,7 +99,7 @@ def test_live_question_run_writes_machine_readable_result_map(
             "--question",
             "72e3ee87",
             "--run-label",
-            "quick-start-bounded",
+            "quick-start-smoke",
             "--result-map",
             str(result_map),
         ],
@@ -125,7 +125,7 @@ def test_live_question_run_writes_machine_readable_result_map(
     }
 
 
-def test_full_lme60_rejects_missing_bounded_proof_before_runtime_loading(
+def test_full_lme60_dispatches_all_cells_without_bounded_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -134,8 +134,39 @@ def test_full_lme60_rejects_missing_bounded_proof_before_runtime_loading(
     plan = _plan()
     resolved_plan = tmp_path / "resolved-plan.json"
     resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    capsule_roots = {
+        cell.cell_id: tmp_path / "capsules" / f"{cell.cell_id}-capsule" for cell in plan.cells
+    }
+    for capsule_root in capsule_roots.values():
+        capsule_root.mkdir(parents=True)
+    selected_cell_ids: tuple[str, ...] = ()
+
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
     monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
+    monkeypatch.setattr(live, "load_live_environment", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        live,
+        "load_live_provider_evidence",
+        lambda **_kwargs: (
+            "provider-project",
+            {cell.provider_id: object() for cell in plan.cells},
+        ),
+    )
+    monkeypatch.setattr(
+        live,
+        "build_live_cell",
+        lambda **kwargs: SimpleNamespace(cell_id=kwargs["cell_id"]),
+    )
+
+    def execute(cells: tuple[SimpleNamespace, ...]) -> tuple[live.LiveCellCompletion, ...]:
+        nonlocal selected_cell_ids
+        selected_cell_ids = tuple(cell.cell_id for cell in cells)
+        return tuple(
+            live.LiveCellCompletion(cell_id, capsule_roots[cell_id])
+            for cell_id in selected_cell_ids
+        )
+
+    monkeypatch.setattr(live, "execute_live_cells", execute)
 
     result = CliRunner().invoke(
         app,
@@ -149,13 +180,14 @@ def test_full_lme60_rejects_missing_bounded_proof_before_runtime_loading(
         ],
     )
 
-    assert result.exit_code != 0
-    assert "full LME-60 requires three bounded capsules and validations" in result.output
+    assert result.exit_code == 0, result.output
+    assert selected_cell_ids == tuple(cell.cell_id for cell in plan.cells)
+    assert "bounded" not in result.output
 
 
 @pytest.mark.parametrize("selector", ("--question", "--case"))
-@pytest.mark.parametrize("selected_count", (2, 59, 60))
-def test_multi_case_lme60_selection_requires_bounded_proof_before_runtime_loading(
+@pytest.mark.parametrize("selected_count", (2, 59))
+def test_multi_case_lme60_selection_uses_readiness_without_bounded_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     selector: str,
@@ -164,9 +196,13 @@ def test_multi_case_lme60_selection_requires_bounded_proof_before_runtime_loadin
     from oamb.config import doctor
 
     plan = _plan()
+    selected_cell = plan.cells[0]
     resolved_plan = tmp_path / "resolved-plan.json"
     resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    capsule_root = tmp_path / "capsules" / "selected-cases"
+    capsule_root.mkdir(parents=True)
     runtime_loaded = False
+    requested_case_ids: tuple[str, ...] = ()
 
     def load_environment(**_kwargs: object) -> dict[str, str]:
         nonlocal runtime_loaded
@@ -174,8 +210,17 @@ def test_multi_case_lme60_selection_requires_bounded_proof_before_runtime_loadin
         return {}
 
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        live,
+        "validate_live_readiness_receipt",
+        lambda **_kwargs: tmp_path / "readiness.json",
+    )
     monkeypatch.setattr(live, "load_live_environment", load_environment)
+    monkeypatch.setattr(
+        live,
+        "load_live_provider_evidence",
+        lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
+    )
     if selector == "--question":
         monkeypatch.setattr(
             live,
@@ -190,6 +235,20 @@ def test_multi_case_lme60_selection_requires_bounded_proof_before_runtime_loadin
         selected_values = [
             canonical_sha256(["selected-case", ordinal]) for ordinal in range(selected_count)
         ]
+
+    def build_cell(**kwargs: object) -> SimpleNamespace:
+        nonlocal requested_case_ids
+        selected = kwargs["requested_case_manifest_entry_ids"]
+        assert isinstance(selected, tuple)
+        requested_case_ids = selected
+        return SimpleNamespace(cell_id=kwargs["cell_id"])
+
+    monkeypatch.setattr(live, "build_live_cell", build_cell)
+    monkeypatch.setattr(
+        live,
+        "execute_live_cells",
+        lambda _cells: (live.LiveCellCompletion(selected_cell.cell_id, capsule_root),),
+    )
     arguments = [
         "run",
         str(resolved_plan),
@@ -205,62 +264,10 @@ def test_multi_case_lme60_selection_requires_bounded_proof_before_runtime_loadin
 
     result = CliRunner().invoke(app, arguments)
 
-    assert result.exit_code != 0
-    assert "LME-60 multi-case or recovery run requires bounded proofs" in result.output
-    assert runtime_loaded is False
-
-
-def test_lme60_recovery_requires_bounded_proof_before_runtime_loading(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from oamb.artifacts import composition
-    from oamb.config import doctor
-
-    plan = _plan()
-    resolved_plan = tmp_path / "resolved-plan.json"
-    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
-    recovery_root = tmp_path / "part"
-    recovery_root.mkdir()
-    runtime_loaded = False
-
-    def load_environment(**_kwargs: object) -> dict[str, str]:
-        nonlocal runtime_loaded
-        runtime_loaded = True
-        return {}
-
-    recovery = SimpleNamespace(
-        source_capsule_ids=("source",),
-        source_manifest_sha256s=(canonical_sha256(["source-manifest"]),),
-        reusable_ingestion_plan_ids=("reusable",),
-        quarantined_ingestion_plan_ids=(),
-        remaining_ingestion_plan_ids=("remaining",),
-        remaining_case_manifest_entry_ids=(canonical_sha256(["remaining-case"]),),
-    )
-    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
-    monkeypatch.setattr(live, "load_live_environment", load_environment)
-    monkeypatch.setattr(composition, "analyze_capsule_recovery", lambda *_a, **_k: recovery)
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "run",
-            str(resolved_plan),
-            "--output-root",
-            str(tmp_path / "capsules"),
-            "--cell",
-            "hindsight-lme60",
-            "--run-label",
-            "recovery-without-proof",
-            "--recover-from",
-            str(recovery_root),
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "LME-60 multi-case or recovery run requires bounded proofs" in result.output
-    assert runtime_loaded is False
+    assert result.exit_code == 0, result.output
+    assert runtime_loaded is True
+    assert len(requested_case_ids) == selected_count
+    assert "bounded" not in result.output
 
 
 @pytest.mark.parametrize("has_remaining", (True, False))
@@ -534,7 +541,7 @@ def test_live_run_rejects_existing_result_map_before_runtime_loading(
             "--question",
             "72e3ee87",
             "--run-label",
-            "quick-start-bounded",
+            "quick-start-smoke",
             "--result-map",
             str(result_map),
         ],

@@ -688,14 +688,6 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
         "load_live_provider_evidence",
         lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
     )
-    monkeypatch.setattr(
-        live,
-        "build_bounded_profile_evidence",
-        lambda **_kwargs: (
-            "72e3ee87",
-            {cell.provider_id: object() for cell in plan.cells},
-        ),
-    )
     monkeypatch.setattr(live, "build_live_cell", build_cell)
     full_target = object()
 
@@ -726,15 +718,6 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
         "--run-label",
         "recovery-1",
     ]
-    for cell in plan.cells:
-        arguments.extend(
-            (
-                "--bounded-capsule",
-                f"{cell.cell_id}={tmp_path / f'{cell.cell_id}-bounded'}",
-                "--bounded-validation",
-                f"{cell.cell_id}={tmp_path / f'{cell.cell_id}-validation.json'}",
-            )
-        )
     result = CliRunner().invoke(cli.app, arguments)
 
     assert result.exit_code == 0, result.output

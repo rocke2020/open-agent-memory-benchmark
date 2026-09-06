@@ -47,9 +47,9 @@ inspect, and reproduce.
 ## How do I use Open Agent Memory Benchmark?
 
 The normal workflow is two commands: `precheck.sh` prepares and verifies the
-complete runtime, then `run.sh` executes, validates, builds the comparison, and
-opens its offline report. Smoke mode is the default; full mode uses the same
-frozen plan and provider profiles for all 60 questions.
+complete runtime, then `run.sh --full_test` runs all three providers in
+parallel, validates their capsules, builds the comparison, and opens its offline
+report. Smoke mode is an optional one-question diagnostic.
 
 The checked-in runtime controls allow two additional safe attempts per eligible
 operation and a 900-second timeout per external attempt. They do not impose a
@@ -121,28 +121,29 @@ Every smoke/full run first verifies the frozen plan and runtime readiness before
 dispatch. To run only that same gate without model or provider calls, use
 `./run.sh --dry-run`.
 
-Run the smoke comparison. `--smoke_test` is the default, so these are identical:
-
-```bash
-./run.sh
-# ./run.sh --smoke_test
-```
-
-Smoke mode runs the frozen question `72e3ee87` once on Hindsight, Mem0, and
-OpenViking. It freshly validates all three capsules, builds a three-provider
-diagnostic comparison over the same question, and opens `report.html`. A
-one-question report never claims a full-study accuracy leader.
-
 Run the complete balanced LME-60 comparison with:
 
 ```bash
 ./run.sh --full_test
 ```
 
-Full mode first produces the required one-question proof for each provider,
-then runs all 60 questions on every provider for 180 provider-specific results.
-It freshly validates each full capsule before building and opening the final
-comparison report.
+Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each
+provider runs the same 60 questions in isolated state and reports its own
+progress from `0/60` through `60/60`. OAMB freshly validates each capsule before
+building and opening the final 180-result comparison report. Full mode does not
+require or consume a smoke run.
+
+For optional debugging, run the frozen question `72e3ee87` once on all three
+providers in parallel. `--smoke_test` is the default, so these are identical:
+
+```bash
+./run.sh
+# ./run.sh --smoke_test
+```
+
+Smoke freshly validates all three capsules, builds a diagnostic comparison over
+the same question, and opens `report.html`. Its one-question report never claims
+a full-study accuracy leader, and its artifacts are not a full-run prerequisite.
 
 If an explicitly started full run stops after sealing partial capsules, resume
 it with:

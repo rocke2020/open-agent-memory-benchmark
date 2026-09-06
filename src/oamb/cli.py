@@ -207,20 +207,6 @@ def run_command(
             help="Frozen public question ID; repeat in manifest order.",
         ),
     ] = None,
-    bounded_capsule: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--bounded-capsule",
-            help="CELL_ID=validated one-question capsule; repeat for all cells.",
-        ),
-    ] = None,
-    bounded_validation: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--bounded-validation",
-            help="CELL_ID=fresh validation JSON for --bounded-capsule.",
-        ),
-    ] = None,
     run_label: Annotated[
         str | None,
         typer.Option("--run-label", help="Fresh operator-chosen run label."),
@@ -267,18 +253,9 @@ def run_command(
 
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
-        if (
-            case
-            or question
-            or bounded_capsule
-            or bounded_validation
-            or recover_from
-            or recovery_analysis_output
-            or result_map
-        ):
+        if case or question or recover_from or recovery_analysis_output or result_map:
             raise typer.BadParameter(
-                "partition, bounded-proof, recovery, and result-map options require a live "
-                "resolved plan"
+                "partition, recovery, and result-map options require a live resolved plan"
             )
         _run_fake_resolved_plan(resolved_plan, scenario=scenario)
         return
@@ -294,7 +271,6 @@ def run_command(
         LiveCellExecutionError,
         LiveCellOutcome,
         LiveConfigurationError,
-        build_bounded_profile_evidence,
         build_live_cell,
         build_live_continuation_cell,
         execute_live_cells,
@@ -371,7 +347,6 @@ def run_command(
                     "recovery parts already contain every target whole group; compose them"
                 )
             recovery_case_ids = recovery.remaining_case_manifest_entry_ids
-        lme60_requires_bounded_proof = False
         full_lme60 = False
         if plan.dataset.selection == "lme60":
             target_case_count = len(LME60_EXPECTED_QUESTION_IDS)
@@ -380,38 +355,13 @@ def run_command(
                 if continue_from is not None or recover_from or not selected_case_ids
                 else len(selected_case_ids)
             )
-            bounded_producer = bool(
-                continue_from is None
-                and not recover_from
-                and effective_case_count == 1
-                and len(selected_cells) == 1
-            )
-            lme60_requires_bounded_proof = not bounded_producer
             full_lme60 = bool(
                 continue_from is None
                 and not recover_from
                 and effective_case_count == target_case_count
             )
-            if lme60_requires_bounded_proof and (not bounded_capsule or not bounded_validation):
-                if not selected_case_ids and continue_from is None and not recover_from:
-                    raise LiveConfigurationError(
-                        "full LME-60 requires three bounded capsules and validations"
-                    )
-                raise LiveConfigurationError(
-                    "LME-60 multi-case or recovery run requires bounded proofs"
-                )
-            if bounded_producer and (bounded_capsule or bounded_validation):
-                raise LiveConfigurationError(
-                    "one-case LME-60 proof producers cannot consume bounded proofs"
-                )
             if full_lme60 and selected_cells != plan.cells:
                 raise LiveConfigurationError("full LME-60 requires all three frozen cells")
-        elif bounded_capsule or bounded_validation:
-            raise LiveConfigurationError("bounded proof options apply only to LME-60")
-        if (case or question) and not full_lme60 and len(selected_cells) != 1:
-            raise LiveConfigurationError(
-                "case or question partition requires exactly one selected cell"
-            )
         environment = load_live_environment(
             provider_env_path=provider_env,
             model_env_path=model_env,
@@ -431,20 +381,6 @@ def run_command(
             environment=environment,
             service_receipt_path=service_receipt_path,
         )
-        if lme60_requires_bounded_proof:
-            dataset_path = Path(plan.dataset.path)
-            if not dataset_path.is_absolute():
-                dataset_path = Path.cwd() / dataset_path
-            bounded_question, evidence_by_provider = build_bounded_profile_evidence(
-                plan=plan,
-                dataset_path=dataset_path,
-                provider_runtime_directory=provider_runtime,
-                capsule_roots=_named_paths(bounded_capsule or [], label="bounded capsule"),
-                validation_paths=_named_paths(bounded_validation or [], label="bounded validation"),
-                service_evidence_by_provider=evidence_by_provider,
-                environment=environment,
-            )
-            typer.echo(f"bounded provider proof: {bounded_question}")
         code_revision = _live_source_revision()
         observed_at = datetime.now(UTC)
         built_cells = []

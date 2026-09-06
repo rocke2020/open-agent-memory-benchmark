@@ -13,7 +13,6 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from oamb.artifacts.atomic import ArtifactCollisionError, read_regular_file, sha256_file
-from oamb.artifacts.lme60_gate import has_bounded_provider_profile_evidence
 from oamb.artifacts.validation.hindsight_evidence import (
     HindsightProjectionEvidence,
     reconstruct_hindsight_projection,
@@ -112,7 +111,6 @@ from oamb.memory_systems.hindsight.profiles import (
     parse_retain_response,
 )
 from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
-from oamb.workloads.longmemeval import LME60_WORKLOAD_ID
 
 NATIVE_EVIDENCE_PROFILE_ID = "oamb-t8-native-evidence-v1"
 PARTITION_EVIDENCE_PROFILE_ID = "oamb-case-partition-evidence-v1"
@@ -633,22 +631,6 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
             if partition is not None
             else {case.case_manifest_entry_id for case in case_manifest.cases}
         )
-        target_manifest_case_ids = {case.case_manifest_entry_id for case in case_manifest.cases}
-        if (
-            case_manifest.workload_id == LME60_WORKLOAD_ID
-            and expected_manifest_case_ids == target_manifest_case_ids
-            and (
-                len(run_preflights) != 1
-                or not has_bounded_provider_profile_evidence(run_preflights[0])
-            )
-        ):
-            issues.append(
-                _issue(
-                    rule_id,
-                    manifest.capsule_id,
-                    "lme60-bounded-profile-evidence-missing",
-                )
-            )
         selected_manifest_plans = tuple(
             plan
             for plan in case_manifest.ingestion_plans
