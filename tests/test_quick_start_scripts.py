@@ -930,12 +930,13 @@ def test_run_reports_live_cell_progress_while_provider_is_running(tmp_path: Path
         in result.stdout
     )
     for provider in ("hindsight", "mem0", "openviking"):
-        assert f"run: provider={provider} status=running" in result.stdout
-        assert "completed_questions=1, question_progress=100% (1/1)" in next(
+        progress_line = next(
             line
             for line in result.stdout.splitlines()
             if f"provider={provider} status=running" in line
         )
+        assert progress_line.startswith(f"provider={provider} status=running, elapsed=")
+        assert progress_line.endswith("completed_questions=1 (1/1, 100%)")
         assert f"run: provider={provider} status=validating" in result.stdout
         assert f"run: provider={provider} status=completed" in result.stdout
     assert "run: status=building-comparison" in result.stdout
@@ -979,9 +980,12 @@ def test_run_full_reports_progress_per_provider_out_of_sixty(tmp_path: Path) -> 
             for line in result.stdout.splitlines()
             if f"provider={provider} status=running" in line
         )
-        assert (
-            f"completed_questions={completed}, question_progress={percentage}% ({completed}/60)"
-        ) in progress_line
+        assert progress_line.startswith(f"provider={provider} status=running, elapsed=")
+        assert progress_line.endswith(
+            f"completed_questions={completed} ({completed}/60, {percentage}%)"
+        )
+        assert "completed_operations=" not in progress_line
+        assert "question_progress=" not in progress_line
     assert "/180" not in result.stdout
     assert "/1)" not in result.stdout
 

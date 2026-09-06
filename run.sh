@@ -63,7 +63,7 @@ provider_status_heartbeat() {
   local timer_pid=""
   local provider run_spec capsule_root memory_system_id
   local hindsight_root mem0_root openviking_root provider_root
-  local completed_operations completed_questions question_progress
+  local completed_questions question_progress
   hindsight_root=""
   mem0_root=""
   openviking_root=""
@@ -92,13 +92,12 @@ provider_status_heartbeat() {
         mem0) provider_root=$mem0_root ;;
         openviking) provider_root=$openviking_root ;;
       esac
-      completed_operations="$(count_capsule_progress_artifacts "$provider_root" attempts)"
       completed_questions="$(count_capsule_progress_artifacts "$provider_root" cases)"
       ((completed_questions <= total_questions)) || completed_questions=$total_questions
       question_progress=$((completed_questions * 100 / total_questions))
-      printf 'run: provider=%s status=running, elapsed=%ss, completed_operations=%s, completed_questions=%s, question_progress=%s%% (%s/%s)\n' \
-        "$provider" "$elapsed_seconds" "$completed_operations" "$completed_questions" \
-        "$question_progress" "$completed_questions" "$total_questions"
+      printf 'provider=%s status=running, elapsed=%ss, completed_questions=%s (%s/%s, %s%%)\n' \
+        "$provider" "$elapsed_seconds" "$completed_questions" "$completed_questions" \
+        "$total_questions" "$question_progress"
     done
   done
 }
