@@ -46,61 +46,61 @@ cells:
     judge_role: judge
     retrieval_binding: openviking
 
+llm_profiles:
+  light_model: &light_model deepseek-v4-flash
+  deep_model: &deep_model deepseek-v4-pro
+
 models:
   # DeepSeek scale is low < high < max. Low is enabled thinking at rank 1/3.
+  # Every generative role uses the one generic LLM connection from root .env.
   # Provider-owned producer roles use Flash/low to reduce latency and tokens.
   hindsight_extraction:
-    model: deepseek-v4-flash
-    runtime_model: deepseek-v4-flash
+    model: *light_model
     thinking_effort: low
-    endpoint_variable: OAMB_HINDSIGHT_LLM_BASE_URL
-    credential_variable: OAMB_HINDSIGHT_LLM_API_KEY
-    recipient: deepseek-api
+    endpoint_variable: LLM_BASE_URL
+    credential_variable: LLM_API_KEY
+    recipient: llm-api
     execution_owner: provider_internal
     proof_kind: effective_config_and_outbound_request
     proof_reference: reasoning_effort=low
     usage_coverage: classified
   mem0_extraction:
-    model: deepseek-v4-flash
-    runtime_model: deepseek-v4-flash
+    model: *light_model
     thinking_effort: low
-    endpoint_variable: OAMB_MEM0_LLM_BASE_URL
-    credential_variable: OAMB_MEM0_LLM_API_KEY
-    recipient: deepseek-api
+    endpoint_variable: LLM_BASE_URL
+    credential_variable: LLM_API_KEY
+    recipient: llm-api
     execution_owner: provider_internal
     proof_kind: effective_config_and_outbound_request
     proof_reference: reasoning_effort=low
     usage_coverage: classified
   openviking_semantic_understanding:
-    model: deepseek-v4-flash
-    runtime_model: deepseek-v4-flash
+    model: *light_model
     thinking_effort: low
-    endpoint_variable: OAMB_OPENVIKING_VLM_BASE_URL
-    credential_variable: OAMB_OPENVIKING_VLM_API_KEY
-    recipient: deepseek-api
+    endpoint_variable: LLM_BASE_URL
+    credential_variable: LLM_API_KEY
+    recipient: llm-api
     execution_owner: provider_internal
     proof_kind: effective_config_and_outbound_request
     proof_reference: reasoning_effort=low
     usage_coverage: classified
   answer:
-    model: deepseek-v4-pro
-    runtime_model: deepseek-v4-pro
+    model: *deep_model
     thinking_effort: low
-    endpoint_variable: OAMB_DEEPSEEK_BASE_URL
-    credential_variable: OAMB_DEEPSEEK_API_KEY
-    recipient: deepseek-api
+    endpoint_variable: LLM_BASE_URL
+    credential_variable: LLM_API_KEY
+    recipient: llm-api
     execution_owner: harness
     proof_kind: sealed_outbound_request_and_response
     proof_reference: reasoning_effort=low
     usage_coverage: classified
   # High is the middle rank 2/3, not maximum. It is reserved for offline judging.
   judge:
-    model: deepseek-v4-flash
-    runtime_model: deepseek-v4-flash
+    model: *light_model
     thinking_effort: high
-    endpoint_variable: OAMB_DEEPSEEK_BASE_URL
-    credential_variable: OAMB_DEEPSEEK_API_KEY
-    recipient: deepseek-api
+    endpoint_variable: LLM_BASE_URL
+    credential_variable: LLM_API_KEY
+    recipient: llm-api
     execution_owner: harness
     proof_kind: sealed_outbound_request_and_response
     proof_reference: reasoning_effort=high
@@ -108,7 +108,6 @@ models:
   # Embedding is non-generative; thinking and credentials do not apply.
   embedding:
     model: qwen3-embedding:0.6b
-    runtime_model: qwen3-embedding:0.6b
     thinking_effort: not_applicable
     endpoint_variable: OAMB_EMBEDDING_BASE_URL
     credential_variable: not_applicable

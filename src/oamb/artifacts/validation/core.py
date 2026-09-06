@@ -1493,12 +1493,7 @@ def _provider_runtime_binding_rule(
         or attestation.build_artifact_sha256 != expected_identity.expected_build_artifact_sha256
     ):
         return _provider_issue(rule_id, "provider-runtime-exact-identity-mismatch")
-    if any(
-        role.role_status != RoleBindingStatus.SELECTED
-        or role.configured_model is None
-        or role.resolved_model is None
-        for role in roles
-    ):
+    if any(role.role_status != RoleBindingStatus.SELECTED or role.model is None for role in roles):
         return _provider_issue(rule_id, "provider-runtime-role-unattested")
     if (
         attestation.liveness_status != ProviderGateStatus.PASS

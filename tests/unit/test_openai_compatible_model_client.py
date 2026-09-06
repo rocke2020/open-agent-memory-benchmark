@@ -32,7 +32,6 @@ from oamb.contracts.specifications import (
 )
 from oamb.model_clients.openai_compatible import (
     OpenAICompatibleModelClient,
-    RuntimeModelPolicy,
     UsageProfile,
 )
 
@@ -141,8 +140,7 @@ def _binding(
     *,
     role: ModelRole = ModelRole.ANSWER,
     binding_id: str | None = None,
-    configured_model: str = "answer-model",
-    resolved_model: str | None = None,
+    model: str = "answer-model",
     thinking_effort: ThinkingEffort = "low",
 ) -> ModelRoleBindingV2:
     default_binding_ids = {
@@ -159,8 +157,7 @@ def _binding(
         provider="fixture-provider",
         endpoint_reference="fixture-model-endpoint",
         credential_variable_name="OAMB_FIXTURE_MODEL_API_KEY",
-        configured_model=configured_model,
-        resolved_model=resolved_model or configured_model,
+        model=model,
         thinking_effort=thinking_effort,
         parameters_fingerprint="1" * 64,
         retry_policy_id="no-retry-v1",
@@ -173,11 +170,9 @@ def _client(
     store: CapturingStore,
     handler: Any,
     *,
-    configured_model: str = "answer-model",
-    resolved_model: str | None = None,
+    model: str = "answer-model",
     role: ModelRole = ModelRole.ANSWER,
     binding_id: str | None = None,
-    runtime_model_policy: RuntimeModelPolicy = "record",
     usage_profile: UsageProfile = "strict-base-v2",
     thinking_effort: ThinkingEffort = "low",
 ) -> OpenAICompatibleModelClient:
@@ -188,11 +183,9 @@ def _client(
         role_binding=_binding(
             role=role,
             binding_id=binding_id,
-            configured_model=configured_model,
-            resolved_model=resolved_model,
+            model=model,
             thinking_effort=thinking_effort,
         ),
-        runtime_model_policy=runtime_model_policy,
         usage_profile=usage_profile,
         transport=httpx.MockTransport(handler),
     )
@@ -226,7 +219,6 @@ async def test_answer_sends_request_bound_low_effort_and_seals_raw_usage() -> No
         base_url="https://models.example/v1",
         api_key="secret",
         role_binding=_binding(),
-        runtime_model_policy="record",
         transport=httpx.MockTransport(handler),
     )
 
@@ -242,8 +234,7 @@ async def test_answer_sends_request_bound_low_effort_and_seals_raw_usage() -> No
     assert "tools" not in sent
     assert receipt.output_text == "answer"
     assert receipt.finish_disposition == FinishDisposition.NORMAL_STOP
-    assert receipt.runtime_model == "answer-model@runtime"
-    assert receipt.runtime_identity_status == "recorded"
+    assert receipt.model == "answer-model"
     assert receipt.supplier_status_code == 200
     assert store.raw[0].sha256 == hashlib.sha256(store.raw[0].payload_bytes).hexdigest()
     usage = json.loads(store.records[0].canonical_bytes)
@@ -271,7 +262,7 @@ async def test_judge_sends_request_bound_high_effort() -> None:
     client = _client(
         CapturingStore(),
         handler,
-        configured_model="judge-model",
+        model="judge-model",
         role=ModelRole.JUDGE,
         thinking_effort="high",
     )
@@ -406,7 +397,7 @@ async def test_exact_structured_429_produces_retry_safe_typed_rejection() -> Non
 
 
 @pytest.mark.asyncio
-async def test_required_runtime_model_identity_rejects_alias_drift() -> None:
+async def test_response_model_is_retained_only_in_raw_evidence() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -422,21 +413,18 @@ async def test_required_runtime_model_identity_rejects_alias_drift() -> None:
     client = _client(
         store,
         handler,
-        configured_model="configured-model",
-        runtime_model_policy="require_match",
+        model="configured-model",
     )
 
-    with pytest.raises(ModelCallFailure, match="identity mismatch") as failure:
-        await client.complete(_request())
+    receipt = await client.complete(_request())
 
-    assert failure.value.failure_kind == "runtime_identity_error"
-    assert failure.value.supplier_status_code == 200
-    assert store.raw
+    assert receipt.model == "configured-model"
+    assert b'"model":"different-runtime-model"' in store.raw[0].payload_bytes
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_required_runtime_model_identity_rejects_a_missing_identity() -> None:
+async def test_response_model_is_not_required() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -445,16 +433,11 @@ async def test_required_runtime_model_identity_rejects_a_missing_identity() -> N
             },
         )
 
-    client = _client(
-        CapturingStore(),
-        handler,
-        runtime_model_policy="require_match",
-    )
+    client = _client(CapturingStore(), handler)
 
-    with pytest.raises(ModelCallFailure, match="missing") as failure:
-        await client.complete(_request())
+    receipt = await client.complete(_request())
 
-    assert failure.value.failure_kind == "runtime_identity_error"
+    assert receipt.model == "answer-model"
     await client.close()
 
 
@@ -629,6 +612,7 @@ async def test_additive_openai_details_profile_preserves_cached_and_reasoning_us
     assert receipt.usage_reference_ids
     usage = json.loads(store.records[0].canonical_bytes)
     assert usage["schema_version"] == 3
+    assert usage["model"] == "answer-model"
     assert usage["cached_input_tokens"] == 7
     assert usage["reasoning_tokens"] == 3
     assert usage["covered_dimensions"] == [
@@ -879,7 +863,6 @@ async def test_no_opaque_retry_and_timeout_is_unknown_outcome() -> None:
         base_url="https://models.example/v1",
         api_key="secret",
         role_binding=_binding(),
-        runtime_model_policy="record",
         transport=httpx.MockTransport(handler),
     )
 
@@ -903,7 +886,6 @@ async def test_total_timeout_bounds_a_model_call_even_when_transport_never_retur
         base_url="https://models.example/v1",
         api_key="secret",
         role_binding=_binding(),
-        runtime_model_policy="record",
         transport=httpx.MockTransport(handler),
         total_timeout_seconds=0.01,
     )
@@ -923,7 +905,6 @@ def test_total_timeout_requires_a_finite_positive_value(total_timeout: float) ->
             base_url="https://models.example/v1",
             api_key="secret",
             role_binding=_binding(),
-            runtime_model_policy="record",
             transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
             total_timeout_seconds=total_timeout,
         )
@@ -1051,7 +1032,6 @@ async def test_failed_transport_close_is_retried_before_client_reports_closed() 
         base_url="https://models.example/v1",
         api_key="secret",
         role_binding=_binding(),
-        runtime_model_policy="record",
         transport=transport,
     )
 

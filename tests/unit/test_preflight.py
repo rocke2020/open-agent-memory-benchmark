@@ -25,11 +25,13 @@ from oamb.runtime.preflight import (
     ProviderGateClosure,
     RoleSlot,
 )
+from tests.benchmark_configuration import load_canonical_configuration
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 HASH_C = "c" * 64
 NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
+BENCHMARK_EMBEDDING_MODEL = load_canonical_configuration().models.embedding.model
 
 
 def _zero_fake_budget() -> BudgetSpec:
@@ -171,10 +173,10 @@ def test_v1_budget_cannot_allow_nonzero_external_allowance() -> None:
 @pytest.mark.parametrize(
     ("model", "dimension", "reranking_disabled", "oamb_reranker", "message"),
     (
-        ("wrong-model", 1024, True, False, "qwen3-embedding:0.6b"),
-        ("qwen3-embedding:0.6b", 768, True, False, "1,024"),
-        ("qwen3-embedding:0.6b", 1024, False, False, "native reranking"),
-        ("qwen3-embedding:0.6b", 1024, True, True, "OAMB reranker"),
+        ("wrong-model", 1024, True, False, BENCHMARK_EMBEDDING_MODEL),
+        (BENCHMARK_EMBEDDING_MODEL, 768, True, False, "1,024"),
+        (BENCHMARK_EMBEDDING_MODEL, 1024, False, False, "native reranking"),
+        (BENCHMARK_EMBEDDING_MODEL, 1024, True, True, "OAMB reranker"),
     ),
 )
 def test_external_profile_rejects_embedding_or_reranking_drift(
@@ -225,7 +227,7 @@ def test_rest_and_sdk_profiles_have_distinct_default_comparison_eligibility() ->
 
     embedding = ControlledEmbeddingDescriptor(
         endpoint_fingerprint="b" * 64,
-        model="qwen3-embedding:0.6b",
+        model=BENCHMARK_EMBEDDING_MODEL,
         artifact_fingerprint="c" * 64,
         dimension=1024,
         input_adaptation_fingerprint="d" * 64,
@@ -283,8 +285,7 @@ def _selected_role(
         provider="fixture-provider",
         endpoint_reference="fixture-endpoint",
         credential_variable_name=credential_variable_name,
-        configured_model=("qwen3-embedding:0.6b" if str(role) == "embedding" else "fixture-model"),
-        resolved_model="fixture-model@sha256:resolved",
+        model=(BENCHMARK_EMBEDDING_MODEL if str(role) == "embedding" else "fixture-model"),
         thinking_effort=(
             "not_applicable"
             if role == ModelRole.EMBEDDING
@@ -624,7 +625,7 @@ def _external_profile() -> AdapterProfileDescriptor:
         transport_kind=TransportKind.REST_API,
         controlled_embedding=ControlledEmbeddingDescriptor(
             endpoint_fingerprint=HASH_C,
-            model="qwen3-embedding:0.6b",
+            model=BENCHMARK_EMBEDDING_MODEL,
             artifact_fingerprint=HASH_B,
             dimension=1024,
             input_adaptation_fingerprint=HASH_A,

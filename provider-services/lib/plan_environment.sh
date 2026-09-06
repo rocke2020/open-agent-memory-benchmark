@@ -8,7 +8,7 @@ load_plan_model_environment() {
   while IFS='|' read -r plan_environment_role plan_environment_variable \
     plan_environment_effort_variable; do
     plan_environment_value="$(jq -er --arg role "$plan_environment_role" '
-      [.model_roles[] | select(.role_id == $role) | .configured_model] |
+      [.model_roles[] | select(.role_id == $role) | .model] |
       select(length == 1) | .[0] |
       select(type == "string" and length > 0)
     ' "$plan_environment_plan")" || return 1

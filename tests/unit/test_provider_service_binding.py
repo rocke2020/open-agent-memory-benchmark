@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from oamb.config.benchmark import load_benchmark_configuration
+
 if TYPE_CHECKING:
     from oamb.config.provider_services import ProviderServiceProfileBinding
     from oamb.runtime.preflight import ControlledEmbeddingDescriptor
@@ -18,11 +20,14 @@ HASH_E = "e" * 64
 HASH_F = "f" * 64
 
 PROJECT = "oamb-providers-test-alpha"
+BENCHMARK_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "benchmark.yml"
+BENCHMARK_MODELS = load_benchmark_configuration(BENCHMARK_CONFIG).models
 EXPECTED_PROVIDER_MODELS = {
-    "hindsight-rest-v1": "deepseek-v4-flash",
-    "mem0-rest-v1": "deepseek-v4-flash",
-    "openviking-rest-v1": "deepseek-v4-flash",
+    "hindsight-rest-v1": BENCHMARK_MODELS.hindsight_extraction.model,
+    "mem0-rest-v1": BENCHMARK_MODELS.mem0_extraction.model,
+    "openviking-rest-v1": BENCHMARK_MODELS.openviking_semantic_understanding.model,
 }
+EXPECTED_EMBEDDING_MODEL = BENCHMARK_MODELS.embedding.model
 EXPECTED_PROVIDER_THINKING_EFFORTS = {
     "hindsight-rest-v1": "low",
     "mem0-rest-v1": "low",
@@ -78,7 +83,7 @@ def _proof_bytes(filename: str) -> bytes:
         "hindsight-health.json": {"database": "connected", "status": "healthy"},
         "hindsight-version.json": {"api_version": "0.9.2", "features": {}},
         "hindsight-model-config.json": {
-            "model": "deepseek-v4-flash",
+            "model": EXPECTED_PROVIDER_MODELS["hindsight-rest-v1"],
             "reasoning_effort": "low",
         },
         "hindsight-retry-config.json": {
@@ -98,7 +103,7 @@ def _proof_bytes(filename: str) -> bytes:
             "llm": {
                 "config": {
                     "is_reasoning_model": True,
-                    "model": "deepseek-v4-flash",
+                    "model": EXPECTED_PROVIDER_MODELS["mem0-rest-v1"],
                     "reasoning_effort": "low",
                 }
             },
@@ -143,7 +148,7 @@ def _proof_bytes(filename: str) -> bytes:
             "status": "ok",
         },
         "openviking-model-config.json": {
-            "model": "deepseek-v4-flash",
+            "model": EXPECTED_PROVIDER_MODELS["openviking-rest-v1"],
             "provider": "openai",
             "reasoning_effort": "low",
         },
@@ -246,21 +251,21 @@ def _controlled_embeddings() -> dict[str, ControlledEmbeddingDescriptor]:
     return {
         "hindsight-rest-v1": ControlledEmbeddingDescriptor(
             endpoint_fingerprint=HASH_E,
-            model="qwen3-embedding:0.6b",
+            model=EXPECTED_EMBEDDING_MODEL,
             artifact_fingerprint=HASH_F,
             dimension=1024,
             input_adaptation_fingerprint="1" * 64,
         ),
         "mem0-rest-v1": ControlledEmbeddingDescriptor(
             endpoint_fingerprint=HASH_E,
-            model="qwen3-embedding:0.6b",
+            model=EXPECTED_EMBEDDING_MODEL,
             artifact_fingerprint=HASH_F,
             dimension=1024,
             input_adaptation_fingerprint="2" * 64,
         ),
         "openviking-rest-v1": ControlledEmbeddingDescriptor(
             endpoint_fingerprint=HASH_E,
-            model="qwen3-embedding:0.6b",
+            model=EXPECTED_EMBEDDING_MODEL,
             artifact_fingerprint=HASH_F,
             dimension=1024,
             input_adaptation_fingerprint="3" * 64,
@@ -324,7 +329,7 @@ def test_exact_profiles_build_preflight_descriptors_and_keep_sdk_separate() -> N
 
     embedding = ControlledEmbeddingDescriptor(
         endpoint_fingerprint=HASH_E,
-        model="qwen3-embedding:0.6b",
+        model=EXPECTED_EMBEDDING_MODEL,
         artifact_fingerprint=HASH_F,
         dimension=1024,
         input_adaptation_fingerprint="1" * 64,
@@ -431,7 +436,7 @@ def test_consumer_rejects_provider_model_proof_that_differs_from_resolved_plan(
     target = document
     for key in model_path[:-1]:
         target = target[key]
-    target[model_path[-1]] = "deepseek-v4-pro"
+    target[model_path[-1]] = "different-model"
     receipt_path = _write_service_artifacts(
         tmp_path,
         payload_overrides={filename: _canonical_bytes(document)},
@@ -797,7 +802,7 @@ def test_consumer_rejects_wrong_mem0_pgvector_proof(
         "openviking-model-config.json",
     ),
 )
-def test_consumer_rejects_pro_runtime_model_proofs(
+def test_consumer_rejects_wrong_model_proofs(
     tmp_path: Path,
     filename: str,
 ) -> None:
@@ -805,9 +810,9 @@ def test_consumer_rejects_pro_runtime_model_proofs(
 
     document = json.loads(_proof_bytes(filename))
     if filename == "mem0-config-redacted.json":
-        document["llm"]["config"]["model"] = "deepseek-v4-pro"
+        document["llm"]["config"]["model"] = "different-model"
     else:
-        document["model"] = "deepseek-v4-pro"
+        document["model"] = "different-model"
     receipt_path = _write_service_artifacts(
         tmp_path,
         payload_overrides={filename: _canonical_bytes(document)},

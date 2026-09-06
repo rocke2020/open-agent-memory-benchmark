@@ -45,7 +45,6 @@ from oamb.contracts.specifications import (
 )
 from oamb.contracts.supplier_rejection import parse_structured_supplier_rejection
 
-RuntimeModelPolicy = Literal["record", "require_match"]
 UsageProfile = Literal["strict-base-v2", "openai-details-v3"]
 DEFAULT_MODEL_CALL_TIMEOUT_SECONDS = 120.0
 
@@ -89,10 +88,6 @@ _MODEL_STAGES_BY_ROLE = {
 }
 
 
-class _RuntimeIdentityMismatch(ValueError):
-    pass
-
-
 class _UsageProfileMismatch(ValueError):
     def __init__(self, message: str, *, usage_reference_ids: tuple[str, ...]) -> None:
         super().__init__(message)
@@ -113,7 +108,6 @@ class OpenAICompatibleModelClient:
         base_url: str,
         api_key: str,
         role_binding: ModelRoleBindingV2,
-        runtime_model_policy: RuntimeModelPolicy,
         usage_profile: UsageProfile = "strict-base-v2",
         transport: httpx.AsyncBaseTransport | None = None,
         connect_timeout_seconds: float = 10.0,
@@ -137,23 +131,18 @@ class OpenAICompatibleModelClient:
             or role_binding.role not in _MODEL_STAGES_BY_ROLE
             or role_binding.retry_policy_id != "no-retry-v1"
             or role_binding.credential_variable_name is None
-            or role_binding.configured_model is None
-            or role_binding.resolved_model is None
+            or role_binding.model is None
         ):
             raise ValueError("model client requires one selected no-retry harness role binding")
-        if runtime_model_policy not in {"record", "require_match"}:
-            raise ValueError("runtime model policy must be record or require_match")
         if usage_profile not in {"strict-base-v2", "openai-details-v3"}:
             raise ValueError("unknown OpenAI-compatible usage profile")
         self._store = store
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._role_binding = role_binding
-        self._configured_model = role_binding.configured_model
-        self._expected_runtime_model = role_binding.resolved_model
+        self._model = role_binding.model
         if role_binding.thinking_effort == "not_applicable" or role_binding.thinking_effort is None:
             raise ValueError("model client requires a generative thinking effort")
         self._thinking_effort: ThinkingEffort = role_binding.thinking_effort
-        self._runtime_model_policy = runtime_model_policy
         self._usage_profile = usage_profile
         self._total_timeout_seconds = total_timeout
         self._transport = transport or httpx.AsyncHTTPTransport()
@@ -194,7 +183,7 @@ class OpenAICompatibleModelClient:
 
     async def _complete_once(self, request: ModelRequest) -> ModelReceipt:
         payload: dict[str, object] = {
-            "model": self._configured_model,
+            "model": self._model,
             "messages": [{"role": role, "content": content} for role, content in request.messages],
             "n": request.candidate_count,
             "temperature": float(request.temperature),
@@ -284,7 +273,6 @@ class OpenAICompatibleModelClient:
                 request,
                 raw_reference,
                 document.get("usage"),
-                runtime_model=document.get("model"),
             )
         except _UsageProfileMismatch as exc:
             raise ModelCallFailure(
@@ -336,29 +324,6 @@ class OpenAICompatibleModelClient:
                 failure_kind="response_parse_error",
                 supplier_status_code=response.status_code,
             ) from exc
-        try:
-            runtime_model, runtime_status = self._runtime_identity(document)
-        except _RuntimeIdentityMismatch as exc:
-            raise ModelCallFailure(
-                str(exc),
-                raw_reference=raw_reference,
-                raw_response_bytes=raw_bytes,
-                usage_reference_ids=usage_ids,
-                retryable=False,
-                failure_kind="runtime_identity_error",
-                supplier_status_code=response.status_code,
-            ) from exc
-        except (TypeError, ValueError) as exc:
-            raise ModelCallFailure(
-                f"model runtime identity parse failed: {exc}",
-                raw_reference=raw_reference,
-                raw_response_bytes=raw_bytes,
-                usage_reference_ids=usage_ids,
-                retryable=False,
-                failure_kind="response_parse_error",
-                supplier_status_code=response.status_code,
-            ) from exc
-
         receipt = ModelReceipt(
             raw_reference=raw_reference,
             output_text=(
@@ -367,11 +332,10 @@ class OpenAICompatibleModelClient:
                 else ""
             ),
             usage_reference_ids=usage_ids,
+            model=self._model,
             raw_response_bytes=raw_bytes,
             finish_disposition=disposition,
             candidates=candidates,
-            runtime_model=runtime_model,
-            runtime_identity_status=runtime_status,
             supplier_status_code=response.status_code,
         )
         return receipt
@@ -483,32 +447,11 @@ class OpenAICompatibleModelClient:
             raise ValueError("response choices have conflicting finish outcomes")
         return tuple(candidates), disposition
 
-    def _runtime_identity(
-        self, document: dict[str, object]
-    ) -> tuple[str | None, Literal["matched", "recorded", "unattested", "mismatch"]]:
-        runtime_model = document.get("model")
-        if runtime_model is None:
-            if self._runtime_model_policy == "require_match":
-                raise _RuntimeIdentityMismatch("required runtime model identity is missing")
-            return None, "unattested"
-        if not isinstance(runtime_model, str) or not runtime_model:
-            raise ValueError("runtime model identity must be non-empty text")
-        if runtime_model == self._expected_runtime_model:
-            return runtime_model, "matched"
-        if self._runtime_model_policy == "record":
-            return runtime_model, "recorded"
-        raise _RuntimeIdentityMismatch(
-            f"runtime model identity mismatch: expected={self._expected_runtime_model!r}, "
-            f"runtime={runtime_model!r}"
-        )
-
     def _seal_usage(
         self,
         request: ModelRequest,
         raw_reference: RawReferenceHandle,
         raw_usage: object,
-        *,
-        runtime_model: object,
     ) -> tuple[tuple[str, ...], int | None]:
         if raw_usage is None:
             return (
@@ -526,7 +469,6 @@ class OpenAICompatibleModelClient:
                 request,
                 raw_reference,
                 raw_usage,
-                runtime_model=runtime_model,
             )
         raw_usage_fields = set(raw_usage)
         if not all(isinstance(field, str) for field in raw_usage_fields):
@@ -578,11 +520,7 @@ class OpenAICompatibleModelClient:
         request: ModelRequest,
         raw_reference: RawReferenceHandle,
         raw_usage: dict[object, object],
-        *,
-        runtime_model: object,
     ) -> tuple[tuple[str, ...], int | None]:
-        if not isinstance(runtime_model, str) or not runtime_model:
-            raise ValueError("extended supplier usage requires runtime model identity")
         raw_usage_fields = set(raw_usage)
         if not all(isinstance(field, str) for field in raw_usage_fields):
             raise ValueError("supplier usage field names must be strings")
@@ -720,8 +658,7 @@ class OpenAICompatibleModelClient:
             context_view_tokens=None,
             cached_input_tokens=detail_values["cached_input_tokens"],
             reasoning_tokens=detail_values["reasoning_tokens"],
-            configured_model=self._configured_model,
-            runtime_model=runtime_model,
+            model=self._model,
             meter_schema_id="openai-chat-usage-details-v1",
             raw_field_paths=tuple(raw_field_paths),
             covered_dimensions=tuple(covered_dimensions),

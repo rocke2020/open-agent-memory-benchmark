@@ -63,8 +63,7 @@ def _adapter(tmp_path: Path, handler: httpx.MockTransport) -> Any:
     return _hindsight_module().HindsightAdapter(
         store=ArtifactStore(tmp_path / "capsule"),
         base_url="https://hindsight.example",
-        configured_extraction_model="fixture-extractor",
-        runtime_extraction_model="fixture-extractor@runtime",
+        extraction_model="fixture-extractor",
         runtime_binding_hash="f" * 64,
         transport=handler,
     )

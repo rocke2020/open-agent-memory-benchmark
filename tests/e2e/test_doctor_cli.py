@@ -9,12 +9,13 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from oamb.cli import app
+from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import ResolvedPlanError, load_resolved_plan_for_run
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from tests.benchmark_configuration import write_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
-LME6_CONFIG_PATH = REPOSITORY_ROOT / "tests/fixtures/configs/t10-lme6.yml"
 EXPECTED_CELL_IDS = ("hindsight-lme60", "mem0-lme60", "openviking-lme60")
 EXPECTED_ROLE_IDS = (
     "hindsight_extraction",
@@ -119,6 +120,8 @@ def test_doctor_writes_one_canonical_plan_with_three_ordered_cell_specs(tmp_path
 
 
 def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Path) -> None:
+    source_configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
+    source_models = dict(source_configuration.models.ordered_items())
     output = tmp_path / "comparison"
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
     assert result.exit_code == 0, result.output
@@ -127,19 +130,19 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
     assert tuple(item["role_id"] for item in document["model_roles"]) == EXPECTED_ROLE_IDS
     assert tuple(
         (
-            item["configured_model"],
+            item["model"],
             item["thinking_effort"],
             item["thinking_effort_rank_1_indexed"],
             item["maximum_output_tokens_per_call"],
         )
         for item in document["model_roles"]
     ) == (
-        ("deepseek-v4-flash", "low", 1, None),
-        ("deepseek-v4-flash", "low", 1, None),
-        ("deepseek-v4-flash", "low", 1, None),
-        ("deepseek-v4-pro", "low", 1, 8192),
-        ("deepseek-v4-flash", "high", 2, 1024),
-        ("qwen3-embedding:0.6b", "not_applicable", None, None),
+        (source_models["hindsight_extraction"].model, "low", 1, None),
+        (source_models["mem0_extraction"].model, "low", 1, None),
+        (source_models["openviking_semantic_understanding"].model, "low", 1, None),
+        (source_models["answer"].model, "low", 1, 8192),
+        (source_models["judge"].model, "high", 2, 1024),
+        (source_models["embedding"].model, "not_applicable", None, None),
     )
     assert document["retrieval"]["generation"] == "disabled"
     assert tuple(
@@ -172,8 +175,9 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
 
 def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
     output = tmp_path / "lme6"
+    lme6_config = write_lme6_configuration(tmp_path / "benchmark-lme6.yml")
 
-    result = _invoke_doctor(config=LME6_CONFIG_PATH, output=output)
+    result = _invoke_doctor(config=lme6_config, output=output)
 
     assert result.exit_code == 0, result.output
     document = json.loads((output / "resolved-plan.json").read_bytes())
@@ -203,6 +207,7 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
 
 
 def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
+    source = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
     output = tmp_path / "comparison"
 
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
@@ -211,10 +216,12 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "comparison: v0.1-lme60" in result.output
     assert "cells: 3" in result.output
     assert "retrieval generation: disabled" in result.output
-    assert "model hindsight_extraction: deepseek-v4-flash / low (rank 1/3)" in result.output
-    assert "model answer: deepseek-v4-pro / low (rank 1/3)" in result.output
-    assert "model judge: deepseek-v4-flash / high (rank 2/3)" in result.output
-    assert "recipient=deepseek-api" in result.output
+    assert (
+        f"model hindsight_extraction: {source.models.hindsight_extraction.model} / low (rank 1/3)"
+    ) in result.output
+    assert f"model answer: {source.models.answer.model} / low (rank 1/3)" in result.output
+    assert f"model judge: {source.models.judge.model} / high (rank 2/3)" in result.output
+    assert "recipient=llm-api" in result.output
     assert "decision: accuracy delta >= 0.05 and exact McNemar p <= 0.05" in result.output
     assert "evaluation controls: retries=2; operation timeout=900s" in result.output
     assert "per-cell authorization: 3547 calls; 9259 owner allocations" in result.output
@@ -225,16 +232,18 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
 
 
 def test_doctor_omits_thinking_effort_from_embedding_summary(tmp_path: Path) -> None:
+    embedding_model = load_benchmark_configuration(BENCHMARK_CONFIG_PATH).models.embedding.model
     output = tmp_path / "comparison"
 
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
 
     assert result.exit_code == 0, result.output
-    assert "model embedding: qwen3-embedding:0.6b; recipient=local-vllm-metal" in result.output
-    assert "model embedding: qwen3-embedding:0.6b /" not in result.output
+    assert f"model embedding: {embedding_model}; recipient=local-vllm-metal" in result.output
+    assert f"model embedding: {embedding_model} /" not in result.output
 
 
 def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) -> None:
+    source_configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
     config = tmp_path / "benchmark.yml"
     config.write_bytes(BENCHMARK_CONFIG_PATH.read_bytes())
     output = tmp_path / "comparison"
@@ -243,14 +252,18 @@ def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) 
     plan_path = output / "resolved-plan.json"
 
     config.write_text(
-        config.read_text(encoding="utf-8").replace("deepseek-v4-pro", "changed-model", 1),
+        config.read_text(encoding="utf-8").replace(
+            source_configuration.llm_profiles.deep_model,
+            "changed-model",
+            1,
+        ),
         encoding="utf-8",
     )
     plan = load_resolved_plan_for_run(plan_path)
 
     assert plan.comparison_id == "v0.1-lme60"
     assert plan.decision is not None
-    assert plan.model_roles[0].configured_model == "deepseek-v4-flash"
+    assert plan.model_roles[0].model == source_configuration.llm_profiles.light_model
     with pytest.raises(FrozenInstanceError):
         plan.comparison_id = "changed"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
@@ -299,12 +312,11 @@ def test_plan_loader_rejects_cross_cell_substitution_with_rehashed_plan(tmp_path
 @pytest.mark.parametrize(
     ("role_mutation", "error"),
     (
-        ({"runtime_model": "deepseek-v4-pro"}, "provider-internal model identity"),
         ({"execution_owner": "harness"}, "execution owner"),
         ({"maximum_output_tokens_per_call": 1}, "protocol output binding"),
     ),
 )
-def test_plan_loader_rejects_rehashed_provider_internal_identity_drift(
+def test_plan_loader_rejects_rehashed_provider_internal_control_drift(
     tmp_path: Path,
     role_mutation: dict[str, object],
     error: str,
@@ -341,7 +353,7 @@ def test_model_endpoint_and_evaluation_control_changes_change_cell_identity(tmp_
 
     model_config = _write_mutated_config(
         tmp_path,
-        "endpoint_variable: OAMB_DEEPSEEK_BASE_URL",
+        "endpoint_variable: LLM_BASE_URL",
         "endpoint_variable: OAMB_ALTERNATE_BASE_URL",
     )
     model_output = tmp_path / "model"

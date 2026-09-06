@@ -134,7 +134,7 @@ MODEL_EXECUTION_OWNER_BY_ROLE: dict[ModelRoleId, ExecutionOwner] = {
     "embedding": "provider_internal",
 }
 _REQUIRED_TOP_LEVEL_KEYS = frozenset(
-    {"comparison", "dataset", "cells", "models", "retrieval", "execution"}
+    {"comparison", "dataset", "cells", "llm_profiles", "models", "retrieval", "execution"}
 )
 _OPTIONAL_TOP_LEVEL_KEYS = frozenset({"decision"})
 _DATASET_KEYS = frozenset(_DATASET_COMMON) | frozenset(
@@ -158,7 +158,6 @@ _CELL_KEYS = frozenset(
 _MODEL_KEYS = frozenset(
     {
         "model",
-        "runtime_model",
         "thinking_effort",
         "endpoint_variable",
         "credential_variable",
@@ -169,6 +168,7 @@ _MODEL_KEYS = frozenset(
         "usage_coverage",
     }
 )
+_LLM_PROFILE_KEYS = frozenset({"light_model", "deep_model"})
 _DECISION_KEYS = frozenset({"minimum_accuracy_delta", "maximum_exact_mcnemar_p_value"})
 _RETRIEVAL_KEYS = frozenset({"generation", "bindings"})
 _RETRIEVAL_BINDING_KEYS = frozenset(
@@ -184,7 +184,7 @@ _RETRIEVAL_BINDING_KEYS = frozenset(
     }
 )
 _EXECUTION_KEYS = frozenset({"max_retries_per_operation", "operation_timeout_seconds"})
-_ENVIRONMENT_REFERENCE = re.compile(r"OAMB_[A-Z0-9_]+")
+_ENVIRONMENT_REFERENCE = re.compile(r"(?:LLM|OAMB)_[A-Z0-9_]+")
 
 
 class BenchmarkConfigurationError(ValueError):
@@ -256,9 +256,14 @@ class CellConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmProfilesConfiguration:
+    light_model: str
+    deep_model: str
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRoleConfiguration:
     model: str
-    runtime_model: str
     thinking_effort: ThinkingEffort
     endpoint_variable: str
     credential_variable: str
@@ -336,6 +341,7 @@ class BenchmarkConfiguration:
     comparison_id: str
     dataset: DatasetConfiguration
     cells: tuple[CellConfiguration, ...]
+    llm_profiles: LlmProfilesConfiguration
     models: ModelRoleConfigurations
     retrieval: RetrievalConfiguration
     evaluation_controls: EvaluationControls
@@ -366,7 +372,8 @@ def _parse_benchmark_configuration(document: object) -> BenchmarkConfiguration:
     )
     comparison_id = _require_text(root["comparison"], "comparison")
     dataset = _parse_dataset(root["dataset"])
-    models = _parse_model_roles(root["models"])
+    llm_profiles = _parse_llm_profiles(root["llm_profiles"])
+    models = _parse_model_roles(root["models"], llm_profiles=llm_profiles)
     retrieval = _parse_retrieval(root["retrieval"])
     cells = _parse_cells(
         root["cells"],
@@ -380,6 +387,7 @@ def _parse_benchmark_configuration(document: object) -> BenchmarkConfiguration:
         comparison_id=comparison_id,
         dataset=dataset,
         cells=cells,
+        llm_profiles=llm_profiles,
         models=models,
         retrieval=retrieval,
         evaluation_controls=evaluation_controls,
@@ -476,16 +484,40 @@ def _parse_cells(
     return tuple(cells)
 
 
-def _parse_model_roles(value: object) -> ModelRoleConfigurations:
+def _parse_llm_profiles(value: object) -> LlmProfilesConfiguration:
+    document = _require_exact_mapping(value, _LLM_PROFILE_KEYS, "LLM profiles")
+    return LlmProfilesConfiguration(
+        light_model=_require_text(document["light_model"], "light model profile"),
+        deep_model=_require_text(document["deep_model"], "deep model profile"),
+    )
+
+
+def _parse_model_roles(
+    value: object,
+    *,
+    llm_profiles: LlmProfilesConfiguration,
+) -> ModelRoleConfigurations:
     document = _require_exact_mapping(value, frozenset(MODEL_ROLE_IDS), "models")
     parsed = {role_id: _parse_model_role(role_id, document[role_id]) for role_id in MODEL_ROLE_IDS}
-    return ModelRoleConfigurations(**parsed)
+    result = ModelRoleConfigurations(**parsed)
+    for role_id in (
+        "hindsight_extraction",
+        "mem0_extraction",
+        "openviking_semantic_understanding",
+        "judge",
+    ):
+        if getattr(result, role_id).model != llm_profiles.light_model:
+            raise BenchmarkConfigurationError(
+                f"model role {role_id} must use the light_model profile"
+            )
+    if result.answer.model != llm_profiles.deep_model:
+        raise BenchmarkConfigurationError("model role answer must use the deep_model profile")
+    return result
 
 
 def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfiguration:
     document = _require_exact_mapping(value, _MODEL_KEYS, f"model role {role_id}")
-    model = _require_text(document["model"], f"model role {role_id} configured model")
-    runtime_model = _require_text(document["runtime_model"], f"model role {role_id} runtime model")
+    model = _require_text(document["model"], f"model role {role_id} model")
     effort = document["thinking_effort"]
     if type(effort) is not str or effort not in (*DEEPSEEK_THINKING_EFFORT_SCALE, "not_applicable"):
         raise BenchmarkConfigurationError(f"model role {role_id} has an invalid thinking effort")
@@ -507,11 +539,6 @@ def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfigura
     owner = document["execution_owner"]
     if owner != MODEL_EXECUTION_OWNER_BY_ROLE[role_id]:
         raise BenchmarkConfigurationError(f"model role {role_id} has the wrong execution owner")
-    if owner == "provider_internal" and runtime_model != model:
-        raise BenchmarkConfigurationError(
-            f"model role {role_id} requires the same configured and runtime model "
-            "because provider proof exposes one model identity"
-        )
     proof_kind = _require_text(document["proof_kind"], f"model role {role_id} proof kind")
     expected_proof_kind = (
         "model_dimension_probe"
@@ -534,7 +561,6 @@ def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfigura
         raise BenchmarkConfigurationError(f"model role {role_id} usage coverage is incomplete")
     return ModelRoleConfiguration(
         model=model,
-        runtime_model=runtime_model,
         thinking_effort=effort,
         endpoint_variable=endpoint_variable,
         credential_variable=credential_variable,
@@ -634,7 +660,7 @@ def _require_role_id(value: object, label: str) -> ModelRoleId:
 
 def _require_environment_reference(value: object, label: str) -> str:
     if type(value) is not str or _ENVIRONMENT_REFERENCE.fullmatch(value) is None:
-        raise BenchmarkConfigurationError(f"{label} must name an OAMB environment variable")
+        raise BenchmarkConfigurationError(f"{label} must name a supported environment variable")
     return value
 
 

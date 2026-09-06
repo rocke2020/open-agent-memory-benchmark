@@ -276,8 +276,7 @@ def retain_usage_record(
     *,
     attempt_id: str,
     parent_id: str,
-    configured_model: str,
-    runtime_model: str,
+    model: str,
     raw_reference: RawReferenceHandle,
 ) -> TokenUsageRecordV3:
     usage = result.usage
@@ -302,8 +301,7 @@ def retain_usage_record(
         "context_view_tokens": None,
         "cached_input_tokens": None,
         "reasoning_tokens": None,
-        "configured_model": configured_model,
-        "runtime_model": runtime_model,
+        "model": model,
         "meter_schema_id": RETAIN_METER_SCHEMA_ID,
         "not_applicable_dimensions": (),
         "inclusion_relationships": (

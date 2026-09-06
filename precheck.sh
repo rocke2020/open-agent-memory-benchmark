@@ -55,6 +55,27 @@ read_env_value() {
   ' "$file"
 }
 
+env_assignment_count() {
+  local file=$1
+  local key=$2
+  awk -v key="$key" '
+    index($0, key "=") == 1 { count += 1 }
+    END { print count + 0 }
+  ' "$file"
+}
+
+reject_duplicate_env_assignment() {
+  local key=$1
+  [[ "$(env_assignment_count "$ENV_FILE" "$key")" -le 1 ]] || \
+    die "$key must occur exactly once in .env"
+}
+
+require_single_env_assignment() {
+  local key=$1
+  [[ "$(env_assignment_count "$ENV_FILE" "$key")" == 1 ]] || \
+    die "$key must occur exactly once in .env"
+}
+
 set_env_value() {
   local file=$1
   local key=$2
@@ -101,6 +122,8 @@ noncanonical = {
     "OMBA_JUDGE_MODEL",
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_API_KEY",
     "OAMB_EMBEDDING_MODEL",
     "OAMB_HINDSIGHT_LLM_PROVIDER",
     "OAMB_HINDSIGHT_LLM_MODEL",
@@ -117,6 +140,7 @@ noncanonical = {
     "OAMB_OPENVIKING_VLM_BASE_URL",
     "OAMB_OPENVIKING_VLM_API_KEY",
 }
+
 stale_comment_lines = {
     "# AMB's OpenAI-compatible adapter consumes these names.",
     "# tcai deepseek url and keys",
@@ -158,19 +182,51 @@ ensure_env_default() {
   fi
 }
 
-ensure_model_environment() {
-  [[ -f "$ENV_FILE" ]] || \
-    die "prepare .env from .env.example, set DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY, then rerun"
-  chmod 600 "$ENV_FILE"
-  remove_noncanonical_environment_values
+migrate_legacy_model_environment() {
+  local generic_value legacy_value
+  generic_value="$(read_env_value "$ENV_FILE" LLM_BASE_URL 2>/dev/null || true)"
+  legacy_value="$(read_env_value "$ENV_FILE" DEEPSEEK_BASE_URL 2>/dev/null || true)"
+  if [[ ( -z "$generic_value" || "$generic_value" == change-me* ) && \
+        -n "$legacy_value" && "$legacy_value" != change-me* ]]; then
+    set_env_value "$ENV_FILE" LLM_BASE_URL "$legacy_value"
+  fi
+  generic_value="$(read_env_value "$ENV_FILE" LLM_API_KEY 2>/dev/null || true)"
+  legacy_value="$(read_env_value "$ENV_FILE" DEEPSEEK_API_KEY 2>/dev/null || true)"
+  if [[ ( -z "$generic_value" || "$generic_value" == change-me* ) && \
+        -n "$legacy_value" && "$legacy_value" != change-me* ]]; then
+    set_env_value "$ENV_FILE" LLM_API_KEY "$legacy_value"
+  fi
+  ensure_env_default LLM_URL_TYPE openai_chat
+}
 
-  local base_url api_key
-  base_url="$(read_env_value "$ENV_FILE" DEEPSEEK_BASE_URL 2>/dev/null || true)"
-  api_key="$(read_env_value "$ENV_FILE" DEEPSEEK_API_KEY 2>/dev/null || true)"
+ensure_model_environment() {
+  [[ ! -L "$ENV_FILE" ]] || \
+    die ".env must be a regular file, not a symbolic link"
+  [[ -f "$ENV_FILE" ]] || \
+    die "prepare .env from .env.example, set LLM_BASE_URL and LLM_API_KEY, then rerun"
+  chmod 600 "$ENV_FILE"
+  local key
+  for key in \
+    LLM_URL_TYPE LLM_BASE_URL LLM_API_KEY \
+    DEEPSEEK_BASE_URL DEEPSEEK_API_KEY; do
+    reject_duplicate_env_assignment "$key"
+  done
+  migrate_legacy_model_environment
+  remove_noncanonical_environment_values
+  for key in LLM_URL_TYPE LLM_BASE_URL LLM_API_KEY; do
+    require_single_env_assignment "$key"
+  done
+
+  local url_type base_url api_key
+  url_type="$(read_env_value "$ENV_FILE" LLM_URL_TYPE 2>/dev/null || true)"
+  [[ "$url_type" == openai_chat ]] || \
+    die "LLM_URL_TYPE must be openai_chat in OAMB v0.1.0"
+  base_url="$(read_env_value "$ENV_FILE" LLM_BASE_URL 2>/dev/null || true)"
+  api_key="$(read_env_value "$ENV_FILE" LLM_API_KEY 2>/dev/null || true)"
   if [[ -n "$base_url" && "$base_url" != change-me* && -n "$api_key" && "$api_key" != change-me* ]]; then
     return
   fi
-  die "configure DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY in .env, then rerun"
+  die "configure LLM_BASE_URL and LLM_API_KEY in .env, then rerun"
 }
 
 ensure_provider_environment() {

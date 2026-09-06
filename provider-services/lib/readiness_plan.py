@@ -48,7 +48,7 @@ def readiness_plan_document(
         "model_roles": [
             {
                 "role_id": role.role_id,
-                "configured_model": role.configured_model,
+                "model": role.model,
                 "thinking_effort": role.thinking_effort,
                 "endpoint_variable": role.endpoint_variable,
                 "credential_variable": role.credential_variable,

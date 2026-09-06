@@ -11,10 +11,10 @@ from oamb.config.benchmark import (
     BenchmarkConfigurationError,
     load_benchmark_configuration,
 )
+from tests.benchmark_configuration import load_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
-LME6_CONFIG_PATH = REPOSITORY_ROOT / "tests/fixtures/configs/t10-lme6.yml"
 
 EXPECTED_ROLE_IDS = (
     "hindsight_extraction",
@@ -86,7 +86,7 @@ def test_checked_in_configuration_selects_one_lme60_three_provider_comparison() 
 
 
 def test_preserved_lme6_configuration_keeps_original_selection_and_concurrency() -> None:
-    configuration = _load(LME6_CONFIG_PATH)
+    configuration = load_lme6_configuration()
 
     assert configuration.comparison_id == "t10-lme6"
     assert configuration.dataset.selection == "lme6"
@@ -102,13 +102,14 @@ def test_preserved_lme6_configuration_keeps_original_selection_and_concurrency()
 
 def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> None:
     configuration = _load(BENCHMARK_CONFIG_PATH)
+    light_model = configuration.llm_profiles.light_model
+    deep_model = configuration.llm_profiles.deep_model
 
     assert configuration.models.ordered_role_ids == EXPECTED_ROLE_IDS
     assert tuple(
         (
             role_id,
             binding.model,
-            binding.runtime_model,
             binding.thinking_effort,
             binding.thinking_effort_scale,
             binding.thinking_effort_rank_1_indexed,
@@ -124,14 +125,13 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
     ) == (
         (
             "hindsight_extraction",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
+            light_model,
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
-            "OAMB_HINDSIGHT_LLM_BASE_URL",
-            "OAMB_HINDSIGHT_LLM_API_KEY",
-            "deepseek-api",
+            "LLM_BASE_URL",
+            "LLM_API_KEY",
+            "llm-api",
             "provider_internal",
             "effective_config_and_outbound_request",
             "reasoning_effort=low",
@@ -139,14 +139,13 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "mem0_extraction",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
+            light_model,
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
-            "OAMB_MEM0_LLM_BASE_URL",
-            "OAMB_MEM0_LLM_API_KEY",
-            "deepseek-api",
+            "LLM_BASE_URL",
+            "LLM_API_KEY",
+            "llm-api",
             "provider_internal",
             "effective_config_and_outbound_request",
             "reasoning_effort=low",
@@ -154,14 +153,13 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "openviking_semantic_understanding",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
+            light_model,
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
-            "OAMB_OPENVIKING_VLM_BASE_URL",
-            "OAMB_OPENVIKING_VLM_API_KEY",
-            "deepseek-api",
+            "LLM_BASE_URL",
+            "LLM_API_KEY",
+            "llm-api",
             "provider_internal",
             "effective_config_and_outbound_request",
             "reasoning_effort=low",
@@ -169,14 +167,13 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "answer",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro",
+            deep_model,
             "low",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             1,
-            "OAMB_DEEPSEEK_BASE_URL",
-            "OAMB_DEEPSEEK_API_KEY",
-            "deepseek-api",
+            "LLM_BASE_URL",
+            "LLM_API_KEY",
+            "llm-api",
             "harness",
             "sealed_outbound_request_and_response",
             "reasoning_effort=low",
@@ -184,14 +181,13 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "judge",
-            "deepseek-v4-flash",
-            "deepseek-v4-flash",
+            light_model,
             "high",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
             2,
-            "OAMB_DEEPSEEK_BASE_URL",
-            "OAMB_DEEPSEEK_API_KEY",
-            "deepseek-api",
+            "LLM_BASE_URL",
+            "LLM_API_KEY",
+            "llm-api",
             "harness",
             "sealed_outbound_request_and_response",
             "reasoning_effort=high",
@@ -199,8 +195,7 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         ),
         (
             "embedding",
-            "qwen3-embedding:0.6b",
-            "qwen3-embedding:0.6b",
+            configuration.models.embedding.model,
             "not_applicable",
             (),
             None,
@@ -215,35 +210,81 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
     )
 
 
-def test_loader_uses_benchmark_yaml_as_the_model_source(tmp_path: Path) -> None:
+def test_light_model_alias_updates_every_linked_role(tmp_path: Path) -> None:
+    source = _valid_configuration_yaml()
+    light_model = _load(BENCHMARK_CONFIG_PATH).llm_profiles.light_model
+    anchor = f"light_model: &light_model {light_model}"
+    assert anchor in source
+    configuration = _load(
+        _write_configuration(
+            tmp_path,
+            source.replace(
+                anchor,
+                "light_model: &light_model alternate-light-model",
+                1,
+            ),
+        )
+    )
+
+    assert (
+        tuple(
+            binding.model
+            for role_id, binding in configuration.models.ordered_items()
+            if role_id
+            in {
+                "hindsight_extraction",
+                "mem0_extraction",
+                "openviking_semantic_understanding",
+                "judge",
+            }
+        )
+        == ("alternate-light-model",) * 4
+    )
+
+
+def test_deep_model_alias_updates_every_linked_role(tmp_path: Path) -> None:
+    source = _valid_configuration_yaml()
+    deep_model = _load(BENCHMARK_CONFIG_PATH).llm_profiles.deep_model
+    anchor = f"deep_model: &deep_model {deep_model}"
+    assert anchor in source
+    configuration = _load(
+        _write_configuration(
+            tmp_path,
+            source.replace(
+                anchor,
+                "deep_model: &deep_model alternate-deep-model",
+                1,
+            ),
+        )
+    )
+
+    answer = configuration.models.answer
+    assert answer.model == "alternate-deep-model"
+
+
+def test_loader_rejects_a_role_model_outside_llm_profiles(tmp_path: Path) -> None:
     content = _valid_configuration_yaml().replace(
-        "  mem0_extraction:\n    model: deepseek-v4-flash\n    runtime_model: deepseek-v4-flash\n",
-        "  mem0_extraction:\n"
-        "    model: configured-by-benchmark\n"
-        "    runtime_model: configured-by-benchmark\n",
+        "  mem0_extraction:\n    model: *light_model\n",
+        "  mem0_extraction:\n    model: configured-by-benchmark\n",
         1,
     )
 
-    configuration = _load(_write_configuration(tmp_path, content))
-
-    assert configuration.models.mem0_extraction.model == "configured-by-benchmark"
-    assert configuration.models.mem0_extraction.runtime_model == "configured-by-benchmark"
+    with pytest.raises(BenchmarkConfigurationError, match="light_model profile"):
+        _load(_write_configuration(tmp_path, content))
 
 
 def test_loader_uses_benchmark_yaml_as_the_thinking_effort_source(tmp_path: Path) -> None:
     content = _valid_configuration_yaml().replace(
-        "  mem0_extraction:\n    model: deepseek-v4-flash\n"
-        "    runtime_model: deepseek-v4-flash\n    thinking_effort: low\n"
-        "    endpoint_variable: OAMB_MEM0_LLM_BASE_URL\n"
-        "    credential_variable: OAMB_MEM0_LLM_API_KEY\n"
-        "    recipient: deepseek-api\n    execution_owner: provider_internal\n"
+        "  mem0_extraction:\n    model: *light_model\n    thinking_effort: low\n"
+        "    endpoint_variable: LLM_BASE_URL\n"
+        "    credential_variable: LLM_API_KEY\n"
+        "    recipient: llm-api\n    execution_owner: provider_internal\n"
         "    proof_kind: effective_config_and_outbound_request\n"
         "    proof_reference: reasoning_effort=low\n",
-        "  mem0_extraction:\n    model: deepseek-v4-flash\n"
-        "    runtime_model: deepseek-v4-flash\n    thinking_effort: high\n"
-        "    endpoint_variable: OAMB_MEM0_LLM_BASE_URL\n"
-        "    credential_variable: OAMB_MEM0_LLM_API_KEY\n"
-        "    recipient: deepseek-api\n    execution_owner: provider_internal\n"
+        "  mem0_extraction:\n    model: *light_model\n    thinking_effort: high\n"
+        "    endpoint_variable: LLM_BASE_URL\n"
+        "    credential_variable: LLM_API_KEY\n"
+        "    recipient: llm-api\n    execution_owner: provider_internal\n"
         "    proof_kind: effective_config_and_outbound_request\n"
         "    proof_reference: reasoning_effort=high\n",
         1,
@@ -344,8 +385,8 @@ def test_loader_rejects_missing_or_unknown_keys(
     (
         lambda text: text + "comparison: duplicate\n",
         lambda text: text.replace(
-            "    model: deepseek-v4-pro\n",
-            "    model: deepseek-v4-pro\n    model: duplicate\n",
+            "    model: *deep_model\n",
+            "    model: *deep_model\n    model: duplicate\n",
             1,
         ),
         lambda text: text.replace(
@@ -413,9 +454,9 @@ def test_loader_rejects_non_exact_retrieval_configuration(
         ("thinking_effort: low", "thinking_effort: none"),
         ("thinking_effort: low", "thinking_effort: not_applicable"),
         ("thinking_effort: not_applicable", "thinking_effort: low"),
-        ("credential_variable: OAMB_DEEPSEEK_API_KEY", "credential_variable: literal-secret"),
-        ("endpoint_variable: OAMB_DEEPSEEK_BASE_URL", "endpoint_variable: https://secret"),
-        ("recipient: deepseek-api", "recipient:"),
+        ("credential_variable: LLM_API_KEY", "credential_variable: literal-secret"),
+        ("endpoint_variable: LLM_BASE_URL", "endpoint_variable: https://secret"),
+        ("recipient: llm-api", "recipient:"),
     ),
 )
 def test_loader_rejects_invalid_model_effort_or_recipient_closure(
@@ -425,17 +466,6 @@ def test_loader_rejects_invalid_model_effort_or_recipient_closure(
 ) -> None:
     content = _valid_configuration_yaml().replace(original, replacement, 1)
     with pytest.raises(BenchmarkConfigurationError):
-        _load(_write_configuration(tmp_path, content))
-
-
-def test_loader_rejects_unproved_provider_runtime_model_drift(tmp_path: Path) -> None:
-    content = _valid_configuration_yaml().replace(
-        "runtime_model: deepseek-v4-flash",
-        "runtime_model: deepseek-v4-pro",
-        1,
-    )
-
-    with pytest.raises(BenchmarkConfigurationError, match="configured and runtime model"):
         _load(_write_configuration(tmp_path, content))
 
 

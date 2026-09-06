@@ -19,10 +19,10 @@ def load_module():
 
 
 class ReadinessResponseTests(unittest.TestCase):
-    def test_chat_response_requires_expected_model_and_usable_message(self) -> None:
+    def test_chat_response_requires_usable_message_without_resolving_model(self) -> None:
         module = load_module()
         valid = {
-            "model": "deepseek-v4-flash",
+            "model": "fixture-chat-model",
             "choices": [
                 {
                     "finish_reason": "stop",
@@ -31,20 +31,21 @@ class ReadinessResponseTests(unittest.TestCase):
             ],
         }
 
-        module.validate_chat_response(valid, "deepseek-v4-flash")
+        module.validate_chat_response(valid)
+        module.validate_chat_response({key: value for key, value in valid.items() if key != "model"})
+        module.validate_chat_response({**valid, "model": "supplier-private-model"})
 
         invalid = (
-            {**valid, "model": "different-model"},
-            {"model": "deepseek-v4-flash", "choices": []},
-            {"model": "deepseek-v4-flash", "choices": [{}]},
+            {"model": "fixture-chat-model", "choices": []},
+            {"model": "fixture-chat-model", "choices": [{}]},
             {
-                "model": "deepseek-v4-flash",
+                "model": "fixture-chat-model",
                 "choices": [
                     {"message": {"role": "assistant", "content": "OK"}}
                 ],
             },
             {
-                "model": "deepseek-v4-flash",
+                "model": "fixture-chat-model",
                 "choices": [
                     {
                         "finish_reason": "length",
@@ -53,7 +54,7 @@ class ReadinessResponseTests(unittest.TestCase):
                 ],
             },
             {
-                "model": "deepseek-v4-flash",
+                "model": "fixture-chat-model",
                 "choices": [
                     {
                         "finish_reason": "stop",
@@ -65,16 +66,16 @@ class ReadinessResponseTests(unittest.TestCase):
         for document in invalid:
             with self.subTest(document=document):
                 with self.assertRaises(module.ReadinessResponseError):
-                    module.validate_chat_response(document, "deepseek-v4-flash")
+                    module.validate_chat_response(document)
 
     def test_embedding_response_requires_exact_finite_numeric_vector(self) -> None:
         module = load_module()
         valid = {
-            "model": "qwen3-embedding:0.6b",
+            "model": "fixture-embedding-model",
             "data": [{"embedding": [0.0] * 1024}],
         }
 
-        module.validate_embedding_response(valid, "qwen3-embedding:0.6b", 1024)
+        module.validate_embedding_response(valid, "fixture-embedding-model", 1024)
 
         invalid_vectors = (
             [0.0] * 1023,
@@ -88,15 +89,15 @@ class ReadinessResponseTests(unittest.TestCase):
             with self.subTest(last=vector[-1], length=len(vector)):
                 with self.assertRaises(module.ReadinessResponseError):
                     module.validate_embedding_response(
-                        {"model": "qwen3-embedding:0.6b", "data": [{"embedding": vector}]},
-                        "qwen3-embedding:0.6b",
+                        {"model": "fixture-embedding-model", "data": [{"embedding": vector}]},
+                        "fixture-embedding-model",
                         1024,
                     )
 
         with self.assertRaises(module.ReadinessResponseError):
             module.validate_embedding_response(
                 {**valid, "model": "different-model"},
-                "qwen3-embedding:0.6b",
+                "fixture-embedding-model",
                 1024,
             )
 

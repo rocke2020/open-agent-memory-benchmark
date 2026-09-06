@@ -2166,8 +2166,7 @@ def _half_integer_text(doubled_value: int) -> str:
 def _model_document(binding: ModelExecutionBinding) -> dict[str, object]:
     return {
         "role_id": binding.role_id,
-        "configured_model": binding.configured_model,
-        "runtime_model": binding.runtime_model,
+        "model": binding.model,
         "thinking_effort": binding.thinking_effort,
         "thinking_effort_scale": binding.thinking_effort_scale,
         "thinking_effort_rank_1_indexed": binding.thinking_effort_rank_1_indexed,
@@ -2492,7 +2491,7 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
     model_rows = "".join(
         "<tr>"
         f"<td>{_escape(item['role_id'])}</td>"
-        f"<td>{_escape(item['runtime_model'])}</td>"
+        f"<td>{_escape(item['model'])}</td>"
         f"<td>{_escape(item['thinking_effort'])}</td>"
         f"<td>{_escape(item['proof_kind'])}</td>"
         "</tr>"

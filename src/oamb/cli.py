@@ -90,7 +90,7 @@ def doctor_command(
             f"{plan.decision.maximum_exact_mcnemar_p_value}"
         )
     for role in plan.model_roles:
-        model_summary = f"model {role.role_id}: {role.configured_model}"
+        model_summary = f"model {role.role_id}: {role.model}"
         if role.thinking_effort_rank_1_indexed is not None:
             model_summary += (
                 f" / {role.thinking_effort} "

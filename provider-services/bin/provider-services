@@ -65,6 +65,10 @@ check_env_file() {
     [ "$mode" = "600" ] || die "$ENV_FILE must have mode 0600 (found ${mode:-unknown})"
     validate_env_file "$ENV_FILE" || die "$ENV_FILE uses duplicate keys or unsupported dotenv syntax"
     reject_plan_owned_env_values "$ENV_FILE" || die "$ENV_FILE contains plan-owned configuration"
+    llm_url_type=$(read_env_value "$ENV_FILE" LLM_URL_TYPE) || \
+        die "missing LLM_URL_TYPE in $ENV_FILE"
+    [ "$llm_url_type" = openai_chat ] || \
+        die "LLM_URL_TYPE must be openai_chat in OAMB v0.1.0"
 }
 
 ensure_plan_model_environment() {
@@ -499,7 +503,7 @@ probe_openai_chat() {
         --max-time "$READINESS_OPERATION_TIMEOUT_SECONDS" \
         -H "@$header_file" -H 'Content-Type: application/json' \
         --data-binary "@$request_file" "${base_url%/}/chat/completions" > "$response_file"
-    python3 "$ROOT/lib/readiness_response.py" chat "$response_file" "$model" || \
+    python3 "$ROOT/lib/readiness_response.py" chat "$response_file" || \
         die "$label model probe returned an invalid response"
     record_model_terminal "$label"
 }
@@ -568,10 +572,14 @@ verify_model_readiness() {
     model_env_mode=$(read_file_mode "$model_env" || true)
     [ "$model_env_mode" = "600" ] || die "$model_env must have mode 0600"
     validate_env_file "$model_env" || die "$model_env uses unsupported dotenv syntax"
-    answer_base_url=$(read_env_value "$model_env" DEEPSEEK_BASE_URL) || \
-        die "DEEPSEEK_BASE_URL is missing from $model_env"
-    answer_api_key=$(read_env_value "$model_env" DEEPSEEK_API_KEY) || \
-        die "DEEPSEEK_API_KEY is missing from $model_env"
+    llm_url_type=$(read_env_value "$model_env" LLM_URL_TYPE) || \
+        die "LLM_URL_TYPE is missing from $model_env"
+    [ "$llm_url_type" = openai_chat ] || \
+        die "LLM_URL_TYPE must be openai_chat in OAMB v0.1.0"
+    answer_base_url=$(read_env_value "$model_env" LLM_BASE_URL) || \
+        die "LLM_BASE_URL is missing from $model_env"
+    answer_api_key=$(read_env_value "$model_env" LLM_API_KEY) || \
+        die "LLM_API_KEY is missing from $model_env"
     [ -n "$answer_base_url" ] && [ -n "$answer_api_key" ] || \
         die "answer and judge model values must be non-empty"
     doctor_full
@@ -612,16 +620,16 @@ verify_model_readiness() {
             '.model_roles | map(select(.role_id == $role)) |
              select(length == 1) | .[0][$field]' "$readiness_plan"
     }
-    [ "$(role_value hindsight_extraction configured_model)" = \
+    [ "$(role_value hindsight_extraction model)" = \
         "$(env_value OAMB_HINDSIGHT_LLM_MODEL)" ] || \
         die "resolved Hindsight model differs from provider configuration"
-    [ "$(role_value mem0_extraction configured_model)" = \
+    [ "$(role_value mem0_extraction model)" = \
         "$(env_value OAMB_MEM0_LLM_MODEL)" ] || \
         die "resolved Mem0 model differs from provider configuration"
-    [ "$(role_value openviking_semantic_understanding configured_model)" = \
+    [ "$(role_value openviking_semantic_understanding model)" = \
         "$(env_value OAMB_OPENVIKING_VLM_MODEL)" ] || \
         die "resolved OpenViking model differs from provider configuration"
-    [ "$(role_value embedding configured_model)" = "$(env_value OAMB_EMBEDDING_MODEL)" ] || \
+    [ "$(role_value embedding model)" = "$(env_value OAMB_EMBEDDING_MODEL)" ] || \
         die "resolved embedding model differs from provider configuration"
     for service in hindsight mem0-postgres mem0 mem0-inspector openviking; do
         wait_for_health "$service"
@@ -649,22 +657,22 @@ verify_model_readiness() {
     probe_openai_chat hindsight_extraction \
         "$(env_value OAMB_HINDSIGHT_LLM_BASE_URL)" \
         "$(env_value OAMB_HINDSIGHT_LLM_API_KEY)" \
-        "$(role_value hindsight_extraction configured_model)" \
+        "$(role_value hindsight_extraction model)" \
         "$(role_value hindsight_extraction thinking_effort)"
     probe_openai_chat mem0_extraction \
         "$(env_value OAMB_MEM0_LLM_BASE_URL)" \
         "$(env_value OAMB_MEM0_LLM_API_KEY)" \
-        "$(role_value mem0_extraction configured_model)" \
+        "$(role_value mem0_extraction model)" \
         "$(role_value mem0_extraction thinking_effort)"
     probe_openai_chat openviking_semantic_understanding \
         "$(env_value OAMB_OPENVIKING_VLM_BASE_URL)" \
         "$(env_value OAMB_OPENVIKING_VLM_API_KEY)" \
-        "$(role_value openviking_semantic_understanding configured_model)" \
+        "$(role_value openviking_semantic_understanding model)" \
         "$(role_value openviking_semantic_understanding thinking_effort)"
     probe_openai_chat answer "$answer_base_url" "$answer_api_key" \
-        "$(role_value answer configured_model)" "$(role_value answer thinking_effort)"
+        "$(role_value answer model)" "$(role_value answer thinking_effort)"
     probe_openai_chat judge "$answer_base_url" "$answer_api_key" \
-        "$(role_value judge configured_model)" "$(role_value judge thinking_effort)"
+        "$(role_value judge model)" "$(role_value judge thinking_effort)"
     openviking_port=$(env_value OAMB_OPENVIKING_PORT)
     openviking_ready_response="$RUNTIME_DIR/openviking-ready-response.json"
     record_model_dispatch openviking-ready

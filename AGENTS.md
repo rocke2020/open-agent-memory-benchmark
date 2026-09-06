@@ -157,10 +157,11 @@ public, non-rerunnable evidence exists and users must reopen it.
   Hindsight `reflect`, Mem0 generative reranking/search processing, OpenViking
   session-intent search, query planning/rewriting, and any other generative
   `memory_query` call are prohibited and must fail validation.
-- A generative model binding includes configured alias, runtime-resolved model,
-  effective thinking effort with provider-defined scale/rank, exact request or
-  provider proof, and usage coverage. A model name alone is incomplete;
-  embedding records thinking effort as not applicable.
+- A generative model binding includes the requested model, effective thinking
+  effort with provider-defined scale/rank, exact request or provider proof, and
+  usage coverage. Supplier-reported model metadata remains in raw evidence and
+  is not a second normalized identity; embedding records thinking effort as not
+  applicable.
 - Keep indexing usage and cost on the physical ingestion plan; do not multiply
   it by logical members or questions.
 - Core import, CLI help, artifact parsing, and validation commands must not import provider

@@ -27,8 +27,7 @@ def _hindsight(tmp_path: Path) -> HindsightAdapter:
     return HindsightAdapter(
         store=ArtifactStore(tmp_path / "hindsight"),
         base_url="https://hindsight.example",
-        configured_extraction_model="configured-model",
-        runtime_extraction_model="runtime-model",
+        extraction_model="configured-model",
         runtime_binding_hash="a" * 64,
         transport=httpx.MockTransport(_slow_response),
         read_timeout_seconds=REQUEST_TIMEOUT_SECONDS,

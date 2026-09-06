@@ -378,8 +378,7 @@ def _memory_factory(
     return HindsightAdapter(
         store=store,
         base_url="https://hindsight.example",
-        configured_extraction_model="fixture-extractor",
-        runtime_extraction_model="fixture-extractor@runtime",
+        extraction_model="fixture-extractor",
         runtime_binding_hash=RUNTIME_BINDING_HASH,
         transport=httpx.MockTransport(service),
     )
@@ -405,8 +404,7 @@ def _recorded_lme6_memory_factory(run_id: str):  # type: ignore[no-untyped-def]
         return HindsightAdapter(
             store=store,
             base_url="https://hindsight.example",
-            configured_extraction_model="fixture-extractor",
-            runtime_extraction_model="fixture-extractor@runtime",
+            extraction_model="fixture-extractor",
             runtime_binding_hash=RUNTIME_BINDING_HASH,
             transport=httpx.MockTransport(service),
         )
@@ -429,8 +427,7 @@ def _model_binding(
         provider="fixture-provider",
         endpoint_reference="fixture-model-endpoint",
         credential_variable_name="OAMB_FIXTURE_MODEL_API_KEY",
-        configured_model=model,
-        resolved_model=model,
+        model=model,
         thinking_effort=thinking_effort,
         parameters_fingerprint="1" * 64,
         retry_policy_id="no-retry-v1",
@@ -471,7 +468,6 @@ def _model_factory(
         base_url="https://models.example/v1",
         api_key="fixture-secret",
         role_binding=_model_binding(role, binding_id, model, thinking_effort),
-        runtime_model_policy="require_match",
         transport=httpx.MockTransport(handler),
     )
 

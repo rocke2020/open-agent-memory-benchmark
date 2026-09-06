@@ -87,8 +87,9 @@ git clone https://github.com/rocke2020/open-agent-memory-benchmark.git && \
   cd open-agent-memory-benchmark
 ```
 
-Prepare the ignored root `.env` from `./.env.example`, set `DEEPSEEK_BASE_URL`
-and `DEEPSEEK_API_KEY`, and keep the file mode `0600`. Then run:
+Prepare the ignored root `.env` from `./.env.example`, keep
+`LLM_URL_TYPE=openai_chat`, set `LLM_BASE_URL` and `LLM_API_KEY`, and keep the
+file mode `0600`. Then run:
 
 ```bash
 ./precheck.sh

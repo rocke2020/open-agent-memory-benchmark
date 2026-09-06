@@ -80,11 +80,10 @@ def _control(
         role_status=RoleBindingStatus.SELECTED,
         execution_owner=ExecutionOwner.HARNESS,
         binding_kind=BindingKind.MODEL_CLIENT,
-        provider="deepseek",
-        endpoint_reference="DEEPSEEK_BASE_URL",
-        credential_variable_name="DEEPSEEK_API_KEY",
-        configured_model="deepseek-chat",
-        resolved_model="deepseek-chat",
+        provider="openai_chat",
+        endpoint_reference="LLM_BASE_URL",
+        credential_variable_name="LLM_API_KEY",
+        model="deepseek-chat",
         thinking_effort="low",
         parameters_fingerprint=_sha("parameters"),
         retry_policy_id="no-retry-v1",
@@ -241,7 +240,7 @@ def _control(
                     ),
                 ),
                 provider_budget_cap=ProviderBudgetCap(
-                    provider="deepseek",
+                    provider="openai_chat",
                     operation_kind="chat_completion",
                     billing_unit="request",
                     maximum_accepted_units=Decimal("10"),
@@ -294,7 +293,7 @@ def _control(
             item.redacted_endpoint_fingerprint for item in role_bindings
         ),
         credential_reference_fingerprints=tuple(
-            _sha(f"DEEPSEEK_API_KEY:{item.binding_id}") for item in role_bindings
+            _sha(f"LLM_API_KEY:{item.binding_id}") for item in role_bindings
         ),
         artifact_repository_fingerprint=_sha("artifact-root"),
         artifact_durability_proof_hash=_sha("durability"),

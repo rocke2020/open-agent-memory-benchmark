@@ -3912,8 +3912,7 @@ def _seal_live_token_usage(
                 allocation
                 for allocation in token_allocations
                 if allocation.owner_id in roles_by_id
-                and roles_by_id[allocation.owner_id].configured_model == source.configured_model
-                and roles_by_id[allocation.owner_id].resolved_model == source.runtime_model
+                and roles_by_id[allocation.owner_id].model == source.model
             )
             if len(matching) != 1 or matching[0].owner_id in source_by_owner:
                 raise ValueError("provider-internal live usage does not map to one role owner")
@@ -3959,22 +3958,15 @@ def _live_token_usage_v5(
         or source.measurement_source != TokenMeasurementSource.SUPPLIER_RESPONSE
     ):
         raise ValueError("live token usage source does not bind its attempt and raw response")
-    configured_model = (
-        source.configured_model
+    model = (
+        source.model
         if isinstance(source, TokenUsageRecordV3)
-        else role.configured_model
+        else role.model
         if role is not None
         else "provider-managed-model"
     )
-    runtime_model = (
-        source.runtime_model
-        if isinstance(source, TokenUsageRecordV3)
-        else role.resolved_model
-        if role is not None
-        else "provider-managed-model"
-    )
-    if configured_model is None or runtime_model is None:
-        raise ValueError("live token usage owner lacks configured/runtime model identity")
+    if model is None:
+        raise ValueError("live token usage owner lacks a model")
     values: tuple[int | None, int | None, int | None, int | None, int | None]
     raw_paths: tuple[tuple[str, str], ...]
     covered: tuple[str, ...]
@@ -4085,8 +4077,7 @@ def _live_token_usage_v5(
         context_view_tokens=None,
         cached_input_tokens=values[3],
         reasoning_tokens=values[4],
-        configured_model=configured_model,
-        runtime_model=runtime_model,
+        model=model,
         meter_schema_id=meter_schema_id,
         raw_field_paths=raw_paths,
         covered_dimensions=covered,

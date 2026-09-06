@@ -280,8 +280,7 @@ class TokenUsageRecordV3(StrictContract):
     context_view_tokens: NonNegativeInt | None
     cached_input_tokens: NonNegativeInt | None
     reasoning_tokens: NonNegativeInt | None
-    configured_model: NonEmptyStr | None
-    runtime_model: NonEmptyStr | None
+    model: NonEmptyStr | None
     meter_schema_id: NonEmptyStr
     raw_field_paths: tuple[tuple[NonEmptyStr, NonEmptyStr], ...]
     covered_dimensions: tuple[NonEmptyStr, ...]
@@ -321,10 +320,8 @@ class TokenUsageRecordV3(StrictContract):
                 raise ValueError("external LLM usage requires a supplier response")
             if self.context_view_tokens is not None:
                 raise ValueError("external LLM usage cannot contain context-view tokens")
-            if self.configured_model is None or self.runtime_model is None:
-                raise ValueError(
-                    "external LLM usage requires configured and runtime model identity"
-                )
+            if self.model is None:
+                raise ValueError("external LLM usage requires a model")
             if self.raw_response_ref is None:
                 raise ValueError("external LLM usage requires a raw response reference")
             raw_path_dimensions = tuple(item[0] for item in self.raw_field_paths)
@@ -338,7 +335,7 @@ class TokenUsageRecordV3(StrictContract):
                 raise ValueError("local context usage requires the local tokenizer")
             if any(values[dimension] is not None for dimension in _EXTERNAL_TOKEN_DIMENSIONS):
                 raise ValueError("local context usage cannot contain supplier token values")
-            if self.configured_model is not None or self.runtime_model is not None:
+            if self.model is not None:
                 raise ValueError("local context usage cannot carry supplier model identity")
             if self.raw_field_paths:
                 raise ValueError("local context usage cannot carry supplier raw field paths")

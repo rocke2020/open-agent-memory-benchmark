@@ -28,15 +28,15 @@ from oamb.contracts.specifications import (
 )
 from oamb.contracts.states import ResumeDisposition, RunState
 from oamb.runtime.source_records import seal_source_contract
+from tests.benchmark_configuration import lme6_configuration_text, load_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-BENCHMARK_CONFIG = REPOSITORY_ROOT / "tests/fixtures/configs/t10-lme6.yml"
 LME60_BENCHMARK_CONFIG = REPOSITORY_ROOT / "configs" / "benchmark.yml"
 NOW = datetime(2026, 8, 30, 10, 0, tzinfo=UTC)
 
 
 def _plan() -> ResolvedPlan:
-    return build_resolved_plan(load_benchmark_configuration(BENCHMARK_CONFIG))
+    return build_resolved_plan(load_lme6_configuration())
 
 
 def _lme60_plan() -> ResolvedPlan:
@@ -59,29 +59,25 @@ def _provider_evidence() -> SourceEvidenceBinding:
 
 
 def _environment() -> dict[str, str]:
+    models = load_benchmark_configuration(LME60_BENCHMARK_CONFIG).models
     return {
         "OAMB_HINDSIGHT_BASE_URL": "http://127.0.0.1:64888",
-        "OAMB_HINDSIGHT_LLM_BASE_URL": "https://model.example/v1",
-        "OAMB_HINDSIGHT_LLM_API_KEY": "provider-model-key",
-        "OAMB_HINDSIGHT_LLM_MODEL": "deepseek-v4-flash",
+        "OAMB_HINDSIGHT_LLM_MODEL": models.hindsight_extraction.model,
         "OAMB_MEM0_BASE_URL": "http://127.0.0.1:64889",
         "OAMB_MEM0_ADMIN_API_KEY": "mem0-key",
-        "OAMB_MEM0_LLM_BASE_URL": "https://model.example/v1",
-        "OAMB_MEM0_LLM_API_KEY": "provider-model-key",
-        "OAMB_MEM0_LLM_MODEL": "deepseek-v4-flash",
+        "OAMB_MEM0_LLM_MODEL": models.mem0_extraction.model,
         "OAMB_MEM0_INSPECTOR_BASE_URL": "http://127.0.0.1:64333",
         "OAMB_MEM0_INSPECTOR_API_KEY": "inspector-key",
         "OAMB_OPENVIKING_BASE_URL": "http://127.0.0.1:64930",
         "OAMB_OPENVIKING_USER_API_KEY": "openviking-key",
-        "OAMB_OPENVIKING_VLM_BASE_URL": "https://model.example/v1",
-        "OAMB_OPENVIKING_VLM_API_KEY": "provider-model-key",
-        "OAMB_OPENVIKING_VLM_MODEL": "deepseek-v4-flash",
+        "OAMB_OPENVIKING_VLM_MODEL": models.openviking_semantic_understanding.model,
         "OAMB_OPENVIKING_ACCOUNT_ID": "benchmark-account",
         "OAMB_OPENVIKING_ADMIN_USER_ID": "benchmark-user",
-        "OAMB_DEEPSEEK_BASE_URL": "https://model.example/v1",
-        "OAMB_DEEPSEEK_API_KEY": "answer-key",
+        "LLM_URL_TYPE": "openai_chat",
+        "LLM_BASE_URL": "https://model.example/v1",
+        "LLM_API_KEY": "model-key",
         "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
-        "OAMB_EMBEDDING_MODEL": "qwen3-embedding:0.6b",
+        "OAMB_EMBEDDING_MODEL": models.embedding.model,
     }
 
 
@@ -283,7 +279,7 @@ def test_continuation_rejects_resolved_plan_drift_before_creating_target(
     )
     mutated_config = tmp_path / "benchmark.yml"
     mutated_config.write_text(
-        BENCHMARK_CONFIG.read_text(encoding="utf-8").replace(
+        lme6_configuration_text().replace(
             "max_retries_per_operation: 2",
             "max_retries_per_operation: 1",
             1,
@@ -449,7 +445,7 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
         assert captured["maximum_task_polls"] == 9_000
 
 
-def test_live_model_factories_receive_the_resolved_model_call_timeout(
+def test_live_model_factories_receive_the_model_call_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -874,7 +870,7 @@ def test_public_question_selector_resolves_frozen_raw_id_before_execution(
         )
 
 
-def test_live_model_env_file_overrides_process_aliases(
+def test_live_model_env_file_overrides_process_generic_connection(
     tmp_path: Path,
 ) -> None:
     from oamb import live
@@ -886,7 +882,9 @@ def test_live_model_env_file_overrides_process_aliases(
     )
     model_env = tmp_path / "model.env"
     model_env.write_text(
-        "DEEPSEEK_BASE_URL=https://file-model.example/v1\nDEEPSEEK_API_KEY=file-answer-key\n",
+        "LLM_URL_TYPE=openai_chat\n"
+        "LLM_BASE_URL=https://file-model.example/v1\n"
+        "LLM_API_KEY=file-answer-key\n",
         encoding="utf-8",
     )
 
@@ -895,13 +893,29 @@ def test_live_model_env_file_overrides_process_aliases(
         model_env_path=model_env,
         provider_runtime_directory=tmp_path / "runtime",
         base_environment={
-            "OAMB_DEEPSEEK_BASE_URL": "https://process-model.example/v1",
-            "OAMB_DEEPSEEK_API_KEY": "process-answer-key",
+            "LLM_URL_TYPE": "openai_chat",
+            "LLM_BASE_URL": "https://process-model.example/v1",
+            "LLM_API_KEY": "process-answer-key",
         },
     )
 
-    assert environment["OAMB_DEEPSEEK_BASE_URL"] == "https://file-model.example/v1"
-    assert environment["OAMB_DEEPSEEK_API_KEY"] == "file-answer-key"
+    assert environment["LLM_URL_TYPE"] == "openai_chat"
+    assert environment["LLM_BASE_URL"] == "https://file-model.example/v1"
+    assert environment["LLM_API_KEY"] == "file-answer-key"
+
+
+def test_live_readiness_hash_binds_llm_url_type() -> None:
+    from oamb import live
+
+    plan = _plan()
+    environment = _environment()
+
+    assert live.live_readiness_environment_hash(plan, environment) != (
+        live.live_readiness_environment_hash(
+            plan,
+            {**environment, "LLM_URL_TYPE": "future_protocol"},
+        )
+    )
 
 
 def _write_model_readiness_evidence(
@@ -1021,7 +1035,7 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
         == service_path
     )
 
-    drifted_environment = {**environment, "OAMB_DEEPSEEK_API_KEY": "different-answer-key"}
+    drifted_environment = {**environment, "LLM_API_KEY": "different-answer-key"}
     with pytest.raises(live.LiveConfigurationError, match="environment"):
         live.validate_live_readiness_receipt(
             plan=plan,

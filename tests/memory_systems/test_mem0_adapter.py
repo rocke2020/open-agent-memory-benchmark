@@ -34,6 +34,7 @@ from oamb.contracts.ports import (
 )
 from oamb.contracts.states import ValidationDisposition
 from oamb.runtime.worker import SupervisedWorker
+from tests.benchmark_configuration import load_canonical_configuration
 
 EXPECTED_V2_0_19_UNSUPPORTED_REASONS = (
     "implicit_entity_store",
@@ -170,7 +171,7 @@ def test_v2_0_19_profile_fixture_binds_exact_config_and_negative_audit(
     assert verdict.api_version == "v1.1"
     assert verdict.vector_store_provider == vector_store_provider
     assert verdict.collection_name == "oamb_memories"
-    assert verdict.embedding_model == "qwen3-embedding:0.6b"
+    assert verdict.embedding_model == load_canonical_configuration().models.embedding.model
     assert verdict.embedding_dimension == 1024
     assert verdict.reranker is None
     assert verdict.entity_store_control == "implicit"
