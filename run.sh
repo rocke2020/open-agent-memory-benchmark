@@ -32,6 +32,19 @@ die() {
   exit 1
 }
 
+finish_logging() {
+  local run_exit_code=$1
+  local log_exit_code=0
+  exec 1>&3 2>&4 3>&- 4>&-
+  wait "$LOG_STDOUT_PID" || log_exit_code=$?
+  wait "$LOG_STDERR_PID" || log_exit_code=$?
+  if ((log_exit_code != 0)); then
+    printf 'run: FAIL: could not finish writing log: %s\n' "$LOG_FILE" >&2
+    ((run_exit_code != 0)) || run_exit_code=$log_exit_code
+  fi
+  exit "$run_exit_code"
+}
+
 count_progress_artifacts() {
   local output_root=$1
   local artifact_kind=$2
@@ -168,6 +181,25 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+command -v tee >/dev/null 2>&1 || die "required command not found: tee"
+mkdir -p "$OUTPUTS_ROOT/tmp" || die "cannot create log directory"
+LOG_FILE="$OUTPUTS_ROOT/tmp/run-$MODE-$(date -u +%Y%m%d-%H%M%S)-$$.log"
+(umask 077; set -C; : > "$LOG_FILE") || die "cannot create log: $LOG_FILE"
+LOG_PIPE_DIR="$(mktemp -d "$OUTPUTS_ROOT/tmp/.run-log.XXXXXX")" || die "cannot create log pipes"
+mkfifo "$LOG_PIPE_DIR/stdout" "$LOG_PIPE_DIR/stderr"
+# Keep stdout/stderr separate on the terminal; append both to one private log.
+# Ordinary background children can be waited for on macOS Bash 3.2.
+exec 3>&1 4>&2
+(trap '' INT TERM HUP; exec tee -a "$LOG_FILE" < "$LOG_PIPE_DIR/stdout" >&3) &
+LOG_STDOUT_PID=$!
+(trap '' INT TERM HUP; exec tee -a "$LOG_FILE" < "$LOG_PIPE_DIR/stderr" >&4) &
+LOG_STDERR_PID=$!
+exec > "$LOG_PIPE_DIR/stdout" 2> "$LOG_PIPE_DIR/stderr"
+trap 'finish_logging "$?"' EXIT
+rm "$LOG_PIPE_DIR/stdout" "$LOG_PIPE_DIR/stderr"
+rmdir "$LOG_PIPE_DIR"
+printf 'run: log=%s\n' "$LOG_FILE"
 
 if [[ "$RESUME" == true && "$MODE" != "full" ]]; then
   die "--resume requires --full_test"
@@ -622,7 +654,7 @@ run_full_resume() {
   RESUME_LOCK="$MODE_DIR/results/full-resume.lock"
   mkdir "$RESUME_LOCK" 2>/dev/null || \
     die "another full-test resume owns the local state: $RESUME_LOCK"
-  trap release_resume_lock EXIT
+  trap 'run_exit_code=$?; release_resume_lock; finish_logging "$run_exit_code"' EXIT
   initialize_resume_state
   increment_resume_attempt
   provider_cap="$(jq -er '

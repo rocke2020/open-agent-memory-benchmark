@@ -993,6 +993,59 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
     return root, env, trace
 
 
+@pytest.mark.parametrize("doctor_exit_code", (0, 47))
+def test_run_saves_stdout_and_stderr_without_changing_exit_status(
+    tmp_path: Path, doctor_exit_code: int
+) -> None:
+    root, env, _trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    release = tmp_path / "release-doctor"
+    env["OAMB_TEST_LOG_RELEASE"] = str(release)
+    _write_executable(
+        root / "provider-services" / "bin" / "provider-services",
+        "printf 'doctor output sentinel\\n'\n"
+        "printf 'doctor error sentinel\\n' >&2\n"
+        'while [ ! -f "$OAMB_TEST_LOG_RELEASE" ]; do /bin/sleep 0.02; done\n'
+        f"exit {doctor_exit_code}",
+    )
+
+    process = subprocess.Popen(
+        [str(script), "--full_test", "--dry-run"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            logs = tuple((root / "outputs" / "tmp").glob("run-full-*.log"))
+            if len(logs) == 1:
+                saved = logs[0].read_text(encoding="utf-8")
+                if "doctor output sentinel" in saved and "doctor error sentinel" in saved:
+                    break
+            time.sleep(0.02)
+        else:
+            pytest.fail("stdout and stderr were not logged while the command was running")
+        assert process.poll() is None
+    finally:
+        release.touch()
+        stdout, stderr = process.communicate(timeout=20)
+
+    assert process.returncode == doctor_exit_code, stdout + stderr
+    assert "doctor output sentinel" in stdout
+    assert "doctor error sentinel" in stderr
+    logs = tuple((root / "outputs" / "tmp").glob("run-full-*.log"))
+    assert len(logs) == 1
+    log = logs[0]
+    assert f"run: log={log}" in stdout
+    saved = log.read_text(encoding="utf-8")
+    assert all(line in saved for line in (stdout + stderr).splitlines())
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    assert not tuple((root / "outputs" / "tmp").glob(".run-log.*"))
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected_mode", "expected_questions"),
     ((["--dry-run"], "smoke", 1), (["--full_test", "--dry-run"], "full", 60)),
@@ -1081,6 +1134,10 @@ def test_run_without_resume_starts_a_fresh_execution_every_time(
         check=False,
         timeout=20,
     )
+    original_logs = {
+        path: path.read_bytes() for path in (root / "outputs" / "tmp").glob("run-*.log")
+    }
+    assert len(original_logs) == 1
     first_trace_lines = trace.read_text(encoding="utf-8").splitlines()
     second = subprocess.run(
         [str(script), *arguments],
@@ -1094,6 +1151,9 @@ def test_run_without_resume_starts_a_fresh_execution_every_time(
 
     assert first.returncode == 0, first.stdout + first.stderr
     assert second.returncode == 0, second.stdout + second.stderr
+    logs = tuple((root / "outputs" / "tmp").glob("run-*.log"))
+    assert len(logs) == 2
+    assert all(path.read_bytes() == content for path, content in original_logs.items())
     execution_roots = sorted((root / "outputs" / output_branch).iterdir())
     assert len(execution_roots) == 2
     assert execution_roots[0] != execution_roots[1]
@@ -1128,6 +1188,11 @@ def test_run_routes_results_to_mode_specific_outputs_directory(
     assert result.returncode == 0, result.stdout + result.stderr
     report = root / "outputs" / output_branch / "lme60-test" / "comparison" / "report.json"
     assert report.is_file()
+    logs = tuple((root / "outputs" / "tmp").glob("run-*.log"))
+    assert len(logs) == 1
+    saved = logs[0].read_text(encoding="utf-8")
+    assert "run: PASS" in saved
+    assert all(line in saved for line in (result.stdout + result.stderr).splitlines())
     assert not (root / ".local-demo").exists()
 
 

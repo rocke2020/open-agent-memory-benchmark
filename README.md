@@ -166,6 +166,8 @@ reports are written under `outputs/full-test/<run-label>/`. Set
 `OAMB_NO_OPEN=1` only in a headless environment; the HTML is still built and
 validated, and its path is printed.
 
+`run.sh` saves stdout and stderr to a new private `outputs/tmp/run-<mode>-<UTC-timestamp>-<pid>.log` while continuing to display them in the terminal. The script prints `run: log=<path>` at startup; use `tail -f <path>` to follow it from another terminal. Logging includes preflight errors and applies to smoke, full, dry-run, and resume invocations; earlier logs are preserved.
+
 ## If a run stops or fails
 
 Preserve `outputs/smoke-test`, `outputs/full-test`, `provider-services/.runtime`,
