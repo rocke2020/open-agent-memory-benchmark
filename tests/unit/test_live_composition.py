@@ -1154,6 +1154,62 @@ def test_service_receipt_resolution_rejects_missing_bound_receipt(tmp_path: Path
         live.resolve_service_verification_receipt(runtime, expected_sha256="a" * 64)
 
 
+@pytest.mark.parametrize("provider", ("hindsight", "mem0", "openviking"))
+def test_cell_retry_guard_reopens_bound_proof_with_reduced_environment(
+    tmp_path: Path, provider: str
+) -> None:
+    from oamb import live
+    from tests.unit.test_provider_service_binding import (
+        PROJECT,
+        _write_receipt,
+        _write_service_artifacts,
+    )
+
+    plan = _lme60_plan()
+    environment = _environment()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    attestation = f"project={PROJECT}\n".encode()
+    (runtime / "provider-project.attestation").write_bytes(attestation)
+    (runtime / "embedding-ready-response.json").write_bytes(b'{"dimension":1024}')
+    original_receipt = _write_service_artifacts(tmp_path / "proof-fixture")
+    receipt_document = json.loads(original_receipt.read_bytes())
+    receipt_document["project_attestation_sha256"] = hashlib.sha256(attestation).hexdigest()
+    receipts = runtime / "service-verification-receipts"
+    original_receipt.parent.rename(receipts)
+    receipt_path = _write_receipt(receipts, receipt_document)
+    project, evidence = live.load_live_provider_evidence(
+        plan=plan,
+        provider_runtime_directory=runtime,
+        environment=environment,
+        service_receipt_path=receipt_path,
+    )
+    cell = live.build_live_cell(
+        plan=plan,
+        cell_id=f"{provider}-lme60",
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=runtime,
+        provider_project_id=project,
+        provider_evidence=evidence[provider],
+        environment=environment,
+        run_label="reduced-environment-proof",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+    )
+    assert "OAMB_HINDSIGHT_LLM_MODEL" not in cell.environment
+    assert set(cell.environment) < set(environment)
+    # A later current-pointer selection cannot replace this cell's frozen receipt.
+    (receipts / "service-verification-current.sha256").write_text("a" * 64 + "\n")
+    assert live._validated_cell_internal_retry_count(cell) == 0
+
+    manifest_hash = receipt_document["profiles"][0]["proof_manifest_sha256"]
+    manifest = json.loads((receipts / f"proofs/manifests/{manifest_hash}.json").read_bytes())
+    retry_blob = next(item for item in manifest["files"] if "retry-config" in item["relative_path"])
+    (receipts / f"proofs/blobs/{retry_blob['sha256']}").write_bytes(b"{}")
+    with pytest.raises(live.LiveConfigurationError, match="receipt or proof is malformed"):
+        live._validated_cell_internal_retry_count(cell)
+
+
 def test_readiness_plan_binds_current_receipt_before_attempt_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

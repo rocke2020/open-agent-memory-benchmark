@@ -623,16 +623,17 @@ def _validated_cell_internal_retry_count(cell: LiveCell) -> int:
     provider_runtime_directory = cell.control.provider_lifecycle_coordination_directory
     if provider_runtime_directory is None:
         raise LiveConfigurationError("provider retry proof directory is unavailable")
-    service_receipt_path = validate_live_readiness_receipt(
+    expected_hash = cell.control.preflight_record.provider_service_evidence.validation_result_hash
+    service_receipt_path = resolve_service_verification_receipt(
+        provider_runtime_directory,
+        expected_sha256=expected_hash,
+    )
+    validate_live_service_verification_receipt(
         plan=cell.plan,
         provider_runtime_directory=provider_runtime_directory,
         environment=cell.environment,
+        service_receipt_path=service_receipt_path,
     )
-    expected_hash = cell.control.preflight_record.provider_service_evidence.validation_result_hash
-    if service_receipt_path.stem != expected_hash:
-        raise LiveConfigurationError(
-            "live readiness selected a different provider verification receipt"
-        )
     return 0
 
 
