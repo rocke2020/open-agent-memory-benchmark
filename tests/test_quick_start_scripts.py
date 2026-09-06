@@ -794,7 +794,8 @@ PY
         esac
         progress_root="$output_root/progress-$progress_provider"
         mkdir -p "$progress_root/source/specs" "$progress_root/source/cases"
-        printf '{"memory_system_id":"%s"}\n' "$progress_provider" \
+        printf '{"memory_system_id":"%s","run_id":"%s-run"}\n' \
+          "$progress_provider" "$progress_provider" \
           > "$progress_root/source/specs/run-spec.json"
         progress_index=0
         while [ "$progress_index" -lt "$provider_progress_cases" ]; do
@@ -803,8 +804,32 @@ PY
         done
       done
     fi
+    if [ -n "${OAMB_TEST_PROGRESS_RUN_RECORDS:-}" ]; then
+      python3 - "$output_root" <<'PY'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+output_root = Path(sys.argv[1])
+for provider, records in json.loads(os.environ["OAMB_TEST_PROGRESS_RUN_RECORDS"]).items():
+    run_root = output_root / f"progress-{provider}" / "source" / "run"
+    run_root.mkdir(parents=True)
+    for index, record in enumerate(records):
+        name = f"{provider}-run" if index == 0 else f"duplicate-{index}"
+        payload = record if isinstance(record, str) else json.dumps(record)
+        (run_root / f"{name}.json").write_text(payload, encoding="utf-8")
+duplicate = os.environ.get("OAMB_TEST_PROGRESS_DUPLICATE_PROVIDER")
+if duplicate:
+    shutil.copytree(output_root / f"progress-{duplicate}", output_root / "duplicate-provider")
+PY
+    fi
     if [ "${OAMB_TEST_OAMB_RUN_DELAY:-0}" = "1" ]; then
       /bin/sleep 1
+    fi
+    if [ "${OAMB_TEST_OAMB_RUN_FAIL:-0}" = "1" ]; then
+      exit 44
     fi
     [ ! -e "$result_map" ] || exit 91
     if [ "${#cells[@]}" -gt 0 ]; then
@@ -1312,6 +1337,102 @@ def test_run_full_reports_progress_per_provider_out_of_sixty(tmp_path: Path) -> 
         assert "question_progress=" not in progress_line
     assert "/180" not in result.stdout
     assert "/1)" not in result.stdout
+
+
+def _progress_run_record(provider: str, state: str) -> dict[str, object]:
+    return {
+        "schema_name": "run_record",
+        "schema_version": 1,
+        "run_id": f"{provider}-run",
+        "run_spec_hash": RESOLVED_PLAN_HASH,
+        "state": state,
+        "resume_disposition": "not_applicable",
+        "started_at": "2026-09-06T01:10:34.090719+00:00",
+        "ended_at": "2026-09-06T01:33:02.823301+00:00",
+        "ingestion_occurrence_ids": [],
+        "case_occurrence_ids": [],
+    }
+
+
+def _run_progress_fixture(
+    tmp_path: Path,
+    records: dict[str, list[object]],
+    *,
+    duplicate_provider: str = "",
+) -> subprocess.CompletedProcess[str]:
+    root, env, _trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    _write_executable(fake_bin / "sleep", "/bin/sleep 0.05")
+    env["OAMB_TEST_OAMB_RUN_DELAY"] = "1"
+    env["OAMB_TEST_PROGRESS_CASES"] = "1"
+    env["OAMB_TEST_PROGRESS_RUN_RECORDS"] = json.dumps(records)
+    env["OAMB_TEST_PROGRESS_DUPLICATE_PROVIDER"] = duplicate_provider
+    env["OAMB_TEST_OAMB_RUN_FAIL"] = "1"
+    return subprocess.run(
+        [str(script), "--full_test"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+
+@pytest.mark.parametrize("failed_state", ("aborted", "infrastructure_blocked"))
+def test_run_progress_preserves_terminal_provider_state_while_peer_runs(
+    tmp_path: Path, failed_state: str
+) -> None:
+    result = _run_progress_fixture(
+        tmp_path,
+        {
+            "hindsight": [_progress_run_record("hindsight", failed_state)],
+            "mem0": [_progress_run_record("mem0", "finalized")],
+        },
+    )
+
+    assert result.returncode == 44, result.stdout + result.stderr
+    assert f"provider=hindsight status={failed_state}, elapsed=1348s" in result.stdout
+    assert "provider=mem0 status=execution-completed, elapsed=1348s" in result.stdout
+    assert "provider=openviking status=running, elapsed=" in result.stdout
+    assert "provider=hindsight status=running" not in result.stdout
+    assert "provider=mem0 status=running" not in result.stdout
+    assert "provider=openviking status=unavailable, elapsed=unavailable" in result.stdout
+    assert "providers=hindsight,mem0,openviking status=failed" not in result.stderr
+    assert "provider=mem0 status=failed" not in result.stdout + result.stderr
+    assert "status=validating" not in result.stdout
+
+
+@pytest.mark.parametrize("invalid_record", ("malformed", "duplicate", "identity", "timestamp"))
+def test_run_progress_reports_invalid_terminal_record_as_unavailable(
+    tmp_path: Path, invalid_record: str
+) -> None:
+    record = _progress_run_record("hindsight", "aborted")
+    records: list[object] = [record]
+    if invalid_record == "malformed":
+        records = ["{"]
+    elif invalid_record == "duplicate":
+        records = [record, record]
+    elif invalid_record == "identity":
+        record["run_id"] = "another-run"
+    else:
+        record["ended_at"] = "not-a-timestamp"
+
+    result = _run_progress_fixture(tmp_path, {"hindsight": records})
+
+    assert result.returncode == 44, result.stdout + result.stderr
+    assert "provider=hindsight status=unavailable, elapsed=unavailable" in result.stdout
+    assert "provider=hindsight status=running" not in result.stdout
+    assert "provider=hindsight status=aborted" not in result.stdout
+
+
+def test_run_progress_reports_ambiguous_provider_root_as_unavailable(tmp_path: Path) -> None:
+    result = _run_progress_fixture(tmp_path, {}, duplicate_provider="hindsight")
+
+    assert result.returncode == 44, result.stdout + result.stderr
+    assert "provider=hindsight status=unavailable, elapsed=unavailable" in result.stdout
+    assert "provider=hindsight status=running" not in result.stdout
 
 
 @pytest.mark.parametrize(

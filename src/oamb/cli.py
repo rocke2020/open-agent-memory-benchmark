@@ -215,7 +215,7 @@ def run_command(
         Path | None,
         typer.Option(
             "--continue-from",
-            help="Aborted OpenViking capsule whose confirmed work must be reused.",
+            help="Unavailable: OpenViking same-scope replay lacks task-specific mutation proof.",
         ),
     ] = None,
     recover_from: Annotated[
@@ -251,6 +251,11 @@ def run_command(
 ) -> None:
     """Execute frozen cells and seal source capsules."""
 
+    if continue_from is not None:
+        raise typer.BadParameter(
+            "OpenViking same-scope continuation lacks task-specific no-mutation and "
+            "work-settlement proof; use --recover-from for validated fresh-scope recovery"
+        )
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
         if case or question or recover_from or recovery_analysis_output or result_map:

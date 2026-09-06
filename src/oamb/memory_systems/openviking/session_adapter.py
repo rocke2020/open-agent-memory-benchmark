@@ -313,7 +313,7 @@ class OpenVikingSessionAdapter:
                 )
             )
 
-        failed_task, failed_task_reference = await self._read_task(
+        failed_task, _failed_task_reference = await self._read_task(
             task_id=failed_session_task_id,
             headers=headers,
         )
@@ -331,25 +331,14 @@ class OpenVikingSessionAdapter:
             raise OpenVikingSessionProfileError(
                 "OpenViking failed continuation session overlaps its completed prefix"
             )
-        failed_session_reference = await self._require_zero_failed_session(
+        await self._require_zero_failed_session(
             session_id=failed_session_id,
             headers=headers,
         )
-
-        projection_response, _memory_uris = await self._capture_memory_projection(binding)
-        self._attempted_allocations.add(binding.memory_root)
-        self._scopes[binding.memory_root] = binding
-        for item in completed:
-            self._completed[item.session_id] = item
-        self._continuations[binding.memory_root] = _ScopeContinuation(
-            completed_session_ids=tuple(item.session_id for item in completed),
-            failed_session_id=failed_session_id,
-            failed_evidence_references=(failed_task_reference, failed_session_reference),
-        )
-        return ScopeReceipt(
-            ingestion_occurrence_id=request.ingestion_occurrence_id,
-            scope_id=binding.memory_root,
-            raw_reference=projection_response.raw_reference,
+        # Failed Phase 2 work may have changed memory before session counters merge.
+        raise OpenVikingSessionProfileError(
+            "OpenViking same-scope continuation requires task-specific no-mutation and "
+            "work-settlement proof; zero session counters do not supply that proof"
         )
 
     def plan_ingestion(self, request: IngestionRequest) -> tuple[IngestionDispatch, ...]:

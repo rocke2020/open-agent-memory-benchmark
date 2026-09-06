@@ -57,61 +57,83 @@ count_progress_artifacts() {
     wc -l | tr -d ' '
 }
 
-count_capsule_progress_artifacts() {
-  local capsule_root=$1
-  local artifact_kind=$2
-  local artifact_root="$capsule_root/source/$artifact_kind"
-  if [[ -z "$capsule_root" || ! -d "$artifact_root" ]]; then
-    printf '0\n'
-    return
-  fi
-  find "$artifact_root" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | \
-    wc -l | tr -d ' '
+report_provider_progress() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+output_root = Path(sys.argv[1])
+total_questions = int(sys.argv[2])
+elapsed_seconds = int(sys.argv[3])
+command_active = sys.argv[4] == "true"
+provider_specs = {provider: [] for provider in ("hindsight", "mem0", "openviking")}
+terminal_statuses = {
+    "finalized": "execution-completed",
+    "aborted": "aborted",
+    "infrastructure_blocked": "infrastructure_blocked",
+}
+for path in output_root.glob("*/source/specs/run-spec.json"):
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        provider = spec["memory_system_id"]
+        if provider in provider_specs:
+            provider_specs[provider].append((path.parents[2], spec))
+    except (OSError, ValueError, KeyError, TypeError):
+        continue
+
+for provider, specs in provider_specs.items():
+    status = elapsed = progress = "unavailable"
+    if len(specs) == 1:
+        capsule_root, spec = specs[0]
+        completed = min(
+            sum(path.is_file() for path in (capsule_root / "source/cases").glob("*.json")),
+            total_questions,
+        )
+        progress = f"{completed} ({completed}/{total_questions}, {completed * 100 // total_questions}%)"
+        records = list((capsule_root / "source/run").glob("*.json"))
+        try:
+            run_id = spec["run_id"]
+            if not isinstance(run_id, str) or not run_id:
+                raise ValueError("missing run identity")
+            if len(records) == 1:
+                record = json.loads(records[0].read_text(encoding="utf-8"))
+                if (
+                    record["schema_name"] != "run_record"
+                    or record["schema_version"] != 1
+                    or record["run_id"] != run_id
+                    or records[0].stem != run_id
+                ):
+                    raise ValueError("terminal run identity differs")
+                terminal_status = terminal_statuses[record["state"]]
+                started = datetime.fromisoformat(record["started_at"])
+                ended = datetime.fromisoformat(record["ended_at"])
+                if started.tzinfo is None or ended.tzinfo is None or ended < started:
+                    raise ValueError("invalid terminal run timestamps")
+                status = terminal_status
+                elapsed = f"{int((ended - started).total_seconds())}s"
+            elif not records and command_active and not (capsule_root / "capsule-manifest.json").exists():
+                status = "running"
+                elapsed = f"{elapsed_seconds}s"
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    print(f"provider={provider} status={status}, elapsed={elapsed}, completed_questions={progress}")
+PY
 }
 
 provider_status_heartbeat() {
   local output_root=$1
   local total_questions=$2
-  local elapsed_seconds=0
+  local started_seconds=$SECONDS
   local timer_pid=""
-  local provider run_spec capsule_root memory_system_id
-  local hindsight_root mem0_root openviking_root provider_root
-  local completed_questions question_progress
-  hindsight_root=""
-  mem0_root=""
-  openviking_root=""
   trap '[ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true; exit 0' TERM INT HUP
   while :; do
     sleep "$STATUS_INTERVAL_SECONDS" &
     timer_pid=$!
     wait "$timer_pid" || exit 0
-    elapsed_seconds=$((elapsed_seconds + STATUS_INTERVAL_SECONDS))
-    if [[ -z "$hindsight_root" || -z "$mem0_root" || -z "$openviking_root" ]]; then
-      while IFS= read -r run_spec; do
-        memory_system_id="$(jq -r '.memory_system_id // empty' "$run_spec" 2>/dev/null)"
-        capsule_root="${run_spec%/source/specs/run-spec.json}"
-        case "$memory_system_id" in
-          hindsight) [[ -n "$hindsight_root" ]] || hindsight_root=$capsule_root ;;
-          mem0) [[ -n "$mem0_root" ]] || mem0_root=$capsule_root ;;
-          openviking) [[ -n "$openviking_root" ]] || openviking_root=$capsule_root ;;
-        esac
-      done < <(
-        find "$output_root" -type f -path '*/source/specs/run-spec.json' -print 2>/dev/null
-      )
-    fi
-    for provider in hindsight mem0 openviking; do
-      case "$provider" in
-        hindsight) provider_root=$hindsight_root ;;
-        mem0) provider_root=$mem0_root ;;
-        openviking) provider_root=$openviking_root ;;
-      esac
-      completed_questions="$(count_capsule_progress_artifacts "$provider_root" cases)"
-      ((completed_questions <= total_questions)) || completed_questions=$total_questions
-      question_progress=$((completed_questions * 100 / total_questions))
-      printf 'provider=%s status=running, elapsed=%ss, completed_questions=%s (%s/%s, %s%%)\n' \
-        "$provider" "$elapsed_seconds" "$completed_questions" "$completed_questions" \
-        "$total_questions" "$question_progress"
-    done
+    report_provider_progress "$output_root" "$total_questions" \
+      "$((SECONDS - started_seconds))" true
   done
 }
 
@@ -121,6 +143,7 @@ run_provider_cells_with_status() {
   local total_questions=$3
   shift 3
   local provider heartbeat_pid command_code
+  local started_seconds=$SECONDS
   printf 'run: providers=hindsight,mem0,openviking status=starting (%s)\n' "$context"
   for provider in hindsight mem0 openviking; do
     printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s)\n' \
@@ -132,14 +155,12 @@ run_provider_cells_with_status() {
   "$@" || command_code=$?
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
+  report_provider_progress "$output_root" "$total_questions" \
+    "$((SECONDS - started_seconds))" false
   if ((command_code != 0)); then
-    printf 'run: providers=hindsight,mem0,openviking status=failed\n' >&2
+    printf 'run: provider execution command status=failed\n' >&2
     return "$command_code"
   fi
-  for provider in hindsight mem0 openviking; do
-    printf 'run: provider=%s status=execution-completed, question_progress=100%% (%s/%s)\n' \
-      "$provider" "$total_questions" "$total_questions"
-  done
 }
 
 open_report() {

@@ -302,10 +302,10 @@ def test_continuation_rejects_resolved_plan_drift_before_creating_target(
     assert not (tmp_path / "continuation").exists()
 
 
-def test_continuation_accepts_the_exact_frozen_plan_and_runtime_binding(
+def test_continuation_rejects_matching_plan_without_no_mutation_proof(
     tmp_path: Path,
 ) -> None:
-    from oamb.live import build_live_continuation_cell
+    from oamb.live import LiveConfigurationError, build_live_continuation_cell
 
     plan = _plan()
     evidence = _provider_evidence()
@@ -317,22 +317,24 @@ def test_continuation_accepts_the_exact_frozen_plan_and_runtime_binding(
         provider_evidence=evidence,
     )
 
-    continued = build_live_continuation_cell(
-        plan=plan,
-        cell_id="openviking-lme6",
-        base_capsule_root=base,
-        output_root=tmp_path / "continuation",
-        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-        provider_project_id="oamb-providers-test-live",
-        provider_evidence=evidence,
-        environment=environment,
-    )
-
-    assert continued.run_id == base.name
-    assert continued.capsule_root == tmp_path / "continuation" / base.name
-    assert continued.continuation is not None
-    assert continued.control.max_parallel_history_ingestions == 3
-    assert continued.control.max_parallel_questions == 3
+    before = {
+        path.relative_to(base): path.read_bytes() for path in base.rglob("*") if path.is_file()
+    }
+    with pytest.raises(LiveConfigurationError, match="no-mutation.*proof"):
+        build_live_continuation_cell(
+            plan=plan,
+            cell_id="openviking-lme6",
+            base_capsule_root=base,
+            output_root=tmp_path / "continuation",
+            provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+            provider_project_id="oamb-providers-test-live",
+            provider_evidence=evidence,
+            environment=environment,
+        )
+    assert not (tmp_path / "continuation").exists()
+    assert before == {
+        path.relative_to(base): path.read_bytes() for path in base.rglob("*") if path.is_file()
+    }
 
 
 @pytest.mark.parametrize("drift", ["environment", "provider_evidence"])

@@ -1233,10 +1233,9 @@ def build_live_continuation_cell(
     provider_evidence: SourceEvidenceBinding,
     environment: Mapping[str, str],
 ) -> LiveCell:
-    """Reopen one aborted OpenViking cell without discarding confirmed work."""
+    """Check the frozen base, then reject unsupported same-scope replay."""
 
     from oamb.contracts.evidence import RunRecord
-    from oamb.runtime.native_continuation import initialize_continuation_root
 
     cell = select_live_cells(plan, (cell_id,))[0]
     if cell.provider_id != "openviking":
@@ -1330,36 +1329,9 @@ def build_live_continuation_cell(
     if attempts_directory.is_dir() and any(attempts_directory.iterdir()):
         raise LiveConfigurationError("provider lifecycle domain has active attempts")
 
-    initialized = initialize_continuation_root(base, Path(output_root))
-    control = NativeRunControl(
-        run_spec=run_spec,
-        preflight_record=preflight,
-        budget=budget,
-        role_bindings=bindings,
-        owner_id=f"oamb-live-{os.getpid()}",
-        host_fingerprint=canonical_sha256(["oamb-live-host-initial-v1", socket.gethostname()]),
-        process_id=os.getpid(),
-        provider_runtime_directory=lifecycle_domain,
-        wall_clock=lambda: datetime.now(UTC),
-        monotonic_clock=time.monotonic,
-        max_parallel_history_ingestions=(
-            plan.execution.max_parallel_history_ingestions_per_provider
-        ),
-        max_parallel_questions=plan.execution.max_parallel_questions_per_provider,
-        max_retries_per_operation=plan.execution.max_retries_per_operation,
-        provider_lifecycle_coordination_directory=provider_runtime_directory,
-    )
-    return LiveCell(
-        plan=plan,
-        cell=cell,
-        run_id=run_spec.run_id,
-        role_ids=role_ids,
-        output_root=initialized.target_root.parent,
-        capsule_root=initialized.target_root,
-        dataset_path=Path(plan.dataset.path),
-        control=control,
-        environment=resolved_environment,
-        continuation=initialized,
+    raise LiveConfigurationError(
+        "OpenViking same-scope continuation requires task-specific no-mutation and "
+        "work-settlement proof; the pinned provider does not supply that proof"
     )
 
 

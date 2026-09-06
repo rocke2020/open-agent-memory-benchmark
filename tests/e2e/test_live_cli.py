@@ -26,6 +26,43 @@ def _lme6_plan() -> ResolvedPlan:
     return build_resolved_plan(load_lme6_configuration())
 
 
+def test_continuation_stops_before_environment_or_provider_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.config.doctor import resolved_plan_bytes
+
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_bytes(resolved_plan_bytes(_lme6_plan()))
+    entered_environment = False
+
+    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
+        nonlocal entered_environment
+        entered_environment = True
+        raise AssertionError("unsupported continuation reached runtime preparation")
+
+    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
+    output = tmp_path / "successor"
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            str(resolved_plan),
+            "--cell",
+            "openviking-lme6",
+            "--continue-from",
+            str(tmp_path / "aborted-base"),
+            "--output-root",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "no-mutation" in result.output
+    assert not entered_environment
+    assert not output.exists()
+
+
 def test_root_environment_template_contains_model_placeholders_without_credentials() -> None:
     entries = {}
     for line in (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8").splitlines():

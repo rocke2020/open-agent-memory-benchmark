@@ -646,7 +646,7 @@ async def test_existing_peer_or_session_stops_before_any_provider_write_and_is_n
 
 
 @pytest.mark.asyncio
-async def test_adopted_scope_seeds_completed_prefix_and_replays_only_proven_zero_failure() -> None:
+async def test_adoption_rejects_zero_counters_without_task_no_mutation_proof() -> None:
     sources = tuple(_source(f"source-{ordinal}", ordinal, _messages(1)) for ordinal in range(1, 4))
     session_ids = tuple(_session_id(source) for source in sources)
     completed_task_ids = ("completed-task-1", "completed-task-2")
@@ -717,27 +717,13 @@ async def test_adopted_scope_seeds_completed_prefix_and_replays_only_proven_zero
     adapter = _adapter(service)
     await adapter.resolve()
 
-    scope = await adapter.adopt_ingestion_scope(
-        ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID),
-        completed_session_task_ids=completed_task_ids,
-        failed_session_task_id=failed_task_id,
-    )
-    dispatches = adapter.plan_ingestion(IngestionRequest(scope, sources))
-    replay = await adapter.ingest(
-        IngestionDispatchRequest(scope=scope, attempt_id="b" * 64, dispatch=dispatches[2])
-    )
-
-    post_paths = [request.url.path for request in service.calls if request.method == "POST"]
-    assert post_paths == [
-        f"/api/v1/sessions/{session_ids[2]}/messages/batch",
-        f"/api/v1/sessions/{session_ids[2]}/commit",
-    ]
-    assert replay.accepted_source_unit_ids == (sources[2].source_unit_id,)
-    projection = await adapter.project(scope)
-    assert projection.inventory.ordered_source_unit_ids == tuple(
-        source.source_unit_id for source in sources
-    )
-    assert all(request.method != "DELETE" for request in service.calls)
+    with pytest.raises(Exception, match="no-mutation.*proof"):
+        await adapter.adopt_ingestion_scope(
+            ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID),
+            completed_session_task_ids=completed_task_ids,
+            failed_session_task_id=failed_task_id,
+        )
+    assert all(request.method in {"GET", "HEAD"} for request in service.calls)
     await adapter.close()
 
 
@@ -797,7 +783,7 @@ async def test_adoption_never_replays_unknown_or_partial_failed_session(
 
 
 @pytest.mark.asyncio
-async def test_failed_session_is_rechecked_before_replay_writes() -> None:
+async def test_adoption_rejects_partial_memory_even_when_session_counters_are_zero() -> None:
     source = _source("source-1", 1, _messages(1))
     session_id = _session_id(source)
     failed_task_id = "failed-task-1"
@@ -824,7 +810,7 @@ async def test_failed_session_is_rechecked_before_replay_writes() -> None:
                 "status": "failed",
                 "resource_id": session_id,
                 "meta": {},
-                "stage": "memory_extraction",
+                "stage": "memory_diff_publication",
                 "result": None,
                 "error": "provider failed",
             }
@@ -833,17 +819,13 @@ async def test_failed_session_is_rechecked_before_replay_writes() -> None:
     )
     adapter = _adapter(service)
     await adapter.resolve()
-    scope = await adapter.adopt_ingestion_scope(
-        ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID),
-        completed_session_task_ids=(),
-        failed_session_task_id=failed_task_id,
-    )
-    dispatch = adapter.plan_ingestion(IngestionRequest(scope, (source,)))[0]
-    session_details[session_id]["memories_extracted"] = {"total": 1}
-
-    with pytest.raises(Exception, match="zero memory and usage"):
-        await adapter.ingest(
-            IngestionDispatchRequest(scope=scope, attempt_id="b" * 64, dispatch=dispatch)
+    # The peer has memory, but failed-task counters have not merged into the session.
+    assert service.peer_exists and not service.empty_projection
+    with pytest.raises(Exception, match="no-mutation.*proof"):
+        await adapter.adopt_ingestion_scope(
+            ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID),
+            completed_session_task_ids=(),
+            failed_session_task_id=failed_task_id,
         )
 
     assert all(request.method in {"GET", "HEAD"} for request in service.calls)
