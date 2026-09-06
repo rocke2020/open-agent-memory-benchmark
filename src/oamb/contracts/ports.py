@@ -397,11 +397,10 @@ class ModelReceipt:
     raw_reference: RawReferenceHandle
     output_text: str
     usage_reference_ids: tuple[str, ...]
+    model: str
     raw_response_bytes: bytes = b""
     finish_disposition: FinishDisposition = FinishDisposition.NORMAL_STOP
     candidates: tuple[ModelCandidate, ...] = ()
-    runtime_model: str | None = None
-    runtime_identity_status: Literal["matched", "recorded", "unattested", "mismatch"] = "unattested"
     supplier_status_code: int | None = None
 
 

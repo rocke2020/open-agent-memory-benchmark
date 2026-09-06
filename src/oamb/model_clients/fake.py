@@ -97,6 +97,7 @@ class ScriptedFakeModelClient:
             raw_reference=raw_reference,
             output_text=output_text,
             usage_reference_ids=usage_ids,
+            model="fake-model",
         )
 
     async def close(self) -> None:

@@ -68,8 +68,7 @@ def test_v2_external_contracts_close_roles_budgets_and_readiness_evidence() -> N
         provider="ollama",
         endpoint_reference="controlled-embedding-endpoint",
         credential_variable_name=None,
-        configured_model="qwen3-embedding:0.6b",
-        resolved_model="qwen3-embedding:0.6b@sha256:manifest",
+        model="fixture-embedding-model",
         thinking_effort="not_applicable",
         parameters_fingerprint=HASH,
         retry_policy_id="no-retry-v1",
@@ -144,7 +143,7 @@ def test_v2_external_contracts_close_roles_budgets_and_readiness_evidence() -> N
         )
 
     with pytest.raises(ValidationError, match="selected binding"):
-        specifications.ModelRoleBindingV2(**(role.model_dump() | {"configured_model": None}))
+        specifications.ModelRoleBindingV2(**(role.model_dump() | {"model": None}))
     with pytest.raises(ValidationError, match="duplicate role ceiling"):
         specifications.BudgetSpecV2(
             **(budget.model_dump() | {"role_ceilings": (role_ceiling(specifications),) * 2})
@@ -505,8 +504,7 @@ def _external_legacy_fixtures() -> tuple[tuple[dict[str, Any], type[Any]], ...]:
             "role": "answer",
             "owner": "harness",
             "endpoint_fingerprint": HASH,
-            "configured_model": "fixture-model",
-            "resolved_model": "fixture-model",
+            "model": "fixture-model",
             "parameters_fingerprint": OTHER_HASH,
             "budget_role": "answer",
         },
@@ -705,8 +703,7 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         context_view_tokens=None,
         cached_input_tokens=None,
         reasoning_tokens=None,
-        configured_model="legacy-model",
-        runtime_model="legacy-model",
+        model="legacy-model",
         meter_schema_id="legacy-meter-v1",
         raw_field_paths=(),
         covered_dimensions=(),
@@ -881,8 +878,7 @@ def test_every_remaining_legacy_contract_version_parses_from_strict_json_bytes()
         context_view_tokens=None,
         cached_input_tokens=None,
         reasoning_tokens=None,
-        configured_model="legacy-model",
-        runtime_model="legacy-model",
+        model="legacy-model",
         meter_schema_id="legacy-meter-v1",
         raw_field_paths=(),
         covered_dimensions=(),

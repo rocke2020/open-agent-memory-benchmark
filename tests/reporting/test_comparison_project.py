@@ -21,6 +21,7 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256, openvikin
 from oamb.contracts.states import ValidationDisposition
 from oamb.reporting.comparison_project import ValidatedCellRoot
 from oamb.workloads.visible_evidence import count_o200k_tokens, tokenizer_fingerprint
+from tests.benchmark_configuration import load_lme6_configuration
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -29,7 +30,7 @@ CASE_COUNT = 6
 
 
 def _plan(tmp_path: Path) -> ResolvedPlan:
-    configuration = load_benchmark_configuration(Path("tests/fixtures/configs/t10-lme6.yml"))
+    configuration = load_lme6_configuration()
     dataset = replace(
         configuration.dataset,
         source_sha256=SHA_A,

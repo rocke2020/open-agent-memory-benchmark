@@ -40,8 +40,8 @@ def _write_configured_environment(root: Path) -> None:
         (REPOSITORY_ROOT / ".env.example")
         .read_text(encoding="utf-8")
         .replace(
-            "DEEPSEEK_BASE_URL=change-me\nDEEPSEEK_API_KEY=change-me",
-            "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key",
+            "LLM_BASE_URL=change-me\nLLM_API_KEY=change-me",
+            "LLM_BASE_URL=https://models.example/v1\nLLM_API_KEY=test-model-key",
         )
     )
     (root / ".env").write_text(
@@ -62,22 +62,30 @@ def _copy_quick_start_script(source: Path, root: Path) -> Path:
     return destination
 
 
-def test_root_env_template_owns_one_deepseek_connection_pair() -> None:
+def test_root_env_template_owns_one_generic_llm_connection() -> None:
     assignment_names = [
         line.split("=", 1)[0]
         for line in (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
         if line and not line.startswith("#")
     ]
 
-    assert assignment_names.count("DEEPSEEK_BASE_URL") == 1
-    assert assignment_names.count("DEEPSEEK_API_KEY") == 1
+    assert assignment_names.count("LLM_URL_TYPE") == 1
+    assert assignment_names.count("LLM_BASE_URL") == 1
+    assert assignment_names.count("LLM_API_KEY") == 1
+    assert "DEEPSEEK_BASE_URL" not in assignment_names
+    assert "DEEPSEEK_API_KEY" not in assignment_names
     assert set(assignment_names).isdisjoint(PROVIDER_MODEL_CONNECTION_ALIASES)
+    assert "LLM_URL_TYPE=openai_chat" in (REPOSITORY_ROOT / ".env.example").read_text(
+        encoding="utf-8"
+    )
 
 
-def test_provider_shell_derives_model_connections_from_deepseek_pair(tmp_path: Path) -> None:
+def test_provider_shell_derives_model_connections_from_generic_llm_pair(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
+        "LLM_URL_TYPE=openai_chat\n"
+        "LLM_BASE_URL=https://models.example/v1\n"
+        "LLM_API_KEY=test-model-key\n",
         encoding="utf-8",
     )
     requested = " ".join(PROVIDER_MODEL_CONNECTION_ALIASES)
@@ -108,14 +116,16 @@ def test_provider_shell_derives_model_connections_from_deepseek_pair(tmp_path: P
     ]
 
 
-def test_live_environment_derives_provider_connections_from_deepseek_pair(
+def test_live_environment_derives_provider_connections_from_generic_llm_pair(
     tmp_path: Path,
 ) -> None:
     from oamb.live import load_live_environment
 
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
+        "LLM_URL_TYPE=openai_chat\n"
+        "LLM_BASE_URL=https://models.example/v1\n"
+        "LLM_API_KEY=test-model-key\n",
         encoding="utf-8",
     )
 
@@ -132,6 +142,26 @@ def test_live_environment_derives_provider_connections_from_deepseek_pair(
     for name in PROVIDER_MODEL_CONNECTION_ALIASES:
         expected = "https://models.example/v1" if name.endswith("BASE_URL") else "test-model-key"
         assert environment[name] == expected
+
+
+def test_live_environment_rejects_unsupported_llm_url_type(tmp_path: Path) -> None:
+    from oamb.live import LiveConfigurationError, load_live_environment
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LLM_URL_TYPE=anthropic\n"
+        "LLM_BASE_URL=https://models.example/v1\n"
+        "LLM_API_KEY=test-model-key\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LiveConfigurationError, match="LLM_URL_TYPE.*openai_chat"):
+        load_live_environment(
+            provider_env_path=env_file,
+            model_env_path=env_file,
+            provider_runtime_directory=tmp_path / "runtime",
+            base_environment={},
+        )
 
 
 def _quick_start_fixture(tmp_path: Path, *, system_name: str) -> tuple[Path, dict[str, str], Path]:
@@ -173,7 +203,7 @@ case " $* " in
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--output" ]; then
         mkdir -p "$2"
-        printf '%s\n' '{"schema_name":"resolved_comparison_plan","model_roles":[{"role_id":"hindsight_extraction","configured_model":"plan-hindsight","thinking_effort":"low"},{"role_id":"mem0_extraction","configured_model":"plan-mem0","thinking_effort":"high"},{"role_id":"openviking_semantic_understanding","configured_model":"plan-openviking","thinking_effort":"max"},{"role_id":"embedding","configured_model":"plan-embedding","thinking_effort":"not_applicable"}]}' > "$2/resolved-plan.json"
+        printf '%s\n' '{"schema_name":"resolved_comparison_plan","model_roles":[{"role_id":"hindsight_extraction","model":"plan-hindsight","thinking_effort":"low"},{"role_id":"mem0_extraction","model":"plan-mem0","thinking_effort":"high"},{"role_id":"openviking_semantic_understanding","model":"plan-openviking","thinking_effort":"max"},{"role_id":"embedding","model":"plan-embedding","thinking_effort":"not_applicable"}]}' > "$2/resolved-plan.json"
         break
       fi
       shift
@@ -314,8 +344,8 @@ def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path
     script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
     root_template = REPOSITORY_ROOT / ".env.example"
     configured = root_template.read_text(encoding="utf-8").replace(
-        "DEEPSEEK_BASE_URL=change-me\nDEEPSEEK_API_KEY=change-me",
-        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key",
+        "LLM_BASE_URL=change-me\nLLM_API_KEY=change-me",
+        "LLM_BASE_URL=https://models.example/v1\nLLM_API_KEY=test-model-key",
     )
     (root / ".env.example").write_text(root_template.read_text(encoding="utf-8"), encoding="utf-8")
     configured_lines = [
@@ -424,6 +454,11 @@ def test_precheck_upgrades_legacy_two_key_root_env(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     root_env = root_env_path.read_text(encoding="utf-8")
+    assert "LLM_URL_TYPE=openai_chat" in root_env
+    assert "LLM_BASE_URL=https://models.example/v1" in root_env
+    assert "LLM_API_KEY=test-model-key" in root_env
+    assert "DEEPSEEK_BASE_URL=" not in root_env
+    assert "DEEPSEEK_API_KEY=" not in root_env
     for expected in (
         "OAMB_HINDSIGHT_PORT=18888",
         "OAMB_MEM0_PORT=18889",
@@ -438,6 +473,133 @@ def test_precheck_upgrades_legacy_two_key_root_env(tmp_path: Path) -> None:
         in (trace.read_text(encoding="utf-8"))
     )
     assert not (root / "provider-services" / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "duplicate_value"),
+    (
+        ("DEEPSEEK_BASE_URL", "https://duplicate.example/v1"),
+        ("DEEPSEEK_API_KEY", "duplicate-model-key"),
+    ),
+)
+def test_precheck_rejects_duplicate_legacy_llm_assignment_without_mutation(
+    tmp_path: Path,
+    key: str,
+    duplicate_value: str,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    env_path.write_text(
+        "DEEPSEEK_BASE_URL=https://models.example/v1\n"
+        "DEEPSEEK_API_KEY=test-model-key\n"
+        f"{key}={duplicate_value}\n",
+        encoding="utf-8",
+    )
+    original = env_path.read_bytes()
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert f"precheck: FAIL: {key} must occur exactly once in .env" in result.stderr
+    assert env_path.read_bytes() == original
+    assert "provider-services " not in trace.read_text(encoding="utf-8")
+
+
+def test_precheck_rejects_symlinked_root_env_without_mutating_target(tmp_path: Path) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    target = tmp_path / "shared.env"
+    env_path.replace(target)
+    env_path.symlink_to(target)
+    original = target.read_bytes()
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "precheck: FAIL: .env must be a regular file, not a symbolic link" in result.stderr
+    assert env_path.is_symlink()
+    assert target.read_bytes() == original
+    assert "provider-services " not in trace.read_text(encoding="utf-8")
+
+
+def test_precheck_rejects_unsupported_llm_url_type(tmp_path: Path) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "LLM_URL_TYPE=openai_chat",
+            "LLM_URL_TYPE=anthropic",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "LLM_URL_TYPE" in result.stderr
+    assert "openai_chat" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("key", "duplicate_value"),
+    (
+        ("LLM_URL_TYPE", "openai_chat"),
+        ("LLM_BASE_URL", "https://duplicate.example/v1"),
+        ("LLM_API_KEY", "duplicate-model-key"),
+    ),
+)
+def test_precheck_rejects_duplicate_generic_llm_assignment_before_provider_start(
+    tmp_path: Path,
+    key: str,
+    duplicate_value: str,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    with env_path.open("a", encoding="utf-8") as stream:
+        stream.write(f"{key}={duplicate_value}\n")
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert f"precheck: FAIL: {key} must occur exactly once in .env" in result.stderr
+    assert "provider-services " not in trace.read_text(encoding="utf-8")
 
 
 def test_precheck_requires_operator_prepared_root_env(tmp_path: Path) -> None:
@@ -770,7 +932,10 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
 """.strip(),
     )
     (root / "provider-services" / ".runtime").mkdir()
-    (root / ".env").write_text("DEEPSEEK_BASE_URL=test\nDEEPSEEK_API_KEY=test\n", encoding="utf-8")
+    (root / ".env").write_text(
+        "LLM_URL_TYPE=openai_chat\nLLM_BASE_URL=test\nLLM_API_KEY=test\n",
+        encoding="utf-8",
+    )
     (root / ".env").chmod(0o600)
     work_dir = root / "outputs" / "tmp" / "precheck" / "lme60-test"
     plan = work_dir / "plan" / "resolved-plan.json"
@@ -783,22 +948,22 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
                 "model_roles": [
                     {
                         "role_id": "hindsight_extraction",
-                        "configured_model": "plan-hindsight",
+                        "model": "plan-hindsight",
                         "thinking_effort": "low",
                     },
                     {
                         "role_id": "mem0_extraction",
-                        "configured_model": "plan-mem0",
+                        "model": "plan-mem0",
                         "thinking_effort": "high",
                     },
                     {
                         "role_id": "openviking_semantic_understanding",
-                        "configured_model": "plan-openviking",
+                        "model": "plan-openviking",
                         "thinking_effort": "max",
                     },
                     {
                         "role_id": "embedding",
-                        "configured_model": "plan-embedding",
+                        "model": "plan-embedding",
                         "thinking_effort": "not_applicable",
                     },
                 ],

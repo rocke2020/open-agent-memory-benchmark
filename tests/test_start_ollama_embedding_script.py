@@ -5,9 +5,12 @@ import subprocess
 import time
 from pathlib import Path
 
+from tests.benchmark_configuration import load_canonical_configuration
+
 SCRIPT_PATH = (
     Path(__file__).parents[1] / "scripts" / "start_local_embedding" / "start_ollama_embedding.sh"
 )
+EMBEDDING_MODEL = load_canonical_configuration().models.embedding.model
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -41,13 +44,13 @@ case "${1:-}" in
     while :; do sleep 1; done
     ;;
   pull)
-    [ "${2:-}" = "qwen3-embedding:0.6b" ]
+    [ "${2:-}" = "__EMBEDDING_MODEL__" ]
     ;;
   *)
     exit 2
     ;;
 esac
-""".strip(),
+""".replace("__EMBEDDING_MODEL__", EMBEDDING_MODEL).strip(),
     )
     _write_executable(fake_bin / "docker", "printf '%s\\n' 172.17.0.1")
     _write_executable(
@@ -68,19 +71,19 @@ dimension = int(sys.argv[1])
 print(json.dumps({
     "object": "list",
     "data": [{"object": "embedding", "embedding": [0.25] * dimension, "index": 0}],
-    "model": "qwen3-embedding:0.6b",
+    "model": "__EMBEDDING_MODEL__",
     "usage": {"prompt_tokens": 1, "total_tokens": 1},
 }))
 PY
     ;;
   */api/ps*)
-    printf '%s\n' '{"models":[{"name":"qwen3-embedding:0.6b","model":"qwen3-embedding:0.6b","context_length":8192}]}'
+    printf '%s\n' '{"models":[{"name":"__EMBEDDING_MODEL__","model":"__EMBEDDING_MODEL__","context_length":8192}]}'
     ;;
   *)
     exit 2
     ;;
 esac
-""".strip(),
+""".replace("__EMBEDDING_MODEL__", EMBEDDING_MODEL).strip(),
     )
 
     env = {
@@ -93,6 +96,7 @@ esac
         "FAKE_EMBEDDING_DIMENSION": str(embedding_dimension),
         "OAMB_OLLAMA_PORT": "18001",
         "OAMB_OLLAMA_BIND_HOST": "172.17.0.1",
+        "OAMB_EMBEDDING_MODEL": EMBEDDING_MODEL,
     }
     return env, ollama_calls, curl_calls, stopped_file
 
@@ -117,7 +121,7 @@ def test_start_ollama_embedding_reuses_server_and_verifies_exact_vector(
 
     assert result.returncode == 0, result.stderr
     assert ollama_calls.read_text(encoding="utf-8").splitlines() == [
-        "OLLAMA_HOST=http://172.17.0.1:18001 pull qwen3-embedding:0.6b"
+        f"OLLAMA_HOST=http://172.17.0.1:18001 pull {EMBEDDING_MODEL}"
     ]
     curl_call_lines = curl_calls.read_text(encoding="utf-8").splitlines()
     embedding_call = next(line for line in curl_call_lines if "/v1/embeddings" in line)
@@ -125,7 +129,7 @@ def test_start_ollama_embedding_reuses_server_and_verifies_exact_vector(
     assert '"dimensions":1024' in embedding_call
     assert any("http://172.17.0.1:18001/api/ps" in line for line in curl_call_lines)
     assert (
-        "PASS: qwen3-embedding:0.6b returned one finite 1024-dimensional vector "
+        f"PASS: {EMBEDDING_MODEL} returned one finite 1024-dimensional vector "
         "with an 8192-token context" in result.stdout
     )
 
@@ -156,7 +160,7 @@ def test_start_ollama_embedding_starts_and_owns_missing_server(tmp_path: Path) -
             assert process.poll() is None, output_path.read_text(encoding="utf-8")
             assert ollama_calls.read_text(encoding="utf-8").splitlines() == [
                 "OLLAMA_HOST=172.17.0.1:18001 serve",
-                "OLLAMA_HOST=http://172.17.0.1:18001 pull qwen3-embedding:0.6b",
+                f"OLLAMA_HOST=http://172.17.0.1:18001 pull {EMBEDDING_MODEL}",
             ]
         finally:
             process.terminate()

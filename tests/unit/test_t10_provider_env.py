@@ -108,17 +108,17 @@ def test_unselected_values_do_not_block_loading_selected_inert_data(tmp_path: Pa
     env_file.write_text(
         'OPENAI_BASE_URL="https://ignored.example/v1"\n'
         'OPENAI_API_KEY="ignored-value"\n'
-        "DEEPSEEK_BASE_URL=https://selected.example/v1\n"
-        "DEEPSEEK_API_KEY=selected-value\n",
+        "LLM_BASE_URL=https://selected.example/v1\n"
+        "LLM_API_KEY=selected-value\n",
         encoding="utf-8",
     )
 
     assert load_t10_provider_environment(
         env_file,
-        expected_keys=frozenset({"DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"}),
+        expected_keys=frozenset({"LLM_BASE_URL", "LLM_API_KEY"}),
     ) == {
-        "DEEPSEEK_BASE_URL": "https://selected.example/v1",
-        "DEEPSEEK_API_KEY": "selected-value",
+        "LLM_BASE_URL": "https://selected.example/v1",
+        "LLM_API_KEY": "selected-value",
     }
 
 

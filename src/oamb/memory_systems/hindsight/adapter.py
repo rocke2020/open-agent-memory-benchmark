@@ -67,21 +67,19 @@ class HindsightAdapter:
         *,
         store: ArtifactStorePort,
         base_url: str,
-        configured_extraction_model: str,
-        runtime_extraction_model: str,
+        extraction_model: str,
         runtime_binding_hash: str,
         authorization: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         read_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_READ_TIMEOUT_SECONDS,
         total_timeout_seconds: float = DEFAULT_MEMORY_SYSTEM_TOTAL_TIMEOUT_SECONDS,
     ) -> None:
-        if not configured_extraction_model or not runtime_extraction_model:
-            raise ValueError("Hindsight extraction model identities are required")
+        if not extraction_model:
+            raise ValueError("Hindsight extraction model is required")
         if re.fullmatch(r"[0-9a-f]{64}", runtime_binding_hash) is None:
             raise ValueError("Hindsight runtime binding hash must be lowercase SHA-256")
         self._store = store
-        self._configured_extraction_model = configured_extraction_model
-        self._runtime_extraction_model = runtime_extraction_model
+        self._extraction_model = extraction_model
         self._runtime_binding_hash = runtime_binding_hash
         self._resolved = False
         self._known_bank_ids: set[str] = set()
@@ -390,8 +388,7 @@ class HindsightAdapter:
                 result,
                 attempt_id=request.attempt_id,
                 parent_id=request.scope.ingestion_occurrence_id,
-                configured_model=self._configured_extraction_model,
-                runtime_model=self._runtime_extraction_model,
+                model=self._extraction_model,
                 raw_reference=response.raw_reference,
             )
         source_ids = tuple(
@@ -515,8 +512,7 @@ class HindsightAdapter:
                 retain_result,
                 attempt_id=dispatch_receipt.attempt_id,
                 parent_id=request.scope.ingestion_occurrence_id,
-                configured_model=self._configured_extraction_model,
-                runtime_model=self._runtime_extraction_model,
+                model=self._extraction_model,
                 raw_reference=dispatch_receipt.raw_reference,
             )
             if dispatch_receipt.usage_records != (expected_usage,):

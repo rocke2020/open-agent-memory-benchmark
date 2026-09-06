@@ -63,8 +63,7 @@ def _partial_hindsight_usage() -> Any:
         context_view_tokens=None,
         cached_input_tokens=None,
         reasoning_tokens=None,
-        configured_model="fixture-extractor",
-        runtime_model="fixture-extractor@runtime",
+        model="fixture-extractor",
         meter_schema_id="hindsight-retain-usage-v0.9.2",
         raw_field_paths=(
             ("input_tokens", "usage.input_tokens"),
@@ -254,8 +253,7 @@ async def test_all_t7_adapters_satisfy_the_common_memory_system_port(tmp_path: P
         HindsightAdapter(
             store=store,
             base_url="https://hindsight.example",
-            configured_extraction_model="fixture-extractor",
-            runtime_extraction_model="fixture-extractor@runtime",
+            extraction_model="fixture-extractor",
             runtime_binding_hash="e" * 64,
             transport=transport,
         ),

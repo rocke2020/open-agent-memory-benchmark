@@ -836,8 +836,7 @@ class ModelRoleBinding(StrictContract):
     role: NonEmptyStr
     owner: NonEmptyStr
     endpoint_fingerprint: Sha256
-    configured_model: NonEmptyStr
-    resolved_model: NonEmptyStr
+    model: NonEmptyStr
     parameters_fingerprint: Sha256
     budget_role: NonEmptyStr
 
@@ -853,8 +852,7 @@ class ModelRoleBindingV2(StrictContract):
     provider: NonEmptyStr | None
     endpoint_reference: NonEmptyStr | None
     credential_variable_name: NonEmptyStr | None
-    configured_model: NonEmptyStr | None
-    resolved_model: NonEmptyStr | None
+    model: NonEmptyStr | None
     thinking_effort: ThinkingEffort | None
     parameters_fingerprint: Sha256 | None
     retry_policy_id: NonEmptyStr | None
@@ -866,8 +864,7 @@ class ModelRoleBindingV2(StrictContract):
         selected_fields = (
             self.provider,
             self.endpoint_reference,
-            self.configured_model,
-            self.resolved_model,
+            self.model,
             self.thinking_effort,
             self.parameters_fingerprint,
             self.retry_policy_id,
@@ -877,7 +874,7 @@ class ModelRoleBindingV2(StrictContract):
             if self.binding_kind not in {BindingKind.NATIVE, BindingKind.MODEL_CLIENT}:
                 raise ValueError("selected binding requires native or model_client kind")
             if any(value is None for value in selected_fields):
-                raise ValueError("selected binding requires resolved provider and model fields")
+                raise ValueError("selected binding requires provider and model fields")
             if self.role == ModelRole.EMBEDDING:
                 if self.thinking_effort != "not_applicable":
                     raise ValueError("selected embedding binding requires not_applicable effort")

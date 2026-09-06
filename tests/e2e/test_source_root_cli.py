@@ -84,6 +84,7 @@ def _run_lme_identity_fixture_capsule(tmp_path: Path) -> NativeRunArtifacts:
                 raw_reference=raw_reference,
                 output_text="yes",
                 usage_reference_ids=usage_ids,
+                model="fixture-judge-model",
             )
 
     source = tmp_path / "longmemeval.json"

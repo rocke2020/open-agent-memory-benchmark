@@ -73,8 +73,7 @@ _MODEL_ROLE_KEYS = frozenset(
     {
         "binding_hash",
         "role_id",
-        "configured_model",
-        "runtime_model",
+        "model",
         "thinking_effort",
         "thinking_effort_scale",
         "thinking_effort_rank_1_indexed",
@@ -168,8 +167,7 @@ class ResolvedDataset:
 class ModelExecutionBinding:
     binding_hash: str
     role_id: ModelRoleId
-    configured_model: str
-    runtime_model: str
+    model: str
     thinking_effort: ThinkingEffort
     thinking_effort_scale: tuple[GenerativeThinkingEffort, ...]
     thinking_effort_rank_1_indexed: int | None
@@ -183,12 +181,6 @@ class ModelExecutionBinding:
     maximum_output_tokens_per_call: int | None
     temperature: str
     top_p: str
-
-    @property
-    def model(self) -> str:
-        """Compatibility spelling for callers migrating to configured_model."""
-
-        return self.configured_model
 
 
 ResolvedModelRole = ModelExecutionBinding
@@ -425,8 +417,7 @@ def _build_model_binding(
 ) -> ModelExecutionBinding:
     values = {
         "role_id": role_id,
-        "configured_model": role.model,
-        "runtime_model": role.runtime_model,
+        "model": role.model,
         "thinking_effort": role.thinking_effort,
         "thinking_effort_scale": role.thinking_effort_scale,
         "thinking_effort_rank_1_indexed": role.thinking_effort_rank_1_indexed,
@@ -667,23 +658,17 @@ def _parse_model_role(value: object) -> ModelExecutionBinding:
         or document["thinking_effort_rank_1_indexed"] != expected_rank
     ):
         raise ResolvedPlanError(f"resolved model role {role_id} effort closure is invalid")
-    configured_model = _require_text(document["configured_model"], "configured model")
-    runtime_model = _require_text(document["runtime_model"], "runtime model")
+    model = _require_text(document["model"], "model")
     execution_owner = _require_text(document["execution_owner"], "execution owner")
     expected_owner = MODEL_EXECUTION_OWNER_BY_ROLE[role_id]
     if execution_owner != expected_owner:
         raise ResolvedPlanError(f"resolved model role {role_id} execution owner is invalid")
-    if expected_owner == "provider_internal" and runtime_model != configured_model:
-        raise ResolvedPlanError(
-            f"resolved model role {role_id} provider-internal model identity must match"
-        )
     maximum_output_tokens_per_call = document["maximum_output_tokens_per_call"]
     if maximum_output_tokens_per_call != _maximum_output_tokens_per_call(role_id):
         raise ResolvedPlanError(f"resolved model role {role_id} protocol output binding is invalid")
     values = {
         "role_id": role_id,
-        "configured_model": configured_model,
-        "runtime_model": runtime_model,
+        "model": model,
         "thinking_effort": cast(ThinkingEffort, effort),
         "thinking_effort_scale": expected_scale,
         "thinking_effort_rank_1_indexed": expected_rank,

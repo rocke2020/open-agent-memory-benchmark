@@ -282,8 +282,7 @@ class ControlledEmbeddingComparisonProjection(StrictContract):
     )
     schema_version: Literal[1] = 1
     endpoint_fingerprint: Sha256
-    configured_model: NonEmptyStr
-    resolved_model: NonEmptyStr
+    model: NonEmptyStr
     artifact_fingerprint: Sha256
     dimension: PositiveInt
     input_adaptation_fingerprint: Sha256

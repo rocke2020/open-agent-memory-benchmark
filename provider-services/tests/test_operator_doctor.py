@@ -117,6 +117,7 @@ class OperatorDoctorTests(unittest.TestCase):
         *command: str,
         model_overrides: dict[str, str] | None = None,
         process_overrides: dict[str, str] | None = None,
+        dotenv_overrides: dict[str, str] | None = None,
         env_extra: str = "",
     ) -> subprocess.CompletedProcess[str]:
         temporary = tempfile.TemporaryDirectory()
@@ -159,6 +160,8 @@ class OperatorDoctorTests(unittest.TestCase):
                 continue
             if name in file_overrides:
                 value = file_overrides[name]
+            elif dotenv_overrides is not None and name in dotenv_overrides:
+                value = dotenv_overrides[name]
             elif value.startswith("change-me"):
                 value = f"test-value-{name.lower()}"
             lines.append(f"{name}={value}")
@@ -174,22 +177,22 @@ class OperatorDoctorTests(unittest.TestCase):
                     "model_roles": [
                         {
                             "role_id": "hindsight_extraction",
-                            "configured_model": "plan-hindsight",
+                            "model": "plan-hindsight",
                             "thinking_effort": "low",
                         },
                         {
                             "role_id": "mem0_extraction",
-                            "configured_model": "plan-mem0",
+                            "model": "plan-mem0",
                             "thinking_effort": "high",
                         },
                         {
                             "role_id": "openviking_semantic_understanding",
-                            "configured_model": "plan-openviking",
+                            "model": "plan-openviking",
                             "thinking_effort": "max",
                         },
                         {
                             "role_id": "embedding",
-                            "configured_model": "plan-embedding",
+                            "model": "plan-embedding",
                             "thinking_effort": "not_applicable",
                         },
                     ]
@@ -293,6 +296,13 @@ class OperatorDoctorTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("plan-owned", result.stderr)
+
+    def test_operator_rejects_unsupported_llm_url_type(self) -> None:
+        result = self._run_operator(dotenv_overrides={"LLM_URL_TYPE": "anthropic"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("LLM_URL_TYPE", result.stderr)
+        self.assertIn("openai_chat", result.stderr)
 
 
 if __name__ == "__main__":

@@ -13,9 +13,9 @@ class ReadinessResponseError(ValueError):
     """A readiness endpoint returned an unusable or mismatched response."""
 
 
-def validate_chat_response(document: object, expected_model: str) -> None:
-    if not isinstance(document, dict) or document.get("model") != expected_model:
-        raise ReadinessResponseError("chat response model does not match the requested model")
+def validate_chat_response(document: object) -> None:
+    if not isinstance(document, dict):
+        raise ReadinessResponseError("chat response must be an object")
     choices = document.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise ReadinessResponseError("chat response has no usable choice")
@@ -59,18 +59,18 @@ def _load_document(path: Path) -> Any:
 
 
 def main() -> None:
-    if len(sys.argv) not in {4, 5}:
+    if len(sys.argv) not in {3, 5}:
         raise SystemExit(
-            "usage: readiness_response.py chat RESPONSE EXPECTED_MODEL | "
+            "usage: readiness_response.py chat RESPONSE | "
             "embedding RESPONSE EXPECTED_MODEL DIMENSION"
         )
-    kind, response_path, expected_model = sys.argv[1:4]
+    kind, response_path = sys.argv[1:3]
     document = _load_document(Path(response_path))
     try:
-        if kind == "chat" and len(sys.argv) == 4:
-            validate_chat_response(document, expected_model)
+        if kind == "chat" and len(sys.argv) == 3:
+            validate_chat_response(document)
         elif kind == "embedding" and len(sys.argv) == 5:
-            validate_embedding_response(document, expected_model, int(sys.argv[4]))
+            validate_embedding_response(document, sys.argv[3], int(sys.argv[4]))
         else:
             raise ReadinessResponseError("unknown readiness response kind")
     except (ReadinessResponseError, ValueError) as exc:

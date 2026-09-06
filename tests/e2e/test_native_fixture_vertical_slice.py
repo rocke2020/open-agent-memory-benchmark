@@ -167,8 +167,7 @@ class _RecordedNativeMemory(ScriptedFakeMemorySystem):
             context_view_tokens=None,
             cached_input_tokens=None,
             reasoning_tokens=None,
-            configured_model="recorded-extractor",
-            runtime_model="recorded-extractor@fixture",
+            model="recorded-extractor",
             meter_schema_id="recorded-fixture-usage-v1",
             raw_field_paths=(),
             covered_dimensions=(),
@@ -310,6 +309,7 @@ class _RecordedNativeModel:
             raw_reference=raw_reference,
             output_text=output_text,
             usage_reference_ids=(),
+            model="fixture-model",
             raw_response_bytes=payload,
         )
 
@@ -1662,8 +1662,7 @@ def test_live_validation_accepts_multiple_provider_usage_records_with_model_role
         parent_id=plan.ingestion_occurrence_id,
         stage="memory_ingest",
         operation_kind="recorded_fixture_secondary_ingest",
-        configured_model="deepseek-chat",
-        runtime_model="deepseek-chat",
+        model="deepseek-chat",
         budget_owner_kind="model_role",
         budget_owner_id="recorded-answer-v1",
         raw_response_ref=original_usage["raw_response_ref"],

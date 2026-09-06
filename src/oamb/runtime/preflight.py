@@ -466,7 +466,7 @@ def _validate_controlled_embedding_binding(
     if len(embedding_roles) != 1 or profile.controlled_embedding is None:
         raise PreflightRejected("external profile requires one selected controlled embedding role")
     binding = embedding_roles[0]
-    if binding.configured_model != profile.controlled_embedding.model:
+    if binding.model != profile.controlled_embedding.model:
         raise PreflightRejected("controlled embedding model does not match its role binding")
     if binding.redacted_endpoint_fingerprint != profile.controlled_embedding.endpoint_fingerprint:
         raise PreflightRejected("controlled embedding endpoint fingerprint does not match its role")
@@ -529,7 +529,7 @@ def _validate_benchmark_runtime(
         if role.execution_owner == ExecutionOwner.MEMORY_SYSTEM
     )
     if runtime.model_role_binding_ids != memory_owned_ids:
-        raise PreflightRejected("runtime model roles do not match selected memory-owned roles")
+        raise PreflightRejected("model roles do not match selected memory-owned roles")
     return runtime
 
 

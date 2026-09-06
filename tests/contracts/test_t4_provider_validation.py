@@ -9,6 +9,7 @@ import pytest
 
 from oamb.artifacts.validation import core, profiles, registry
 from oamb.contracts.specifications import TransportProfile
+from tests.benchmark_configuration import load_canonical_configuration
 
 HASHES = {str(index): str(index) * 64 for index in range(1, 10)}
 HASHES.update({letter: letter * 64 for letter in "abcdef"})
@@ -27,6 +28,7 @@ EXPECTED_INVENTORY = (
 )
 EXPECTED_INVENTORY_HASH = "73fc43ce2152e4ccf4e8c103c5c41bc0302eaa68bac54a0731ae6085dbd47d15"
 MANIFEST_NAME = "provider-service-evidence-manifest.json"
+EMBEDDING_MODEL = load_canonical_configuration().models.embedding.model
 
 
 def _json_bytes(document: dict[str, Any]) -> bytes:
@@ -76,8 +78,7 @@ def _valid_documents() -> dict[str, tuple[str, dict[str, Any] | bytes]]:
         "provider": "ollama",
         "endpoint_reference": "controlled-embedding-endpoint",
         "credential_variable_name": None,
-        "configured_model": "qwen3-embedding:0.6b",
-        "resolved_model": "qwen3-embedding:0.6b@sha256:manifest",
+        "model": EMBEDDING_MODEL,
         "thinking_effort": "not_applicable",
         "parameters_fingerprint": HASHES["1"],
         "retry_policy_id": "no-retry-v1",

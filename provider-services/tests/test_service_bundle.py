@@ -9,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent
 
 
+def benchmark_embedding_model() -> str:
+    content = (REPOSITORY_ROOT / "configs" / "benchmark.yml").read_text(encoding="utf-8")
+    marker = "  embedding:\n    model: "
+    if content.count(marker) != 1:
+        raise AssertionError("canonical benchmark embedding model is not unique")
+    return content.split(marker, 1)[1].splitlines()[0]
+
+
 class ServiceBundleContractTests(unittest.TestCase):
     def read(self, relative_path: str) -> str:
         path = ROOT / relative_path
@@ -277,7 +285,7 @@ class ServiceBundleContractTests(unittest.TestCase):
             self.assertNotIn('. "$ENV_FILE"', script)
             self.assertIn("env_value()", script)
         self.assertIn('read_runtime_env_value "$ENV_FILE" "$1"', mem0)
-        self.assertNotIn("qwen3-embedding:0.6b", mem0)
+        self.assertNotIn(benchmark_embedding_model(), mem0)
         self.assertIn('read_env_value "$ENV_FILE" "$1"', openviking)
         self.assertIn('. "$ROOT/lib/compose.sh"', mem0)
         self.assertIn('. "$ROOT/lib/compose.sh"', operator)
@@ -290,14 +298,15 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn(".account_id == $account", script)
         self.assertIn(".user_id == $user", script)
 
-    def test_example_env_has_one_deepseek_connection_pair_without_credentials(self) -> None:
+    def test_example_env_has_one_generic_llm_connection_without_credentials(self) -> None:
         example = self.read_root_env_example()
         values = dict(
             line.split("=", 1) for line in example.splitlines() if line and not line.startswith("#")
         )
         for name in (
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_API_KEY",
+            "LLM_URL_TYPE",
+            "LLM_BASE_URL",
+            "LLM_API_KEY",
             "OAMB_PROVIDER_PROJECT",
             "OAMB_MEM0_INSPECTOR_API_KEY",
         ):
@@ -309,6 +318,8 @@ class ServiceBundleContractTests(unittest.TestCase):
             "OMBA_JUDGE_MODEL",
             "OPENAI_BASE_URL",
             "OPENAI_API_KEY",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
             "OAMB_EMBEDDING_MODEL",
             "OAMB_HINDSIGHT_LLM_PROVIDER",
             "OAMB_HINDSIGHT_LLM_MODEL",
@@ -323,8 +334,9 @@ class ServiceBundleContractTests(unittest.TestCase):
             "OAMB_OPENVIKING_VLM_API_KEY",
         ):
             self.assertNotIn(name, values)
-        self.assertEqual(values["DEEPSEEK_BASE_URL"], "change-me")
-        self.assertEqual(values["DEEPSEEK_API_KEY"], "change-me")
+        self.assertEqual(values["LLM_URL_TYPE"], "openai_chat")
+        self.assertEqual(values["LLM_BASE_URL"], "change-me")
+        self.assertEqual(values["LLM_API_KEY"], "change-me")
         self.assertNotRegex(example, r"sk-[A-Za-z0-9]{12,}")
 
 

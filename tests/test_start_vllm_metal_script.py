@@ -5,9 +5,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from tests.benchmark_configuration import load_canonical_configuration
+
 SCRIPT_PATH = (
     Path(__file__).parents[1] / "scripts" / "start_local_embedding" / "start_vllm_metal.sh"
 )
+EMBEDDING_MODEL = load_canonical_configuration().models.embedding.model
 
 
 def test_start_vllm_metal_is_executable_from_readme_command() -> None:
@@ -67,6 +70,7 @@ def test_start_vllm_metal_uses_sibling_environment_not_shell_path(tmp_path: Path
             **os.environ,
             "CAPTURE": str(capture),
             "HOME": str(home),
+            "OAMB_EMBEDDING_MODEL": EMBEDDING_MODEL,
             "PATH": f"{fallback_vllm.parent}:/usr/bin:/bin",
         },
     )
@@ -79,7 +83,7 @@ def test_start_vllm_metal_uses_sibling_environment_not_shell_path(tmp_path: Path
         '--hf-overrides {"matryoshka_dimensions":[1024]} --runner pooling '
         "--max-model-len 8192 --max-num-batched-tokens 8192 --additional-config "
         '{"turboquant":true,"k_quant":"q8_0","v_quant":"q8_0"} '
-        "--host 127.0.0.1 --port 18000 --served-model-name qwen3-embedding:0.6b"
+        f"--host 127.0.0.1 --port 18000 --served-model-name {EMBEDDING_MODEL}"
     )
 
 
@@ -100,6 +104,7 @@ def test_start_vllm_metal_rejects_missing_environment_without_path_fallback(
             **os.environ,
             "CAPTURE": str(capture),
             "HOME": str(tmp_path / "home"),
+            "OAMB_EMBEDDING_MODEL": EMBEDDING_MODEL,
             "PATH": f"{fallback_vllm.parent}:/usr/bin:/bin",
         },
     )
@@ -124,6 +129,7 @@ def test_start_vllm_metal_rejects_missing_cached_model(tmp_path: Path) -> None:
             **os.environ,
             "CAPTURE": str(capture),
             "HOME": str(tmp_path / "home"),
+            "OAMB_EMBEDDING_MODEL": EMBEDDING_MODEL,
             "PATH": "/usr/bin:/bin",
         },
     )

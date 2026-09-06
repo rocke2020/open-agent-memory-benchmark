@@ -104,6 +104,8 @@ _EXTRA_ENVIRONMENT_BY_PROVIDER = {
     "openviking": ("OAMB_OPENVIKING_ACCOUNT_ID", "OAMB_OPENVIKING_ADMIN_USER_ID"),
 }
 _SERVICE_RECEIPT_POINTER = "service-verification-current.sha256"
+_LLM_URL_TYPE_VARIABLE = "LLM_URL_TYPE"
+_SUPPORTED_LLM_URL_TYPE = "openai_chat"
 
 
 class LiveConfigurationError(ValueError):
@@ -171,18 +173,18 @@ def load_live_environment(
     environment.update(
         load_t10_provider_environment(
             model_env_path,
-            expected_keys=frozenset({"DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"}),
+            expected_keys=frozenset({_LLM_URL_TYPE_VARIABLE, "LLM_BASE_URL", "LLM_API_KEY"}),
         )
     )
+    if environment.get(_LLM_URL_TYPE_VARIABLE) != _SUPPORTED_LLM_URL_TYPE:
+        raise LiveConfigurationError("LLM_URL_TYPE must be openai_chat in OAMB v0.1.0")
     aliases = {
-        "OAMB_DEEPSEEK_BASE_URL": "DEEPSEEK_BASE_URL",
-        "OAMB_DEEPSEEK_API_KEY": "DEEPSEEK_API_KEY",
-        "OAMB_HINDSIGHT_LLM_BASE_URL": "DEEPSEEK_BASE_URL",
-        "OAMB_HINDSIGHT_LLM_API_KEY": "DEEPSEEK_API_KEY",
-        "OAMB_MEM0_LLM_BASE_URL": "DEEPSEEK_BASE_URL",
-        "OAMB_MEM0_LLM_API_KEY": "DEEPSEEK_API_KEY",
-        "OAMB_OPENVIKING_VLM_BASE_URL": "DEEPSEEK_BASE_URL",
-        "OAMB_OPENVIKING_VLM_API_KEY": "DEEPSEEK_API_KEY",
+        "OAMB_HINDSIGHT_LLM_BASE_URL": "LLM_BASE_URL",
+        "OAMB_HINDSIGHT_LLM_API_KEY": "LLM_API_KEY",
+        "OAMB_MEM0_LLM_BASE_URL": "LLM_BASE_URL",
+        "OAMB_MEM0_LLM_API_KEY": "LLM_API_KEY",
+        "OAMB_OPENVIKING_VLM_BASE_URL": "LLM_BASE_URL",
+        "OAMB_OPENVIKING_VLM_API_KEY": "LLM_API_KEY",
     }
     for target, source in aliases.items():
         if source in environment:
@@ -323,11 +325,9 @@ def _live_service_identity(
 
 def _expected_provider_models(plan: ResolvedPlan) -> dict[str, str]:
     return {
-        "hindsight-rest-v1": _model_plan(plan, "hindsight_extraction").configured_model,
-        "mem0-rest-v1": _model_plan(plan, "mem0_extraction").configured_model,
-        "openviking-rest-v1": _model_plan(
-            plan, "openviking_semantic_understanding"
-        ).configured_model,
+        "hindsight-rest-v1": _model_plan(plan, "hindsight_extraction").model,
+        "mem0-rest-v1": _model_plan(plan, "mem0_extraction").model,
+        "openviking-rest-v1": _model_plan(plan, "openviking_semantic_understanding").model,
     }
 
 
@@ -341,19 +341,19 @@ def _expected_provider_thinking_efforts(plan: ResolvedPlan) -> dict[str, str]:
     }
 
 
-def _validate_live_configured_models(
+def _validate_live_models(
     plan: ResolvedPlan,
     environment: Mapping[str, str],
 ) -> None:
-    configured_model_variables: tuple[tuple[ModelRoleId, str], ...] = (
+    model_variables: tuple[tuple[ModelRoleId, str], ...] = (
         ("hindsight_extraction", "OAMB_HINDSIGHT_LLM_MODEL"),
         ("mem0_extraction", "OAMB_MEM0_LLM_MODEL"),
         ("openviking_semantic_understanding", "OAMB_OPENVIKING_VLM_MODEL"),
         ("embedding", "OAMB_EMBEDDING_MODEL"),
     )
-    for role_id, variable in configured_model_variables:
-        if environment.get(variable) != _model_plan(plan, role_id).configured_model:
-            raise LiveConfigurationError(f"{role_id} configured model differs from the plan")
+    for role_id, variable in model_variables:
+        if environment.get(variable) != _model_plan(plan, role_id).model:
+            raise LiveConfigurationError(f"{role_id} model differs from the plan")
 
 
 def resolve_service_verification_receipt(
@@ -426,7 +426,7 @@ def validate_live_readiness_receipt(
 ) -> Path:
     """Reopen the all-role preflight receipt and its durable dispatch ledger."""
 
-    _validate_live_configured_models(plan, environment)
+    _validate_live_models(plan, environment)
 
     receipt_path = provider_runtime_directory / "model-readiness-receipt.json"
     attempt_path = provider_runtime_directory / "model-readiness-attempt.json"
@@ -542,7 +542,7 @@ def live_readiness_environment_hash(
 ) -> str:
     """Bind the secret-safe endpoint and credential values used by all model roles."""
 
-    required_names: list[str] = []
+    required_names: list[str] = [_LLM_URL_TYPE_VARIABLE]
     for role in plan.model_roles:
         required_names.append(role.endpoint_variable)
         if role.credential_variable != "not_applicable":
@@ -660,8 +660,7 @@ def execute_live_cell(
                 store=store,  # type: ignore[arg-type]
                 base_url=environment[cell.cell.endpoint_variable],
                 authorization=None,
-                configured_extraction_model=producer.configured_model,
-                runtime_extraction_model=producer.runtime_model,
+                extraction_model=producer.model,
                 runtime_binding_hash=cell.control.run_spec.runtime_binding_hash,
                 read_timeout_seconds=memory_timeout_seconds,
                 total_timeout_seconds=memory_timeout_seconds,
@@ -698,7 +697,6 @@ def execute_live_cell(
             base_url=cell.environment[answer_plan.endpoint_variable],
             api_key=cell.environment[answer_plan.credential_variable],
             role_binding=bindings_by_role["answer"],
-            runtime_model_policy="require_match",
             usage_profile="openai-details-v3",
             read_timeout_seconds=model_timeout_seconds,
             total_timeout_seconds=model_timeout_seconds,
@@ -710,7 +708,6 @@ def execute_live_cell(
             base_url=cell.environment[judge_plan.endpoint_variable],
             api_key=cell.environment[judge_plan.credential_variable],
             role_binding=bindings_by_role["judge"],
-            runtime_model_policy="require_match",
             usage_profile="openai-details-v3",
             read_timeout_seconds=model_timeout_seconds,
             total_timeout_seconds=model_timeout_seconds,
@@ -1370,7 +1367,7 @@ def _required_environment(
     cell: CellSpec,
     roles: tuple[ModelExecutionBinding, ...],
 ) -> tuple[str, ...]:
-    names = [cell.endpoint_variable]
+    names = [_LLM_URL_TYPE_VARIABLE, cell.endpoint_variable]
     if cell.credential_variable != "not_applicable":
         names.append(cell.credential_variable)
     for role in roles:
@@ -1455,15 +1452,14 @@ def _role_bindings(
                     if role.execution_owner == "harness"
                     else BindingKind.NATIVE
                 ),
-                provider=("vllm-metal" if role.role_id == "embedding" else "deepseek"),
+                provider=("vllm-metal" if role.role_id == "embedding" else _SUPPORTED_LLM_URL_TYPE),
                 endpoint_reference=role.endpoint_variable,
                 credential_variable_name=(
                     None
                     if role.credential_variable == "not_applicable"
                     else role.credential_variable
                 ),
-                configured_model=role.configured_model,
-                resolved_model=role.runtime_model,
+                model=role.model,
                 thinking_effort=role.thinking_effort,
                 parameters_fingerprint=canonical_sha256(
                     [
