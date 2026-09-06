@@ -20,6 +20,7 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 | HTTPX with SOCKS support | Hub transport through configured proxies | BSD-3-Clause | Download dependency |
 | LongMemEval prompt excerpts | Attributed judge PromptPack templates | MIT | Embedded runtime PromptPack data |
 | MemoryAgentBench prompt excerpts | Attributed MAB-65 answer PromptPack templates | MIT | Embedded runtime PromptPack data |
+| Mem0 extraction parser excerpts | Regression fixture for pinned native ingestion | Apache-2.0 | Test-only excerpt and [license](provider-services/tests/fixtures/LICENSE.Mem0) |
 
 MemoryAgentBench inputs and prompt excerpts are preserved for deferred research
 and license compliance. v0.1.0 selects the balanced LME-60 LongMemEval screen;

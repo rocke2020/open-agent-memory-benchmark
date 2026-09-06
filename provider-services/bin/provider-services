@@ -266,6 +266,7 @@ mem0_build_input_sha256() {
             .dockerignore \
             mem0/Dockerfile \
             mem0/requirements.lock \
+            mem0/extraction_response.py \
             mem0/inspector.py
         do
             digest=$(shasum -a 256 "$ROOT/$relative_path" | awk '{print $1}')

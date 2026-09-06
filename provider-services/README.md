@@ -30,9 +30,9 @@ The exact commits and digests are in `versions.env`. The Mem0 build accepts
 only an official local checkout whose `v2.0.19` tag resolves to the recorded
 commit. Dirty worktree content and the checkout's current branch are excluded
 because the build input is a digest-checked `git archive` of that commit.
-The build-input fingerprint additionally binds the Dockerfile, dependency lock,
-inspector, Docker ignore rules, and fixed source archive before an existing
-local image may be reused.
+The build-input fingerprint additionally binds the Dockerfile, dependency lock, inspector, extraction-response normalization, Docker ignore rules, and fixed source archive before an existing local image may be reused.
+
+The Mem0 image includes a small [extraction-response normalization](mem0/extraction_response.py) before native embedding and storage in both synchronous and asynchronous ingestion. A decoded `memory` value may contain text strings or text-bearing objects, individually or in an array; the normalizer wraps strings as `text` objects and preserves existing object fields and text bytes. Empty arrays remain valid empty extraction; invalid or blank entries reject the entire batch before storage. This prevents the pinned parser's `.get()` crash without changing extraction prompts, models, attribution, or retry policy.
 
 ## State and safety boundary
 

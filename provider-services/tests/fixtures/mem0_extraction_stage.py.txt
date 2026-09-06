@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Curated Mem0 v2.0.19 parser-stage fixture with an in-memory consumer boundary.
+
+Parser and empty-response branches are from mem0/memory/main.py at
+dc82354e143c2581d505d581a00286d6ef8c3605, lines 971-992 and 2632-2652.
+Source: https://github.com/mem0ai/mem0/blob/dc82354e143c2581d505d581a00286d6ef8c3605/mem0/memory/main.py
+License: Apache-2.0; see LICENSE.Mem0 in this directory.
+Modified: only the parser stages are retained; downstream consumers are fakes.
+The real-pin reproduction separately exercises the complete original methods.
+"""
+
+import asyncio
+import json
+
+
+class Memory:
+    def _add_to_vector_store(self, response, messages, session_scope):
+        # Parse response
+        try:
+            response = remove_code_blocks(response)
+            if not response or not response.strip():
+                extracted_memories = []
+            else:
+                try:
+                    extracted_memories = json.loads(response, strict=False).get("memory", [])
+                except json.JSONDecodeError:
+                    extracted_json = extract_json(response)
+                    extracted_memories = json.loads(extracted_json, strict=False).get("memory", [])
+        except Exception as e:
+            logger.error(f"Error parsing extraction response: {e}")
+            extracted_memories = []
+
+        if not extracted_memories:
+            # Save messages even if nothing extracted
+            self.db.save_messages(messages, session_scope)
+            return []
+
+        # Phase 3: Batch embed all extracted memory texts
+        mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
+        self.embedding_model.embed_batch(mem_texts, "add")
+        result = self.persist(extracted_memories)
+        self.db.save_messages(messages, session_scope)
+        return result
+
+
+class AsyncMemory:
+    async def _add_to_vector_store(self, response, messages, session_scope):
+        # Parse response
+        try:
+            response = remove_code_blocks(response)
+            if not response or not response.strip():
+                extracted_memories = []
+            else:
+                try:
+                    extracted_memories = json.loads(response, strict=False).get("memory", [])
+                except json.JSONDecodeError:
+                    extracted_json = extract_json(response)
+                    extracted_memories = json.loads(extracted_json, strict=False).get("memory", [])
+        except Exception as e:
+            logger.error(f"Error parsing extraction response (async): {e}")
+            extracted_memories = []
+
+        if not extracted_memories:
+            await asyncio.to_thread(self.db.save_messages, messages, session_scope)
+            return []
+
+        # Phase 3: Batch embed all extracted memory texts
+        mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
+        await asyncio.to_thread(self.embedding_model.embed_batch, mem_texts, "add")
+        result = await asyncio.to_thread(self.persist, extracted_memories)
+        await asyncio.to_thread(self.db.save_messages, messages, session_scope)
+        return result
