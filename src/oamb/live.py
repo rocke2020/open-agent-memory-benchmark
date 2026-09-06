@@ -177,6 +177,12 @@ def load_live_environment(
     aliases = {
         "OAMB_DEEPSEEK_BASE_URL": "DEEPSEEK_BASE_URL",
         "OAMB_DEEPSEEK_API_KEY": "DEEPSEEK_API_KEY",
+        "OAMB_HINDSIGHT_LLM_BASE_URL": "DEEPSEEK_BASE_URL",
+        "OAMB_HINDSIGHT_LLM_API_KEY": "DEEPSEEK_API_KEY",
+        "OAMB_MEM0_LLM_BASE_URL": "DEEPSEEK_BASE_URL",
+        "OAMB_MEM0_LLM_API_KEY": "DEEPSEEK_API_KEY",
+        "OAMB_OPENVIKING_VLM_BASE_URL": "DEEPSEEK_BASE_URL",
+        "OAMB_OPENVIKING_VLM_API_KEY": "DEEPSEEK_API_KEY",
     }
     for target, source in aliases.items():
         if source in environment:

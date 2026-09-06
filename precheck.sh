@@ -88,13 +88,13 @@ random_secret() {
   python3 -c 'import secrets; print(secrets.token_hex(32))'
 }
 
-remove_plan_owned_environment_values() {
+remove_noncanonical_environment_values() {
   OAMB_ENV_FILE="$ENV_FILE" python3 - <<'PY'
 import os
 from pathlib import Path
 
 path = Path(os.environ["OAMB_ENV_FILE"])
-plan_owned = {
+noncanonical = {
     "OMBA_ANSWER_LLM",
     "OMBA_ANSWER_MODEL",
     "OMBA_JUDGE_LLM",
@@ -110,6 +110,12 @@ plan_owned = {
     "OAMB_OPENVIKING_VLM_PROVIDER",
     "OAMB_OPENVIKING_VLM_MODEL",
     "OAMB_OPENVIKING_VLM_REASONING_EFFORT",
+    "OAMB_HINDSIGHT_LLM_BASE_URL",
+    "OAMB_HINDSIGHT_LLM_API_KEY",
+    "OAMB_MEM0_LLM_BASE_URL",
+    "OAMB_MEM0_LLM_API_KEY",
+    "OAMB_OPENVIKING_VLM_BASE_URL",
+    "OAMB_OPENVIKING_VLM_API_KEY",
 }
 stale_comment_lines = {
     "# AMB's OpenAI-compatible adapter consumes these names.",
@@ -130,7 +136,7 @@ def keep(line: str) -> bool:
         }:
             return False
         return True
-    return "=" not in line or line.split("=", 1)[0] not in plan_owned
+    return "=" not in line or line.split("=", 1)[0] not in noncanonical
 
 
 lines = path.read_text(encoding="utf-8").splitlines()
@@ -156,7 +162,7 @@ ensure_model_environment() {
   [[ -f "$ENV_FILE" ]] || \
     die "prepare .env from .env.example, set DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY, then rerun"
   chmod 600 "$ENV_FILE"
-  remove_plan_owned_environment_values
+  remove_noncanonical_environment_values
 
   local base_url api_key
   base_url="$(read_env_value "$ENV_FILE" DEEPSEEK_BASE_URL 2>/dev/null || true)"
@@ -172,9 +178,7 @@ ensure_provider_environment() {
   local mem0_checkout=$2
   chmod 600 "$ENV_FILE"
 
-  local model_url model_key value
-  model_url="$(read_env_value "$ENV_FILE" DEEPSEEK_BASE_URL)"
-  model_key="$(read_env_value "$ENV_FILE" DEEPSEEK_API_KEY)"
+  local value
   value="$(read_env_value "$ENV_FILE" OAMB_PROVIDER_PROJECT 2>/dev/null || true)"
   if [[ -z "$value" || "$value" == change-me* ]]; then
     set_env_value "$ENV_FILE" OAMB_PROVIDER_PROJECT "oamb-providers-$run_label"
@@ -192,24 +196,6 @@ ensure_provider_environment() {
   ensure_env_default OAMB_OPENVIKING_ADMIN_USER_ID "$DEFAULT_OPENVIKING_ADMIN_USER_ID"
 
   local key
-  for key in \
-    OAMB_HINDSIGHT_LLM_BASE_URL \
-    OAMB_MEM0_LLM_BASE_URL \
-    OAMB_OPENVIKING_VLM_BASE_URL; do
-    value="$(read_env_value "$ENV_FILE" "$key" 2>/dev/null || true)"
-    if [[ -z "$value" || "$value" == change-me* ]]; then
-      set_env_value "$ENV_FILE" "$key" "$model_url"
-    fi
-  done
-  for key in \
-    OAMB_HINDSIGHT_LLM_API_KEY \
-    OAMB_MEM0_LLM_API_KEY \
-    OAMB_OPENVIKING_VLM_API_KEY; do
-    value="$(read_env_value "$ENV_FILE" "$key" 2>/dev/null || true)"
-    if [[ -z "$value" || "$value" == change-me* ]]; then
-      set_env_value "$ENV_FILE" "$key" "$model_key"
-    fi
-  done
   for key in \
     OAMB_MEM0_ADMIN_API_KEY \
     OAMB_MEM0_JWT_SECRET \
