@@ -501,13 +501,12 @@ def validate_live_readiness_receipt(
         service_receipt = json.loads(read_regular_file(service_receipt_path))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise LiveConfigurationError("live readiness evidence is missing or malformed") from exc
-    if receipt["environment_hash"] != live_readiness_environment_hash(plan, environment):
-        raise LiveConfigurationError("live readiness environment differs from the probed values")
     if (
         receipt["schema_version"] != "oamb-provider-model-readiness-receipt-v1"
         or not isinstance(service_receipt, dict)
         or receipt["provider_project"] != service_receipt.get("provider_project")
         or receipt["resolved_plan_hash"] != plan.resolved_plan_hash
+        or not _is_sha256(receipt["environment_hash"])
         or receipt["attempt_sha256"] != hashlib.sha256(attempt_bytes).hexdigest()
         or receipt["operation_timeout_seconds"] != plan.execution.operation_timeout_seconds
         or receipt["model_calls_dispatched"] != 7

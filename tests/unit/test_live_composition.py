@@ -992,6 +992,44 @@ def _write_model_readiness_evidence(
     return service_path, receipt, receipt_path
 
 
+def test_live_readiness_receipt_accepts_rotated_model_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+
+    monkeypatch.setattr(
+        live,
+        "validate_live_service_verification_receipt",
+        lambda **_kwargs: None,
+    )
+    plan = _lme60_plan()
+    environment = _environment()
+    runtime = tmp_path / "runtime"
+    service_path, _, _ = _write_model_readiness_evidence(
+        runtime,
+        plan=plan,
+        environment=environment,
+        project="oamb-providers-readiness-test",
+        service_bytes=json.dumps({"provider_project": "oamb-providers-readiness-test"}).encode(),
+    )
+
+    rotated_connection = {
+        **environment,
+        "LLM_BASE_URL": "https://rotated-model.example/v1",
+        "LLM_API_KEY": "rotated-model-key",
+    }
+
+    assert (
+        live.validate_live_readiness_receipt(
+            plan=plan,
+            provider_runtime_directory=runtime,
+            environment=rotated_connection,
+        )
+        == service_path
+    )
+
+
 def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1040,14 +1078,6 @@ def test_live_readiness_receipt_binds_all_roles_plan_and_zero_internal_retries(
         )
         == service_path
     )
-
-    drifted_environment = {**environment, "LLM_API_KEY": "different-answer-key"}
-    with pytest.raises(live.LiveConfigurationError, match="environment"):
-        live.validate_live_readiness_receipt(
-            plan=plan,
-            provider_runtime_directory=runtime,
-            environment=drifted_environment,
-        )
 
     drifted_embedding = {**environment, "OAMB_EMBEDDING_MODEL": "different-embedding"}
     with pytest.raises(live.LiveConfigurationError, match="embedding.*model"):

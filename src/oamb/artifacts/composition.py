@@ -53,6 +53,7 @@ from oamb.contracts.states import (
 )
 
 COMPOSITION_VALIDATION_PROFILE_ID = "oamb-capsule-composition-v1"
+_ROTATABLE_MODEL_ENDPOINT_REFERENCE = "LLM_BASE_URL"
 
 
 class CapsuleCompositionError(ValueError):
@@ -499,9 +500,11 @@ def build_composition_execution_configuration_hash(
     if all(record is not None for record in control_records):
         assert run_spec is not None and preflight is not None and budget is not None
         live_configuration = {
+            # Credential values are rotatable connection evidence. Stable provider
+            # scope, runtime, and non-LLM endpoint identities remain below.
             "run_spec": run_spec.model_dump(
                 mode="python",
-                exclude={"run_id", "budget_id"},
+                exclude={"run_id", "budget_id", "environment_hash"},
             ),
             "preflight": preflight.model_dump(
                 mode="python",
@@ -511,6 +514,7 @@ def build_composition_execution_configuration_hash(
                     "observed_at",
                     "run_spec_hash",
                     "budget_hash",
+                    "redacted_endpoint_fingerprints",
                     "artifact_repository_fingerprint",
                     "artifact_durability_proof_hash",
                 },
@@ -520,7 +524,14 @@ def build_composition_execution_configuration_hash(
                 exclude={"budget_id", "budget_hash", "scope_id"},
             ),
             "role_bindings": tuple(
-                binding.model_dump(mode="python")
+                binding.model_dump(
+                    mode="python",
+                    exclude=(
+                        {"redacted_endpoint_fingerprint"}
+                        if binding.endpoint_reference == _ROTATABLE_MODEL_ENDPOINT_REFERENCE
+                        else set()
+                    ),
+                )
                 for binding in sorted(role_bindings, key=lambda item: item.binding_id)
             ),
         }

@@ -48,6 +48,7 @@ from oamb.contracts.ports import (
 from oamb.contracts.specifications import (
     INFRASTRUCTURE_RETRY_POLICY_HASH,
     CasePartitionSpec,
+    run_preflight_record_hash,
 )
 from oamb.contracts.states import ValidationDisposition
 from oamb.reporting.comparison_project import (
@@ -196,6 +197,9 @@ def _run_controlled(
     plan_index: int | None,
     model_factory: Callable[[ArtifactStorePort], ModelClientPort] = _RecordedNativeModel,
     code_revision: str = "fixture-revision",
+    model_connection_identity: str | None = None,
+    model_name: str | None = None,
+    model_endpoint_reference: str | None = None,
 ) -> Path:
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
@@ -214,6 +218,57 @@ def _run_controlled(
         provider_runtime_directory=(tmp_path / f"provider-{run_id}").resolve(),
         code_revision=code_revision,
     )
+    if any(
+        value is not None
+        for value in (model_connection_identity, model_name, model_endpoint_reference)
+    ):
+        role_bindings = []
+        for binding in control.role_bindings:
+            updates = {}
+            if model_connection_identity is not None:
+                updates["redacted_endpoint_fingerprint"] = canonical_sha256(
+                    ["model-connection", model_connection_identity, binding.binding_id]
+                )
+            if model_name is not None:
+                updates["model"] = model_name
+                updates["configuration_fingerprint"] = canonical_sha256(
+                    ["model-configuration", model_name, binding.binding_id]
+                )
+            if model_endpoint_reference is not None:
+                updates["endpoint_reference"] = model_endpoint_reference
+            role_bindings.append(binding.model_copy(update=updates))
+        frozen_role_bindings = tuple(role_bindings)
+        run_spec = control.run_spec
+        if model_connection_identity is not None:
+            run_spec = run_spec.model_copy(
+                update={
+                    "environment_hash": canonical_sha256(["environment", model_connection_identity])
+                }
+            )
+        preflight_fields = control.preflight_record.model_dump(
+            mode="python",
+            exclude={"preflight_record_hash"},
+        )
+        preflight_fields.update(
+            {
+                "run_spec_hash": canonical_sha256(run_spec),
+                "redacted_endpoint_fingerprints": tuple(
+                    binding.redacted_endpoint_fingerprint for binding in frozen_role_bindings
+                ),
+            }
+        )
+        preflight = type(control.preflight_record).model_validate(
+            {
+                "preflight_record_hash": run_preflight_record_hash(preflight_fields),
+                **preflight_fields,
+            }
+        )
+        control = replace(
+            control,
+            run_spec=run_spec,
+            preflight_record=preflight,
+            role_bindings=frozen_role_bindings,
+        )
     partition = None
     if plan_index is not None:
         selected_plan = manifest.ingestion_plans[plan_index]
@@ -810,6 +865,88 @@ def test_composition_rejects_different_execution_configuration(tmp_path: Path) -
         code_revision="revision-b",
     )
     output = tmp_path / "incompatible-execution-configuration"
+
+    with pytest.raises(CapsuleCompositionError, match="incompatible composition parts"):
+        compose_capsules((first, second), output)
+
+    assert not output.exists()
+
+
+def test_composition_accepts_rotated_model_connection(tmp_path: Path) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    first = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="model-connection-part-a",
+        plan_index=0,
+        model_connection_identity="before-rotation",
+    )
+    second = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="model-connection-part-b",
+        plan_index=1,
+        model_connection_identity="after-rotation",
+    )
+
+    composed = compose_capsules((first, second), tmp_path / "rotated-model-connection")
+
+    assert validate_source_root(composed.capsule_root).disposition == (
+        ValidationDisposition.VALIDATED
+    )
+
+
+def test_composition_rejects_changed_model_configuration(tmp_path: Path) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    first = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="model-configuration-part-a",
+        plan_index=0,
+    )
+    second = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="model-configuration-part-b",
+        plan_index=1,
+        model_name="different-model",
+    )
+    output = tmp_path / "changed-model-configuration"
+
+    with pytest.raises(CapsuleCompositionError, match="incompatible composition parts"):
+        compose_capsules((first, second), output)
+
+    assert not output.exists()
+
+
+def test_composition_rejects_changed_non_llm_endpoint(tmp_path: Path) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    first = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="embedding-connection-part-a",
+        plan_index=0,
+        model_connection_identity="embedding-before",
+        model_endpoint_reference="OAMB_EMBEDDING_BASE_URL",
+    )
+    second = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="embedding-connection-part-b",
+        plan_index=1,
+        model_connection_identity="embedding-after",
+        model_endpoint_reference="OAMB_EMBEDDING_BASE_URL",
+    )
+    output = tmp_path / "changed-embedding-connection"
 
     with pytest.raises(CapsuleCompositionError, match="incompatible composition parts"):
         compose_capsules((first, second), output)
