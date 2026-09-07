@@ -8,7 +8,7 @@ import os
 import signal
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +20,7 @@ import oamb.artifacts.composition as composition_module
 from oamb.artifacts.atomic import read_regular_file
 from oamb.artifacts.composition import CapsuleCompositionError, compose_capsules
 from oamb.artifacts.store import ArtifactStore
+from oamb.artifacts.validation.native import validate_partition_capsule
 from oamb.artifacts.validation.source_root import validate_source_root
 from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import ResolvedPlan, build_resolved_plan
@@ -38,7 +39,11 @@ from oamb.contracts.ports import (
     IngestionDispatch,
     IngestionDispatchReceipt,
     IngestionDispatchRequest,
+    IngestionPlan,
     IngestionRequest,
+    MemorySystemCallCancelledBeforeDispatch,
+    MemorySystemCallUnknownOutcome,
+    MemorySystemPort,
     ModelClientPort,
     NativeEvidenceBatch,
     RetrievalRequest,
@@ -77,6 +82,10 @@ def _tree_digest(root: Path) -> str:
 
 
 def _set_partition_run_state(root: Path, state: str) -> None:
+    _set_partition_run_fields(root, state=state)
+
+
+def _set_partition_run_fields(root: Path, **updates: object) -> None:
     manifest_path = root / "capsule-manifest.json"
     manifest = CapsuleManifest.model_validate_json(manifest_path.read_bytes())
     run_entry = next(
@@ -84,7 +93,7 @@ def _set_partition_run_state(root: Path, state: str) -> None:
     )
     run_path = root / run_entry.relative_path
     run = json.loads(run_path.read_bytes())
-    run["state"] = state
+    run.update(updates)
     run_path.write_bytes(canonical_json_bytes(run))
     source_entries = tuple(
         entry.model_copy(
@@ -194,8 +203,14 @@ def _run_controlled(
     cell_index: int,
     run_id: str,
     plan_index: int | None,
+    memory_factory: Callable[
+        [ArtifactStorePort, tuple[IngestionPlan, ...]], MemorySystemPort
+    ] = _memory_factory,
     model_factory: Callable[[ArtifactStorePort], ModelClientPort] = _RecordedNativeModel,
     code_revision: str = "fixture-revision",
+    execution_family_label: str | None = None,
+    recovery_parts: tuple[Path, ...] = (),
+    recovery_execution_configuration_family_hash: str | None = None,
 ) -> Path:
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
@@ -214,6 +229,24 @@ def _run_controlled(
         provider_runtime_directory=(tmp_path / f"provider-{run_id}").resolve(),
         code_revision=code_revision,
     )
+    if execution_family_label is not None:
+        control = replace(
+            control,
+            role_bindings=tuple(
+                binding.model_copy(
+                    update={
+                        "configuration_fingerprint": canonical_sha256(
+                            [
+                                "fixture-execution-family",
+                                execution_family_label,
+                                binding.role,
+                            ]
+                        )
+                    }
+                )
+                for binding in control.role_bindings
+            ),
+        )
     partition = None
     if plan_index is not None:
         selected_plan = manifest.ingestion_plans[plan_index]
@@ -235,13 +268,44 @@ def _run_controlled(
         workload=workload,
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
         artifact_store_factory=ArtifactStore,
-        memory_factory=_memory_factory,
+        memory_factory=memory_factory,
         model_factory=model_factory,
         answer_role_binding_id="recorded-answer-v1",
         control=control,
         partition=partition,
+        recovery_parts=recovery_parts,
+        recovery_execution_configuration_family_hash=(
+            recovery_execution_configuration_family_hash
+            or (
+                composition_module.capsule_execution_configuration_family_hash(recovery_parts[0])
+                if recovery_parts
+                else None
+            )
+        ),
     )
     return completed.capsule_root
+
+
+def _composition_target_for_root(
+    plan: ResolvedPlan,
+    *,
+    cell_index: int,
+    current_root: Path,
+) -> composition_module.CapsuleCompositionTarget:
+    cell = plan.cells[cell_index]
+    return composition_module.CapsuleCompositionTarget(
+        resolved_plan_hash=plan.resolved_plan_hash,
+        cell_spec_hash=cell.cell_spec_hash,
+        target_case_manifest_hash=cell.case_manifest_hash,
+        budget_policy_hash=cell.authorization_hash,
+        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+        execution_configuration_hash=(
+            composition_module.capsule_execution_configuration_hash(current_root)
+        ),
+        execution_configuration_family_hash=(
+            composition_module.capsule_execution_configuration_family_hash(current_root)
+        ),
+    )
 
 
 def test_composes_complementary_parts_without_changing_sources(tmp_path: Path) -> None:
@@ -353,7 +417,9 @@ def test_composition_part_binding_rejects_noncanonical_embedded_root(
         )
 
 
-def test_recovery_rejects_ordinary_failed_history_without_retry_allowance(tmp_path: Path) -> None:
+def test_recovery_rebuilds_known_failed_group_without_rerunning_completed_group(
+    tmp_path: Path,
+) -> None:
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
     manifest = workload.build_case_manifest(dataset)
@@ -413,10 +479,18 @@ def test_recovery_rejects_ordinary_failed_history_without_retry_allowance(tmp_pa
             answer_role_binding_id="recorded-answer-v1",
             partition=aborted_partition,
         )
-    with pytest.raises(CapsuleCompositionError, match="no eligible pending retry allowance"):
-        composition_module.analyze_capsule_recovery(
-            (tmp_path / "aborted-parts" / aborted_partition.run_id,)
-        )
+    recovery = composition_module.analyze_capsule_recovery(
+        (tmp_path / "aborted-parts" / aborted_partition.run_id,)
+    )
+
+    completed_plan = manifest.ingestion_plans[0]
+    failed_plan = manifest.ingestion_plans[1]
+    assert recovery.reusable_ingestion_plan_ids == (completed_plan.ingestion_plan_id,)
+    assert recovery.quarantined_ingestion_plan_ids == (failed_plan.ingestion_plan_id,)
+    assert recovery.remaining_ingestion_plan_ids == (failed_plan.ingestion_plan_id,)
+    assert recovery.remaining_case_manifest_entry_ids == (
+        failed_plan.ordered_case_manifest_entry_ids
+    )
 
 
 @pytest.mark.parametrize(
@@ -538,8 +612,15 @@ def test_process_signal_drains_and_seals_completed_groups_for_fresh_scope_recove
 
     capsule_root = tmp_path / "sigint-parts" / run_id
     assert validate_source_root(capsule_root).disposition == ValidationDisposition.VALIDATED
-    with pytest.raises(CapsuleCompositionError, match="no eligible pending retry allowance"):
-        composition_module.analyze_capsule_recovery((capsule_root,))
+    recovery = composition_module.analyze_capsule_recovery((capsule_root,))
+    completed_plan = manifest.ingestion_plans[0]
+    interrupted_plan = manifest.ingestion_plans[1]
+    assert recovery.reusable_ingestion_plan_ids == (completed_plan.ingestion_plan_id,)
+    assert recovery.quarantined_ingestion_plan_ids == (interrupted_plan.ingestion_plan_id,)
+    assert recovery.remaining_ingestion_plan_ids == (interrupted_plan.ingestion_plan_id,)
+    assert recovery.remaining_case_manifest_entry_ids == (
+        interrupted_plan.ordered_case_manifest_entry_ids
+    )
     interrupted_second_occurrence_id = ingestion_occurrence_id(
         run_id,
         "fake-memory",
@@ -555,7 +636,411 @@ def test_process_signal_drains_and_seals_completed_groups_for_fresh_scope_recove
     assert tuple(document["outcome"] for document in interrupted_second_ingests) == ("succeeded",)
 
 
-def test_recovery_run_derives_remaining_groups_before_loading_runtime(
+def test_recovery_rejects_unknown_history_in_aborted_part(tmp_path: Path) -> None:
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    case_plans = workload.iter_case_plans(manifest)
+    run_id = "unknown-recovery-part"
+    partition = build_case_partition_spec(
+        run_id=run_id,
+        resolved_plan_hash=canonical_sha256(["unknown-recovery-plan"]),
+        cell_spec_hash=canonical_sha256(["unknown-recovery-cell"]),
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest=manifest,
+        case_plans=case_plans,
+        requested_case_manifest_entry_ids=tuple(
+            case.case_manifest_entry_id for case in manifest.cases
+        ),
+        budget_policy_hash=canonical_sha256(["unknown-recovery-budget"]),
+        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+    )
+    second_plan_id = manifest.ingestion_plans[1].ingestion_plan_id
+
+    class UnknownSecondPlanMemory(_RecordedNativeMemory):
+        def __init__(self, store: ArtifactStorePort) -> None:
+            super().__init__(store)
+            self.first_group_complete = asyncio.Event()
+            self.first_group_retrievals = 0
+
+        async def allocate_ingestion_scope(
+            self,
+            request: ScopeAllocationRequest,
+        ) -> ScopeReceipt:
+            if request.ingestion_plan_id == second_plan_id:
+                await self.first_group_complete.wait()
+            return await super().allocate_ingestion_scope(request)
+
+        async def ingest(
+            self,
+            request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            if self._plan_by_scope[request.scope.scope_id] == second_plan_id:
+                raise MemorySystemCallUnknownOutcome(
+                    "planted dispatched write without a receipt",
+                    failure_kind="planted_unknown",
+                )
+            return await super().ingest(request)
+
+        async def retrieve(self, request: RetrievalRequest) -> NativeEvidenceBatch:
+            result = await super().retrieve(request)
+            self.first_group_retrievals += 1
+            if self.first_group_retrievals == 3:
+                self.first_group_complete.set()
+            return result
+
+    with pytest.raises(
+        MemorySystemCallUnknownOutcome,
+        match="planted dispatched write without a receipt",
+    ):
+        run_native_vertical_slice(
+            output_root=tmp_path / "unknown-parts",
+            run_id=run_id,
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=lambda store, _plans: UnknownSecondPlanMemory(store),
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="recorded-answer-v1",
+            partition=partition,
+        )
+
+    capsule_root = tmp_path / "unknown-parts" / run_id
+    assert validate_source_root(capsule_root).disposition == ValidationDisposition.VALIDATED
+    with pytest.raises(CapsuleCompositionError, match="unknown outcome"):
+        composition_module.analyze_capsule_recovery((capsule_root,))
+
+
+def test_recovery_rejects_unknown_rerun_after_completed_contribution(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    completed = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="completed-before-unknown-rerun",
+        plan_index=0,
+    )
+
+    class UnknownRerunMemory(_RecordedNativeMemory):
+        async def ingest(
+            self,
+            _request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            raise MemorySystemCallUnknownOutcome(
+                "planted unknown rerun after completion",
+                failure_kind="planted_unknown",
+            )
+
+    rerun_id = "unknown-rerun-after-completion"
+    with pytest.raises(
+        MemorySystemCallUnknownOutcome,
+        match="planted unknown rerun after completion",
+    ):
+        _run_controlled(
+            tmp_path,
+            plan=plan,
+            cell_index=0,
+            run_id=rerun_id,
+            plan_index=0,
+            memory_factory=lambda store, _plans: UnknownRerunMemory(store),
+        )
+    unknown_rerun = tmp_path / "controlled" / rerun_id
+    assert validate_source_root(unknown_rerun).disposition == ValidationDisposition.VALIDATED
+
+    with pytest.raises(CapsuleCompositionError, match="unknown outcome"):
+        composition_module.analyze_capsule_recovery(
+            (completed, unknown_rerun),
+            target=_composition_target_for_root(
+                plan,
+                cell_index=0,
+                current_root=completed,
+            ),
+        )
+
+
+def test_history_recovery_rejects_unknown_in_an_unselected_embedded_group_before_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+
+    class UnknownSourceMemory(_RecordedNativeMemory):
+        async def ingest(
+            self,
+            _request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            raise MemorySystemCallUnknownOutcome(
+                "planted hidden unknown source",
+                failure_kind="planted_unknown",
+            )
+
+    source_run_id = "hidden-unknown-source"
+    with pytest.raises(MemorySystemCallUnknownOutcome):
+        _run_controlled(
+            tmp_path,
+            plan=plan,
+            cell_index=0,
+            run_id=source_run_id,
+            plan_index=0,
+            memory_factory=lambda store, _plans: UnknownSourceMemory(store),
+        )
+    source = tmp_path / "controlled" / source_run_id
+    assert validate_source_root(source).disposition == ValidationDisposition.VALIDATED
+
+    memory_constructed = False
+
+    def tracked_memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> MemorySystemPort:
+        nonlocal memory_constructed
+        memory_constructed = True
+        return _RecordedNativeMemory(store)
+
+    with pytest.raises(ValueError, match="unknown outcome"):
+        _run_controlled(
+            tmp_path,
+            plan=plan,
+            cell_index=0,
+            run_id="hidden-unknown-successor",
+            plan_index=1,
+            memory_factory=tracked_memory_factory,
+            recovery_parts=(source,),
+        )
+    assert memory_constructed is False
+
+    from oamb.artifacts import history_recovery
+
+    monkeypatch.setattr(
+        history_recovery,
+        "_require_closed_recovery_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    crafted = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="hidden-unknown-crafted-successor",
+        plan_index=1,
+        recovery_parts=(source,),
+    )
+    crafted_validation = validate_partition_capsule(crafted)
+    assert crafted_validation.disposition == ValidationDisposition.INVALID
+    assert "history-carry-graph-mismatch" in {issue.code for issue in crafted_validation.issues}
+
+
+def test_recovery_rejects_finalized_revision_drift_despite_unrelated_aborted_part(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    old_finalized = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="old-finalized-revision",
+        plan_index=0,
+        code_revision="revision-a",
+    )
+    current = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="current-finalized-revision",
+        plan_index=1,
+        code_revision="revision-b",
+    )
+    unrelated_aborted = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="unrelated-aborted-revision",
+        plan_index=1,
+        code_revision="revision-b",
+    )
+    _set_partition_run_state(unrelated_aborted, "aborted")
+
+    with pytest.raises(
+        CapsuleCompositionError,
+        match="revision-drifted recovery part is not aborted",
+    ):
+        composition_module._require_compatible_parts(
+            tuple(
+                composition_module._load_part(root)
+                for root in (old_finalized, current, unrelated_aborted)
+            ),
+            target=_composition_target_for_root(
+                plan,
+                cell_index=0,
+                current_root=current,
+            ),
+        )
+
+
+@pytest.mark.parametrize("terminal_status", ("ready", "failed", "cancelled"))
+def test_terminal_known_aborted_group_rebuilds_in_fresh_scope_end_to_end(
+    tmp_path: Path,
+    terminal_status: str,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+
+    class TerminalKnownMemory(_RecordedNativeMemory):
+        async def allocate_ingestion_scope(
+            self,
+            request: ScopeAllocationRequest,
+        ) -> ScopeReceipt:
+            if terminal_status == "failed":
+                raise RuntimeError("planted known allocation failure")
+            if terminal_status == "cancelled":
+                raise MemorySystemCallCancelledBeforeDispatch(
+                    "planted cancellation before allocation dispatch"
+                )
+            return await super().allocate_ingestion_scope(request)
+
+        async def retrieve(self, request: RetrievalRequest) -> NativeEvidenceBatch:
+            if terminal_status == "ready":
+                raise RuntimeError("planted query failure after ready history")
+            return await super().retrieve(request)
+
+    aborted_run_id = f"terminal-known-{terminal_status}"
+    expected_error: type[BaseException] = (
+        MemorySystemCallCancelledBeforeDispatch if terminal_status == "cancelled" else RuntimeError
+    )
+    with pytest.raises(expected_error):
+        _run_controlled(
+            tmp_path,
+            plan=plan,
+            cell_index=0,
+            run_id=aborted_run_id,
+            plan_index=0,
+            memory_factory=lambda store, _plans: TerminalKnownMemory(store),
+        )
+    aborted = tmp_path / "controlled" / aborted_run_id
+    assert validate_source_root(aborted).disposition == ValidationDisposition.VALIDATED
+    history_documents = tuple(
+        json.loads(path.read_bytes())
+        for path in (aborted / "source" / "history-attempts").glob("*.json")
+    )
+    assert tuple(item["status"] for item in history_documents) == (terminal_status,)
+
+    recovery = composition_module.analyze_capsule_recovery(
+        (aborted,),
+        target=_composition_target_for_root(
+            plan,
+            cell_index=0,
+            current_root=aborted,
+        ),
+    )
+    assert len(recovery.remaining_ingestion_plan_ids) == 1
+
+    rebuilt = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id=f"terminal-known-{terminal_status}-rebuilt",
+        plan_index=0,
+        recovery_parts=(aborted,),
+    )
+    rebuilt_validation = validate_partition_capsule(rebuilt)
+    assert rebuilt_validation.disposition == ValidationDisposition.VALIDATED, [
+        (issue.rule_id, issue.code) for issue in rebuilt_validation.issues
+    ]
+    rebuilt_histories = tuple(
+        json.loads(path.read_bytes())
+        for path in (rebuilt / "source" / "history-attempts").glob("*.json")
+    )
+    assert tuple(item["history_attempt_ordinal"] for item in rebuilt_histories) == (1,)
+    assert tuple(item["previous_retry_event_id"] for item in rebuilt_histories) == (None,)
+    assert tuple(item["admission_claim_raw_ref"] for item in rebuilt_histories) == (None,)
+    carry = json.loads(next((rebuilt / "source" / "history-carries").glob("*.json")).read_bytes())
+    assert carry["execution_configuration_family_hash"] == (
+        composition_module.capsule_execution_configuration_family_hash(aborted)
+    )
+    assert carry["allowances"] == [
+        {
+            "consumed_retries": 0,
+            "execution_run_id": f"terminal-known-{terminal_status}-rebuilt",
+            "ingestion_plan_id": recovery.remaining_ingestion_plan_ids[0],
+            "next_history_attempt_ordinal": 1,
+            "predecessor_history_attempt_id": None,
+            "previous_retry_event_id": None,
+            "schema_name": "history_retry_allowance",
+            "schema_version": 1,
+        }
+    ]
+    peer = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id=f"terminal-known-{terminal_status}-peer",
+        plan_index=1,
+    )
+    composed = compose_capsules(
+        (aborted, rebuilt, peer),
+        tmp_path / f"terminal-known-{terminal_status}-composed",
+        target=_composition_target_for_root(
+            plan,
+            cell_index=0,
+            current_root=rebuilt,
+        ),
+    )
+    assert validate_source_root(composed.capsule_root).disposition == (
+        ValidationDisposition.VALIDATED
+    )
+
+
+def test_terminal_known_group_can_rebuild_after_two_aborted_fresh_scopes(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+
+    class ReadyThenQueryFailureMemory(_RecordedNativeMemory):
+        async def retrieve(self, _request: RetrievalRequest) -> NativeEvidenceBatch:
+            raise RuntimeError("planted query failure after ready history")
+
+    aborted_parts: list[Path] = []
+    for attempt in (1, 2):
+        run_id = f"terminal-known-multi-aborted-{attempt}"
+        with pytest.raises(RuntimeError):
+            _run_controlled(
+                tmp_path,
+                plan=plan,
+                cell_index=0,
+                run_id=run_id,
+                plan_index=0,
+                memory_factory=lambda store, _plans: ReadyThenQueryFailureMemory(store),
+                recovery_parts=tuple(aborted_parts),
+            )
+        aborted_parts.append(tmp_path / "controlled" / run_id)
+        recovery = composition_module.analyze_capsule_recovery(
+            tuple(aborted_parts),
+            target=_composition_target_for_root(
+                plan,
+                cell_index=0,
+                current_root=aborted_parts[-1],
+            ),
+        )
+        assert len(recovery.remaining_ingestion_plan_ids) == 1
+
+    rebuilt = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="terminal-known-multi-success",
+        plan_index=0,
+        recovery_parts=tuple(aborted_parts),
+    )
+    assert validate_partition_capsule(rebuilt).disposition == ValidationDisposition.VALIDATED
+
+
+def test_recovery_run_validates_current_execution_before_selecting_remaining_groups(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -571,7 +1056,18 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
     remaining_case_id = canonical_sha256(["remaining-case"])
     call_order: list[str] = []
     captured: dict[str, object] = {}
+    executed_case_ids: tuple[str, ...] = ()
+    executed_family_hash: str | None = None
     recovery_targets: list[object] = []
+
+    @dataclass(frozen=True)
+    class BuiltCell:
+        requested_case_manifest_entry_ids: tuple[str, ...] = ()
+        recovery_execution_configuration_family_hash: str | None = None
+
+    @dataclass(frozen=True)
+    class Target:
+        execution_configuration_family_hash: str
 
     def analyze(*_args: object, **_kwargs: object) -> CapsuleRecoveryPlan:
         call_order.append("analyze")
@@ -589,9 +1085,13 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
         call_order.append("environment")
         return {}
 
-    def build_cell(**kwargs: object) -> object:
+    def build_cell(**kwargs: object) -> BuiltCell:
         captured.update(kwargs)
-        return object()
+        return BuiltCell(
+            requested_case_manifest_entry_ids=cast(
+                tuple[str, ...], kwargs["requested_case_manifest_entry_ids"]
+            )
+        )
 
     monkeypatch.setattr(composition_module, "analyze_capsule_recovery", analyze)
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
@@ -603,14 +1103,18 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
         lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
     )
     monkeypatch.setattr(live, "build_live_cell", build_cell)
-    full_target = object()
+    full_target = Target(canonical_sha256(["current-execution-family"]))
 
     def composition_target(_cell: object) -> object:
         call_order.append("target")
         return full_target
 
-    def execute(_cells: object) -> tuple[live.LiveCellCompletion, ...]:
+    def execute(cells: object) -> tuple[live.LiveCellCompletion, ...]:
+        nonlocal executed_case_ids, executed_family_hash
         call_order.append("execute")
+        executed_cell = cast(tuple[BuiltCell, ...], cells)[0]
+        executed_case_ids = executed_cell.requested_case_manifest_entry_ids
+        executed_family_hash = executed_cell.recovery_execution_configuration_family_hash
         return (live.LiveCellCompletion(selected_cell.cell_id, tmp_path / "recovery-capsule"),)
 
     monkeypatch.setattr(
@@ -635,9 +1139,11 @@ def test_recovery_run_derives_remaining_groups_before_loading_runtime(
     result = CliRunner().invoke(cli.app, arguments)
 
     assert result.exit_code == 0, result.output
-    assert call_order == ["analyze", "environment", "target", "analyze", "execute"]
-    assert recovery_targets[1] is full_target
-    assert captured["requested_case_manifest_entry_ids"] == (remaining_case_id,)
+    assert call_order == ["environment", "target", "analyze", "execute"]
+    assert recovery_targets == [full_target]
+    assert captured["requested_case_manifest_entry_ids"] == ()
+    assert executed_case_ids == (remaining_case_id,)
+    assert executed_family_hash == full_target.execution_configuration_family_hash
     assert "recovery reusable groups:" in result.output
     assert "recovery remaining groups:" in result.output
 
@@ -652,6 +1158,39 @@ def test_infrastructure_blocked_partition_requires_terminal_retry_evidence(
 
     assert validation.disposition == ValidationDisposition.INVALID
     assert "infrastructure-retry-evidence-mismatch" in {issue.code for issue in validation.issues}
+
+
+def test_infrastructure_blocked_selected_group_without_history_is_not_recoverable(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    root = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="blocked-before-history",
+        plan_index=0,
+    )
+    part = composition_module._load_part(root)
+    blocked_before_history = replace(
+        part,
+        run=part.run.model_copy(update={"state": "infrastructure_blocked"}),
+        plans=(),
+        cases=(),
+        attempts=(),
+        receipts=(),
+        history_attempts=(),
+    )
+
+    with pytest.raises(
+        CapsuleCompositionError,
+        match="incomplete history group is not owned only by aborted parts",
+    ):
+        composition_module._require_attempted_groups_recoverable(
+            (blocked_before_history,),
+            {},
+        )
 
 
 def test_composed_cell_uses_normal_comparison_and_report_path(
@@ -708,6 +1247,7 @@ def test_composed_cell_uses_normal_comparison_and_report_path(
         cell_index=0,
         run_id="controlled-part-a",
         plan_index=0,
+        code_revision="revision-a",
         model_factory=lambda store: _client(
             cast(Any, store),
             handler,
@@ -720,6 +1260,7 @@ def test_composed_cell_uses_normal_comparison_and_report_path(
         cell_index=0,
         run_id="controlled-part-b",
         plan_index=1,
+        code_revision="revision-b",
     )
     peer = _run_controlled(
         tmp_path,
@@ -727,9 +1268,18 @@ def test_composed_cell_uses_normal_comparison_and_report_path(
         cell_index=1,
         run_id="controlled-peer",
         plan_index=None,
+        code_revision="revision-b",
     )
     _set_partition_run_state(first, "aborted")
-    composed = compose_capsules((first, second), tmp_path / "composed-cell")
+    composed = compose_capsules(
+        (first, second),
+        tmp_path / "composed-cell",
+        target=_composition_target_for_root(
+            plan,
+            cell_index=0,
+            current_root=second,
+        ),
+    )
     composed_validation = validate_source_root(composed.capsule_root)
     peer_validation = validate_source_root(peer)
 
@@ -767,6 +1317,154 @@ def test_composed_cell_uses_normal_comparison_and_report_path(
     assert composed_cell["observed_time"]["indexing_ready"]["count"] == 2
     assert composed_cell["accounting"]["attempts"]["retry_count"] == 1
     assert composed_cell["accounting"]["attempts"]["failed_count"] == 1
+    assert composed_cell["code_revisions"] == ["revision-a", "revision-b"]
+    assert any("mixed code revisions" in item for item in composed_cell["limitations"])
+    assert export["comparisons"][0]["comparable"] is False
+    assert any(
+        "identical singleton code revision" in item
+        for item in export["comparisons"][0]["limitations"]
+    )
+    assert export["comparisons"][0]["accuracy_decision"]["status"] == ("no_clear_accuracy_leader")
+
+
+def test_report_rejects_different_singleton_code_revisions(tmp_path: Path) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    left = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="singleton-revision-a",
+        plan_index=None,
+        code_revision="revision-a",
+    )
+    right = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=1,
+        run_id="singleton-revision-b",
+        plan_index=None,
+        code_revision="revision-b",
+    )
+
+    built = build_comparison_project(
+        plan,
+        {
+            plan.cells[0].cell_id: ValidatedCellRoot(
+                root=left,
+                validation_result=validate_source_root(left),
+            ),
+            plan.cells[1].cell_id: ValidatedCellRoot(
+                root=right,
+                validation_result=validate_source_root(right),
+            ),
+        },
+        output_root=tmp_path / "singleton-revision-report",
+    )
+    export = json.loads(built.export_path.read_bytes())
+
+    assert [cell["code_revisions"] for cell in export["cells"]] == [
+        ["revision-a"],
+        ["revision-b"],
+    ]
+    assert export["comparisons"][0]["comparable"] is False
+    assert any(
+        "identical singleton code revision" in item
+        for item in export["comparisons"][0]["limitations"]
+    )
+    assert export["comparisons"][0]["accuracy_decision"]["status"] == ("no_clear_accuracy_leader")
+
+
+def test_report_includes_nested_carried_code_revision(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+
+    class ReadyThenQueryFailureMemory(_RecordedNativeMemory):
+        async def retrieve(self, _request: RetrievalRequest) -> NativeEvidenceBatch:
+            raise RuntimeError("planted query failure after ready history")
+
+    with pytest.raises(RuntimeError, match="read-only retrieval failed"):
+        _run_controlled(
+            tmp_path,
+            plan=plan,
+            cell_index=0,
+            run_id="nested-revision-source-a",
+            plan_index=0,
+            code_revision="revision-a",
+            memory_factory=lambda store, _plans: ReadyThenQueryFailureMemory(store),
+        )
+    source = tmp_path / "controlled" / "nested-revision-source-a"
+    _set_partition_run_fields(
+        source,
+        started_at="2026-08-30T08:01:00+00:00",
+    )
+    rebuilt = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="nested-revision-wrapper-b",
+        plan_index=0,
+        code_revision="revision-b",
+        recovery_parts=(source,),
+    )
+    second = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="nested-revision-second-b",
+        plan_index=1,
+        code_revision="revision-b",
+    )
+    comparison_peer = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=1,
+        run_id="nested-revision-peer-b",
+        plan_index=None,
+        code_revision="revision-b",
+    )
+    composed = compose_capsules(
+        (rebuilt, second),
+        tmp_path / "nested-revision-composed",
+        target=_composition_target_for_root(
+            plan,
+            cell_index=0,
+            current_root=rebuilt,
+        ),
+    )
+    composed_validation = validate_source_root(composed.capsule_root)
+    peer_validation = validate_source_root(comparison_peer)
+
+    built = build_comparison_project(
+        plan,
+        {
+            plan.cells[0].cell_id: ValidatedCellRoot(
+                root=composed.capsule_root,
+                validation_result=composed_validation,
+            ),
+            plan.cells[1].cell_id: ValidatedCellRoot(
+                root=comparison_peer,
+                validation_result=peer_validation,
+            ),
+        },
+        output_root=tmp_path / "nested-revision-report",
+    )
+    export = json.loads(built.export_path.read_bytes())
+    composed_cell = next(
+        cell for cell in export["cells"] if cell["cell_id"] == plan.cells[0].cell_id
+    )
+
+    assert composed_cell["code_revisions"] == ["revision-a", "revision-b"]
+    assert composed_cell["observed_time"]["run_wall_microseconds"] == 60_000_088
+    assert "composed from 3 immutable part capsules" in composed_cell["limitations"]
+    assert any("resume source part states aborted" in item for item in composed_cell["limitations"])
+    assert export["comparisons"][0]["comparable"] is False
+    assert any(
+        "identical singleton code revision" in item
+        for item in export["comparisons"][0]["limitations"]
+    )
 
 
 @pytest.mark.parametrize("invalid_kind", ["missing", "duplicate", "overlap"])
@@ -838,21 +1536,329 @@ def test_recovery_rejects_target_execution_configuration_before_remaining_work(
         plan_index=1,
         code_revision="revision-b",
     )
-    incompatible_hash = composition_module.capsule_execution_configuration_hash(incompatible)
-    cell = plan.cells[0]
-
     with pytest.raises(
         CapsuleCompositionError,
         match="requested execution configuration",
     ):
         composition_module.analyze_capsule_recovery(
             (first,),
-            target=composition_module.CapsuleCompositionTarget(
-                resolved_plan_hash=plan.resolved_plan_hash,
-                cell_spec_hash=cell.cell_spec_hash,
-                target_case_manifest_hash=cell.case_manifest_hash,
-                budget_policy_hash=cell.authorization_hash,
-                retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-                execution_configuration_hash=incompatible_hash,
+            target=_composition_target_for_root(
+                plan,
+                cell_index=0,
+                current_root=incompatible,
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "target_update",
+    (
+        {"execution_configuration_hash": None},
+        {"execution_configuration_family_hash": None},
+    ),
+)
+def test_recovery_target_requires_paired_execution_hashes(
+    tmp_path: Path,
+    target_update: dict[str, None],
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    current = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-paired-execution-hashes",
+        plan_index=0,
+    )
+    target = _composition_target_for_root(plan, cell_index=0, current_root=current)
+
+    with pytest.raises(CapsuleCompositionError, match="must be supplied together"):
+        composition_module.analyze_capsule_recovery(
+            (current,),
+            target=replace(target, **target_update),
+        )
+
+
+def test_recovery_target_rejects_wrong_family_when_full_hash_matches(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    current = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-wrong-family",
+        plan_index=0,
+    )
+    target = _composition_target_for_root(plan, cell_index=0, current_root=current)
+
+    with pytest.raises(
+        CapsuleCompositionError,
+        match="requested execution configuration family",
+    ):
+        composition_module.analyze_capsule_recovery(
+            (current,),
+            target=replace(
+                target,
+                execution_configuration_family_hash=canonical_sha256(["wrong-execution-family"]),
+            ),
+        )
+
+
+def test_recovery_accepts_aborted_part_when_only_code_revision_differs(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    aborted = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-aborted-old-revision",
+        plan_index=0,
+        code_revision="revision-a",
+    )
+    current = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-current-revision",
+        plan_index=0,
+        code_revision="revision-b",
+    )
+    _set_partition_run_state(aborted, "aborted")
+
+    recovery = composition_module.analyze_capsule_recovery(
+        (aborted,),
+        target=_composition_target_for_root(
+            plan,
+            cell_index=0,
+            current_root=current,
+        ),
+    )
+
+    assert len(recovery.reusable_ingestion_plan_ids) == 1
+    assert recovery.remaining_ingestion_plan_ids == ()
+
+
+def test_recovery_rejects_aborted_part_when_execution_family_differs(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    aborted = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-aborted-family-a",
+        plan_index=0,
+        code_revision="revision-a",
+    )
+    current = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="recovery-current-family-b",
+        plan_index=0,
+        code_revision="revision-b",
+    )
+    _set_partition_run_state(aborted, "aborted")
+    target = _composition_target_for_root(plan, cell_index=0, current_root=current)
+
+    with pytest.raises(
+        CapsuleCompositionError,
+        match="requested execution configuration family",
+    ):
+        composition_module.analyze_capsule_recovery(
+            (aborted,),
+            target=replace(
+                target,
+                execution_configuration_family_hash=canonical_sha256(
+                    ["different-execution-family"]
+                ),
+            ),
+        )
+
+
+def test_history_recovery_rejects_transitive_execution_family_drift(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    first = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="transitive-family-a",
+        plan_index=0,
+        execution_family_label="a",
+    )
+    second = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="transitive-family-b",
+        plan_index=0,
+        execution_family_label="b",
+    )
+    first_part = composition_module._load_part(first)
+    second_part = composition_module._load_part(second)
+    expected_family_hash = composition_module._compatibility_family_key(second_part)
+
+    from oamb.artifacts.history_recovery import _require_recovery_compatibility
+
+    with pytest.raises(ValueError, match="execution configuration family drifted"):
+        _require_recovery_compatibility(
+            (
+                replace(first_part, run=first_part.run.model_copy(update={"state": "aborted"})),
+                replace(second_part, run=second_part.run.model_copy(update={"state": "aborted"})),
+            ),
+            (first_part.partition.selected_ingestion_plan_ids[0],),
+            "fake-memory",
+            expected_family_hash,
+        )
+
+
+def test_current_execution_family_drift_fails_before_memory_factory(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+
+    class ReadyThenQueryFailureMemory(_RecordedNativeMemory):
+        async def retrieve(self, _request: RetrievalRequest) -> NativeEvidenceBatch:
+            raise RuntimeError("planted query failure after ready history")
+
+    with pytest.raises(RuntimeError, match="read-only retrieval failed"):
+        _run_controlled(
+            tmp_path,
+            plan=plan,
+            cell_index=0,
+            run_id="current-family-source-a",
+            plan_index=0,
+            execution_family_label="a",
+            memory_factory=lambda store, _plans: ReadyThenQueryFailureMemory(store),
+        )
+    source = tmp_path / "controlled" / "current-family-source-a"
+    current = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="current-family-target-b",
+        plan_index=0,
+        execution_family_label="b",
+    )
+    memory_constructed = False
+
+    def tracked_memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> MemorySystemPort:
+        nonlocal memory_constructed
+        memory_constructed = True
+        return _RecordedNativeMemory(store)
+
+    with pytest.raises(ValueError, match="execution configuration family drifted"):
+        _run_controlled(
+            tmp_path,
+            plan=plan,
+            cell_index=0,
+            run_id="current-family-recovery-b",
+            plan_index=0,
+            execution_family_label="b",
+            memory_factory=tracked_memory_factory,
+            recovery_parts=(source,),
+            recovery_execution_configuration_family_hash=(
+                composition_module.capsule_execution_configuration_family_hash(current)
+            ),
+        )
+    assert memory_constructed is False
+
+
+def test_execution_family_excludes_only_revision_and_derived_identity(
+    tmp_path: Path,
+) -> None:
+    workload = _NativeFixtureWorkload()
+    plan = _comparison_plan(workload)
+    root = _run_controlled(
+        tmp_path,
+        plan=plan,
+        cell_index=0,
+        run_id="execution-family-controls",
+        plan_index=0,
+        code_revision="revision-a",
+    )
+    part = composition_module._load_part(root)
+    assert part.run_spec is not None
+    assert part.preflight is not None
+    assert part.budget is not None
+
+    def family_hash(**updates: object) -> str:
+        return composition_module.build_composition_execution_configuration_family_hash(
+            partition=cast(CasePartitionSpec, updates.get("partition", part.partition)),
+            case_manifest=part.case_manifest,
+            dataset_manifest=part.dataset_manifest,
+            runtime_bindings=(
+                (
+                    part.run_spec.memory_system_id,
+                    part.preflight.adapter_profile_id,
+                    part.run_spec.runtime_binding_hash,
+                ),
+            ),
+            run_spec=cast(Any, updates.get("run_spec", part.run_spec)),
+            preflight=cast(Any, updates.get("preflight", part.preflight)),
+            budget=cast(Any, updates.get("budget", part.budget)),
+            role_bindings=cast(
+                Any,
+                updates.get("role_bindings", part.role_bindings),
+            ),
+        )
+
+    baseline = family_hash()
+    revised_run_spec = part.run_spec.model_copy(update={"code_revision": "revision-b"})
+    revised_preflight = part.preflight.model_copy(
+        update={"run_spec_hash": canonical_sha256(revised_run_spec)}
+    )
+    assert family_hash(run_spec=revised_run_spec, preflight=revised_preflight) == baseline
+
+    changed_hash = canonical_sha256(["changed-non-revision-leaf"])
+    mutations = {
+        "environment": {
+            "run_spec": part.run_spec.model_copy(update={"environment_hash": changed_hash})
+        },
+        "provider_evidence": {
+            "preflight": part.preflight.model_copy(
+                update={
+                    "provider_service_evidence": (
+                        part.preflight.provider_service_evidence.model_copy(
+                            update={"source_root_hash": changed_hash}
+                        )
+                    )
+                }
+            )
+        },
+        "runtime_binding": {
+            "run_spec": part.run_spec.model_copy(update={"runtime_binding_hash": changed_hash})
+        },
+        "model_role_binding": {
+            "role_bindings": (
+                part.role_bindings[0].model_copy(
+                    update={"configuration_fingerprint": changed_hash}
+                ),
+                *part.role_bindings[1:],
+            )
+        },
+        "retry_or_timeout": {
+            "budget": part.budget.model_copy(update={"max_attempts": part.budget.max_attempts + 1})
+        },
+        "authorization": {
+            "partition": part.partition.model_copy(update={"budget_policy_hash": changed_hash})
+        },
+        "target_identity": {
+            "partition": part.partition.model_copy(update={"cell_spec_hash": changed_hash})
+        },
+    }
+    assert {
+        label for label, updates in mutations.items() if family_hash(**updates) == baseline
+    } == set()

@@ -353,7 +353,14 @@ def test_recovery_analysis_output_closes_current_execution_without_dispatch(
         return object()
 
     monkeypatch.setattr(live, "build_live_cell", build_recovery_cell)
-    monkeypatch.setattr(live, "live_composition_target", lambda _cell: object())
+    monkeypatch.setattr(
+        live,
+        "live_composition_target",
+        lambda _cell: SimpleNamespace(
+            execution_configuration_hash=canonical_sha256(["current-execution"]),
+            execution_configuration_family_hash=canonical_sha256(["current-execution-family"]),
+        ),
+    )
 
     def execute(_cells: object) -> tuple[live.LiveCellCompletion, ...]:
         nonlocal executed
@@ -384,6 +391,8 @@ def test_recovery_analysis_output_closes_current_execution_without_dispatch(
     assert executed is False
     assert json.loads(analysis_output.read_bytes()) == {
         "cell_id": selected_cell.cell_id,
+        "execution_configuration_hash": canonical_sha256(["current-execution"]),
+        "execution_configuration_family_hash": canonical_sha256(["current-execution-family"]),
         "quarantined_ingestion_plan_ids": list(recovery.quarantined_ingestion_plan_ids),
         "remaining_case_manifest_entry_ids": list(recovery.remaining_case_manifest_entry_ids),
         "remaining_ingestion_plan_ids": list(recovery.remaining_ingestion_plan_ids),

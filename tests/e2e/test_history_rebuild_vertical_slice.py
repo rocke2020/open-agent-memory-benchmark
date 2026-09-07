@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 import oamb.runtime.native_run as native
+from oamb.artifacts.composition import capsule_execution_configuration_family_hash
 from oamb.artifacts.store import ArtifactStore
 from oamb.artifacts.validation.native import validate_native_capsule
 from oamb.contracts.ids import canonical_sha256, ingestion_occurrence_id
@@ -239,6 +240,11 @@ def _run(
         partition=partition,
         control=control,
         recovery_parts=recovery_parts,
+        recovery_execution_configuration_family_hash=(
+            capsule_execution_configuration_family_hash(recovery_parts[0])
+            if recovery_parts
+            else None
+        ),
     )
     for line in service.journal.read_text().splitlines():
         event = json.loads(line)

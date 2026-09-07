@@ -155,6 +155,7 @@ class _CellSnapshot:
     raw_payloads: Mapping[str, bytes]
     infrastructure_retries: tuple[dict[str, Any], ...] = ()
     composition_part_states: tuple[str, ...] = ()
+    code_revisions: tuple[str, ...] = ()
 
 
 def build_comparison_project(
@@ -495,6 +496,11 @@ def _load_cell_snapshot(
         retrieval_runtime_proof_state=retrieval_proof_state,
         raw_payloads=raw_payloads,
         infrastructure_retries=infrastructure_retries,
+        code_revisions=(
+            (revision,)
+            if isinstance((revision := run_spec.get("code_revision")), str) and revision
+            else ()
+        ),
     )
 
 
@@ -520,6 +526,8 @@ def _load_composed_cell_snapshot(
     case_manifest: dict[str, Any] | None = None
     starts: list[str] = []
     ends: list[str] = []
+    part_states: list[str] = []
+    code_revisions: list[str] = []
     operational_documents: list[dict[str, list[tuple[bytes, dict[str, Any]]]]] = []
     seen_operational_parts: dict[str, str] = {}
     for binding, embedded_root in zip(composition.ordered_parts, embedded_roots, strict=True):
@@ -539,6 +547,22 @@ def _load_composed_cell_snapshot(
             embedded_root, cell.cell_id, seen_operational_parts
         ):
             operational_documents.append(nested_documents)
+            nested_run_spec = _exact_document(
+                nested_documents,
+                "run_spec",
+                cell.cell_id,
+            )
+            code_revisions.append(_required_text(nested_run_spec, "code_revision"))
+            nested_run_record = _exact_document(
+                nested_documents,
+                "run_record",
+                cell.cell_id,
+            )
+            part_states.append(_required_text(nested_run_record, "state"))
+            if isinstance(nested_run_record.get("started_at"), str):
+                starts.append(nested_run_record["started_at"])
+            if isinstance(nested_run_record.get("ended_at"), str):
+                ends.append(nested_run_record["ended_at"])
             for raw_id, payload in nested_raw.items():
                 previous = merged_raw_payloads.setdefault(raw_id, payload)
                 if previous != payload:
@@ -561,7 +585,6 @@ def _load_composed_cell_snapshot(
         run_spec = _exact_document(documents, "run_spec", cell.cell_id)
         preflight = _exact_document(documents, "run_preflight_record", cell.cell_id)
         dataset = _exact_document(documents, "dataset_manifest", cell.cell_id)
-        part_run_record = _exact_document(documents, "run_record", cell.cell_id)
         if (
             run_spec.get("run_id") != binding.run_id
             or run_spec.get("memory_system_id") != cell.provider_id
@@ -583,10 +606,6 @@ def _load_composed_cell_snapshot(
             raise ComparisonProjectError(
                 f"cell {cell.cell_id} embedded dataset source does not close"
             )
-        if isinstance(part_run_record.get("started_at"), str):
-            starts.append(part_run_record["started_at"])
-        if isinstance(part_run_record.get("ended_at"), str):
-            ends.append(part_run_record["ended_at"])
 
     if case_manifest_bytes is None or case_manifest is None:
         raise ComparisonProjectError(f"cell {cell.cell_id} composition has no case manifest")
@@ -717,9 +736,8 @@ def _load_composed_cell_snapshot(
         retrieval_runtime_proof_state=retrieval_proof_state,
         raw_payloads=merged_raw_payloads,
         infrastructure_retries=all_infrastructure_retries,
-        composition_part_states=tuple(
-            binding.run_state.value for binding in composition.ordered_parts
-        ),
+        composition_part_states=tuple(part_states),
+        code_revisions=tuple(sorted(set(code_revisions))),
     )
 
 
@@ -869,6 +887,11 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
                 "resume source part states "
                 f"{','.join(nonfinal)}; only terminal-success whole-plan groups contributed"
             )
+    if len(snapshot.code_revisions) > 1:
+        limitations.append(
+            "composed from mixed code revisions; descriptive evidence only and excluded from "
+            "strict pair comparison"
+        )
     document: dict[str, Any] = {
         "cell_id": snapshot.cell.cell_id,
         "cell_spec_hash": snapshot.cell.cell_spec_hash,
@@ -883,6 +906,7 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
         "judged_case_count": len(judged),
         "judged_numerator": numerator,
         "judged_denominator": denominator,
+        "code_revisions": snapshot.code_revisions,
         "results": tuple(
             {
                 "case_manifest_entry_id": item["case_manifest_entry_id"],
@@ -1730,6 +1754,11 @@ def _pair_document(
 ) -> dict[str, Any]:
     limitations: list[str] = []
     comparable = True
+    left_revisions = tuple(left.get("code_revisions", ()))
+    right_revisions = tuple(right.get("code_revisions", ()))
+    if len(left_revisions) != 1 or len(right_revisions) != 1 or left_revisions != right_revisions:
+        comparable = False
+        limitations.append("pair does not share one identical singleton code revision")
     if left["metric_id"] == "unavailable" or left["metric_id"] != right["metric_id"]:
         comparable = False
         limitations.append("metric policy or judged evidence is unavailable")

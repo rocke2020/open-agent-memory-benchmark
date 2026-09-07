@@ -227,7 +227,6 @@ class ProviderLifecycleBridge:
     _LEGACY_ACTIVE_ATTEMPT_NAME = "active-provider-attempt"
     _ACTIVE_OPERATION_NAME = "active-operation"
     _ACTIVE_ATTEMPTS_DIRECTORY_NAME = "active-provider-attempts"
-    _HISTORY_SUCCESSOR_CLAIMS_DIRECTORY_NAME = "history-successor-claims"
     _CONFORMANCE_SPEC_PATH = Path("source/specs/memory-conformance-spec.json")
 
     def __init__(
@@ -538,109 +537,6 @@ class ProviderLifecycleBridge:
                 raise ResumeRejectedError("active provider attempt intent hash does not match")
             path.unlink()
             _fsync_directory(path.parent)
-
-    def claim_history_successor(
-        self,
-        *,
-        retry_event_id: str,
-        retry_event_sha256: str,
-        ingestion_plan_id: str,
-        successor_ingestion_occurrence_id: str,
-        claimant_run_id: str,
-        claimant_capsule_id: str,
-        source_part_manifest_bindings: tuple[tuple[str, str], ...] = (),
-    ) -> bytes:
-        """Permanently fence one retry event before its successor scope is allocated."""
-
-        for value in (
-            retry_event_id,
-            retry_event_sha256,
-            ingestion_plan_id,
-            successor_ingestion_occurrence_id,
-        ):
-            _require_sha256(value)
-        if not claimant_run_id or claimant_capsule_id != claimant_run_id:
-            raise ResumeRejectedError(
-                "history successor claimant capsule must equal its pre-final run identity"
-            )
-        if tuple(sorted(source_part_manifest_bindings)) != source_part_manifest_bindings or len(
-            {capsule_id for capsule_id, _ in source_part_manifest_bindings}
-        ) != len(source_part_manifest_bindings):
-            raise ResumeRejectedError("history successor source bindings are not canonical")
-        for capsule_id, manifest_sha256 in source_part_manifest_bindings:
-            _require_sha256(capsule_id)
-            _require_sha256(manifest_sha256)
-
-        authority = self._active_authority
-        if not isinstance(authority, _RunLeaseAuthority):
-            raise ResumeRejectedError("history successor claim requires current run authority")
-        with self._lifecycle_lock():
-            operation = self._read_pointer(self._ACTIVE_OPERATION_NAME, "active operation")
-            operation_kind, operation_id, operation_hash = _operation_authority_fields(
-                operation, authority
-            )
-            if operation_kind != "benchmark_run" or operation_id != claimant_run_id:
-                raise ResumeRejectedError("history successor claimant does not own the run")
-            try:
-                runtime_domain = self._runtime_directory.relative_to(
-                    self._coordination_directory
-                ).as_posix()
-            except ValueError as exc:
-                raise ResumeRejectedError(
-                    "history successor runtime domain is outside coordination"
-                ) from exc
-            document = {
-                "schema_name": "oamb_history_successor_claim",
-                "schema_version": 1,
-                "retry_event_id": retry_event_id,
-                "retry_event_sha256": retry_event_sha256,
-                "ingestion_plan_id": ingestion_plan_id,
-                "successor_ingestion_occurrence_id": successor_ingestion_occurrence_id,
-                "claimant_run_id": claimant_run_id,
-                "claimant_capsule_id": claimant_capsule_id,
-                "claimant_process_id": os.getpid(),
-                "provider_project": operation["provider_project"],
-                "profile_id": operation["profile_id"],
-                "runtime_domain": runtime_domain,
-                "operation_record_sha256": operation_hash,
-                "source_part_manifest_bindings": source_part_manifest_bindings,
-            }
-            content = canonical_json_bytes(document)
-            claims_directory = self._ensure_history_successor_claims_directory()
-            path = claims_directory / f"{retry_event_id}.json"
-            try:
-                self._write_create_only(path, content)
-            except FileExistsError as exc:
-                existing = self._read_history_successor_claim(path)
-                if existing == content:
-                    return content
-                raise ResumeRejectedError(
-                    "history successor retry event is already claimed"
-                ) from exc
-            return content
-
-    def _ensure_history_successor_claims_directory(self) -> Path:
-        directory = self._coordination_directory / self._HISTORY_SUCCESSOR_CLAIMS_DIRECTORY_NAME
-        try:
-            directory.mkdir(mode=0o700, exist_ok=True)
-            mode = directory.lstat().st_mode
-        except OSError as exc:
-            raise ResumeRejectedError("history successor claims directory is unavailable") from exc
-        if not stat.S_ISDIR(mode) or directory.is_symlink():
-            raise ResumeRejectedError("history successor claims directory is unsafe")
-        return directory
-
-    @staticmethod
-    def _read_history_successor_claim(path: Path) -> bytes:
-        try:
-            mode = path.lstat().st_mode
-            if not stat.S_ISREG(mode):
-                raise ResumeRejectedError("history successor claim path is unsafe")
-            return path.read_bytes()
-        except FileNotFoundError as exc:
-            raise ResumeRejectedError("history successor claim disappeared") from exc
-        except OSError as exc:
-            raise ResumeRejectedError("history successor claim cannot be inspected") from exc
 
     def _active_attempts_present(self) -> bool:
         if (self._runtime_directory / self._LEGACY_ACTIVE_ATTEMPT_NAME).exists():

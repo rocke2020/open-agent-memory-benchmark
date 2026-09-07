@@ -745,6 +745,8 @@ document = {
     "schema_version": 1,
     "resolved_plan_hash": plan_hash,
     "cell_id": cell,
+    "execution_configuration_hash": "e" * 64,
+    "execution_configuration_family_hash": "f" * 64,
     "source_manifest_sha256s": [f"{index + 1:064x}" for index in range(source_count)],
     "reusable_ingestion_plan_ids": [f"reusable-{index}" for index in range(reusable)],
     "quarantined_ingestion_plan_ids": [
@@ -1334,6 +1336,14 @@ def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path
     }
 
 
+def test_run_progress_has_no_legacy_history_successor_path() -> None:
+    source = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'progress_records(root, "history-retries"' not in source
+    assert "successor_history_attempt_ordinal" not in source
+    assert 'record.get("history_attempt_ordinal") != 1' in source
+
+
 def test_run_reports_live_cell_progress_while_provider_is_running(tmp_path: Path) -> None:
     root, env, _trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
@@ -1898,6 +1908,94 @@ def test_run_full_resume_recovers_providers_concurrently_and_composes_report(
     assert state["attempt"] == 1
     assert [len(cell["parts"]) for cell in state["cells"]] == [2, 2, 2]
     assert all(cell["final_capsule_root"] for cell in state["cells"])
+
+
+def test_run_full_resume_reconciles_published_part_before_dispatch(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    source_roots = _write_interrupted_full_result_map(root)
+    full_root = root / "outputs" / "full-test" / "lme60-test"
+    results = full_root / "results"
+    state_path = results / "full-resume-state.json"
+    cells = ("hindsight-lme60", "mem0-lme60", "openviking-lme60")
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_name": "full_test_resume_state",
+                "schema_version": 1,
+                "resolved_plan_hash": RESOLVED_PLAN_HASH,
+                "attempt": 1,
+                "cells": [
+                    {
+                        "cell_id": cell,
+                        "parts": [str(source_root)],
+                        "final_capsule_root": None,
+                        "final_validation": None,
+                    }
+                    for cell, source_root in zip(cells, source_roots, strict=True)
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    recovered_cell = cells[0]
+    recovered_provider = "hindsight"
+    recovered_output = full_root / "capsules" / "resume" / "1" / recovered_provider
+    recovered_capsule = recovered_output / f"{recovered_cell}-recovery-capsule"
+    recovered_capsule.mkdir(parents=True)
+    (recovered_capsule / "fake-completed").write_text("completed\n", encoding="utf-8")
+    (results / f"resume-1-{recovered_provider}.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "live_run_result_map",
+                "schema_version": 1,
+                "resolved_plan_hash": RESOLVED_PLAN_HASH,
+                "status": "completed",
+                "cells": [
+                    {
+                        "cell_id": recovered_cell,
+                        "status": "completed",
+                        "capsule_root": str(recovered_capsule),
+                        "detail": None,
+                    }
+                ],
+                "capsule_roots": {recovered_cell: str(recovered_capsule)},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    recovery_calls = [
+        line
+        for line in calls
+        if "oamb run" in line
+        and "--recover-from" in line
+        and "--recovery-analysis-output" not in line
+    ]
+    assert not any(f"--cell {recovered_cell}" in line for line in recovery_calls)
+    hindsight_analysis = next(
+        line
+        for line in calls
+        if "--recovery-analysis-output" in line and f"--cell {recovered_cell}" in line
+    )
+    assert hindsight_analysis.count("--recover-from") == 2
+    final_state = json.loads(state_path.read_bytes())
+    assert final_state["attempt"] == 2
+    assert [len(cell["parts"]) for cell in final_state["cells"]] == [2, 2, 2]
 
 
 def test_run_full_resume_obeys_two_provider_cap_while_preserving_overlap(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import signal
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -414,6 +415,9 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
 
     def record_memory_factory(**kwargs: object) -> object:
         assert kwargs["recovery_parts"] == (tmp_path / "predecessor",)
+        assert kwargs["recovery_execution_configuration_family_hash"] == canonical_sha256(
+            ["current-execution-family"]
+        )
         memory_factory = kwargs["memory_factory"]
         assert callable(memory_factory)
         memory_factory(object(), object())
@@ -440,6 +444,10 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
         observed_at=NOW,
         code_revision="source-tree-test",
         recovery_parts=(tmp_path / "predecessor",),
+    )
+    built = replace(
+        built,
+        recovery_execution_configuration_family_hash=canonical_sha256(["current-execution-family"]),
     )
 
     live.execute_live_cell(built)
@@ -1395,6 +1403,35 @@ def test_three_isolated_live_cells_are_dispatched_in_parallel(
     assert tuple(item.capsule_root for item in completed) == tuple(
         cell.capsule_root for cell in cells
     )
+
+
+@pytest.mark.parametrize("pointer_name", ("active-operation", "active-provider-attempt"))
+def test_recovery_cell_build_rejects_active_lifecycle_ownership(
+    tmp_path: Path,
+    pointer_name: str,
+) -> None:
+    from oamb import live
+
+    runtime = (tmp_path / "provider-runtime").resolve()
+    lifecycle_domain = runtime / "lifecycle-domains" / "hindsight"
+    lifecycle_domain.mkdir(parents=True)
+    (lifecycle_domain / pointer_name).write_text("active\n", encoding="utf-8")
+
+    with pytest.raises(live.LiveConfigurationError, match="lifecycle domain is active"):
+        live.build_live_cell(
+            plan=_lme60_plan(),
+            cell_id="hindsight-lme60",
+            output_root=tmp_path / "recovery-capsules",
+            provider_runtime_directory=runtime,
+            provider_project_id="oamb-providers-test-live",
+            provider_evidence=_provider_evidence(),
+            environment=_environment(),
+            run_label="recovery-active-owner",
+            observed_at=NOW,
+            code_revision="source-tree-test",
+            requested_case_manifest_entry_ids=(canonical_sha256(["remaining-case"]),),
+            recovery_parts=(tmp_path / "validated-aborted-part",),
+        )
 
 
 def test_parallel_live_cells_drain_after_root_sigterm(

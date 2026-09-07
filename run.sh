@@ -103,83 +103,28 @@ def progress_records(root, folder, schema, versions, identity):
 
 def history_rebuild_attempts(root, run_id, provider):
     try:
-        histories = {}
-        history_positions = set()
+        if not (root / "source/parts").is_dir():
+            return "0"
+        histories = set()
+        plan_ids = set()
         for record in progress_records(root, "history-attempts", "history_attempt_record", {1}, "history_attempt_id"):
             occurrence = record.get("ingestion_occurrence_id")
-            ordinal = record.get("history_attempt_ordinal")
+            plan_id = record.get("ingestion_plan_id")
             if (
-                record.get("run_id") != run_id or record.get("memory_system_id") != provider
+                record.get("run_id") != run_id
+                or record.get("execution_run_id") != run_id
+                or record.get("memory_system_id") != provider
                 or not sha256(occurrence) or occurrence in histories
-                or not sha256(record.get("ingestion_plan_id"))
-                or type(ordinal) is not int or ordinal not in {1, 2, 3}
-                or (record["ingestion_plan_id"], ordinal) in history_positions
+                or not sha256(plan_id) or plan_id in plan_ids
+                or record.get("history_attempt_ordinal") != 1
+                or record.get("previous_retry_event_id") is not None
+                or record.get("admission_claim_raw_ref") is not None
                 or record.get("status") not in {"ready", "retryable_failed_settled", "failed", "unknown", "cancelled"}
-                or (ordinal > 1 and not sha256(record.get("previous_retry_event_id")))
             ):
                 raise ValueError("invalid history progress record")
-            histories[occurrence] = record
-            history_positions.add((record["ingestion_plan_id"], ordinal))
-        successors = {}
-        for event in progress_records(root, "history-retries", "history_retry_event", {1}, "history_retry_event_id"):
-            scheduled = event.get("retry_scheduled")
-            ordinal = event.get("failed_history_attempt_ordinal")
-            limit = event.get("max_retries_per_operation")
-            occurrence = event.get("successor_ingestion_occurrence_id")
-            if (
-                event.get("run_id") != run_id or type(scheduled) is not bool
-                or not sha256(event.get("ingestion_plan_id"))
-                or type(ordinal) is not int or type(limit) is not int
-                or type(event.get("retry_ordinal")) is not int
-                or limit not in {0, 1, 2} or event["retry_ordinal"] != ordinal
-            ):
-                raise ValueError("invalid history retry event")
-            if not scheduled:
-                if ordinal != limit + 1 or any(event.get(key) is not None for key in (
-                    "successor_ingestion_occurrence_id", "successor_execution_run_id",
-                    "successor_history_attempt_ordinal", "backoff_seconds",
-                )):
-                    raise ValueError("invalid exhausted history event")
-                continue
-            if (
-                ordinal not in {1, 2} or ordinal > limit
-                or not sha256(occurrence) or occurrence in successors
-                or event.get("successor_execution_run_id") != run_id
-                or type(event.get("successor_history_attempt_ordinal")) is not int
-                or event["successor_history_attempt_ordinal"] != ordinal + 1
-                or type(event.get("backoff_seconds")) is not int
-                or event.get("backoff_seconds") != ordinal
-            ):
-                raise ValueError("invalid pending history successor")
-            successors[occurrence] = event
-            record = histories.get(occurrence)
-            if record and (
-                record["ingestion_plan_id"] != event["ingestion_plan_id"]
-                or record["history_attempt_ordinal"] != ordinal + 1
-                or record["previous_retry_event_id"] != event["history_retry_event_id"]
-            ):
-                raise ValueError("history successor evidence disagrees")
-        admitted = {key for key, value in histories.items() if value["history_attempt_ordinal"] > 1}
-        has_carried_parts = (root / "source/parts").exists()
-        if successors or has_carried_parts:
-            allocations = set()
-            for intent in progress_records(root, "attempt-intents", "attempt_intent_record", {1, 3}, "attempt_id"):
-                if intent.get("stage") != "scope_allocate":
-                    continue
-                occurrence = intent.get("parent_id")
-                if (
-                    intent.get("parent_kind") != "ingestion_plan" or not sha256(occurrence)
-                    or occurrence in allocations
-                    or (intent["schema_version"] == 3 and (
-                        intent.get("scope_kind") != "run" or intent.get("scope_id") != run_id
-                    ))
-                ):
-                    raise ValueError("ambiguous history scope admission")
-                allocations.add(occurrence)
-            if has_carried_parts and allocations - histories.keys() - successors.keys():
-                raise ValueError("carried successor has no local ordinal evidence yet")
-            admitted.update(allocations & successors.keys())
-        return str(len(admitted))
+            histories.add(occurrence)
+            plan_ids.add(plan_id)
+        return str(len(histories))
     except (OSError, ValueError, KeyError, TypeError):
         return "unavailable"
 
@@ -581,6 +526,36 @@ append_resume_part() {
   '
 }
 
+reconcile_resume_worker_results() {
+  local completed_attempt attempt cell provider result_map capsule_root expected_output
+  local capsule_parent expected_parent validation
+  completed_attempt="$(jq -er '.attempt' "$RESUME_STATE")"
+  for ((attempt = 1; attempt <= completed_attempt; attempt++)); do
+    for cell in "${CELLS[@]}"; do
+      provider="${cell%-lme60}"
+      result_map="$MODE_DIR/results/resume-$attempt-$provider.json"
+      [[ -e "$result_map" ]] || continue
+      [[ -f "$result_map" && ! -L "$result_map" ]] || \
+        die "resume worker result map is not a regular file: $result_map"
+      capsule_root="$(resume_result_root "$result_map" "$cell")" || \
+        die "resume worker result map is malformed or unbound: $result_map"
+      expected_output="$MODE_DIR/capsules/resume/$attempt/$provider"
+      [[ -d "$capsule_root" && ! -L "$capsule_root" ]] || \
+        die "resume worker capsule is missing or malformed: $capsule_root"
+      [[ -d "$expected_output" && ! -L "$expected_output" ]] || \
+        die "resume worker output root is missing or malformed: $expected_output"
+      capsule_parent="$(cd "$(dirname "$capsule_root")" && pwd -P)"
+      expected_parent="$(cd "$expected_output" && pwd -P)"
+      [[ "$capsule_parent" == "$expected_parent" ]] || \
+        die "resume worker capsule is outside its attempt-owned output root: $capsule_root"
+      validation="$MODE_DIR/validations/resume-reconcile-$attempt-$provider-$(date -u +%Y%m%d-%H%M%S)-$$.json"
+      validate_capsule_result "$capsule_root" "$validation" || \
+        die "resume worker capsule reconciliation failed: $capsule_root"
+      append_resume_part "$cell" "$capsule_root"
+    done
+  done
+}
+
 complete_resume_cell() {
   local cell=$1
   local capsule_root=$2
@@ -768,9 +743,17 @@ compose_resume_cell() {
   local provider=$2
   local output="$MODE_DIR/capsules/composed/$provider-$RESUME_ATTEMPT"
   local validation="$MODE_DIR/validations/resume-$RESUME_ATTEMPT-$provider.json"
+  local analysis="$MODE_DIR/results/resume-analysis-$RESUME_ATTEMPT-$provider.json"
+  local execution_hash execution_family_hash
   local part
+  execution_hash="$(jq -er '.execution_configuration_hash' "$analysis")" || \
+    die "resume analysis lacks execution configuration hash: $provider"
+  execution_family_hash="$(jq -er '.execution_configuration_family_hash' "$analysis")" || \
+    die "resume analysis lacks execution configuration family hash: $provider"
   local -a arguments=(
     uv run --locked oamb capsule compose --plan "$PLAN" --cell "$cell" --output "$output"
+    --execution-configuration-hash "$execution_hash"
+    --execution-configuration-family-hash "$execution_family_hash"
   )
   while IFS= read -r part; do
     arguments+=(--part "$part")
@@ -802,6 +785,7 @@ run_full_resume() {
     die "another full-test resume owns the local state: $RESUME_LOCK"
   trap 'run_exit_code=$?; release_resume_lock; finish_logging "$run_exit_code"' EXIT
   initialize_resume_state
+  reconcile_resume_worker_results
   increment_resume_attempt
   provider_cap="$(jq -er '
     .execution.max_parallel_providers_per_dataset |

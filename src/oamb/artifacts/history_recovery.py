@@ -7,14 +7,21 @@ from pathlib import Path
 
 from oamb.artifacts.atomic import atomic_write_bytes, read_regular_file
 from oamb.contracts.evidence import (
-    HistoryAttemptRecord,
     HistoryRetryAllowance,
     HistoryRetryCarryRecord,
-    HistoryRetryEvent,
     history_retry_carry_id,
 )
 
-from .composition import CapsuleCompositionError, _load_part, _part_binding, _PartSnapshot
+from .composition import (
+    CapsuleCompositionError,
+    _aborted_group_is_terminal_known,
+    _compatibility_family_key,
+    _contributions_by_plan,
+    _load_part,
+    _part_binding,
+    _PartSnapshot,
+    _require_attempted_groups_recoverable,
+)
 
 
 def prepare_history_recovery(
@@ -25,8 +32,9 @@ def prepare_history_recovery(
     selected_ingestion_plan_ids: tuple[str, ...],
     max_retries_per_operation: int,
     memory_system_id: str | None,
-) -> tuple[HistoryRetryCarryRecord, tuple[HistoryRetryEvent, ...]]:
-    """Embed validated predecessors and derive the only resumable retry allowances."""
+    execution_configuration_family_hash: str,
+) -> HistoryRetryCarryRecord:
+    """Embed terminal-known ABORTED predecessors for fresh-scope reconstruction."""
 
     if not part_roots:
         raise CapsuleCompositionError("history recovery requires predecessor parts")
@@ -59,75 +67,38 @@ def prepare_history_recovery(
         if len(derived_memory_ids) != 1:
             raise CapsuleCompositionError("history recovery memory-system identity is not singular")
         memory_system_id = next(iter(derived_memory_ids))
-    _require_recovery_compatibility(evidence_parts, selected_ingestion_plan_ids, memory_system_id)
+    target_execution_configuration_family_hash = execution_configuration_family_hash
+    _require_recovery_compatibility(
+        evidence_parts,
+        selected_ingestion_plan_ids,
+        memory_system_id,
+        target_execution_configuration_family_hash,
+    )
+    _require_closed_recovery_graph(evidence_parts, selected_ingestion_plan_ids)
     attempts = tuple(item for part in evidence_parts for item in part.history_attempts)
-    events = tuple(item for part in evidence_parts for item in part.history_retry_events)
     if len({item.history_attempt_id for item in attempts}) != len(attempts):
         raise CapsuleCompositionError("duplicate history attempt evidence")
-    if len({item.history_retry_event_id for item in events}) != len(events):
-        raise CapsuleCompositionError("duplicate history retry event evidence")
-    pending: list[HistoryRetryEvent] = []
     allowances: list[HistoryRetryAllowance] = []
     for plan_id in sorted(selected_ingestion_plan_ids):
-        plan_attempts = tuple(
-            sorted(
-                (item for item in attempts if item.ingestion_plan_id == plan_id),
-                key=lambda item: item.history_attempt_ordinal,
-            )
-        )
-        if not plan_attempts:
-            allowances.append(
-                HistoryRetryAllowance(
-                    ingestion_plan_id=plan_id,
-                    next_history_attempt_ordinal=1,
-                    execution_run_id=run_id,
-                    previous_retry_event_id=None,
-                    predecessor_history_attempt_id=None,
-                    consumed_retries=0,
-                )
-            )
-            continue
-        _require_history_chain(plan_attempts, events, max_retries_per_operation)
-        last = plan_attempts[-1]
-        if last.status == "ready":
-            continue
-        if last.status != "retryable_failed_settled":
-            raise CapsuleCompositionError("history group has no retryable settled predecessor")
-        matches = tuple(
-            item
-            for item in events
-            if item.ingestion_plan_id == plan_id
-            and item.failed_history_attempt_id == last.history_attempt_id
-        )
-        if len(matches) != 1 or not matches[0].retry_scheduled:
-            raise CapsuleCompositionError("history group has no single pending scheduled retry")
-        event = matches[0]
-        if event.max_retries_per_operation != max_retries_per_operation:
-            raise CapsuleCompositionError("history retry allowance differs from current policy")
-        if any(
-            item.history_attempt_ordinal == event.successor_history_attempt_ordinal
-            for item in plan_attempts
+        plan_attempts = tuple(item for item in attempts if item.ingestion_plan_id == plan_id)
+        if plan_attempts and not _aborted_group_is_terminal_known(
+            evidence_parts,
+            plan_id,
+            plan_attempts,
         ):
-            raise CapsuleCompositionError("scheduled history successor was already admitted")
-        if any(
-            intent.parent_id == event.successor_ingestion_occurrence_id
-            for part in evidence_parts
-            for intent in part.intents
-        ):
-            raise CapsuleCompositionError("scheduled history successor has dispatch intent")
-        assert event.successor_execution_run_id is not None
-        assert event.successor_history_attempt_ordinal is not None
+            raise CapsuleCompositionError(
+                "history group is not eligible for terminal-known fresh-scope rebuild"
+            )
         allowances.append(
             HistoryRetryAllowance(
                 ingestion_plan_id=plan_id,
-                next_history_attempt_ordinal=event.successor_history_attempt_ordinal,
-                execution_run_id=event.successor_execution_run_id,
-                previous_retry_event_id=event.history_retry_event_id,
-                predecessor_history_attempt_id=last.history_attempt_id,
-                consumed_retries=event.retry_ordinal,
+                next_history_attempt_ordinal=1,
+                execution_run_id=run_id,
+                previous_retry_event_id=None,
+                predecessor_history_attempt_id=None,
+                consumed_retries=0,
             )
         )
-        pending.append(event)
 
     ordered_parts = tuple(sorted(parts, key=lambda item: item.manifest.capsule_id))
     bindings = tuple(_part_binding(part) for part in ordered_parts)
@@ -139,52 +110,43 @@ def prepare_history_recovery(
         "allowances": tuple(allowances),
         "retry_policy_hash": ordered_parts[0].partition.retry_policy_hash,
         "max_retries_per_operation": max_retries_per_operation,
+        "execution_configuration_family_hash": (target_execution_configuration_family_hash),
     }
     carry = HistoryRetryCarryRecord.model_validate(
         {"carry_record_id": history_retry_carry_id(fields), **fields}
     )
     _embed_parts(ordered_parts, Path(capsule_root))
-    return carry, tuple(sorted(pending, key=lambda item: item.ingestion_plan_id))
+    return carry
 
 
-def _require_history_chain(
-    attempts: tuple[HistoryAttemptRecord, ...],
-    events: tuple[HistoryRetryEvent, ...],
-    max_retries_per_operation: int,
+def _require_closed_recovery_graph(
+    evidence_parts: tuple[_PartSnapshot, ...],
+    selected_ingestion_plan_ids: tuple[str, ...],
 ) -> None:
-    ordinals = tuple(item.history_attempt_ordinal for item in attempts)
-    if ordinals != tuple(range(1, len(attempts) + 1)):
-        raise CapsuleCompositionError("history attempt ordinals do not form one chain")
-    first = attempts[0]
-    if any(
-        item.max_retries_per_operation != max_retries_per_operation
-        or item.ingestion_plan_id != first.ingestion_plan_id
-        or item.memory_system_id != first.memory_system_id
-        or item.runtime_binding_hash != first.runtime_binding_hash
-        or item.retry_policy_hash != first.retry_policy_hash
-        or item.history_input_hash != first.history_input_hash
-        for item in attempts
-    ):
-        raise CapsuleCompositionError("history attempt chain identity drifted")
-    events_by_id = {item.history_retry_event_id: item for item in events}
-    for previous, current in zip(attempts, attempts[1:], strict=False):
-        event = events_by_id.get(current.previous_retry_event_id or "")
-        if (
-            event is None
-            or not event.retry_scheduled
-            or event.failed_history_attempt_id != previous.history_attempt_id
-            or event.successor_ingestion_occurrence_id != current.ingestion_occurrence_id
-            or event.successor_execution_run_id != current.execution_run_id
-            or event.successor_history_attempt_ordinal != current.history_attempt_ordinal
-        ):
-            raise CapsuleCompositionError("history attempt chain omits its exact retry event")
+    contributions_by_plan = _contributions_by_plan(evidence_parts)
+    _require_attempted_groups_recoverable(evidence_parts, contributions_by_plan)
+    selected_plan_ids = set(selected_ingestion_plan_ids)
+    if selected_plan_ids.intersection(contributions_by_plan):
+        raise CapsuleCompositionError("completed history group cannot be rebuilt")
+    source_selected_plan_ids = {
+        plan_id for part in evidence_parts for plan_id in part.partition.selected_ingestion_plan_ids
+    }
+    if source_selected_plan_ids - selected_plan_ids - set(contributions_by_plan):
+        raise CapsuleCompositionError(
+            "history recovery source contains an incomplete unselected group"
+        )
 
 
 def _require_recovery_compatibility(
     parts: tuple[_PartSnapshot, ...],
     selected_plan_ids: tuple[str, ...],
     memory_system_id: str,
+    execution_configuration_family_hash: str,
 ) -> None:
+    if any(
+        _compatibility_family_key(part) != execution_configuration_family_hash for part in parts
+    ):
+        raise CapsuleCompositionError("history recovery execution configuration family drifted")
     retry_hashes = {part.partition.retry_policy_hash for part in parts}
     if len(retry_hashes) != 1:
         raise CapsuleCompositionError("history recovery retry policy drifted")

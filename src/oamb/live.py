@@ -141,6 +141,7 @@ class LiveCell:
     requested_case_manifest_entry_ids: tuple[str, ...] = ()
     continuation: InitializedContinuation | None = None
     recovery_parts: tuple[Path, ...] = ()
+    recovery_execution_configuration_family_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,6 +626,7 @@ def live_composition_target(cell: LiveCell) -> CapsuleCompositionTarget:
 
     from oamb.artifacts.composition import (
         CapsuleCompositionTarget,
+        build_composition_execution_configuration_family_hash,
         build_composition_execution_configuration_hash,
     )
 
@@ -646,6 +648,16 @@ def live_composition_target(cell: LiveCell) -> CapsuleCompositionTarget:
         budget=cell.control.budget,
         role_bindings=cell.control.role_bindings,
     )
+    execution_family_hash = build_composition_execution_configuration_family_hash(
+        partition=partition,
+        case_manifest=case_manifest,
+        dataset_manifest=dataset_manifest,
+        runtime_bindings=runtime_bindings,
+        run_spec=cell.control.run_spec,
+        preflight=cell.control.preflight_record,
+        budget=cell.control.budget,
+        role_bindings=cell.control.role_bindings,
+    )
     return CapsuleCompositionTarget(
         resolved_plan_hash=partition.resolved_plan_hash,
         cell_spec_hash=partition.cell_spec_hash,
@@ -653,6 +665,7 @@ def live_composition_target(cell: LiveCell) -> CapsuleCompositionTarget:
         budget_policy_hash=partition.budget_policy_hash,
         retry_policy_hash=partition.retry_policy_hash,
         execution_configuration_hash=execution_hash,
+        execution_configuration_family_hash=execution_family_hash,
     )
 
 
@@ -680,6 +693,11 @@ def execute_live_cell(
     stop_event: Any | None = None,
 ) -> NativeRunArtifacts:
     """Run one already-closed cell through the generic native vertical slice."""
+
+    if cell.recovery_parts and cell.recovery_execution_configuration_family_hash is None:
+        raise LiveConfigurationError(
+            "history recovery requires the current execution configuration family hash"
+        )
 
     from oamb.artifacts.store import ArtifactStore
     from oamb.memory_systems.hindsight.adapter import HindsightAdapter
@@ -791,6 +809,9 @@ def execute_live_cell(
         partition=partition,
         stop_event=stop_event,
         recovery_parts=cell.recovery_parts,
+        recovery_execution_configuration_family_hash=(
+            cell.recovery_execution_configuration_family_hash
+        ),
     )
 
 
