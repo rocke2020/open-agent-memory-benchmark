@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 import oamb.config.doctor as doctor_module
-from oamb.config.benchmark import BenchmarkConfiguration, load_benchmark_configuration
+from oamb.config.benchmark import (
+    BenchmarkConfiguration,
+    EvaluationControls,
+    load_benchmark_configuration,
+)
 from oamb.config.doctor import build_resolved_plan
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.specifications import ModelRole, SourceEvidenceBinding, SourceEvidenceKind
@@ -68,24 +72,38 @@ def _environment() -> dict[str, str]:
     }
 
 
-@pytest.mark.parametrize(
-    ("retries", "operations", "owners"),
-    ((0, 3_307, 9_019), (1, 6_433, 17_797), (2, 9_559, 26_575)),
-)
-def test_lme60_resolved_execution_freezes_whole_history_budget(
-    retries: int,
-    operations: int,
-    owners: int,
-) -> None:
-    plan = build_resolved_plan(_configuration(retries=retries))
+def test_lme60_resolved_execution_freezes_whole_history_budget() -> None:
+    plan = build_resolved_plan(_configuration(retries=2))
 
-    assert plan.execution.ingestion_retry_unit == "whole_history_through_ready_projection"
-    assert plan.execution.ingestion_recovery_strategy == "fresh_scope_full_history_rebuild_v2"
-    assert plan.execution.per_cell_retry_eligible_operation_count == 3_126
-    assert plan.execution.per_cell_max_operation_attempt_count == operations
-    assert plan.execution.per_cell_max_owner_authorization_count == owners
-    assert plan.execution.comparison_max_operation_attempt_count == operations * 3
-    assert plan.execution.comparison_max_owner_authorization_count == owners * 3
+    assert plan.execution.ingestion_retry_unit == "batch_dispatch"
+    assert plan.execution.ingestion_recovery_strategy == "same_scope_batch_retry_skip_v1"
+    assert plan.execution.extraction_max_retries == 10
+    assert plan.execution.model_max_attempts == 6
+    assert plan.execution.model_transport_max_retries == 2
+    assert plan.execution.per_cell_max_operation_attempt_count == 10_999
+    assert plan.execution.per_cell_max_owner_authorization_count == 28_015
+    assert plan.execution.comparison_max_operation_attempt_count == 32_997
+    assert plan.execution.comparison_max_owner_authorization_count == 84_045
+
+
+@pytest.mark.parametrize(
+    "controls",
+    (
+        EvaluationControls(1, 900, 10, 6, 2),
+        EvaluationControls(2, 900, 9, 6, 2),
+        EvaluationControls(2, 900, 10, 5, 2),
+        EvaluationControls(2, 900, 10, 6, 1),
+    ),
+)
+def test_resolved_execution_parser_rejects_self_consistent_non_profile_controls(
+    controls: EvaluationControls,
+) -> None:
+    document = doctor_module._execution_document(
+        doctor_module._resolve_execution("lme60", controls)
+    )
+
+    with pytest.raises(ValueError, match="layered retry"):
+        doctor_module._parse_execution(document, selection="lme60")
 
 
 def test_resolved_execution_uses_uneven_manifest_inventory(
@@ -103,9 +121,9 @@ def test_resolved_execution_uses_uneven_manifest_inventory(
 
     assert execution.per_cell_base_operation_count == 32
     assert execution.per_cell_base_owner_authorization_count == 49
-    assert execution.per_cell_retry_eligible_operation_count == 22
-    assert execution.per_cell_max_operation_attempt_count == 76
-    assert execution.per_cell_max_owner_authorization_count == 121
+    assert execution.per_cell_retry_eligible_operation_count == 13
+    assert execution.per_cell_max_operation_attempt_count == 148
+    assert execution.per_cell_max_owner_authorization_count == 193
 
 
 def test_live_budget_expands_ingestion_stages_and_internal_owners(tmp_path: Path) -> None:
@@ -131,19 +149,19 @@ def test_live_budget_expands_ingestion_stages_and_internal_owners(tmp_path: Path
 
     assert operations == {
         "runtime_resolve": 1,
-        "scope_allocate": 180,
+        "scope_allocate": 60,
         "memory_ingest": 8_478,
-        "memory_readiness": 180,
-        "memory_projection": 180,
+        "memory_readiness": 60,
+        "memory_projection": 60,
         "pre_query_projection": 60,
         "memory_query": 60,
         "post_query_projection": 60,
     }
     assert roles[bindings[ModelRole.MEMORY_EXTRACTION]] == 8_478
     assert roles[bindings[ModelRole.EMBEDDING]] == 8_538
-    assert roles[bindings[ModelRole.ANSWER]] == 180
-    assert roles[bindings[ModelRole.JUDGE]] == 180
-    assert budget.max_attempts == 26_575
+    assert roles[bindings[ModelRole.ANSWER]] == 1_080
+    assert roles[bindings[ModelRole.JUDGE]] == 1_080
+    assert budget.max_attempts == 28_015
 
 
 def test_old_dispatch_retry_execution_document_is_not_reinterpreted(tmp_path: Path) -> None:

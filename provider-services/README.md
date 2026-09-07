@@ -32,7 +32,7 @@ commit. Dirty worktree content and the checkout's current branch are excluded
 because the build input is a digest-checked `git archive` of that commit.
 The build-input fingerprint additionally binds the Dockerfile, dependency lock, inspector, extraction-response normalization, Docker ignore rules, and fixed source archive before an existing local image may be reused.
 
-The Mem0 image includes a small [extraction-response normalization](mem0/extraction_response.py) before native embedding and storage in both synchronous and asynchronous ingestion. A decoded `memory` value may contain text strings or text-bearing objects, individually or in an array; the normalizer wraps strings as `text` objects and preserves existing object fields and text bytes. Empty arrays remain valid empty extraction; invalid or blank entries reject the entire batch before storage. This prevents the pinned parser's `.get()` crash without changing extraction prompts, models, attribution, or retry policy.
+The Mem0 image includes a small [extraction-response normalization and retry patch](mem0/extraction_response.py) before native embedding and storage in both synchronous and asynchronous ingestion. A decoded `memory` value may contain text strings or text-bearing objects, individually or in an array; the normalizer wraps strings as `text` objects and preserves existing object fields and text bytes. Empty arrays remain valid empty extraction and return immediately. Generation, JSON parsing, or normalized-schema failures retry from the shared `OAMB_EXTRACTION_MAX_RETRIES` input and raise after exhaustion instead of becoming an empty extraction.
 
 ## State and safety boundary
 

@@ -57,7 +57,7 @@ def test_ready_history_releases_questions_while_other_histories_keep_ingesting(
         await question_releases[case_id].wait()
         return (f"record-{case_id}",)
 
-    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
     monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
 
     async def scenario() -> None:
@@ -159,7 +159,7 @@ def test_questions_sharing_one_ready_history_overlap_without_reingestion(
         await release.wait()
         return (case.case_manifest_entry_id,)
 
-    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
     monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
 
     async def scenario() -> None:
@@ -230,7 +230,7 @@ def test_fatal_history_stops_queued_admission_but_active_sibling_settles(
             sibling_settled.set()
         return (f"record-{plan_id}",), {plan_id: object()}
 
-    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -279,6 +279,76 @@ def test_fatal_history_stops_queued_admission_but_active_sibling_settles(
     asyncio.run(scenario())
 
 
+def test_fatal_history_logs_original_reason_before_active_sibling_settles(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    from oamb.runtime import native_run
+
+    both_started = asyncio.Event()
+    fatal_raised = asyncio.Event()
+    release_sibling = asyncio.Event()
+
+    async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
+        plan = kwargs["plan"]
+        if plan.ingestion_plan_id == "plan-a":
+            await both_started.wait()
+            fatal_raised.set()
+            raise ValueError("raw-planning-reason")
+        both_started.set()
+        await release_sibling.wait()
+        return ("record-plan-b",), {"plan-b": object()}
+
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
+
+    async def scenario() -> None:
+        plans = tuple(
+            SimpleNamespace(
+                ingestion_plan_id=f"plan-{suffix}",
+                ordered_case_manifest_entry_ids=(),
+            )
+            for suffix in ("a", "b")
+        )
+        state = SimpleNamespace(
+            control=SimpleNamespace(
+                max_parallel_history_ingestions=2,
+                max_parallel_questions=2,
+            )
+        )
+        run = asyncio.create_task(
+            native_run._execute_history_question_pipeline(
+                state=cast(Any, state),
+                workload=cast(Any, object()),
+                memory=cast(Any, object()),
+                answer_model=cast(Any, object()),
+                judge_model=None,
+                plans=cast(Any, plans),
+                case_plans=(),
+                memory_system_id="mem0",
+                runtime_binding_hash="runtime",
+                adapter_profile_id="adapter",
+                visible_evidence_policy=cast(Any, object()),
+                answer_role_binding_id="answer",
+                judge_role_binding_id=None,
+            )
+        )
+
+        await asyncio.wait_for(fatal_raised.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not run.done()
+        assert (
+            "oamb: provider=mem0 history=plan-a status=failed, "
+            "reason=ValueError: raw-planning-reason; draining admitted operations"
+            in capfd.readouterr().err
+        )
+
+        release_sibling.set()
+        with pytest.raises(ValueError, match="raw-planning-reason"):
+            await run
+
+    asyncio.run(scenario())
+
+
 def test_malformed_history_result_stops_queued_admission_before_releasing_the_permit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -294,7 +364,7 @@ def test_malformed_history_result_stops_queued_admission_before_releasing_the_pe
             return (), {plan_id: object()}
         return (f"record-{plan_id}",), {plan_id: object()}
 
-    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -351,7 +421,7 @@ def test_malformed_question_result_stops_queued_admission_before_releasing_the_p
             return ()
         return (f"record-{case_id}",)
 
-    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
     monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
 
     async def scenario() -> None:
@@ -415,7 +485,7 @@ def test_parent_cancellation_drains_active_histories_and_preserves_cleanup_error
             raise
         raise AssertionError("unreachable")
 
-    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -485,7 +555,7 @@ def test_parent_cancellation_preserves_every_sibling_cancellation_evidence_error
             ) from None
         raise AssertionError("unreachable")
 
-    monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
 
     async def scenario() -> None:
         plans = tuple(
@@ -629,7 +699,7 @@ def test_source_writes_are_serial_within_history_and_overlap_across_histories(
     plans = (make_plan("a"), make_plan("b"))
     memory = ObservedSourceMemory(ArtifactStore(tmp_path / "raw"))
     serial_ingest = native_run._execute_ingestion_plans_serial
-    history_ingest = native_run._execute_history_with_rebuild
+    history_ingest = native_run._execute_history
     serial_states = {
         plan.ingestion_plan_id: native_run._NativeExecutionState(
             store=ArtifactStore(tmp_path / plan.ingestion_plan_id),
@@ -648,7 +718,7 @@ def test_source_writes_are_serial_within_history_and_overlap_across_histories(
 
     monkeypatch.setattr(
         native_run,
-        "_execute_history_with_rebuild",
+        "_execute_history",
         ingest_one_with_isolated_state,
     )
 
@@ -833,7 +903,7 @@ def test_limits_one_and_two_return_the_same_canonical_semantics(
                 case_b_started.set()
             return (f"record-{case.case_manifest_entry_id}",)
 
-        monkeypatch.setattr(native_run, "_execute_history_with_rebuild", ingest_one)
+        monkeypatch.setattr(native_run, "_execute_history", ingest_one)
         monkeypatch.setattr(native_run, "_execute_cases_serial", execute_one_question)
         state = SimpleNamespace(
             control=SimpleNamespace(

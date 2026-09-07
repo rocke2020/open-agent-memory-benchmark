@@ -119,6 +119,7 @@ class OpenVikingRestAdapter:
         self._allocation_lock = asyncio.Lock()
         self._planned_batches: dict[str, _PlannedBatch] = {}
         self._attempted_scopes: set[str] = set()
+        self._partial_scopes: set[str] = set()
         self._attempted_wrong_peer_write_probes: set[tuple[str, str, str]] = set()
         self._wrong_peer_probe_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._accepting_wrong_peer_probes = True
@@ -377,8 +378,14 @@ class OpenVikingRestAdapter:
             source.source_unit_id for source in planned.dispatch.ordered_source_units
         )
         receipt = request.ingestion_receipt
+        if receipt.rejected_source_unit_ids:
+            return ReadinessReceipt(
+                ingestion_occurrence_id=request.scope.ingestion_occurrence_id,
+                ready=False,
+                evidence_references=receipt.raw_references,
+            )
         if (
-            request.expected_source_unit_ids != expected_source_ids
+            request.expected_source_unit_ids != receipt.accepted_source_unit_ids
             or receipt.ingestion_occurrence_id != request.scope.ingestion_occurrence_id
             or len(receipt.dispatch_receipts) != 1
             or len(receipt.raw_references) != 1
@@ -390,6 +397,7 @@ class OpenVikingRestAdapter:
             or dispatch_receipt.raw_reference != receipt.raw_references[0]
             or receipt.accepted_source_unit_ids != dispatch_receipt.accepted_source_unit_ids
             or receipt.rejected_source_unit_ids != dispatch_receipt.rejected_source_unit_ids
+            or receipt.skipped_source_unit_ids != dispatch_receipt.skipped_source_unit_ids
         ):
             raise OpenVikingProfileError("OpenViking readiness dispatch receipt is invalid")
         if (
@@ -399,25 +407,38 @@ class OpenVikingRestAdapter:
             raise OpenVikingProfileError(
                 "OpenViking immutable readiness raw receipt hash does not match"
             )
-        created, queue_ready = _parse_batch_response(
-            dispatch_receipt.raw_response_bytes,
-            expected_root=binding.root_uri,
-            expected_chunk_uris=planned.chunk_uris,
+        partitions = (
+            set(dispatch_receipt.accepted_source_unit_ids),
+            set(dispatch_receipt.rejected_source_unit_ids),
+            set(dispatch_receipt.skipped_source_unit_ids),
         )
-        ready = (
-            created == planned.chunk_uris
-            and queue_ready
-            and dispatch_receipt.accepted_source_unit_ids == expected_source_ids
-            and not dispatch_receipt.rejected_source_unit_ids
-        )
+        if any(
+            left & right
+            for index, left in enumerate(partitions)
+            for right in partitions[index + 1 :]
+        ) or set().union(*partitions) != set(expected_source_ids):
+            raise OpenVikingProfileError("OpenViking readiness source partition is invalid")
+        ready = True
+        if not dispatch_receipt.skipped_source_unit_ids:
+            created, queue_ready = _parse_batch_response(
+                dispatch_receipt.raw_response_bytes,
+                expected_root=binding.root_uri,
+                expected_chunk_uris=planned.chunk_uris,
+            )
+            ready = created == planned.chunk_uris and queue_ready
         if not ready:
             return ReadinessReceipt(
                 ingestion_occurrence_id=request.scope.ingestion_occurrence_id,
                 ready=False,
                 evidence_references=(dispatch_receipt.raw_reference,),
             )
+        if dispatch_receipt.skipped_source_unit_ids:
+            self._partial_scopes.add(binding.root_uri)
         projection = await self._capture_projection(request.scope)
-        if projection.inventory.ordered_source_unit_ids != expected_source_ids:
+        if not set(projection.inventory.ordered_source_unit_ids) <= (
+            set(dispatch_receipt.accepted_source_unit_ids)
+            | set(dispatch_receipt.skipped_source_unit_ids)
+        ):
             raise OpenVikingProfileError(
                 "OpenViking readiness projection does not match expected sources"
             )
@@ -843,7 +864,7 @@ class OpenVikingRestAdapter:
         planned = self._planned_batches.get(binding.root_uri)
         if planned is None:
             raise OpenVikingProfileError("OpenViking projection has no frozen batch plan")
-        inventory_uris = tuple(
+        planned_inventory_uris = tuple(
             sorted(
                 (
                     f"{binding.root_uri}/.abstract.md",
@@ -852,7 +873,7 @@ class OpenVikingRestAdapter:
                 )
             )
         )
-        node_limit = len(inventory_uris) + 1
+        node_limit = len(planned_inventory_uris) + 1
         headers = {ACTOR_PEER_HEADER: binding.actor_peer_id}
         ls_response = await self._client.request(
             "GET",
@@ -873,12 +894,22 @@ class OpenVikingRestAdapter:
         if (
             len(returned_uris) >= node_limit
             or len(set(returned_uris)) != len(returned_uris)
-            or frozenset(returned_uris) != frozenset(inventory_uris)
+            or not frozenset(returned_uris) <= frozenset(planned_inventory_uris)
+            or not {
+                f"{binding.root_uri}/.abstract.md",
+                f"{binding.root_uri}/.overview.md",
+            }
+            <= set(returned_uris)
+            or (
+                binding.root_uri not in self._partial_scopes
+                and frozenset(returned_uris) != frozenset(planned_inventory_uris)
+            )
         ):
             raise OpenVikingProfileError(
                 "OpenViking recursive hidden inventory is incomplete or unexpected"
             )
 
+        inventory_uris = tuple(sorted(returned_uris))
         tags_by_uri: dict[str, tuple[str, ...]] = {}
         attrs_references: dict[str, RawReferenceHandle] = {}
         for uri in (binding.root_uri, *inventory_uris):
@@ -913,6 +944,8 @@ class OpenVikingRestAdapter:
             zip(planned.chunk_uris, planned.dispatch.ordered_source_units, strict=True)
         )
         for uri, source in source_by_uri.items():
+            if uri not in contents_by_uri:
+                continue
             if contents_by_uri[uri].encode("utf-8") != source.payload_bytes:
                 raise OpenVikingProfileError(
                     "OpenViking projected chunk bytes do not match the frozen source"
@@ -954,7 +987,9 @@ class OpenVikingRestAdapter:
             )
         )
         source_ids = tuple(
-            source.source_unit_id for source in planned.dispatch.ordered_source_units
+            source_by_uri[uri].source_unit_id
+            for uri in planned.chunk_uris
+            if uri in contents_by_uri
         )
         return ProjectionReceipt(
             inventory=InventoryReceipt(

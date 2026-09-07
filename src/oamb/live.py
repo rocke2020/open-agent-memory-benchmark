@@ -207,6 +207,43 @@ def load_live_environment(
     return environment
 
 
+def validate_lme60_mem0_input_encoding(dataset_path: Path) -> int:
+    """Encode every frozen LME-60 source through the real Mem0 request boundary."""
+
+    from oamb.memory_systems.mem0.adapter import _source_messages
+    from oamb.memory_systems.mem0.wire import Mem0SourceMetadata, build_add_http_request
+
+    bundle = build_longmemeval_bundle(dataset_path, "lme60")
+    synthetic_run_id = canonical_sha256(["oamb-lme60-input-encoding-precheck-v1"])
+    checked = 0
+    for plan in bundle.ingestion_plans:
+        for source in plan.ordered_source_units:
+            request = build_add_http_request(
+                messages=_source_messages(source),
+                run_id=synthetic_run_id,
+                metadata=Mem0SourceMetadata(
+                    ingestion_occurrence_id=synthetic_run_id,
+                    ingestion_plan_id=plan.ingestion_plan_id,
+                    source_unit_id=source.source_unit_id,
+                    source_ordinal=source.ordinal_1_indexed,
+                ),
+            )
+            encoded_messages = json.loads(request.body)["messages"]
+            if encoded_messages != json.loads(source.payload_bytes):
+                raise ValueError("Mem0 input precheck changed source message values or order")
+            encoded_message_bytes = json.dumps(
+                encoded_messages,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+            if encoded_message_bytes != source.payload_bytes:
+                raise ValueError("Mem0 input precheck changed canonical source payload bytes")
+            checked += 1
+    if checked != LME60_EXPECTED_SESSION_COUNT:
+        raise ValueError("Mem0 input precheck did not cover every frozen LME-60 source")
+    return checked
+
+
 def load_live_provider_evidence(
     *,
     plan: ResolvedPlan,
@@ -634,7 +671,7 @@ def _validated_cell_internal_retry_count(cell: LiveCell) -> int:
         environment=cell.environment,
         service_receipt_path=service_receipt_path,
     )
-    return 0
+    return cell.plan.execution.extraction_max_retries
 
 
 def execute_live_cell(
@@ -1232,6 +1269,9 @@ def build_live_cell(
         ),
         max_parallel_questions=plan.execution.max_parallel_questions_per_provider,
         max_retries_per_operation=plan.execution.max_retries_per_operation,
+        extraction_max_retries=plan.execution.extraction_max_retries,
+        model_max_attempts=plan.execution.model_max_attempts,
+        model_transport_max_retries=plan.execution.model_transport_max_retries,
         provider_lifecycle_coordination_directory=provider_runtime_directory,
     )
     return LiveCell(
@@ -1492,13 +1532,16 @@ def _budget(
 ) -> BudgetSpecV4:
     case_count, source_count = _workload_counts(cell.selection)
     provider_role_id = cell.producer_role_id
-    retry_multiplier = plan.execution.max_retries_per_operation + 1
+    ingest_attempts = plan.execution.max_retries_per_operation + 1
+    model_attempts = plan.execution.model_max_attempts * (
+        plan.execution.model_transport_max_retries + 1
+    )
     operation_timeout_seconds = plan.execution.operation_timeout_seconds
     role_attempts: dict[str, int] = {
-        provider_role_id: source_count * retry_multiplier,
-        "embedding": source_count * retry_multiplier + case_count,
-        "answer": case_count * retry_multiplier,
-        "judge": case_count * retry_multiplier,
+        provider_role_id: source_count * ingest_attempts,
+        "embedding": source_count * ingest_attempts + case_count,
+        "answer": case_count * model_attempts,
+        "judge": case_count * model_attempts,
     }
     output_tokens_per_attempt: dict[str, int] = {
         provider_role_id: 0,
@@ -1546,10 +1589,10 @@ def _budget(
     role_ceilings = tuple(role_ceilings_list)
     operation_attempts = {
         "runtime_resolve": 1,
-        "scope_allocate": case_count * retry_multiplier,
-        "memory_ingest": source_count * retry_multiplier,
-        "memory_readiness": case_count * retry_multiplier,
-        "memory_projection": case_count * retry_multiplier,
+        "scope_allocate": case_count,
+        "memory_ingest": source_count * ingest_attempts,
+        "memory_readiness": case_count,
+        "memory_projection": case_count,
         "pre_query_projection": case_count,
         "memory_query": case_count,
         "post_query_projection": case_count,

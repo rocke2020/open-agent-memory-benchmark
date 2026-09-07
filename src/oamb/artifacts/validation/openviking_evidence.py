@@ -136,27 +136,39 @@ def reconstruct_openviking_plan(
         raise ValueError("OpenViking exact profile requires one ordered batch dispatch")
     dispatch_attempt_id = plan.ordered_dispatch_attempt_ids[0]
     dispatch_attempt = attempts.get(dispatch_attempt_id)
+    skipped_dispatch = bool(plan.skipped_source_unit_ids)
     if (
         dispatch_attempt is None
         or dispatch_attempt.parent_kind != "ingestion_plan"
         or dispatch_attempt.parent_id != plan.ingestion_occurrence_id
         or dispatch_attempt.stage != "memory_ingest"
-        or dispatch_attempt.outcome != AttemptOutcome.SUCCEEDED
-        or dispatch_attempt.raw_response_ref is None
     ):
         raise ValueError("OpenViking dispatch attempt evidence is incomplete")
-    dispatch_raw_ref = dispatch_attempt.raw_response_ref
-    created, queue_ready = _parse_batch_response(
-        _required_raw(raw_payloads, dispatch_raw_ref),
-        expected_root=root_uri,
-        expected_chunk_uris=chunk_uris,
-    )
-    if (
-        created != chunk_uris
-        or not queue_ready
-        or plan.accepted_source_unit_ids != plan.ordered_source_unit_ids
-        or plan.rejected_source_unit_ids
-    ):
+    if skipped_dispatch:
+        if (
+            dispatch_attempt.outcome != AttemptOutcome.FAILED
+            or dispatch_attempt.raw_error_ref is None
+        ):
+            raise ValueError("OpenViking skipped batch lacks terminal failure evidence")
+        dispatch_raw_ref = dispatch_attempt.raw_error_ref
+        _required_raw(raw_payloads, dispatch_raw_ref)
+    else:
+        if (
+            dispatch_attempt.outcome != AttemptOutcome.SUCCEEDED
+            or dispatch_attempt.raw_response_ref is None
+        ):
+            raise ValueError("OpenViking dispatch attempt evidence is incomplete")
+        dispatch_raw_ref = dispatch_attempt.raw_response_ref
+        created, queue_ready = _parse_batch_response(
+            _required_raw(raw_payloads, dispatch_raw_ref),
+            expected_root=root_uri,
+            expected_chunk_uris=chunk_uris,
+        )
+        if created != chunk_uris or not queue_ready:
+            raise ValueError("OpenViking batch response does not close the source partition")
+    if set(plan.accepted_source_unit_ids) | set(plan.rejected_source_unit_ids) | set(
+        plan.skipped_source_unit_ids
+    ) != set(plan.ordered_source_unit_ids):
         raise ValueError("OpenViking batch response does not close the source partition")
 
     projection = reconstruct_openviking_projection(
@@ -168,7 +180,8 @@ def reconstruct_openviking_plan(
     )
     if (
         plan.inventory_raw_ref != plan.projection_raw_refs[0]
-        or plan.projected_source_unit_ids != plan.ordered_source_unit_ids
+        or not set(plan.projected_source_unit_ids)
+        <= (set(plan.accepted_source_unit_ids) | set(plan.skipped_source_unit_ids))
         or plan.protected_state_sha256 != projection.state_sha256
         or plan.readiness_evidence_refs
         != (dispatch_raw_ref, plan.inventory_raw_ref, projection.state_evidence_raw_ref)

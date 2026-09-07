@@ -46,7 +46,6 @@ from oamb.contracts.specifications import (
     RunSpec,
 )
 from oamb.contracts.states import (
-    AttemptOutcome,
     CaseState,
     IngestionPlanState,
     RunState,
@@ -600,13 +599,8 @@ def _terminal_contributions(
         )
         if any(case is None or case.state != CaseState.COMPLETED for case in cases):
             continue
-        parent_ids = {plan.ingestion_occurrence_id, *plan.ordered_case_occurrence_ids}
-        if any(
-            attempt.parent_id in parent_ids
-            and attempt.outcome in {AttemptOutcome.FAILED, AttemptOutcome.UNKNOWN_OUTCOME}
-            for attempt in part.attempts
-        ):
-            continue
+        # Fresh part validation has already checked every retry chain. Failed
+        # predecessors do not invalidate a sealed plan with completed cases.
         concrete_cases = tuple(case for case in cases if case is not None)
         fields = {
             "schema_name": "capsule_composition_contribution",

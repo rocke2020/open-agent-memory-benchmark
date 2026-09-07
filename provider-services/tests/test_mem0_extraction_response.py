@@ -18,6 +18,34 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "mem0_extraction_stage.py.tx
 PATCH_ANCHOR = "        if not extracted_memories:\n"
 MEANINGFUL_TEXT = "  User's tea preference: 乌龙茶; no sugar.  "
 SECOND_TEXT = "Assistant recommended a ceramic teapot."
+ERRORS_FIXTURE = """
+import sys
+from contextvars import ContextVar
+class HTTPException(Exception):
+    def __init__(self, status_code, detail):
+        self.status_code, self.detail = status_code, detail
+class JSONResponse:
+    def __init__(self, status_code, content, headers):
+        self.status_code, self.content, self.headers = status_code, content, headers
+request_id_var = ContextVar("request_id", default="-")
+class UpstreamError(HTTPException):
+    def __init__(self, code, detail, request_id):
+        super().__init__(status_code=502, detail=detail)
+        self.code, self.request_id = code, request_id
+def _classify_one(exc):
+    name = type(exc).__name__
+    return ("unknown", "Upstream provider error.")
+def _classify(exc):
+    result = _classify_one(exc)
+    if result[0] != "unknown":
+        return result
+    return ("unknown", "Upstream provider error.")
+def upstream_error():
+    code, message = _classify(sys.exc_info()[1])
+    return UpstreamError(code, message, request_id_var.get())
+async def upstream_error_handler(_, exc):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "code": exc.code, "request_id": exc.request_id}, headers={"X-Request-ID": exc.request_id})
+"""
 
 
 def load_module():
@@ -75,6 +103,92 @@ def execute_stage(module, source, value, consumer, *, asynchronous):
 
 
 class Mem0ExtractionResponseTests(unittest.TestCase):
+    def test_extraction_exhaustion_maps_to_typed_502_rest_response(self):
+        module = load_module()
+        namespace: dict[str, object] = {}
+        exec(module.patch_errors_source(ERRORS_FIXTURE), namespace)
+
+        def add_memory():
+            namespace["request_id_var"].set("req-test-1")
+            try:
+                raise module.ExtractionResponseError("exhausted")
+            except Exception as exc:
+                raise namespace["upstream_error"]() from exc
+
+        try:
+            add_memory()
+        except namespace["UpstreamError"] as exc:
+            response = asyncio.run(namespace["upstream_error_handler"](None, exc))
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.content,
+            {
+                "detail": "Provider memory extraction failed after retries.",
+                "code": "provider_extraction_failed",
+                "request_id": "req-test-1",
+            },
+        )
+        self.assertEqual(response.headers["X-Request-ID"], "req-test-1")
+
+    def test_extraction_retries_ten_times_then_returns_normalized_result(self):
+        module = load_module()
+        attempts = 0
+
+        def generate_response():
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 10:
+                return "not-json"
+            return json.dumps({"memory": [MEANINGFUL_TEXT]}, ensure_ascii=False)
+
+        result = module.generate_parse_normalize_with_retry(
+            generate_response,
+            remove_code_blocks=lambda response: response,
+            extract_json=lambda response: response,
+            max_retries=10,
+        )
+
+        self.assertEqual(result, [{"text": MEANINGFUL_TEXT}])
+        self.assertEqual(attempts, 11)
+
+    def test_extraction_exhaustion_raises_instead_of_becoming_empty(self):
+        module = load_module()
+        attempts = 0
+
+        def generate_response():
+            nonlocal attempts
+            attempts += 1
+            return "not-json"
+
+        with self.assertRaises(module.ExtractionResponseError):
+            module.generate_parse_normalize_with_retry(
+                generate_response,
+                remove_code_blocks=lambda response: response,
+                extract_json=lambda response: response,
+                max_retries=10,
+            )
+        self.assertEqual(attempts, 11)
+
+    def test_valid_empty_extraction_does_not_retry(self):
+        module = load_module()
+        attempts = 0
+
+        def generate_response():
+            nonlocal attempts
+            attempts += 1
+            return '{"memory": []}'
+
+        self.assertEqual(
+            module.generate_parse_normalize_with_retry(
+                generate_response,
+                remove_code_blocks=lambda response: response,
+                extract_json=lambda response: response,
+                max_retries=10,
+            ),
+            [],
+        )
+        self.assertEqual(attempts, 1)
+
     def test_supported_shapes_reach_add_with_exact_text_in_both_native_stages(self):
         module = load_module()
         source = module.patch_source(FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -185,9 +299,11 @@ class Mem0ExtractionResponseTests(unittest.TestCase):
         source = FIXTURE_PATH.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "main.py"
+            errors_target = Path(temporary) / "errors.py"
             target.write_text(source, encoding="utf-8")
+            errors_target.write_text(ERRORS_FIXTURE, encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, str(MODULE_PATH), str(target)],
+                [sys.executable, str(MODULE_PATH), str(target), str(errors_target)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -199,7 +315,7 @@ class Mem0ExtractionResponseTests(unittest.TestCase):
             self.assertEqual(events, [{"event": "ADD", "memory": MEANINGFUL_TEXT}])
             before = target.read_bytes()
             repeated = subprocess.run(
-                [sys.executable, str(MODULE_PATH), str(target)],
+                [sys.executable, str(MODULE_PATH), str(target), str(errors_target)],
                 capture_output=True,
                 text=True,
                 check=False,

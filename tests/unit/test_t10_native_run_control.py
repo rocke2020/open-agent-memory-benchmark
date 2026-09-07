@@ -72,6 +72,7 @@ def _control(
     judge_role_binding_id: str | None = None,
     provider_runtime_directory: Path | None = None,
     bounded_cost: bool = False,
+    model_attempts: int = 10,
     code_revision: str = "fixture-revision",
 ) -> NativeRunControl:
     role = ModelRoleBindingV2(
@@ -209,9 +210,9 @@ def _control(
         budget_id="run-budget",
         scope_kind=BudgetScopeKindV3.RUN,
         scope_id=run_id,
-        max_attempts=100,
-        max_input_tokens=100_000,
-        max_output_tokens=10_000,
+        max_attempts=max(100, model_attempts + 30),
+        max_input_tokens=max(100_000, model_attempts * 10_000),
+        max_output_tokens=max(10_000, model_attempts * 1_000),
         max_dispatch_wall_seconds=Decimal("3000"),
         max_cost=Decimal("20") if bounded_cost else None,
         currency="USD" if bounded_cost else None,
@@ -225,9 +226,9 @@ def _control(
         role_ceilings=tuple(
             RoleBudgetCeiling(
                 role_binding_id=selected_role.binding_id,
-                max_attempts=10,
-                max_input_tokens=100_000,
-                max_output_tokens=10_000,
+                max_attempts=model_attempts,
+                max_input_tokens=max(100_000, model_attempts * 10_000),
+                max_output_tokens=max(10_000, model_attempts * 1_000),
                 max_dispatch_wall_seconds=Decimal("600"),
                 max_cost=Decimal("10") if bounded_cost else None,
                 currency="USD" if bounded_cost else None,
@@ -243,7 +244,7 @@ def _control(
                     provider="openai_chat",
                     operation_kind="chat_completion",
                     billing_unit="request",
-                    maximum_accepted_units=Decimal("10"),
+                    maximum_accepted_units=Decimal(model_attempts),
                 ),
             )
             for selected_role in role_bindings

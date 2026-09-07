@@ -43,7 +43,6 @@ def reconstruct_hindsight_projection(
         len(references) < 4
         or references[0] != references[1]
         or len(ordered_source_unit_ids) != len(ordered_source_payload_sha256)
-        or not ordered_source_unit_ids
         or len(set(ordered_source_unit_ids)) != len(ordered_source_unit_ids)
     ):
         raise ValueError("Hindsight projection reference or source inventory is invalid")

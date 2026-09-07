@@ -256,7 +256,8 @@ class Mem0RestAdapter:
         self._ingestion_plan_locks: dict[str, asyncio.Lock] = {}
         self._planned_adds: dict[str, tuple[_PlannedAdd, ...]] = {}
         self._next_ingestion_dispatch_ordinal: dict[str, int] = {}
-        self._attempted_dispatches: set[tuple[str, str]] = set()
+        self._attempted_dispatches: set[tuple[str, str, int]] = set()
+        self._next_batch_attempt_ordinals: dict[tuple[str, str], int] = {}
         self._ready_projections: dict[str, _CapturedProjection] = {}
         self._projection_capture_sequences: dict[str, int] = {}
         self._close_lock = asyncio.Lock()
@@ -402,9 +403,13 @@ class Mem0RestAdapter:
             expected_ordinal = self._next_ingestion_dispatch_ordinal[request.scope.scope_id]
             if request.dispatch.dispatch_ordinal_1_indexed != expected_ordinal:
                 raise ValueError("Mem0 add dispatch is not the next ordered source")
-            if dispatch_key in self._attempted_dispatches:
+            expected_batch_attempt = self._next_batch_attempt_ordinals.get(dispatch_key, 1)
+            if request.batch_attempt_ordinal != expected_batch_attempt:
+                raise ValueError("Mem0 add batch attempt is not the next allowed retry")
+            attempt_key = (*dispatch_key, request.batch_attempt_ordinal)
+            if attempt_key in self._attempted_dispatches:
                 raise ValueError("Mem0 add dispatch was already attempted and cannot replay")
-            self._attempted_dispatches.add(dispatch_key)
+            self._attempted_dispatches.add(attempt_key)
             try:
                 response = await self._public_client.request(
                     planned.request.method,
@@ -413,7 +418,7 @@ class Mem0RestAdapter:
                     write_intent=True,
                 )
             except MemorySystemCallCancelledBeforeDispatch:
-                self._attempted_dispatches.remove(dispatch_key)
+                self._attempted_dispatches.remove(attempt_key)
                 raise
             except MemorySystemCallFailure as exc:
                 if (
@@ -429,6 +434,13 @@ class Mem0RestAdapter:
                         internal_retry_count=self._internal_retry_count,
                     )
                     if reason is not None:
+                        self._next_batch_attempt_ordinals[dispatch_key] = (
+                            request.batch_attempt_ordinal + 1
+                        )
+                        if request.batch_attempt_ordinal == 3:
+                            self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = (
+                                expected_ordinal + 1
+                            )
                         raise SettledTransientIngestionFailure(
                             "Mem0 synchronous add settled with a supplier failure",
                             failure_kind=reason,
@@ -446,6 +458,7 @@ class Mem0RestAdapter:
             ):
                 parse_add_response(response.raw_bytes)
             self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = expected_ordinal + 1
+            self._next_batch_attempt_ordinals[dispatch_key] = 0
             source_id = request.dispatch.ordered_source_units[0].source_unit_id
             return IngestionDispatchReceipt(
                 attempt_id=request.attempt_id,
@@ -470,23 +483,55 @@ class Mem0RestAdapter:
         )
         receipt = request.ingestion_receipt
         if (
-            request.expected_source_unit_ids != planned_source_ids
+            request.expected_source_unit_ids != receipt.accepted_source_unit_ids
             or receipt.ingestion_occurrence_id != binding.ingestion_occurrence_id
-            or receipt.accepted_source_unit_ids != planned_source_ids
-            or receipt.rejected_source_unit_ids
             or tuple(item.dispatch for item in receipt.dispatch_receipts)
             != tuple(item.dispatch for item in planned)
             or receipt.raw_references
             != tuple(item.raw_reference for item in receipt.dispatch_receipts)
         ):
             raise ValueError("Mem0 readiness receipt does not bind the completed source ledger")
+        if (
+            receipt.accepted_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.accepted_source_unit_ids
+            )
+            or receipt.rejected_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.rejected_source_unit_ids
+            )
+            or receipt.skipped_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.skipped_source_unit_ids
+            )
+        ):
+            raise ValueError("Mem0 readiness aggregate source partition is invalid")
         for dispatch_receipt in receipt.dispatch_receipts:
             if (
                 hashlib.sha256(dispatch_receipt.raw_response_bytes).hexdigest()
                 != dispatch_receipt.raw_reference.sha256
             ):
                 raise ValueError("Mem0 readiness raw add receipt hash does not match")
-            parse_add_response(dispatch_receipt.raw_response_bytes)
+            source_id = dispatch_receipt.dispatch.ordered_source_units[0].source_unit_id
+            partitions = (
+                set(dispatch_receipt.accepted_source_unit_ids),
+                set(dispatch_receipt.rejected_source_unit_ids),
+                set(dispatch_receipt.skipped_source_unit_ids),
+            )
+            if any(
+                left & right
+                for index, left in enumerate(partitions)
+                for right in partitions[index + 1 :]
+            ) or set().union(*partitions) != {source_id}:
+                raise ValueError("Mem0 readiness dispatch source partition is invalid")
+            if not dispatch_receipt.skipped_source_unit_ids:
+                parse_add_response(dispatch_receipt.raw_response_bytes)
 
         first = await self._capture_native_projection(request.scope.scope_id)
         second = await self._capture_native_projection(request.scope.scope_id)
@@ -499,7 +544,11 @@ class Mem0RestAdapter:
         self._validate_projection_sources(
             binding=binding,
             projection=second.native,
-            completed_source_ids=planned_source_ids,
+            completed_source_ids=tuple(
+                source_id
+                for source_id in planned_source_ids
+                if source_id not in receipt.rejected_source_unit_ids
+            ),
         )
         self._ready_projections[request.scope.scope_id] = second
         return ReadinessReceipt(
@@ -813,8 +862,8 @@ def _source_messages(source: SourceUnit) -> tuple[tuple[str, str], ...]:
                 raise ValueError("Mem0 LongMemEval message must contain role and content")
             role = item["role"]
             content = item["content"]
-            if not isinstance(role, str) or not role or not isinstance(content, str) or not content:
-                raise ValueError("Mem0 LongMemEval role and content must be non-empty strings")
+            if not isinstance(role, str) or not role or not isinstance(content, str):
+                raise ValueError("Mem0 LongMemEval requires a non-empty role and string content")
             messages.append((role, content))
         return tuple(messages)
     try:

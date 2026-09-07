@@ -23,7 +23,7 @@ COPY .build/mem0-source.tar /tmp/mem0-source.tar
 RUN python -c "import hashlib,pathlib; p=pathlib.Path('/tmp/mem0-source.tar'); assert hashlib.sha256(p.read_bytes()).hexdigest() == '${MEM0_SOURCE_ARCHIVE_SHA256}'"
 ADD .build/mem0-source.tar /opt/
 COPY mem0/extraction_response.py /opt/mem0-source/mem0/memory/oamb_extraction_response.py
-RUN python /opt/mem0-source/mem0/memory/oamb_extraction_response.py /opt/mem0-source/mem0/memory/main.py \
+RUN python /opt/mem0-source/mem0/memory/oamb_extraction_response.py /opt/mem0-source/mem0/memory/main.py /opt/mem0-source/server/errors.py \
     && python -m pip install --no-cache-dir --no-deps --no-build-isolation /opt/mem0-source \
     && python -c "import importlib.metadata as m; assert m.version('mem0ai') == '2.0.19'"
 

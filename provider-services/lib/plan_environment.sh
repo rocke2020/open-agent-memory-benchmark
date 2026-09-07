@@ -1,6 +1,7 @@
 #!/bin/sh
 
-# Export provider-owned model identities from one already-frozen OAMB plan.
+# Export provider-owned model identities and extraction retry count from one
+# already-frozen OAMB plan.
 load_plan_model_environment() {
   plan_environment_plan=$1
   [ -f "$plan_environment_plan" ] || return 1
@@ -28,11 +29,18 @@ openviking_semantic_understanding|OAMB_OPENVIKING_VLM_MODEL|OAMB_OPENVIKING_VLM_
 embedding|OAMB_EMBEDDING_MODEL|not_applicable
 EOF
 
+  plan_environment_extraction_max_retries="$(jq -er '
+    .execution.extraction_max_retries |
+    select(type == "number" and . == 10)
+  ' "$plan_environment_plan")" || return 1
+  export OAMB_EXTRACTION_MAX_RETRIES="$plan_environment_extraction_max_retries"
+
   # These provider processes expose an OpenAI-compatible protocol; this is an
   # implementation detail, not a user-selectable model setting.
   export OAMB_HINDSIGHT_LLM_PROVIDER=openai
   export OAMB_OPENVIKING_VLM_PROVIDER=openai
 
   unset plan_environment_plan plan_environment_role plan_environment_variable \
-    plan_environment_effort_variable plan_environment_value plan_environment_effort
+    plan_environment_effort_variable plan_environment_value plan_environment_effort \
+    plan_environment_extraction_max_retries
 }

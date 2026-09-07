@@ -27,11 +27,17 @@ _HINDSIGHT_INVALID_JSON_FAILURE = re.compile(
     r"chunk (0|[1-9][0-9]*): JSONDecodeError: Invalid control character at: "
     r"line [1-9][0-9]* column [1-9][0-9]* \(char (?:0|[1-9][0-9]*)\)"
 )
+_HINDSIGHT_FAILURE_ENTRY = re.compile(
+    r"chunk (0|[1-9][0-9]*): (.+?)(?=, chunk (?:0|[1-9][0-9]*): |$)"
+)
 _MEM0_REQUEST_ID = re.compile(r"[0-9a-f]{8}")
 _OPENVIKING_WRAPPER_FIELDS = frozenset({"status", "result", "error", "profile", "telemetry"})
 
 SettledFailureKind = Literal[
-    "supplier_connection", "supplier_rate_limit", "supplier_invalid_json_output"
+    "supplier_connection",
+    "supplier_rate_limit",
+    "supplier_invalid_json_output",
+    "provider_ingestion_error",
 ]
 
 
@@ -44,11 +50,11 @@ def classify_settled_ingestion_failure(
     expected_task_id: str | None = None,
     expected_session_id: str | None = None,
 ) -> SettledFailureKind | None:
-    """Recognize only a complete pinned receipt with proven internal retries off."""
+    """Recognize only a complete pinned receipt with a proven supported retry count."""
 
     if (
         type(internal_retry_count) is not int
-        or internal_retry_count != 0
+        or internal_retry_count != 10
         or type(status_code) is not int
         or not isinstance(raw_response_bytes, bytes)
         or not raw_response_bytes
@@ -82,6 +88,8 @@ def classify_settled_ingestion_failure(
             return "supplier_connection"
         if value["code"] == "provider_rate_limited":
             return "supplier_rate_limit"
+        if value["code"] == "provider_extraction_failed":
+            return "provider_ingestion_error"
     elif settlement_basis == OPENVIKING_SETTLEMENT_BASIS:
         if (
             status_code == 200
@@ -101,9 +109,14 @@ def classify_settled_ingestion_failure(
                 and task.get("task_type") == "session_commit"
                 and task.get("status") == "failed"
                 and task.get("stage") == "failed"
-                and task.get("error") == "Connection error."
+                and isinstance(task.get("error"), str)
+                and bool(task["error"].strip())
             ):
-                return "supplier_connection"
+                return (
+                    "supplier_connection"
+                    if task["error"] == "Connection error."
+                    else "provider_ingestion_error"
+                )
     return None
 
 
@@ -115,26 +128,44 @@ def _hindsight_extraction_failure(value: dict[str, object]) -> SettledFailureKin
         return None
     try:
         failed, total = int(aggregate[1]), int(aggregate[2])
-        if failed > min(total, _HINDSIGHT_FAILURE_SUMMARY_LIMIT):
+        if failed > total:
             return None
-        failures = aggregate[3].split(", ")
-        if len(failures) != failed:
+        failures = tuple(_HINDSIGHT_FAILURE_ENTRY.finditer(aggregate[3]))
+        cursor = 0
+        for entry in failures:
+            if entry.start() != cursor and aggregate[3][cursor : entry.start()] != ", ":
+                return None
+            cursor = entry.end()
+        if not failures or cursor != len(aggregate[3]):
+            return None
+        if len(failures) != min(failed, _HINDSIGHT_FAILURE_SUMMARY_LIMIT):
             return None
         indices: set[int] = set()
         failure_kind: SettledFailureKind | None = None
-        for failure in failures:
+        for entry in failures:
+            failure = entry[0]
             match = _HINDSIGHT_CONNECTION_FAILURE.fullmatch(failure)
             member_kind: SettledFailureKind = "supplier_connection"
             if match is None:
                 match = _HINDSIGHT_INVALID_JSON_FAILURE.fullmatch(failure)
                 member_kind = "supplier_invalid_json_output"
-            if match is None or (failure_kind is not None and member_kind != failure_kind):
-                return None
-            index = int(match[1])
+            if match is None:
+                index = int(entry[1])
+                member_kind = (
+                    "supplier_invalid_json_output"
+                    if entry[2].startswith("JSONDecodeError:")
+                    else "provider_ingestion_error"
+                )
+            else:
+                index = int(match[1])
             if index >= total or index in indices:
                 return None
             indices.add(index)
-            failure_kind = member_kind
+            failure_kind = (
+                member_kind
+                if failure_kind is None or failure_kind == member_kind
+                else "provider_ingestion_error"
+            )
     except ValueError:
         return None
     return failure_kind

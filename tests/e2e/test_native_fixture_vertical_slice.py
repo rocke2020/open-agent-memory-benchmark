@@ -38,7 +38,6 @@ from oamb.contracts.evidence import (
     OccurrenceClaimRecord,
     RunLeaseRecord,
     history_attempt_id,
-    infrastructure_retry_event_id,
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
@@ -567,72 +566,32 @@ def test_native_partition_executes_only_selected_whole_plan(tmp_path: Path) -> N
     assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
 
 
-def _rewrite_retry_event(
-    root: Path,
-    event_path: Path,
-    **updates: object,
-) -> Path:
-    event = {**json.loads(event_path.read_bytes()), **updates}
-    event["retry_event_id"] = infrastructure_retry_event_id(
-        {key: value for key, value in event.items() if key != "retry_event_id"}
-    )
-    replacement = event_path.with_name(f"{event['retry_event_id']}.json")
-    if replacement != event_path:
-        event_path.rename(replacement)
-    replacement.write_bytes(canonical_json_bytes(event))
-    manifest_path = root / "capsule-manifest.json"
-    manifest = CapsuleManifest.model_validate_json(manifest_path.read_bytes())
-    source_entries = tuple(
-        entry.model_copy(
-            update={
-                "record_id": event["retry_event_id"],
-                "relative_path": replacement.relative_to(root).as_posix(),
-                "sha256": hashlib.sha256(replacement.read_bytes()).hexdigest(),
-            }
-        )
-        if root / entry.relative_path == event_path
-        else entry
-        for entry in manifest.source_entries
-    )
-    source_manifest_hash = canonical_sha256(
-        [
-            "oamb-source-manifest-v1",
-            tuple(entry.model_dump(mode="python") for entry in source_entries),
-        ]
-    )
-    manifest_path.write_bytes(
-        canonical_json_bytes(
-            manifest.model_copy(
-                update={
-                    "capsule_id": canonical_sha256(
-                        [
-                            "oamb-capsule-v1",
-                            manifest.run_id,
-                            manifest.run_spec_hash,
-                            source_manifest_hash,
-                        ]
-                    ),
-                    "source_entries": source_entries,
-                    "source_manifest_hash": source_manifest_hash,
-                }
-            )
-        )
-    )
-    return replacement
-
-
-def test_native_model_429_retries_remain_separate_from_normal_attempts(
+@pytest.mark.parametrize("unknown_transport", (False, True))
+def test_native_model_429_retries_retain_each_physical_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    unknown_transport: bool,
 ) -> None:
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
     manifest = workload.build_case_manifest(dataset)
     first_plan = manifest.ingestion_plans[0]
+    provider_runtime = (tmp_path / "model-retry-provider-runtime").resolve()
+    control = _control(
+        run_id="native-structured-429",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
     partition = build_case_partition_spec(
         run_id="native-structured-429",
-        resolved_plan_hash=canonical_sha256(["structured-429-plan"]),
-        cell_spec_hash=canonical_sha256(["structured-429-cell"]),
+        resolved_plan_hash=control.preflight_record.resolved_plan_hash,
+        cell_spec_hash=control.preflight_record.adapter_profile_hash,
         dataset_manifest_hash=dataset.manifest_hash,
         case_manifest=manifest,
         case_plans=workload.iter_case_plans(manifest),
@@ -660,6 +619,8 @@ def test_native_model_429_retries_remain_separate_from_normal_attempts(
             calls.value += 1
             call_number = calls.value
         if call_number <= 2:
+            if unknown_transport:
+                raise httpx.ReadError("response lost", request=_request)
             return httpx.Response(429, content=rejection)
         return httpx.Response(
             200,
@@ -690,6 +651,7 @@ def test_native_model_429_retries_remain_separate_from_normal_attempts(
         model_factory=lambda store: _client(cast(Any, store), handler),
         answer_role_binding_id="answer-binding",
         partition=partition,
+        control=control,
     )
 
     events = tuple(
@@ -708,43 +670,44 @@ def test_native_model_429_retries_remain_separate_from_normal_attempts(
         for record in (json.loads(path.read_bytes()),)
     }
     assert calls.value == 5
-    assert [
-        event["backoff_seconds"]
-        for event in sorted(events, key=lambda item: item["supplier_call_ordinal"])
-    ] == [1, 2]
-    assert all(event["retry_scheduled"] is True for event in events)
-    assert len({event["supplier_call_id"] for event in events}) == len(events)
+    assert not events
+    answer_attempts = [attempt for attempt in attempts if attempt["stage"] == "answer"]
+    assert len(answer_attempts) == 5
+    failed_outcome = "unknown_outcome" if unknown_transport else "failed"
+    assert sum(attempt["outcome"] == failed_outcome for attempt in answer_attempts) == 2
+    assert sum(attempt["outcome"] == "succeeded" for attempt in answer_attempts) == 3
+    assert len({attempt["attempt_id"] for attempt in answer_attempts}) == 5
+    answer_ids = {
+        attempt["attempt_id"]
+        for attempt in answer_attempts
+        if attempt["outcome"] != "unknown_outcome"
+    }
+    assert {
+        record["attempt_id"] for record in usage_records.values() if record["stage"] == "answer"
+    } == answer_ids
+    referenced_usage = {
+        identity for case in completed.case_records for identity in case.usage_record_ids
+    }
     assert all(
-        usage_records[usage_id]["attempt_id"] == event["supplier_call_id"]
-        for event in events
-        for usage_id in event["usage_record_ids"]
+        identity in referenced_usage
+        for identity, record in usage_records.items()
+        if record["attempt_id"] in answer_ids
     )
-    assert len([attempt for attempt in attempts if attempt["stage"] == "answer"]) == 3
-    assert validate_native_capsule(completed.capsule_root).disposition == (
-        ValidationDisposition.VALIDATED
-    )
-    invalid_root = tmp_path / "invalid-structured-429-backoff"
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+    assert not (provider_runtime / "active-operation").exists()
+    active_attempts = provider_runtime / "active-provider-attempts"
+    assert not active_attempts.exists() or not tuple(active_attempts.iterdir())
+    invalid_root = tmp_path / "invalid-model-retry-chain"
     shutil.copytree(completed.capsule_root, invalid_root)
-    event_path = next((invalid_root / "source/infrastructure-retries").glob("*.json"))
-    _rewrite_retry_event(invalid_root, event_path, backoff_seconds=9)
+    retry_attempt = next(attempt for attempt in answer_attempts if attempt["retry_of_attempt_id"])
+    path = invalid_root / "source/attempts" / f"{retry_attempt['attempt_id']}.json"
+    _mutate_source_document(invalid_root, path, retry_of_attempt_id="f" * 64)
     invalid = validate_native_capsule(invalid_root)
-    assert "infrastructure-retry-evidence-mismatch" in {issue.code for issue in invalid.issues}
-
-    for label, update in (
-        ("raw-proof", {"internal_retry_count": 4}),
-        ("attempt-binding", {"stage": "judge"}),
-    ):
-        invalid_root = tmp_path / f"invalid-structured-429-{label}"
-        shutil.copytree(completed.capsule_root, invalid_root)
-        event_path = next((invalid_root / "source/infrastructure-retries").glob("*.json"))
-        _rewrite_retry_event(invalid_root, event_path, **update)
-
-        invalid = validate_native_capsule(invalid_root)
-
-        assert "infrastructure-retry-evidence-mismatch" in {issue.code for issue in invalid.issues}
+    assert invalid.disposition == ValidationDisposition.INVALID
 
 
-def test_native_model_429_exhaustion_is_infrastructure_blocked(
+def test_native_model_429_exhaustion_retains_error_cases_and_finishes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -755,6 +718,7 @@ def test_native_model_429_exhaustion_is_infrastructure_blocked(
     provider_runtime = (tmp_path / "structured-429-provider-runtime").resolve()
     control = _control(
         run_id="native-structured-429-exhausted",
+        model_attempts=54,
         dataset_manifest_hash=dataset.manifest_hash,
         case_manifest_hash=manifest.manifest_hash,
         workload_id=manifest.workload_id,
@@ -799,20 +763,19 @@ def test_native_model_429_exhaustion_is_infrastructure_blocked(
         return None
 
     monkeypatch.setattr(native_run_module, "_infrastructure_retry_sleep", no_wait)
-    with pytest.raises(RuntimeError, match="operation retry limit exhausted"):
-        run_native_vertical_slice(
-            output_root=tmp_path / "capsules",
-            run_id=partition.run_id,
-            adapter_profile_id="recorded-native-fixture-v1",
-            workload=workload,
-            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
-            artifact_store_factory=ArtifactStore,
-            memory_factory=_memory_factory,
-            model_factory=lambda store: _client(cast(Any, store), handler),
-            answer_role_binding_id="answer-binding",
-            control=control,
-            partition=partition,
-        )
+    run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id=partition.run_id,
+        adapter_profile_id="recorded-native-fixture-v1",
+        workload=workload,
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=lambda store: _client(cast(Any, store), handler),
+        answer_role_binding_id="answer-binding",
+        control=control,
+        partition=partition,
+    )
 
     root = tmp_path / "capsules" / partition.run_id
     run = json.loads((root / "source/run" / f"{partition.run_id}.json").read_bytes())
@@ -822,14 +785,19 @@ def test_native_model_429_exhaustion_is_infrastructure_blocked(
     )
     resources = tuple((root / "source/resources").glob("*.json"))
     costs = tuple((root / "source/costs").glob("*.json"))
-    assert calls.value == 3
-    assert run["state"] == "infrastructure_blocked"
-    assert [
-        event["backoff_seconds"]
-        for event in sorted(events, key=lambda item: item["supplier_call_ordinal"])
-    ] == [1, 2, None]
+    assert calls.value == 54  # Three cases independently exhaust 6 x 3 physical calls.
+    assert run["state"] == "finalized"
+    assert not events
+    cases = [json.loads(path.read_bytes()) for path in (root / "source/cases").glob("*.json")]
+    assert len(cases) == 3
+    assert all(
+        case["state"] == "error" and case["evaluation_disposition"] == "not_run" for case in cases
+    )
     assert len(resources) == len(costs)
-    assert validate_source_root(root).disposition == ValidationDisposition.VALIDATED
+    validation = validate_source_root(root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, [
+        (issue.rule_id, issue.code, issue.evidence_ref) for issue in validation.issues
+    ]
     assert not (provider_runtime / "active-operation").exists()
     attempts_directory = provider_runtime / "active-provider-attempts"
     assert not attempts_directory.exists() or not tuple(attempts_directory.iterdir())
@@ -911,8 +879,11 @@ def test_live_cancellation_during_retry_backoff_clears_provider_lifecycle(
     events = tuple((root / "source/infrastructure-retries").glob("*.json"))
     assert calls.value == 1
     assert run["state"] == "aborted"
-    assert len(events) == 1
-    assert validate_source_root(root).disposition == ValidationDisposition.VALIDATED
+    assert not events
+    validation = validate_source_root(root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, [
+        (issue.rule_id, issue.code, issue.evidence_ref) for issue in validation.issues
+    ]
     assert not (provider_runtime / "active-operation").exists()
     attempts_directory = provider_runtime / "active-provider-attempts"
     assert not attempts_directory.exists() or not tuple(attempts_directory.iterdir())
@@ -994,12 +965,16 @@ def test_planned_stop_during_retry_backoff_starts_no_later_supplier_call(
 
     assert calls.value == 1
     root = tmp_path / "capsules" / partition.run_id
-    assert validate_source_root(root).disposition == ValidationDisposition.VALIDATED
+    validation = validate_source_root(root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, [
+        (issue.rule_id, issue.code, issue.evidence_ref) for issue in validation.issues
+    ]
     assert not (provider_runtime / "active-operation").exists()
 
 
 def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
@@ -1036,7 +1011,11 @@ def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
             calls.value += 1
         return httpx.Response(429, content=rejection)
 
-    with pytest.raises(RuntimeError, match="operation retry limit exhausted"):
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(native_run_module, "_infrastructure_retry_sleep", no_wait)
+    with pytest.raises(RuntimeError, match="supplier internal retry configuration drift"):
         run_native_vertical_slice(
             output_root=tmp_path / "capsules",
             run_id=partition.run_id,
@@ -1054,7 +1033,7 @@ def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
     validation = validate_source_root(root)
     assert calls.value == 1
     assert validation.disposition == ValidationDisposition.INVALID
-    assert "infrastructure-retry-evidence-mismatch" in {issue.code for issue in validation.issues}
+    assert "model-supplier-retry-proof-drift" in {issue.code for issue in validation.issues}
 
 
 def test_native_mem0_rest_writes_v3_for_empty_visible_subset(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ import hashlib
 import math
 import multiprocessing
 import signal
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -51,7 +52,6 @@ from oamb.contracts.evidence import (
     HistoryAttemptRecord,
     HistoryRetryAllowance,
     HistoryRetryEvent,
-    InfrastructureRetryEvent,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
     OccurrenceClaimRecord,
@@ -63,9 +63,6 @@ from oamb.contracts.evidence import (
     budget_reservation_v3_hash,
     budget_reservation_v3_id,
     history_attempt_id,
-    history_retry_event_id,
-    infrastructure_retry_event_id,
-    infrastructure_supplier_call_id,
 )
 from oamb.contracts.evidence import (
     BudgetOwnerAllocation as EvidenceBudgetOwnerAllocation,
@@ -86,6 +83,9 @@ from oamb.contracts.ports import (
     ArtifactWriteRequest,
     CasePlan,
     DeterministicEvaluation,
+    FinishDisposition,
+    IngestionDispatch,
+    IngestionDispatchReceipt,
     IngestionDispatchRequest,
     IngestionPlan,
     IngestionReceipt,
@@ -96,11 +96,11 @@ from oamb.contracts.ports import (
     MemorySystemCallUnknownOutcome,
     MemorySystemPort,
     ModelCallCancelledUnknownOutcome,
+    ModelCallFailure,
     ModelCallUnknownOutcome,
     ModelClientPort,
     ModelReceipt,
     ModelRequest,
-    ModelSupplierRateLimitRejection,
     NativeEvidenceBatch,
     ProjectionReceipt,
     RawPayloadSealRequest,
@@ -156,11 +156,10 @@ from oamb.runtime.budget import (
 from oamb.runtime.case_partition import select_partition_execution
 from oamb.runtime.infrastructure_retry import (
     InfrastructureBackoffCancelled,
-    InfrastructureRetryController,
     InfrastructureRetryExhausted,
-    execute_with_infrastructure_retry,
 )
 from oamb.runtime.memory_query import execute_read_only_retrieval
+from oamb.runtime.model_completion_retry import execute_model_completion_retry
 from oamb.runtime.native_continuation import (
     ImportedAttemptAccounting,
     NativeContinuation,
@@ -296,6 +295,9 @@ class NativeRunControl:
     max_parallel_history_ingestions: int = 1
     max_parallel_questions: int = 1
     max_retries_per_operation: int = len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
+    extraction_max_retries: int = 10
+    model_max_attempts: int = 6
+    model_transport_max_retries: int = 2
     provider_lifecycle_coordination_directory: Path | None = None
 
     def __post_init__(self) -> None:
@@ -342,10 +344,17 @@ class NativeRunControl:
             < 1
         ):
             raise ValueError("live native concurrency limits must be positive")
-        if type(
-            self.max_retries_per_operation
-        ) is not int or self.max_retries_per_operation not in {0, 1, 2}:
-            raise ValueError("live native retry limit must be 0, 1, or 2")
+        if type(self.max_retries_per_operation) is not int or self.max_retries_per_operation != 2:
+            raise ValueError("live native retry limit must equal 2")
+        if (
+            type(self.extraction_max_retries) is not int
+            or self.extraction_max_retries != 10
+            or type(self.model_max_attempts) is not int
+            or self.model_max_attempts != 6
+            or type(self.model_transport_max_retries) is not int
+            or self.model_transport_max_retries != 2
+        ):
+            raise ValueError("live native layered retry controls differ from the frozen profile")
         comparison_records = (
             self.runtime_binding,
             self.workload_control,
@@ -626,6 +635,7 @@ class _NativeExecutionState:
     stop_event: _NativeStopSignal | None = None
     sequence: int = 0
     operation_records: dict[str, AttemptRecordV2 | AttemptRecordV4] = field(default_factory=dict)
+    attempt_accounting: dict[str, tuple[tuple[str, ...], str, str]] = field(default_factory=dict)
     history_records: list[HistoryAttemptRecord] = field(default_factory=list)
     history_scopes: dict[str, ScopeReceipt] = field(default_factory=dict)
     history_allowances: dict[str, HistoryRetryAllowance] = field(default_factory=dict)
@@ -770,96 +780,8 @@ def _scope_raw_reference(result: object) -> str | None:
     return getattr(raw_reference, "sha256", None)
 
 
-async def _infrastructure_retry_sleep(seconds: int) -> None:
+async def _infrastructure_retry_sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
-
-
-async def _complete_model_with_infrastructure_retry(
-    state: _NativeExecutionState,
-    *,
-    prepared: _PreparedNativeAttempt,
-    model: ModelClientPort,
-    request: ModelRequest,
-) -> ModelReceipt:
-    maximum_retries = (
-        state.control.max_retries_per_operation
-        if state.control is not None
-        else len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
-    )
-    controller = InfrastructureRetryController(maximum_total_retries=maximum_retries)
-
-    async def persist_rejection(
-        rejection: ModelSupplierRateLimitRejection,
-        supplier_call_ordinal: int,
-        backoff_seconds: int | None,
-    ) -> None:
-        pending_usage = state.pending_model_usage
-        if pending_usage is not None:
-            for usage_record_id in rejection.usage_reference_ids:
-                usage_record = pending_usage.pop(usage_record_id, None)
-                if usage_record is None:
-                    raise ValueError("infrastructure rejection usage was not captured before retry")
-                _seal(state, "usage", usage_record_id, usage_record)
-        classification = rejection.classification
-        raw_error_ref = rejection.raw_reference.sha256
-        supplier_call_id = infrastructure_supplier_call_id(
-            prepared.attempt_id,
-            supplier_call_ordinal,
-            raw_error_ref,
-        )
-        fields = {
-            "schema_name": "infrastructure_retry_event",
-            "schema_version": 1,
-            "run_id": state.run_id,
-            "logical_attempt_id": prepared.attempt_id,
-            "parent_kind": prepared.parent_kind,
-            "parent_id": prepared.parent_id,
-            "stage": prepared.stage,
-            "supplier_call_ordinal": supplier_call_ordinal,
-            "supplier_call_id": supplier_call_id,
-            "origin": classification.origin,
-            "failure_kind": classification.failure_kind,
-            "status": classification.status,
-            "acceptance": classification.acceptance,
-            "provider_mutation": classification.provider_mutation,
-            "retryable": classification.retryable,
-            "internal_retry_count": classification.internal_retry_count,
-            "raw_error_ref": raw_error_ref,
-            "usage_record_ids": rejection.usage_reference_ids,
-            "retry_policy_hash": INFRASTRUCTURE_RETRY_POLICY_HASH,
-            "retry_scheduled": backoff_seconds is not None,
-            "backoff_seconds": backoff_seconds,
-            "observed_at": state.timestamp(),
-        }
-        event = InfrastructureRetryEvent.model_validate(
-            {"retry_event_id": infrastructure_retry_event_id(fields), **fields}
-        )
-        _seal(state, "infrastructure-retries", event.retry_event_id, event)
-
-        lifecycle = state.provider_lifecycle
-        if lifecycle is not None and prepared.intent is not None:
-            lifecycle.clear_attempt_after_receipt(
-                attempt_id=prepared.attempt_id,
-                expected_intent_record_hash=prepared.intent.intent_hash,
-            )
-
-    async def dispatch(supplier_call_ordinal: int) -> ModelReceipt:
-        if supplier_call_ordinal > 1:
-            _raise_if_native_stop_requested(state)
-        lifecycle = state.provider_lifecycle
-        if supplier_call_ordinal > 1 and lifecycle is not None and prepared.intent is not None:
-            lifecycle.mark_attempt_dispatched(
-                attempt_id=prepared.attempt_id,
-                intent_record_hash=prepared.intent.intent_hash,
-            )
-        return await model.complete(replace(request, supplier_call_ordinal=supplier_call_ordinal))
-
-    return await execute_with_infrastructure_retry(
-        dispatch,
-        persist_rejection=persist_rejection,
-        sleep=_infrastructure_retry_sleep,
-        controller=controller,
-    )
 
 
 def _readiness_raw_reference(result: object) -> str | None:
@@ -2217,7 +2139,7 @@ async def _execute_history_question_pipeline(
 
     async def execute_history(plan_index: int, plan: IngestionPlan) -> None:
         async def operation() -> tuple[NativeIngestionPlanRecord, ScopeReceipt]:
-            records, scopes = await _execute_history_with_rebuild(
+            records, scopes = await _execute_history(
                 state=state,
                 memory=memory,
                 plan=plan,
@@ -2237,7 +2159,19 @@ async def _execute_history_question_pipeline(
                 raise AssertionError("admitted history did not close one record and scope")
             return records[0], scopes[plan.ingestion_plan_id]
 
-        was_admitted, result = await admitted(history_permits, operation)
+        try:
+            was_admitted, result = await admitted(history_permits, operation)
+        except BaseException as error:
+            if not isinstance(error, (asyncio.CancelledError, NativeRunInterrupted)):
+                print(
+                    f"oamb: provider={memory_system_id} "
+                    f"history={plan.ingestion_plan_id} status=failed, "
+                    f"reason={type(error).__name__}: {error}; "
+                    "draining admitted operations",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            raise
         if not was_admitted:
             return
         if result is None:
@@ -2396,9 +2330,17 @@ def _seal_history_attempt(
         for record in state.operation_records.values()
         if record.parent_kind == "ingestion_plan" and record.parent_id == occurrence
     )
-    failure = next(
-        (record for record in reversed(operations) if record.outcome != AttemptOutcome.SUCCEEDED),
-        None,
+    failure = (
+        None
+        if ready_record is not None
+        else next(
+            (
+                record
+                for record in reversed(operations)
+                if record.outcome != AttemptOutcome.SUCCEEDED
+            ),
+            None,
+        )
     )
     eligible = bool(
         isinstance(error, SettledTransientIngestionFailure)
@@ -2486,46 +2428,7 @@ def _seal_history_attempt(
     return record
 
 
-def _seal_history_retry(
-    state: _NativeExecutionState,
-    failed: HistoryAttemptRecord,
-    *,
-    scheduled: bool,
-) -> HistoryRetryEvent:
-    ordinal = failed.history_attempt_ordinal
-    fields = {
-        "schema_name": "history_retry_event",
-        "schema_version": 1,
-        "run_id": state.run_id,
-        "ingestion_plan_id": failed.ingestion_plan_id,
-        "failed_history_attempt_id": failed.history_attempt_id,
-        "failed_history_attempt_ordinal": ordinal,
-        "retry_ordinal": ordinal,
-        "retry_scheduled": scheduled,
-        "successor_ingestion_occurrence_id": ingestion_occurrence_id(
-            state.run_id,
-            failed.memory_system_id,
-            failed.ingestion_plan_id,
-            history_attempt_ordinal=ordinal + 1,
-        )
-        if scheduled
-        else None,
-        "successor_execution_run_id": state.run_id if scheduled else None,
-        "successor_history_attempt_ordinal": ordinal + 1 if scheduled else None,
-        "retry_policy_hash": INFRASTRUCTURE_RETRY_POLICY_HASH,
-        "max_retries_per_operation": failed.max_retries_per_operation,
-        "backoff_seconds": INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[ordinal - 1] if scheduled else None,
-        "observed_at": state.timestamp(),
-    }
-    event = HistoryRetryEvent.model_validate(
-        {"history_retry_event_id": history_retry_event_id(fields), **fields}
-    )
-    _seal(state, "history-retries", event.history_retry_event_id, event)
-    state.history_events[event.history_retry_event_id] = event
-    return event
-
-
-async def _execute_history_with_rebuild(
+async def _execute_history(
     *,
     state: _NativeExecutionState,
     memory: MemorySystemPort,
@@ -2537,99 +2440,174 @@ async def _execute_history_with_rebuild(
     setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
     continuation: PartialPlanContinuation | None = None,
 ) -> tuple[tuple[NativeIngestionPlanRecord, ...], dict[str, ScopeReceipt]]:
-    maximum = (
-        state.control.max_retries_per_operation
-        if state.control
-        else len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
-    )
-    controller = InfrastructureRetryController(maximum_total_retries=maximum)
-    allowance = state.history_allowances.get(plan.ingestion_plan_id)
-    ordinal = allowance.next_history_attempt_ordinal if allowance else 1
-    execution_run_id = allowance.execution_run_id if allowance else state.run_id
-    previous_event = (
-        state.history_events.get(allowance.previous_retry_event_id)
-        if allowance and allowance.previous_retry_event_id
-        else None
-    )
-    if ordinal > 1 and (previous_event is None or not await controller.reserve(ordinal - 1)):
-        raise ValueError("history recovery allowance has no closed pending retry")
-    if previous_event is not None:
-        _raise_if_native_stop_requested(state)
-        assert previous_event.backoff_seconds is not None
-        await _infrastructure_retry_sleep(previous_event.backoff_seconds)
-    while True:
-        _raise_if_native_stop_requested(state)
-        if previous_event is not None:
-            _claim_history_successor(state, previous_event)
-        started_at = state.timestamp()
-        occurrence = ingestion_occurrence_id(
-            execution_run_id,
-            memory_system_id,
-            plan.ingestion_plan_id,
-            history_attempt_ordinal=ordinal,
+    _raise_if_native_stop_requested(state)
+    if continuation is not None:
+        raise ValueError("same-scope batch continuation requires a new complete run")
+    started_at = state.timestamp()
+    occurrence = ingestion_occurrence_id(state.run_id, memory_system_id, plan.ingestion_plan_id)
+    if occurrence in state.history_occurrence_bindings:
+        raise ValueError("history execution occurrence was already admitted")
+    state.history_occurrence_bindings[occurrence] = (plan.ingestion_plan_id, 1)
+    if state.publish_history_progress is not None:
+        state.publish_history_progress()
+    try:
+        records, scopes = await _execute_ingestion_plans_serial(
+            state=state,
+            memory=memory,
+            plans=(plan,),
+            case_plans=case_plans,
+            memory_system_id=memory_system_id,
+            runtime_binding_hash=runtime_binding_hash,
+            adapter_profile_id=adapter_profile_id,
+            setup_artifacts=setup_artifacts,
+            history_attempt_ordinal=1,
+            execution_run_id=state.run_id,
         )
-        if occurrence in state.history_occurrence_bindings:
-            raise ValueError("history execution occurrence was already admitted")
-        state.history_occurrence_bindings[occurrence] = (plan.ingestion_plan_id, ordinal)
-        if state.publish_history_progress is not None:
-            state.publish_history_progress()
-        try:
-            records, scopes = await _execute_ingestion_plans_serial(
-                state=state,
-                memory=memory,
-                plans=(plan,),
-                case_plans=case_plans,
-                memory_system_id=memory_system_id,
-                runtime_binding_hash=runtime_binding_hash,
-                adapter_profile_id=adapter_profile_id,
-                setup_artifacts=setup_artifacts
-                if ordinal == (allowance.next_history_attempt_ordinal if allowance else 1)
-                else (),
-                continuation=continuation if ordinal == 1 else None,
-                history_attempt_ordinal=ordinal,
-                execution_run_id=execution_run_id,
-            )
-        except BaseException as error:
-            failed = _seal_history_attempt(
-                state=state,
-                plan=plan,
-                memory_system_id=memory_system_id,
-                runtime_binding_hash=runtime_binding_hash,
-                execution_run_id=execution_run_id,
-                ordinal=ordinal,
-                maximum_retries=maximum,
-                previous_event=previous_event,
-                started_at=started_at,
-                error=error,
-            )
-            if failed.status != "retryable_failed_settled":
-                raise
-            _raise_if_native_stop_requested(state)
-            scheduled = await controller.reserve(1)
-            previous_event = _seal_history_retry(state, failed, scheduled=scheduled)
-            if not scheduled:
-                raise HistoryRebuildExhausted(
-                    "history reconstruction retry limit exhausted"
-                ) from error
-            assert previous_event.backoff_seconds is not None
-            await _infrastructure_retry_sleep(previous_event.backoff_seconds)
-            _raise_if_native_stop_requested(state)
-            ordinal += 1
-            execution_run_id = state.run_id
-            continue
+    except BaseException as error:
         _seal_history_attempt(
             state=state,
             plan=plan,
             memory_system_id=memory_system_id,
             runtime_binding_hash=runtime_binding_hash,
-            execution_run_id=execution_run_id,
-            ordinal=ordinal,
-            maximum_retries=maximum,
-            previous_event=previous_event,
+            execution_run_id=state.run_id,
+            ordinal=1,
+            maximum_retries=0,
+            previous_event=None,
             started_at=started_at,
-            ready_record=records[0],
+            error=error,
         )
-        return records, scopes
+        raise
+    _seal_history_attempt(
+        state=state,
+        plan=plan,
+        memory_system_id=memory_system_id,
+        runtime_binding_hash=runtime_binding_hash,
+        execution_run_id=state.run_id,
+        ordinal=1,
+        maximum_retries=0,
+        previous_event=None,
+        started_at=started_at,
+        ready_record=records[0],
+    )
+    return records, scopes
+
+
+async def _execute_ingestion_batch(
+    state: _NativeExecutionState,
+    *,
+    memory: MemorySystemPort,
+    scope: ScopeReceipt,
+    dispatch: IngestionDispatch,
+    adapter_profile_id: str,
+) -> tuple[IngestionDispatchReceipt, tuple[str, ...]]:
+    maximum_attempts = (state.control.max_retries_per_operation + 1) if state.control else 3
+    physical_attempt_ids: list[str] = []
+    base_attempt = attempt_id(
+        scope.ingestion_occurrence_id,
+        "memory_ingest",
+        dispatch.dispatch_ordinal_1_indexed,
+        dispatch.request_fingerprint,
+    )
+    for batch_ordinal in range(1, maximum_attempts + 1):
+        _raise_if_native_stop_requested(state)
+        previous = physical_attempt_ids[-1] if physical_attempt_ids else None
+        current = (
+            base_attempt
+            if batch_ordinal == 1
+            else canonical_sha256(
+                [
+                    "oamb-native-batch-attempt-v1",
+                    base_attempt,
+                    batch_ordinal,
+                    dispatch.request_fingerprint,
+                ]
+            )
+        )
+        prepared = _prepare_native_attempt(
+            state,
+            attempt_identity=current,
+            parent_kind="ingestion_plan",
+            parent_id=scope.ingestion_occurrence_id,
+            stage="memory_ingest",
+            ordinal=dispatch.dispatch_ordinal_1_indexed,
+            request_fingerprint=dispatch.request_fingerprint,
+            role_binding_id=adapter_profile_id,
+            retry_of_attempt_id=previous,
+        )
+        physical_attempt_ids.append(current)
+        started_at = state.timestamp()
+        try:
+            receipt = await memory.ingest(
+                IngestionDispatchRequest(
+                    scope=scope,
+                    attempt_id=current,
+                    dispatch=dispatch,
+                    batch_attempt_ordinal=batch_ordinal,
+                )
+            )
+            if receipt.attempt_id != current or receipt.dispatch != dispatch:
+                raise ValueError("native ingestion receipt does not bind its dispatch")
+        except BaseException as error:
+            terminal = _seal_native_failure_preserving(
+                state,
+                prepared,
+                started_at=started_at,
+                error=error,
+            )
+            if terminal.raw_error_ref is not None and current not in state.attempt_accounting:
+                _seal_native_attempt_accounting(
+                    state,
+                    prepared,
+                    started_at=started_at,
+                    ended_at=terminal.ended_at,
+                    raw_response_ref=terminal.raw_error_ref,
+                    usage_record_ids=tuple(getattr(error, "usage_reference_ids", ())),
+                    indexing_view=IndexingView.ATTEMPTED,
+                )
+            if (
+                not isinstance(error, SettledTransientIngestionFailure)
+                or error.raw_reference is None
+            ):
+                raise
+            if batch_ordinal < maximum_attempts:
+                await _infrastructure_retry_sleep(10)
+                continue
+            return IngestionDispatchReceipt(
+                attempt_id=current,
+                dispatch=dispatch,
+                accepted_source_unit_ids=(),
+                rejected_source_unit_ids=(),
+                skipped_source_unit_ids=tuple(
+                    s.source_unit_id for s in dispatch.ordered_source_units
+                ),
+                raw_reference=error.raw_reference,
+                raw_response_bytes=error.raw_response_bytes or b"",
+                usage_records=(),
+            ), tuple(physical_attempt_ids)
+        ended_at = state.timestamp()
+        _seal_native_success(
+            state,
+            prepared,
+            started_at=started_at,
+            ended_at=ended_at,
+            raw_response_ref=receipt.raw_reference.sha256,
+            index_contribution=IndexContribution.FINAL,
+        )
+        if state.control is None:
+            for usage in receipt.usage_records:
+                _seal(state, "usage", usage.usage_record_id, usage)
+        _seal_native_attempt_accounting(
+            state,
+            prepared,
+            started_at=started_at,
+            ended_at=ended_at,
+            raw_response_ref=receipt.raw_reference.sha256,
+            usage_record_ids=tuple(usage.usage_record_id for usage in receipt.usage_records),
+            inline_usage_records=tuple(receipt.usage_records),
+            indexing_view=IndexingView.FINAL_CONTRIBUTION,
+        )
+        return receipt, tuple(physical_attempt_ids)
+    raise AssertionError("ingestion batch exceeded its attempt bound")
 
 
 async def _execute_ingestion_plans_serial(
@@ -2759,93 +2737,22 @@ async def _execute_ingestion_plans_serial(
         cost_record_ids: list[str] = [
             item.accounting.cost_record_id for item in imported_dispatches
         ]
+        all_dispatch_attempt_ids = list(dispatch_attempt_ids)
         for dispatch in dispatches[len(imported_dispatches) :]:
-            _raise_if_native_stop_requested(state)
-            retry_of_attempt_id: str | None = None
-            if (
-                continuation is not None
-                and dispatch.dispatch_ordinal_1_indexed == continuation.failed_attempt.ordinal
-            ):
-                if dispatch.request_fingerprint != continuation.failed_attempt.request_fingerprint:
-                    raise ValueError("native continuation failed dispatch fingerprint changed")
-                retry_of_attempt_id = continuation.failed_attempt.attempt_id
-                dispatch_attempt_id = canonical_sha256(
-                    [
-                        "oamb-native-retry-attempt-v1",
-                        retry_of_attempt_id,
-                        1,
-                        dispatch.request_fingerprint,
-                    ]
-                )
-            else:
-                dispatch_attempt_id = attempt_id(
-                    occurrence_id,
-                    "memory_ingest",
-                    dispatch.dispatch_ordinal_1_indexed,
-                    dispatch.request_fingerprint,
-                )
-            prepared = _prepare_native_attempt(
+            receipt, physical_ids = await _execute_ingestion_batch(
                 state,
-                attempt_identity=dispatch_attempt_id,
-                parent_kind="ingestion_plan",
-                parent_id=occurrence_id,
-                stage="memory_ingest",
-                ordinal=dispatch.dispatch_ordinal_1_indexed,
-                request_fingerprint=dispatch.request_fingerprint,
-                role_binding_id=adapter_profile_id,
-                retry_of_attempt_id=retry_of_attempt_id,
+                memory=memory,
+                scope=scope,
+                dispatch=dispatch,
+                adapter_profile_id=adapter_profile_id,
             )
-            started_at = state.timestamp()
-            try:
-                receipt = await memory.ingest(
-                    IngestionDispatchRequest(
-                        scope=scope,
-                        attempt_id=dispatch_attempt_id,
-                        dispatch=dispatch,
-                    )
-                )
-                if receipt.attempt_id != dispatch_attempt_id or receipt.dispatch != dispatch:
-                    raise ValueError("native ingestion receipt does not bind its dispatch")
-            except BaseException as exc:
-                _seal_native_failure_preserving(
-                    state,
-                    prepared,
-                    started_at=started_at,
-                    error=exc,
-                )
-                raise
-            ended_at = state.timestamp()
-            _seal_native_success(
-                state,
-                prepared,
-                started_at=started_at,
-                ended_at=ended_at,
-                raw_response_ref=receipt.raw_reference.sha256,
-                index_contribution=IndexContribution.FINAL,
-            )
-            if state.control is None:
-                for usage in receipt.usage_records:
-                    _seal(state, "usage", usage.usage_record_id, usage)
-                    usage_record_ids.append(usage.usage_record_id)
-            attempt_usage_ids, attempt_resource_id, attempt_cost_id = (
-                _seal_native_attempt_accounting(
-                    state,
-                    prepared,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    raw_response_ref=receipt.raw_reference.sha256,
-                    usage_record_ids=tuple(
-                        usage.usage_record_id for usage in receipt.usage_records
-                    ),
-                    inline_usage_records=tuple(receipt.usage_records),
-                    indexing_view=IndexingView.FINAL_CONTRIBUTION,
-                )
-            )
-            if state.control is not None or not receipt.usage_records:
-                usage_record_ids.extend(attempt_usage_ids)
-            resource_record_ids.append(attempt_resource_id)
-            cost_record_ids.append(attempt_cost_id)
-            dispatch_attempt_ids.append(dispatch_attempt_id)
+            all_dispatch_attempt_ids.extend(physical_ids)
+            for physical_id in physical_ids:
+                usage_ids, resource_id, cost_id = state.attempt_accounting[physical_id]
+                usage_record_ids.extend(usage_ids)
+                resource_record_ids.append(resource_id)
+                cost_record_ids.append(cost_id)
+            dispatch_attempt_ids.append(receipt.attempt_id)
             dispatch_receipts.append(receipt)
 
         _raise_if_native_stop_requested(state)
@@ -2863,6 +2770,11 @@ async def _execute_ingestion_plans_serial(
             ),
             raw_references=tuple(receipt.raw_reference for receipt in dispatch_receipts),
             dispatch_receipts=tuple(dispatch_receipts),
+            skipped_source_unit_ids=tuple(
+                source_id
+                for receipt in dispatch_receipts
+                for source_id in receipt.skipped_source_unit_ids
+            ),
         )
         readiness_request = ReadinessRequest(
             scope=scope,
@@ -2925,6 +2837,7 @@ async def _execute_ingestion_plans_serial(
         _require_projection_occurrence(projection, occurrence_id)
         if (
             adapter_profile_id != "mem0-rest-v1"
+            and not ingestion_receipt.skipped_source_unit_ids
             and projection.inventory.ordered_source_unit_ids
             != ingestion_receipt.accepted_source_unit_ids
         ):
@@ -2958,6 +2871,7 @@ async def _execute_ingestion_plans_serial(
             ),
             accepted_source_unit_ids=ingestion_receipt.accepted_source_unit_ids,
             rejected_source_unit_ids=ingestion_receipt.rejected_source_unit_ids,
+            skipped_source_unit_ids=ingestion_receipt.skipped_source_unit_ids,
             readiness_evidence_refs=tuple(
                 dict.fromkeys(
                     (
@@ -2972,7 +2886,7 @@ async def _execute_ingestion_plans_serial(
             protected_state_sha256=projection.state_digest.state_sha256,
             attempt_ids=(
                 *(item.attempt_id for item in plan_artifacts),
-                *dispatch_attempt_ids,
+                *all_dispatch_attempt_ids,
             ),
             usage_record_ids=(
                 *(usage_id for item in plan_artifacts for usage_id in item.usage_record_ids),
@@ -3067,6 +2981,214 @@ class _LiveAttemptedQueryMemory:
         assert self.artifacts is not None
         self.artifacts.append(artifacts)
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class _ModelStageResult:
+    receipt: ModelReceipt | None
+    error: BaseException | None
+    attempt_ids: tuple[str, ...]
+    usage_record_ids: tuple[str, ...]
+    resource_record_ids: tuple[str, ...]
+    cost_record_ids: tuple[str, ...]
+
+
+def _validate_assistant_output(receipt: ModelReceipt) -> None:
+    if receipt.finish_disposition == FinishDisposition.CONTENT_FILTERED:
+        raise RuntimeError("model output was content filtered")
+    if receipt.finish_disposition != FinishDisposition.NORMAL_STOP:
+        raise ValueError(f"assistant output must finish normally, got {receipt.finish_disposition}")
+    if not receipt.output_text.strip():
+        raise ValueError("assistant output must contain nonblank text")
+    if receipt.candidates and (
+        len(receipt.candidates) != 1
+        or receipt.candidates[0].tool_call_present
+        or not receipt.candidates[0].complete
+    ):
+        raise ValueError("assistant output must contain one complete text candidate")
+
+
+async def _execute_model_stage(
+    state: _NativeExecutionState,
+    *,
+    model: ModelClientPort,
+    request: ModelRequest,
+    maximum_output_tokens: int,
+    validate: Callable[[ModelReceipt], None] = _validate_assistant_output,
+) -> _ModelStageResult:
+    if request.parent_kind != "case" or request.stage not in {"answer", "judge"}:
+        raise ValueError("layered model completion requires an answer or judge case request")
+    prepared_calls: dict[int, tuple[_PreparedNativeAttempt, datetime]] = {}
+    last_receipt: ModelReceipt | None = None
+    output_error: BaseException | None = None
+
+    async def dispatch(ordinal: int, messages: tuple[tuple[str, str], ...]) -> ModelReceipt:
+        _raise_if_native_stop_requested(state)
+        messages_hash = _seal_raw(
+            state.store, canonical_json_bytes(messages), media_type="application/json"
+        )
+        outgoing = replace(request, messages=messages, messages_sha256=messages_hash)
+        outgoing = replace(
+            outgoing,
+            attempt_id=attempt_id(
+                request.parent_id,
+                request.stage,
+                ordinal,
+                outgoing.request_fingerprint,
+            ),
+        )
+        previous = prepared_calls[ordinal - 1][0].attempt_id if ordinal > 1 else None
+        prepared = _prepare_native_attempt(
+            state,
+            attempt_identity=outgoing.attempt_id,
+            parent_kind="case",
+            parent_id=request.parent_id,
+            stage=request.stage,
+            ordinal=ordinal,
+            request_fingerprint=outgoing.request_fingerprint,
+            role_binding_id=request.role_binding_id,
+            request_messages_sha256=messages_hash,
+            maximum_output_tokens=maximum_output_tokens,
+            retry_of_attempt_id=previous,
+        )
+        prepared_calls[ordinal] = prepared, state.timestamp()
+        return await model.complete(outgoing)
+
+    async def record(
+        ordinal: int, receipt: ModelReceipt | None, error: BaseException | None
+    ) -> None:
+        nonlocal last_receipt, output_error
+        if ordinal not in prepared_calls:
+            assert error is not None
+            raise error
+        prepared, started_at = prepared_calls[ordinal]
+        last_receipt = receipt
+        if error is None:
+            assert receipt is not None
+            ended_at = state.timestamp()
+            _seal_native_success(
+                state,
+                prepared,
+                started_at=started_at,
+                ended_at=ended_at,
+                raw_response_ref=receipt.raw_reference.sha256,
+                index_contribution=IndexContribution.NOT_APPLICABLE,
+            )
+            _seal_native_attempt_accounting(
+                state,
+                prepared,
+                started_at=started_at,
+                ended_at=ended_at,
+                raw_response_ref=receipt.raw_reference.sha256,
+                usage_record_ids=receipt.usage_reference_ids,
+                indexing_view=IndexingView.NOT_APPLICABLE,
+            )
+            return
+        recorded_error = error
+        if receipt is not None:
+            output_error = error
+            recorded_error = ModelCallFailure(
+                str(error),
+                raw_reference=receipt.raw_reference,
+                raw_response_bytes=receipt.raw_response_bytes,
+                usage_reference_ids=receipt.usage_reference_ids,
+                retryable=isinstance(error, ValueError),
+                failure_kind="output_contract_error",
+                supplier_status_code=receipt.supplier_status_code,
+            )
+        terminal = _seal_native_failure_preserving(
+            state,
+            prepared,
+            started_at=started_at,
+            error=recorded_error,
+        )
+        if (
+            terminal.raw_error_ref is not None
+            and prepared.attempt_id not in state.attempt_accounting
+        ):
+            _seal_native_attempt_accounting(
+                state,
+                prepared,
+                started_at=started_at,
+                ended_at=terminal.ended_at,
+                raw_response_ref=terminal.raw_error_ref,
+                usage_record_ids=tuple(getattr(recorded_error, "usage_reference_ids", ())),
+                indexing_view=IndexingView.NOT_APPLICABLE,
+            )
+
+    failure: BaseException | None = None
+    try:
+        last_receipt = await execute_model_completion_retry(
+            messages=request.messages,
+            dispatch=dispatch,
+            validate=validate,
+            record=record,
+            max_outer_attempts=state.control.model_max_attempts if state.control else 6,
+            max_transport_retries=state.control.model_transport_max_retries if state.control else 2,
+            sleep=_infrastructure_retry_sleep,
+        )
+    except BaseException as error:
+        if isinstance(error, (asyncio.CancelledError, NativeRunInterrupted)):
+            raise
+        if error is not output_error and not isinstance(
+            error, (ModelCallFailure, ModelCallUnknownOutcome)
+        ):
+            raise
+        if isinstance(error, ModelCallFailure) and error.failure_kind == "usage_parse_error":
+            raise
+        failure = error
+    attempt_ids = tuple(prepared.attempt_id for prepared, _started in prepared_calls.values())
+    accounting = tuple(
+        state.attempt_accounting[identity]
+        for identity in attempt_ids
+        if identity in state.attempt_accounting
+    )
+    return _ModelStageResult(
+        receipt=last_receipt,
+        error=failure,
+        attempt_ids=attempt_ids,
+        usage_record_ids=tuple(
+            identity for usage, _resource, _cost in accounting for identity in usage
+        ),
+        resource_record_ids=tuple(resource for _usage, resource, _cost in accounting),
+        cost_record_ids=tuple(cost for _usage, _resource, cost in accounting),
+    )
+
+
+def _seal_model_error_case(
+    state: _NativeExecutionState,
+    *,
+    common: dict[str, Any],
+    stage: str,
+    attempt_ids: tuple[str, ...],
+    usage_record_ids: tuple[str, ...],
+    resource_record_ids: tuple[str, ...],
+    cost_record_ids: tuple[str, ...],
+    answer_receipt: ModelReceipt | None = None,
+    answer_value: AnswerValue | None = None,
+    judge_prompt_raw_ref: str | None = None,
+) -> CaseRecordV3:
+    record = CaseRecordV3(
+        **common,
+        state=CaseState.ERROR,
+        judge_prompt_raw_ref=judge_prompt_raw_ref,
+        answer_raw_ref=answer_receipt.raw_reference.sha256 if answer_receipt else None,
+        parsed_answer_sha256=answer_value.parsed_value_sha256 if answer_value else None,
+        metric_id=None,
+        metric_numerator=None,
+        metric_denominator=None,
+        evaluation_raw_ref=None,
+        evaluation_disposition=CaseEvaluationDisposition.UNJUDGED
+        if stage == "judge"
+        else CaseEvaluationDisposition.NOT_RUN,
+        attempt_ids=attempt_ids,
+        usage_record_ids=usage_record_ids,
+        resource_record_ids=resource_record_ids,
+        cost_record_ids=cost_record_ids,
+        error_stage=stage,
+    )
+    _seal(state, "cases", record.case_occurrence_id, record)
+    return record
 
 
 async def _execute_cases_serial(
@@ -3230,6 +3352,49 @@ async def _execute_cases_serial(
         )
         messages = (("user", prompt.canonical_bytes.decode("utf-8", errors="strict")),)
         messages_sha256 = canonical_sha256(messages)
+        common_case_values: dict[str, Any] = dict(
+            case_occurrence_id=case_occurrence,
+            run_id=state.run_id,
+            ingestion_occurrence_id=ingestion_occurrence,
+            case_manifest_entry_id=case_plan.case_manifest_entry_id,
+            adapter_profile_id=adapter_profile_id,
+            retrieval_raw_ref=query_receipt.native_batch.raw_reference.sha256,
+            retrieval_supporting_raw_refs=tuple(
+                item.sha256 for item in query_receipt.native_batch.supporting_raw_references
+            ),
+            retrieval_request_raw_ref=(
+                None
+                if query_receipt.native_batch.request_raw_reference is None
+                else query_receipt.native_batch.request_raw_reference.sha256
+            ),
+            ordered_native_candidate_ids=tuple(
+                candidate.native_id for candidate in query_receipt.native_batch.candidates
+            ),
+            ordered_native_content_sha256=tuple(
+                hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
+                for candidate in query_receipt.native_batch.candidates
+            ),
+            native_candidate_source_unit_ids=tuple(
+                candidate.source_unit_id for candidate in query_receipt.native_batch.candidates
+            ),
+            visible_evidence_raw_ref=visible_raw_ref,
+            visible_evidence_sha256=visible.sha256,
+            visible_evidence_byte_count=len(visible.canonical_bytes),
+            visible_evidence_token_count=visible.token_count,
+            visible_evidence_tokenizer_fingerprint=visible.tokenizer_fingerprint,
+            native_candidate_count=visible.candidate_count,
+            visible_kept_count=visible.kept_count,
+            visible_dropped_count=visible.dropped_count,
+            visible_truncated_count=visible.truncated_count,
+            visible_decision_ledger_raw_ref=decision_raw_ref,
+            pre_query_projection_raw_refs=_projection_raw_refs(query_receipt.before_projection),
+            pre_query_state_sha256=(query_receipt.before_projection.state_digest.state_sha256),
+            post_query_projection_raw_refs=_projection_raw_refs(query_receipt.after_projection),
+            post_query_state_sha256=(query_receipt.after_projection.state_digest.state_sha256),
+            query_mutation_status="unchanged",
+            prompt_raw_ref=prompt_raw_ref,
+            prompt_sha256=prompt.sha256,
+        )
         answer_request = ModelRequest.for_attempt(
             ordinal=1,
             parent_kind="case",
@@ -3245,53 +3410,28 @@ async def _execute_cases_serial(
             output_contract_id=case_plan.output_contract_id,
             max_output_tokens=None,
         )
-        answer_attempt_id = answer_request.attempt_id
-        prepared_answer = _prepare_native_attempt(
+        answer_result = await _execute_model_stage(
             state,
-            attempt_identity=answer_attempt_id,
-            parent_kind="case",
-            parent_id=case_occurrence,
-            stage="answer",
-            ordinal=1,
-            request_fingerprint=answer_request.request_fingerprint,
-            role_binding_id=answer_role_binding_id,
-            request_messages_sha256=messages_sha256,
+            model=answer_model,
+            request=answer_request,
             maximum_output_tokens=case_plan.answer_max_output_tokens,
         )
-        answer_started_at = state.timestamp()
-        try:
-            answer_receipt = await _complete_model_with_infrastructure_retry(
-                state,
-                prepared=prepared_answer,
-                model=answer_model,
-                request=answer_request,
+        if answer_result.error is not None:
+            records.append(
+                _seal_model_error_case(
+                    state,
+                    common=common_case_values,
+                    stage="answer",
+                    attempt_ids=(*query_attempt_ids, *answer_result.attempt_ids),
+                    usage_record_ids=(*query_usage_ids, *answer_result.usage_record_ids),
+                    resource_record_ids=(*query_resource_ids, *answer_result.resource_record_ids),
+                    cost_record_ids=(*query_cost_ids, *answer_result.cost_record_ids),
+                    answer_receipt=answer_result.receipt,
+                )
             )
-        except BaseException as exc:
-            _seal_native_failure_preserving(
-                state,
-                prepared_answer,
-                started_at=answer_started_at,
-                error=exc,
-            )
-            raise
-        answer_ended_at = state.timestamp()
-        _seal_native_success(
-            state,
-            prepared_answer,
-            started_at=answer_started_at,
-            ended_at=answer_ended_at,
-            raw_response_ref=answer_receipt.raw_reference.sha256,
-            index_contribution=IndexContribution.NOT_APPLICABLE,
-        )
-        answer_usage_ids, answer_resource_id, answer_cost_id = _seal_native_attempt_accounting(
-            state,
-            prepared_answer,
-            started_at=answer_started_at,
-            ended_at=answer_ended_at,
-            raw_response_ref=answer_receipt.raw_reference.sha256,
-            usage_record_ids=answer_receipt.usage_reference_ids,
-            indexing_view=IndexingView.NOT_APPLICABLE,
-        )
+            continue
+        answer_receipt = answer_result.receipt
+        assert answer_receipt is not None
         parsed_answer = answer_receipt.output_text.encode("utf-8")
         answer_value = AnswerValue(
             raw_reference=answer_receipt.raw_reference,
@@ -3300,10 +3440,10 @@ async def _execute_cases_serial(
             parsed_value_sha256=hashlib.sha256(parsed_answer).hexdigest(),
         )
         evaluation = workload.evaluate(case_plan, answer_value)
-        case_attempt_ids = [*query_attempt_ids, answer_attempt_id]
-        usage_record_ids = [*query_usage_ids, *answer_usage_ids]
-        resource_record_ids = [*query_resource_ids, answer_resource_id]
-        cost_record_ids = [*query_cost_ids, answer_cost_id]
+        case_attempt_ids = [*query_attempt_ids, *answer_result.attempt_ids]
+        usage_record_ids = [*query_usage_ids, *answer_result.usage_record_ids]
+        resource_record_ids = [*query_resource_ids, *answer_result.resource_record_ids]
+        cost_record_ids = [*query_cost_ids, *answer_result.cost_record_ids]
         evaluation_disposition = CaseEvaluationDisposition.DETERMINISTIC_EVALUATED
         judge_prompt_raw_ref: str | None = None
         if isinstance(evaluation, JudgeRequest):
@@ -3342,65 +3482,53 @@ async def _execute_cases_serial(
                 output_contract_id=evaluation.output_contract_id,
                 max_output_tokens=None,
             )
-            judge_attempt_id = judge_request.attempt_id
-            prepared_judge = _prepare_native_attempt(
+            judge_evaluations: list[DeterministicEvaluation] = []
+
+            def validate_judge(
+                receipt: ModelReceipt,
+                *,
+                bound_case: CasePlan = case_plan,
+                bound_answer: AnswerValue = answer_value,
+                results: list[DeterministicEvaluation] = judge_evaluations,
+            ) -> None:
+                _validate_assistant_output(receipt)
+                raw_answer = receipt.output_text.encode("utf-8")
+                value = AnswerValue(
+                    raw_reference=receipt.raw_reference,
+                    raw_answer=raw_answer,
+                    parsed_value=raw_answer,
+                    parsed_value_sha256=hashlib.sha256(raw_answer).hexdigest(),
+                )
+                results.append(workload.finalize_judge(bound_case, bound_answer, value))
+
+            judge_result = await _execute_model_stage(
                 state,
-                attempt_identity=judge_attempt_id,
-                parent_kind="case",
-                parent_id=case_occurrence,
-                stage="judge",
-                ordinal=1,
-                request_fingerprint=judge_request.request_fingerprint,
-                role_binding_id=case_plan.judge_binding_id,
-                request_messages_sha256=judge_messages_sha256,
+                model=judge_model,
+                request=judge_request,
                 maximum_output_tokens=evaluation.max_output_tokens,
+                validate=validate_judge,
             )
-            judge_started_at = state.timestamp()
-            try:
-                judge_receipt = await _complete_model_with_infrastructure_retry(
-                    state,
-                    prepared=prepared_judge,
-                    model=judge_model,
-                    request=judge_request,
+            case_attempt_ids.extend(judge_result.attempt_ids)
+            usage_record_ids.extend(judge_result.usage_record_ids)
+            resource_record_ids.extend(judge_result.resource_record_ids)
+            cost_record_ids.extend(judge_result.cost_record_ids)
+            if judge_result.error is not None:
+                records.append(
+                    _seal_model_error_case(
+                        state,
+                        common=common_case_values,
+                        stage="judge",
+                        attempt_ids=tuple(case_attempt_ids),
+                        usage_record_ids=tuple(usage_record_ids),
+                        resource_record_ids=tuple(resource_record_ids),
+                        cost_record_ids=tuple(cost_record_ids),
+                        answer_receipt=answer_receipt,
+                        answer_value=answer_value,
+                        judge_prompt_raw_ref=judge_prompt_raw_ref,
+                    )
                 )
-            except BaseException as exc:
-                _seal_native_failure_preserving(
-                    state,
-                    prepared_judge,
-                    started_at=judge_started_at,
-                    error=exc,
-                )
-                raise
-            judge_ended_at = state.timestamp()
-            _seal_native_success(
-                state,
-                prepared_judge,
-                started_at=judge_started_at,
-                ended_at=judge_ended_at,
-                raw_response_ref=judge_receipt.raw_reference.sha256,
-                index_contribution=IndexContribution.NOT_APPLICABLE,
-            )
-            judge_usage_ids, judge_resource_id, judge_cost_id = _seal_native_attempt_accounting(
-                state,
-                prepared_judge,
-                started_at=judge_started_at,
-                ended_at=judge_ended_at,
-                raw_response_ref=judge_receipt.raw_reference.sha256,
-                usage_record_ids=judge_receipt.usage_reference_ids,
-                indexing_view=IndexingView.NOT_APPLICABLE,
-            )
-            judge_bytes = judge_receipt.output_text.encode("utf-8")
-            judge_answer = AnswerValue(
-                raw_reference=judge_receipt.raw_reference,
-                raw_answer=judge_bytes,
-                parsed_value=judge_bytes,
-                parsed_value_sha256=hashlib.sha256(judge_bytes).hexdigest(),
-            )
-            evaluation = workload.finalize_judge(case_plan, answer_value, judge_answer)
-            case_attempt_ids.append(judge_attempt_id)
-            usage_record_ids.extend(judge_usage_ids)
-            resource_record_ids.append(judge_resource_id)
-            cost_record_ids.append(judge_cost_id)
+                continue
+            evaluation = judge_evaluations[-1]
             evaluation_disposition = CaseEvaluationDisposition.JUDGED
         evaluation_raw_ref = _seal_deterministic_evaluation(
             state.store,
@@ -3410,48 +3538,8 @@ async def _execute_cases_serial(
         if evaluation.numerator is None or evaluation.denominator is None:
             raise ValueError("native deterministic evaluation requires an exact fraction")
         record = CaseRecordV3(
-            case_occurrence_id=case_occurrence,
-            run_id=state.run_id,
-            ingestion_occurrence_id=ingestion_occurrence,
-            case_manifest_entry_id=case_plan.case_manifest_entry_id,
-            adapter_profile_id=adapter_profile_id,
+            **common_case_values,
             state=CaseState.COMPLETED,
-            retrieval_raw_ref=query_receipt.native_batch.raw_reference.sha256,
-            retrieval_supporting_raw_refs=tuple(
-                item.sha256 for item in query_receipt.native_batch.supporting_raw_references
-            ),
-            retrieval_request_raw_ref=(
-                None
-                if query_receipt.native_batch.request_raw_reference is None
-                else query_receipt.native_batch.request_raw_reference.sha256
-            ),
-            ordered_native_candidate_ids=tuple(
-                candidate.native_id for candidate in query_receipt.native_batch.candidates
-            ),
-            ordered_native_content_sha256=tuple(
-                hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
-                for candidate in query_receipt.native_batch.candidates
-            ),
-            native_candidate_source_unit_ids=tuple(
-                candidate.source_unit_id for candidate in query_receipt.native_batch.candidates
-            ),
-            visible_evidence_raw_ref=visible_raw_ref,
-            visible_evidence_sha256=visible.sha256,
-            visible_evidence_byte_count=len(visible.canonical_bytes),
-            visible_evidence_token_count=visible.token_count,
-            visible_evidence_tokenizer_fingerprint=visible.tokenizer_fingerprint,
-            native_candidate_count=visible.candidate_count,
-            visible_kept_count=visible.kept_count,
-            visible_dropped_count=visible.dropped_count,
-            visible_truncated_count=visible.truncated_count,
-            visible_decision_ledger_raw_ref=decision_raw_ref,
-            pre_query_projection_raw_refs=_projection_raw_refs(query_receipt.before_projection),
-            pre_query_state_sha256=(query_receipt.before_projection.state_digest.state_sha256),
-            post_query_projection_raw_refs=_projection_raw_refs(query_receipt.after_projection),
-            post_query_state_sha256=(query_receipt.after_projection.state_digest.state_sha256),
-            query_mutation_status="unchanged",
-            prompt_raw_ref=prompt_raw_ref,
-            prompt_sha256=prompt.sha256,
             judge_prompt_raw_ref=judge_prompt_raw_ref,
             answer_raw_ref=answer_receipt.raw_reference.sha256,
             parsed_answer_sha256=answer_value.parsed_value_sha256,
@@ -4066,8 +4154,11 @@ def _seal_native_attempt_accounting(
     indexing_view: IndexingView,
     inline_usage_records: tuple[StrictContract, ...] = (),
 ) -> tuple[tuple[str, ...], str, str]:
+    cached = state.attempt_accounting.get(prepared.attempt_id)
+    if cached is not None:
+        return cached
     if prepared.route is not None:
-        return _seal_live_native_attempt_accounting(
+        result = _seal_live_native_attempt_accounting(
             state,
             prepared,
             started_at=started_at,
@@ -4077,6 +4168,8 @@ def _seal_native_attempt_accounting(
             inline_usage_records=inline_usage_records,
             indexing_view=indexing_view,
         )
+        state.attempt_accounting[prepared.attempt_id] = result
+        return result
     if len(usage_record_ids) > 1:
         raise ValueError("native attempt cannot bind multiple token-usage records")
     if usage_record_ids:
@@ -4161,7 +4254,9 @@ def _seal_native_attempt_accounting(
         reason="supplier_cost_unavailable",
     )
     _seal(state, "costs", cost_record_id, cost)
-    return closed_usage_ids, resource_record_id, cost_record_id
+    result = closed_usage_ids, resource_record_id, cost_record_id
+    state.attempt_accounting[prepared.attempt_id] = result
+    return result
 
 
 def _seal_live_native_attempt_accounting(
@@ -4575,6 +4670,14 @@ def _seal_native_failure(
     receipt = AttemptReceiptRecord(
         attempt_id=prepared.attempt_id,
         receipt_kind=receipt_kind,
+        failure_kind=getattr(error, "failure_kind", None),
+        supplier_status_code=getattr(
+            error, "supplier_status_code", getattr(error, "status_code", None)
+        ),
+        settlement_basis=getattr(error, "settlement_basis", None),
+        internal_retry_count=getattr(error, "internal_retry_count", None),
+        settlement_task_id=getattr(error, "expected_task_id", None),
+        settlement_session_id=getattr(error, "expected_session_id", None),
         raw_response_ref=None,
         raw_error_ref=raw_error_ref,
         dispatch_started_at=started_at,
@@ -4621,6 +4724,13 @@ def _seal_native_failure(
             raise ValueError("live failed attempt lost budget or lifecycle state")
         if unknown:
             ledger.mark_unknown(reservation.reservation_id)
+            if prepared.stage in {"answer", "judge"} and not isinstance(
+                error, asyncio.CancelledError
+            ):
+                lifecycle.clear_attempt_after_receipt(
+                    attempt_id=prepared.attempt_id,
+                    expected_intent_record_hash=prepared.intent.intent_hash,
+                )
             return live_terminal
         if cancelled_before_dispatch:
             ledger.cancel_before_dispatch(reservation.reservation_id)
@@ -4650,15 +4760,17 @@ def _seal_native_failure(
                 owner_observed=owner_observed,
             )
             return live_terminal
-        _seal_live_native_attempt_accounting(
+        _seal_native_attempt_accounting(
             state,
             prepared,
             started_at=started_at,
             ended_at=ended_at,
             raw_response_ref=raw_error_ref,
-            usage_record_ids=(),
+            usage_record_ids=tuple(getattr(error, "usage_reference_ids", ())),
             inline_usage_records=(),
-            indexing_view=IndexingView.ATTEMPTED,
+            indexing_view=IndexingView.ATTEMPTED
+            if prepared.stage == "memory_ingest"
+            else IndexingView.NOT_APPLICABLE,
         )
         return live_terminal
     terminal = AttemptRecordV2(

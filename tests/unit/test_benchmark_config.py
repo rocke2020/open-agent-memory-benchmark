@@ -96,7 +96,7 @@ def test_preserved_lme6_configuration_keeps_original_selection_and_concurrency()
         "mem0-lme6",
         "openviking-lme6",
     )
-    assert configuration.evaluation_controls.as_tuple() == (2, 900)
+    assert configuration.evaluation_controls.as_tuple() == (2, 10, 6, 2, 900)
     assert configuration.decision is None
 
 
@@ -346,10 +346,10 @@ def test_checked_in_configuration_freezes_generation_free_retrieval_bindings() -
     assert "rerank=false" not in _valid_configuration_yaml()
 
 
-def test_checked_in_configuration_has_only_two_finite_evaluation_controls() -> None:
+def test_checked_in_configuration_freezes_all_layered_retry_controls() -> None:
     configuration = _load(BENCHMARK_CONFIG_PATH)
 
-    assert configuration.evaluation_controls.as_tuple() == (2, 900)
+    assert configuration.evaluation_controls.as_tuple() == (2, 10, 6, 2, 900)
 
 
 @pytest.mark.parametrize(
@@ -521,16 +521,16 @@ def test_loader_rejects_each_removed_ceiling_or_concurrency_key(
         _load(_write_configuration(tmp_path, content))
 
 
-def test_loader_accepts_zero_retries_as_one_initial_attempt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("retry_count", (0, 1))
+def test_loader_rejects_non_profile_batch_retry_count(tmp_path: Path, retry_count: int) -> None:
     content = _valid_configuration_yaml().replace(
         "max_retries_per_operation: 2",
-        "max_retries_per_operation: 0",
+        f"max_retries_per_operation: {retry_count}",
         1,
     )
 
-    configuration = _load(_write_configuration(tmp_path, content))
-
-    assert configuration.evaluation_controls.as_tuple() == (0, 900)
+    with pytest.raises(BenchmarkConfigurationError, match="batch retry"):
+        _load(_write_configuration(tmp_path, content))
 
 
 def test_configuration_is_frozen() -> None:
@@ -538,7 +538,20 @@ def test_configuration_is_frozen() -> None:
 
     with pytest.raises(AttributeError):
         configuration.cells = ()  # type: ignore[misc]
-    assert replace(configuration.evaluation_controls).as_tuple() == (2, 900)
+    assert replace(configuration.evaluation_controls).as_tuple() == (2, 10, 6, 2, 900)
+
+
+def test_loader_rejects_plan_without_layered_retry_fields(tmp_path: Path) -> None:
+    content = _valid_configuration_yaml()
+    for line in (
+        "  extraction_max_retries: 10\n",
+        "  model_max_attempts: 6\n",
+        "  model_transport_max_retries: 2\n",
+    ):
+        content = content.replace(line, "", 1)
+        with pytest.raises(BenchmarkConfigurationError, match="execution keys"):
+            _load(_write_configuration(tmp_path, content))
+        content = _valid_configuration_yaml()
 
 
 @pytest.mark.parametrize(

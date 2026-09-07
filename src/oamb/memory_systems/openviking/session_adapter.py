@@ -175,6 +175,8 @@ class OpenVikingSessionAdapter:
         self._plans: dict[str, tuple[_PlannedSession, ...]] = {}
         self._attempted_sessions: set[str] = set()
         self._completed: dict[str, _CompletedSession] = {}
+        self._skipped_sessions: set[str] = set()
+        self._next_batch_attempt_ordinals: dict[str, int] = {}
         self._continuations: dict[str, _ScopeContinuation] = {}
         self._ready_scopes: set[str] = set()
 
@@ -421,12 +423,26 @@ class OpenVikingSessionAdapter:
     async def ingest(self, request: IngestionDispatchRequest) -> IngestionDispatchReceipt:
         binding = self._require_scope(request.scope)
         planned = self._planned_for_dispatch(binding, request.dispatch)
-        if planned.session_id in self._attempted_sessions:
+        expected_batch_attempt = self._next_batch_attempt_ordinals.get(planned.session_id, 1)
+        if request.batch_attempt_ordinal != expected_batch_attempt:
+            raise OpenVikingSessionProfileError(
+                "OpenViking session batch attempt is not the next allowed retry"
+            )
+        session_id = (
+            planned.session_id
+            if request.batch_attempt_ordinal == 1
+            else openviking_session_id(
+                binding.ingestion_occurrence_id,
+                f"{planned.source.source_unit_id}:batch-attempt:{request.batch_attempt_ordinal}",
+            )
+        )
+        if session_id in self._attempted_sessions:
             raise OpenVikingSessionProfileError(
                 "OpenViking create-only native session was already attempted and cannot be reused"
             )
         completed_count = sum(
-            item.session_id in self._completed for item in self._plans[binding.memory_root]
+            item.session_id in self._completed or item.session_id in self._skipped_sessions
+            for item in self._plans[binding.memory_root]
         )
         if request.dispatch.dispatch_ordinal_1_indexed != completed_count + 1:
             raise OpenVikingSessionProfileError(
@@ -434,22 +450,26 @@ class OpenVikingSessionAdapter:
             )
 
         headers = {ACTOR_PEER_HEADER: binding.actor_peer_id}
-        self._attempted_sessions.add(planned.session_id)
+        self._attempted_sessions.add(session_id)
         continuation = self._continuations.get(binding.memory_root)
-        if continuation is not None and continuation.failed_session_id == planned.session_id:
+        if (
+            request.batch_attempt_ordinal == 1
+            and continuation is not None
+            and continuation.failed_session_id == planned.session_id
+        ):
             replay_failed_session = True
             evidence_references = list(continuation.failed_evidence_references)
             evidence_references.append(
                 await self._require_zero_failed_session(
-                    session_id=planned.session_id,
+                    session_id=session_id,
                     headers=headers,
                 )
             )
         else:
             replay_failed_session = False
             session_absence = await self._require_absent(
-                path=f"/api/v1/sessions/{planned.session_id}",
-                expected_resource=planned.session_id,
+                path=f"/api/v1/sessions/{session_id}",
+                expected_resource=session_id,
                 expected_type="session",
                 params={"auto_create": False},
                 headers=headers,
@@ -460,7 +480,7 @@ class OpenVikingSessionAdapter:
                 "POST",
                 "/api/v1/sessions",
                 json_payload={
-                    "session_id": planned.session_id,
+                    "session_id": session_id,
                     "auto_commit_policy": None,
                 },
                 request_headers=headers,
@@ -470,7 +490,7 @@ class OpenVikingSessionAdapter:
             create_result = _clean_result(create, "session create")
             if (
                 not isinstance(create_result, dict)
-                or create_result.get("session_id") != planned.session_id
+                or create_result.get("session_id") != session_id
                 or create_result.get("auto_commit_policy", object()) is not None
             ):
                 raise OpenVikingSessionProfileError(
@@ -491,7 +511,7 @@ class OpenVikingSessionAdapter:
             batch = message_payloads[start : start + MAX_MESSAGES_PER_BATCH]
             message_response = await self._client.request(
                 "POST",
-                f"/api/v1/sessions/{planned.session_id}/messages/batch",
+                f"/api/v1/sessions/{session_id}/messages/batch",
                 json_payload={"messages": batch},
                 request_headers=headers,
                 write_intent=True,
@@ -500,7 +520,7 @@ class OpenVikingSessionAdapter:
             message_result = _clean_result(message_response, "session messages")
             if (
                 not isinstance(message_result, dict)
-                or message_result.get("session_id") != planned.session_id
+                or message_result.get("session_id") != session_id
             ):
                 raise OpenVikingSessionProfileError(
                     "OpenViking session message response has the wrong session"
@@ -508,48 +528,57 @@ class OpenVikingSessionAdapter:
 
         commit = await self._client.request(
             "POST",
-            f"/api/v1/sessions/{planned.session_id}/commit",
+            f"/api/v1/sessions/{session_id}/commit",
             json_payload={"keep_recent_count": 0},
             request_headers=headers,
             write_intent=True,
         )
         evidence_references.append(commit.raw_reference)
         commit_result = _clean_result(commit, "session commit")
-        task_id, archive_uri = _commit_identity(commit_result, planned.session_id)
+        task_id, archive_uri = _commit_identity(commit_result, session_id)
 
-        task_result, task_references = await self._poll_terminal_task(
-            task_id=task_id,
-            session_id=planned.session_id,
-            archive_uri=archive_uri,
-            headers=headers,
-            preceding_raw_references=tuple(evidence_references),
-        )
+        try:
+            task_result, task_references = await self._poll_terminal_task(
+                task_id=task_id,
+                session_id=session_id,
+                archive_uri=archive_uri,
+                headers=headers,
+                preceding_raw_references=tuple(evidence_references),
+            )
+        except SettledTransientIngestionFailure:
+            self._next_batch_attempt_ordinals[planned.session_id] = (
+                request.batch_attempt_ordinal + 1
+            )
+            if request.batch_attempt_ordinal == 3:
+                self._skipped_sessions.add(planned.session_id)
+            raise
         evidence_references.extend(task_references)
         _require_usage_snapshot(task_result)
 
         archive_id = archive_uri.rstrip("/").rsplit("/", 1)[-1]
         archive = await self._client.request(
             "GET",
-            f"/api/v1/sessions/{planned.session_id}/archives/{archive_id}",
+            f"/api/v1/sessions/{session_id}/archives/{archive_id}",
             request_headers=headers,
         )
         evidence_references.append(archive.raw_reference)
         archive_result = _clean_result(archive, "session archive")
         if not isinstance(archive_result, dict) or archive_result.get("session_id") not in {
             None,
-            planned.session_id,
+            session_id,
         }:
             raise OpenVikingSessionProfileError("OpenViking session archive has the wrong session")
 
         projection_response, _uris = await self._capture_memory_projection(binding)
         evidence_references.append(projection_response.raw_reference)
         completed = _CompletedSession(
-            session_id=planned.session_id,
+            session_id=session_id,
             archive_uri=archive_uri,
             task_id=task_id,
             evidence_references=tuple(evidence_references),
         )
         self._completed[planned.session_id] = completed
+        self._next_batch_attempt_ordinals[planned.session_id] = 0
         if replay_failed_session:
             del self._continuations[binding.memory_root]
         return IngestionDispatchReceipt(
@@ -567,11 +596,10 @@ class OpenVikingSessionAdapter:
         planned = self._plans.get(binding.memory_root)
         if planned is None:
             raise OpenVikingSessionProfileError("OpenViking session readiness has no frozen plan")
-        expected_source_ids = tuple(item.source.source_unit_id for item in planned)
         requested_source_ids = tuple(request.expected_source_unit_ids)
         receipt = request.ingestion_receipt
         if (
-            requested_source_ids != expected_source_ids
+            requested_source_ids != receipt.accepted_source_unit_ids
             or receipt.ingestion_occurrence_id != binding.ingestion_occurrence_id
         ):
             return ReadinessReceipt(
@@ -588,10 +616,8 @@ class OpenVikingSessionAdapter:
             item.source.source_unit_id for item in planned if item.session_id in self._completed
         )
         if (
-            receipt_source_ids != expected_source_ids
-            or receipt.accepted_source_unit_ids != expected_source_ids
-            or receipt.rejected_source_unit_ids
-            or completed_source_ids != expected_source_ids
+            receipt_source_ids != receipt.accepted_source_unit_ids
+            or completed_source_ids != receipt.accepted_source_unit_ids
             or len(receipt.dispatch_receipts) != len(planned)
         ):
             return ReadinessReceipt(
@@ -604,17 +630,54 @@ class OpenVikingSessionAdapter:
                     for reference in completed.evidence_references
                 ),
             )
+        if (
+            receipt.accepted_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.accepted_source_unit_ids
+            )
+            or receipt.rejected_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.rejected_source_unit_ids
+            )
+            or receipt.skipped_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.skipped_source_unit_ids
+            )
+        ):
+            raise OpenVikingSessionProfileError(
+                "OpenViking session readiness aggregate source partition is invalid"
+            )
         for expected, actual in zip(planned, receipt.dispatch_receipts, strict=True):
+            source_id = expected.source.source_unit_id
+            partitions = (
+                set(actual.accepted_source_unit_ids),
+                set(actual.rejected_source_unit_ids),
+                set(actual.skipped_source_unit_ids),
+            )
             if (
                 actual.dispatch != expected.dispatch
                 or hashlib.sha256(actual.raw_response_bytes).hexdigest()
                 != actual.raw_reference.sha256
+                or any(
+                    left & right
+                    for index, left in enumerate(partitions)
+                    for right in partitions[index + 1 :]
+                )
+                or set().union(*partitions) != {source_id}
             ):
                 raise OpenVikingSessionProfileError(
                     "OpenViking session readiness receipt binding is invalid"
                 )
         projection = await self.project(request.scope)
-        if projection.inventory.ordered_source_unit_ids != expected_source_ids:
+        if not set(projection.inventory.ordered_source_unit_ids) <= (
+            set(receipt.accepted_source_unit_ids) | set(receipt.skipped_source_unit_ids)
+        ):
             raise OpenVikingSessionProfileError(
                 "OpenViking session readiness projection lost source-session order"
             )
@@ -626,7 +689,8 @@ class OpenVikingSessionAdapter:
                 *(
                     reference
                     for item in planned
-                    for reference in self._completed[item.session_id].evidence_references
+                    if (completed := self._completed.get(item.session_id)) is not None
+                    for reference in completed.evidence_references
                 ),
                 projection.inventory.raw_reference,
                 *projection.supporting_raw_references,

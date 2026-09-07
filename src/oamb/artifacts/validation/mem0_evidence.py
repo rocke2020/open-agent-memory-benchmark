@@ -172,15 +172,25 @@ def reconstruct_mem0_plan(
         strict=True,
     ):
         attempt = attempts.get(attempt_id)
+        skipped_dispatch = set(source_ids) <= set(plan.skipped_source_unit_ids)
         if (
             attempt is None
             or attempt.parent_kind != "ingestion_plan"
             or attempt.parent_id != plan.ingestion_occurrence_id
             or attempt.stage != "memory_ingest"
-            or attempt.outcome != AttemptOutcome.SUCCEEDED
-            or attempt.raw_response_ref is None
             or len(source_ids) != 1
         ):
+            raise ValueError("Mem0 add attempt does not close its source dispatch")
+        if skipped_dispatch:
+            if (
+                attempt.outcome != AttemptOutcome.FAILED
+                or attempt.raw_error_ref is None
+                or attempt.raw_error_ref not in raw_payloads
+            ):
+                raise ValueError("Mem0 skipped add lacks its terminal failure evidence")
+            dispatched.extend(source_ids)
+            continue
+        if attempt.outcome != AttemptOutcome.SUCCEEDED or attempt.raw_response_ref is None:
             raise ValueError("Mem0 add attempt does not close its source dispatch")
         payload = raw_payloads.get(attempt.raw_response_ref)
         if payload is None:
@@ -190,8 +200,10 @@ def reconstruct_mem0_plan(
         add_raw_refs.append(attempt.raw_response_ref)
     if (
         tuple(dispatched) != plan.ordered_source_unit_ids
-        or plan.accepted_source_unit_ids != plan.ordered_source_unit_ids
-        or plan.rejected_source_unit_ids
+        or set(plan.accepted_source_unit_ids)
+        | set(plan.rejected_source_unit_ids)
+        | set(plan.skipped_source_unit_ids)
+        != set(plan.ordered_source_unit_ids)
         or not set(add_raw_refs) <= set(plan.readiness_evidence_refs)
     ):
         raise ValueError("Mem0 completed source ledger does not close")
@@ -216,7 +228,10 @@ def reconstruct_mem0_plan(
         references=plan.projection_raw_refs,
         expected_run_id=plan.ingestion_occurrence_id,
     )
-    completed = set(plan.accepted_source_unit_ids)
+    observable = set(plan.accepted_source_unit_ids) | set(plan.skipped_source_unit_ids)
+    source_positions = {
+        source_id: index for index, source_id in enumerate(plan.ordered_source_unit_ids)
+    }
     for point in projection.projection.points:
         metadata = point.metadata
         if metadata is None:
@@ -224,9 +239,8 @@ def reconstruct_mem0_plan(
         if (
             metadata.ingestion_occurrence_id != plan.ingestion_occurrence_id
             or metadata.ingestion_plan_id != plan.ingestion_plan_id
-            or metadata.source_unit_id not in completed
-            or metadata.source_ordinal
-            != plan.accepted_source_unit_ids.index(metadata.source_unit_id) + 1
+            or metadata.source_unit_id not in observable
+            or metadata.source_ordinal != source_positions[metadata.source_unit_id] + 1
         ):
             raise ValueError("Mem0 visible projection contains foreign source metadata")
     if (

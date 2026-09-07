@@ -87,12 +87,13 @@ def _proof_bytes(filename: str) -> bytes:
             "reasoning_effort": "low",
         },
         "hindsight-retry-config.json": {
+            "extraction_max_retries": 10,
             "llm_base_url_host": "api.deepseek.com",
             "llm_max_retries": 0,
             "NO_PROXY": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
             "no_proxy": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
             "openai_sdk_max_retries": 0,
-            "retain_llm_max_retries": 0,
+            "retain_llm_max_retries": 10,
             "worker_max_retries": 0,
         },
         "mem0-openapi.json": {
@@ -128,6 +129,7 @@ def _proof_bytes(filename: str) -> bytes:
             "version": "v1.1",
         },
         "mem0-retry-config.json": {
+            "extraction_max_retries": 10,
             "llm_base_url_host": "api.deepseek.com",
             "NO_PROXY": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
             "no_proxy": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
@@ -162,8 +164,9 @@ def _proof_bytes(filename: str) -> bytes:
         },
         "openviking-retry-config.json": {
             "embedding_max_retries": 0,
+            "extraction_max_retries": 10,
             "llm_base_url_host": "api.deepseek.com",
-            "memory_extraction_max_retries": 0,
+            "memory_extraction_max_retries": 10,
             "NO_PROXY": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
             "no_proxy": "127.0.0.1,localhost,host.docker.internal,api.deepseek.com",
             "openai_sdk_max_retries": 0,
@@ -309,13 +312,13 @@ def _read_receipt(receipt_path: Path) -> dict[str, object]:
     return value
 
 
-def test_profile_bindings_carry_only_strict_zero_from_validated_retry_proofs(
+def test_profile_bindings_carry_strict_extraction_retry_count_from_validated_proofs(
     tmp_path: Path,
 ) -> None:
     from oamb.config.provider_services import ProviderServiceBindingError
 
     valid = _write_service_artifacts(tmp_path / "valid")
-    assert tuple(binding.internal_retry_count for binding in _load(valid)) == (0, 0, 0)
+    assert tuple(binding.internal_retry_count for binding in _load(valid)) == (10, 10, 10)
 
     invalid_payloads = (
         b'{"NO_PROXY":"127.0.0.1,localhost,host.docker.internal,api.deepseek.com",'

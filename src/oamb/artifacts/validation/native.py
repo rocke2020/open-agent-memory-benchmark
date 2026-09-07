@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +55,7 @@ from oamb.contracts.accounting import (
 from oamb.contracts.evidence import (
     AttemptIntentRecord,
     AttemptIntentRecordV3,
+    AttemptReceiptKind,
     AttemptReceiptRecord,
     AttemptRecordV2,
     AttemptRecordV4,
@@ -81,8 +83,14 @@ from oamb.contracts.ids import (
     canonical_sha256,
     case_occurrence_id,
     ingestion_occurrence_id,
+    openviking_session_id,
 )
-from oamb.contracts.ingestion_failures import classify_settled_ingestion_failure
+from oamb.contracts.ingestion_failures import (
+    HINDSIGHT_SETTLEMENT_BASIS,
+    MEM0_SETTLEMENT_BASIS,
+    OPENVIKING_SETTLEMENT_BASIS,
+    classify_settled_ingestion_failure,
+)
 from oamb.contracts.ports import NativeEvidenceCandidate
 from oamb.contracts.specifications import (
     INFRASTRUCTURE_MAX_TOTAL_RETRIES,
@@ -909,6 +917,20 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
                 aligned = False
             if not aligned:
                 issues.append(_issue(rule_id, attempt_id, "attempt-evidence-mismatch"))
+            if (
+                attempt.stage in {"answer", "judge"}
+                and attempt.outcome == AttemptOutcome.FAILED
+                and attempt.raw_error_ref is not None
+                and (
+                    rejection := parse_structured_supplier_rejection(
+                        snapshot.raw_payloads.get(attempt.raw_error_ref, b""),
+                        status_code=429,
+                    )
+                )
+                is not None
+                and rejection.internal_retry_count != 0
+            ):
+                issues.append(_issue(rule_id, attempt_id, "model-supplier-retry-proof-drift"))
     issues.extend(_infrastructure_retry_issues(snapshot, attempts, runs, partitions))
     return tuple(issues)
 
@@ -1422,6 +1444,7 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
     usage_records = {item.usage_record_id: item for item in _token_usage_records(snapshot)}
     resource_records = {item.resource_record_id: item for item in _resource_usage_records(snapshot)}
     cost_records = {item.cost_record_id: item for item in _cost_records(snapshot)}
+    receipts = {item.attempt_id: item for item in _contracts(snapshot, AttemptReceiptRecord)}
     issues: list[ValidationIssue] = []
     for plan in _ingestion_plans(snapshot):
         if plan.state != IngestionPlanState.SEALED or plan.scope_id is None:
@@ -1445,6 +1468,21 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                     "ingestion-accounting-ledger-mismatch",
                 )
             )
+        for final_attempt_id, dispatch_source_ids in zip(
+            plan.ordered_dispatch_attempt_ids,
+            plan.ordered_dispatch_source_unit_ids,
+            strict=True,
+        ):
+            final_attempt = attempts.get(final_attempt_id)
+            if final_attempt is not None and not _dispatch_retry_chain_closes(
+                plan=plan,
+                source_ids=dispatch_source_ids,
+                final_attempt=final_attempt,
+                attempts=attempts,
+                receipts=receipts,
+                raw_payloads=snapshot.raw_payloads,
+            ):
+                issues.append(_issue(rule_id, final_attempt_id, "dispatch-retry-chain-mismatch"))
         if plan.adapter_profile_id == HINDSIGHT_PROFILE_ID:
             if not isinstance(plan, IngestionPlanRecordV2):
                 issues.append(
@@ -1563,6 +1601,7 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
 
         accepted: list[str] = []
         rejected: list[str] = []
+        skipped: list[str] = []
         dispatched: list[str] = []
         for attempt_id, expected_dispatch_source_ids in zip(
             plan.ordered_dispatch_attempt_ids,
@@ -1570,14 +1609,25 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
             strict=True,
         ):
             attempt = attempts.get(attempt_id)
+            skipped_dispatch = set(expected_dispatch_source_ids) <= set(
+                plan.skipped_source_unit_ids
+            )
             if (
                 attempt is None
                 or attempt.parent_kind != "ingestion_plan"
                 or attempt.parent_id != plan.ingestion_occurrence_id
                 or attempt.stage != "memory_ingest"
-                or attempt.outcome != AttemptOutcome.SUCCEEDED
-                or attempt.raw_response_ref is None
             ):
+                issues.append(_issue(rule_id, attempt_id, "dispatch-attempt-mismatch"))
+                continue
+            if skipped_dispatch:
+                if attempt.outcome != AttemptOutcome.FAILED or attempt.raw_error_ref is None:
+                    issues.append(_issue(rule_id, attempt_id, "dispatch-attempt-mismatch"))
+                    continue
+                dispatched.extend(expected_dispatch_source_ids)
+                skipped.extend(expected_dispatch_source_ids)
+                continue
+            if attempt.outcome != AttemptOutcome.SUCCEEDED or attempt.raw_response_ref is None:
                 issues.append(_issue(rule_id, attempt_id, "dispatch-attempt-mismatch"))
                 continue
             document = _raw_object(snapshot, attempt.raw_response_ref)
@@ -1618,6 +1668,7 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
         if (
             tuple(accepted) != plan.accepted_source_unit_ids
             or tuple(rejected) != plan.rejected_source_unit_ids
+            or tuple(skipped) != plan.skipped_source_unit_ids
         ):
             issues.append(
                 _issue(rule_id, plan.ingestion_occurrence_id, "dispatch-partition-mismatch")
@@ -1649,10 +1700,6 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
                 scope_id=plan.scope_id,
             )
             or tuple(projected) != plan.projected_source_unit_ids
-            or (
-                isinstance(plan, IngestionPlanRecordV2)
-                and plan.projected_source_unit_ids != plan.accepted_source_unit_ids
-            )
         ):
             issues.append(
                 _issue(
@@ -1681,6 +1728,154 @@ def _plan_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssu
     return tuple(issues)
 
 
+def _dispatch_retry_chain_closes(
+    *,
+    plan: NativePlanRecord,
+    source_ids: tuple[str, ...],
+    final_attempt: NativeAttemptRecord,
+    attempts: dict[str, NativeAttemptRecord],
+    receipts: dict[str, AttemptReceiptRecord],
+    raw_payloads: Mapping[str, bytes],
+) -> bool:
+    chain = [final_attempt]
+    seen = {final_attempt.attempt_id}
+    predecessor_id = final_attempt.retry_of_attempt_id
+    while predecessor_id is not None:
+        predecessor = attempts.get(predecessor_id)
+        if predecessor is None or predecessor_id in seen:
+            return False
+        chain.append(predecessor)
+        seen.add(predecessor_id)
+        predecessor_id = predecessor.retry_of_attempt_id
+    chain.reverse()
+    skipped = set(source_ids) <= set(plan.skipped_source_unit_ids)
+    if not 1 <= len(chain) <= 3 or (skipped and len(chain) != 3):
+        return False
+    if chain[0].retry_of_attempt_id is not None or any(
+        current.retry_of_attempt_id != previous.attempt_id
+        for previous, current in zip(chain, chain[1:], strict=False)
+    ):
+        return False
+    if any(
+        (
+            attempt.parent_kind,
+            attempt.parent_id,
+            attempt.stage,
+            attempt.ordinal,
+            attempt.request_fingerprint,
+        )
+        != (
+            "ingestion_plan",
+            final_attempt.parent_id,
+            "memory_ingest",
+            final_attempt.ordinal,
+            final_attempt.request_fingerprint,
+        )
+        for attempt in chain
+    ):
+        return False
+    matching_attempt_ids = {
+        attempt.attempt_id
+        for attempt in attempts.values()
+        if (
+            attempt.parent_kind,
+            attempt.parent_id,
+            attempt.stage,
+            attempt.ordinal,
+            attempt.request_fingerprint,
+        )
+        == (
+            "ingestion_plan",
+            final_attempt.parent_id,
+            "memory_ingest",
+            final_attempt.ordinal,
+            final_attempt.request_fingerprint,
+        )
+    }
+    if matching_attempt_ids != seen or not seen <= set(plan.attempt_ids):
+        return False
+    expected_failed_count = len(chain) if skipped else len(chain) - 1
+    if any(
+        attempt.outcome != AttemptOutcome.FAILED
+        or not _settled_ingestion_receipt_closes(
+            attempt,
+            receipts.get(attempt.attempt_id),
+            raw_payloads,
+            plan=plan,
+            source_ids=source_ids,
+            batch_attempt_ordinal=index + 1,
+        )
+        for index, attempt in enumerate(chain[:expected_failed_count])
+    ):
+        return False
+    if skipped:
+        return final_attempt.outcome == AttemptOutcome.FAILED
+    final_receipt = receipts.get(final_attempt.attempt_id)
+    return bool(
+        final_attempt.outcome == AttemptOutcome.SUCCEEDED
+        and final_receipt is not None
+        and final_receipt.receipt_kind == AttemptReceiptKind.RESPONSE
+        and final_receipt.raw_response_ref == final_attempt.raw_response_ref
+    )
+
+
+def _settled_ingestion_receipt_closes(
+    attempt: NativeAttemptRecord,
+    receipt: AttemptReceiptRecord | None,
+    raw_payloads: Mapping[str, bytes],
+    *,
+    plan: NativePlanRecord,
+    source_ids: tuple[str, ...],
+    batch_attempt_ordinal: int,
+) -> bool:
+    if (
+        receipt is None
+        or receipt.receipt_kind != AttemptReceiptKind.ERROR
+        or receipt.raw_error_ref != attempt.raw_error_ref
+        or receipt.raw_error_ref is None
+        or receipt.failure_kind is None
+        or receipt.supplier_status_code is None
+        or receipt.settlement_basis is None
+        or receipt.internal_retry_count is None
+    ):
+        return False
+    expected_basis = {
+        "hindsight": HINDSIGHT_SETTLEMENT_BASIS,
+        "mem0": MEM0_SETTLEMENT_BASIS,
+        "openviking": OPENVIKING_SETTLEMENT_BASIS,
+    }.get(plan.memory_system_id)
+    if receipt.settlement_basis != expected_basis:
+        return False
+    expected_session_id = receipt.settlement_session_id
+    if plan.memory_system_id == "openviking":
+        if len(source_ids) != 1:
+            return False
+        session_identity = source_ids[0]
+        if batch_attempt_ordinal > 1:
+            session_identity = f"{session_identity}:batch-attempt:{batch_attempt_ordinal}"
+        expected_session_id = openviking_session_id(
+            plan.ingestion_occurrence_id,
+            session_identity,
+        )
+        if receipt.settlement_session_id != expected_session_id:
+            return False
+    elif receipt.settlement_task_id is not None or receipt.settlement_session_id is not None:
+        return False
+    raw = raw_payloads.get(receipt.raw_error_ref)
+    return bool(
+        raw is not None
+        and classify_settled_ingestion_failure(
+            settlement_basis=receipt.settlement_basis,
+            status_code=receipt.supplier_status_code,
+            raw_response_bytes=raw,
+            internal_retry_count=receipt.internal_retry_count,
+            expected_task_id=receipt.settlement_task_id,
+            expected_session_id=receipt.settlement_session_id,
+        )
+        == receipt.failure_kind
+    )
+
+
 def _plan_usage_closes(
     plan: NativePlanRecord,
     attempts: dict[str, NativeAttemptRecord],
@@ -1690,7 +1885,11 @@ def _plan_usage_closes(
         set(plan.usage_record_ids)
     ):
         return False
-    dispatch_attempt_ids = set(plan.ordered_dispatch_attempt_ids)
+    dispatch_attempt_ids = {
+        attempt_id
+        for attempt_id in plan.attempt_ids
+        if (attempt := attempts.get(attempt_id)) is not None and attempt.stage == "memory_ingest"
+    }
     expected_usage_ids = {
         usage.usage_record_id
         for usage in usage_records.values()
@@ -1709,7 +1908,7 @@ def _plan_usage_closes(
             or usage.parent_kind != "ingestion_plan"
             or usage.parent_id != plan.ingestion_occurrence_id
             or usage.stage.value != "memory_ingest"
-            or usage.raw_response_ref != attempt.raw_response_ref
+            or usage.raw_response_ref != (attempt.raw_response_ref or attempt.raw_error_ref)
         ):
             return False
         covered_attempt_ids.add(usage.attempt_id)
@@ -1731,18 +1930,34 @@ def _accounting_ledger_closes(
 ) -> bool:
     if not attempt_ids:
         return False
+    if any(
+        (attempt := attempts.get(attempt_id)) is None
+        or attempt.parent_kind != parent_kind
+        or attempt.parent_id != parent_id
+        for attempt_id in attempt_ids
+    ):
+        return False
+    accountable_attempt_ids = tuple(
+        attempt_id
+        for attempt_id in attempt_ids
+        if not (
+            attempts[attempt_id].outcome == AttemptOutcome.UNKNOWN_OUTCOME
+            and attempts[attempt_id].raw_response_ref is None
+            and attempts[attempt_id].raw_error_ref is None
+        )
+    )
     live_accounting = any(
         isinstance(attempts.get(attempt_id), AttemptRecordV4) for attempt_id in attempt_ids
     )
     if live_accounting:
         if not (
-            len(attempt_ids) == len(resource_record_ids) == len(cost_record_ids)
+            len(accountable_attempt_ids) == len(resource_record_ids) == len(cost_record_ids)
             and len(usage_record_ids) == len(set(usage_record_ids))
         ):
             return False
         expected_usage_ids = tuple(
             usage.usage_record_id
-            for attempt_id in attempt_ids
+            for attempt_id in accountable_attempt_ids
             for usage in usage_records.values()
             if usage.attempt_id == attempt_id
         )
@@ -1751,7 +1966,7 @@ def _accounting_ledger_closes(
         ):
             return False
     elif not (
-        len(attempt_ids)
+        len(accountable_attempt_ids)
         == len(usage_record_ids)
         == len(resource_record_ids)
         == len(cost_record_ids)
@@ -1759,7 +1974,7 @@ def _accounting_ledger_closes(
         return False
     for ordinal, (attempt_id, resource_id, cost_id) in enumerate(
         zip(
-            attempt_ids,
+            accountable_attempt_ids,
             resource_record_ids,
             cost_record_ids,
             strict=True,
@@ -1783,8 +1998,15 @@ def _accounting_ledger_closes(
         cost = cost_records.get(cost_id)
         expected_indexing_view = (
             "final_contribution"
+            if attempt is not None
+            and attempt.stage == "memory_ingest"
+            and attempt.outcome == AttemptOutcome.SUCCEEDED
+            else "attempted"
             if attempt is not None and attempt.stage == "memory_ingest"
             else "not_applicable"
+        )
+        raw_attempt_ref = (
+            attempt.raw_response_ref or attempt.raw_error_ref if attempt is not None else None
         )
         if (
             attempt is None
@@ -1795,7 +2017,7 @@ def _accounting_ledger_closes(
             or resource.parent_kind != parent_kind
             or resource.parent_id != parent_id
             or resource.stage != attempt.stage
-            or resource.raw_telemetry_ref != attempt.raw_response_ref
+            or resource.raw_telemetry_ref != raw_attempt_ref
             or cost.parent_kind != parent_kind
             or cost.parent_id != parent_id
             or cost.indexing_view.value != expected_indexing_view
@@ -1832,7 +2054,7 @@ def _accounting_ledger_closes(
                     or attempt_usage.parent_kind != parent_kind
                     or attempt_usage.parent_id != parent_id
                     or attempt_usage.stage.value != attempt.stage
-                    or attempt_usage.raw_response_ref != attempt.raw_response_ref
+                    or attempt_usage.raw_response_ref != raw_attempt_ref
                     or attempt_usage.dispatch_route_id != attempt.dispatch_route_id
                     or attempt_usage.dispatch_route_hash != attempt.dispatch_route_hash
                 ):
@@ -1843,7 +2065,7 @@ def _accounting_ledger_closes(
             or usage.parent_kind != parent_kind
             or usage.parent_id != parent_id
             or usage.stage.value != attempt.stage
-            or usage.raw_response_ref != attempt.raw_response_ref
+            or usage.raw_response_ref != raw_attempt_ref
             or cost.source_usage_record_ids != (usage_id,)
         ):
             return False
@@ -1925,33 +2147,47 @@ def _hindsight_plan_closure(
         strict=True,
     ):
         attempt = attempts.get(attempt_id)
-        payload = (
-            snapshot.raw_payloads.get(attempt.raw_response_ref)
-            if attempt is not None and attempt.raw_response_ref is not None
+        skipped_dispatch = set(expected_source_ids) <= set(plan.skipped_source_unit_ids)
+        raw_reference = (
+            attempt.raw_error_ref
+            if skipped_dispatch and attempt is not None
+            else attempt.raw_response_ref
+            if attempt is not None
             else None
         )
+        payload = snapshot.raw_payloads.get(raw_reference) if raw_reference is not None else None
         if (
             attempt is None
             or attempt.parent_kind != "ingestion_plan"
             or attempt.parent_id != plan.ingestion_occurrence_id
             or attempt.stage != "memory_ingest"
-            or attempt.outcome != AttemptOutcome.SUCCEEDED
-            or attempt.raw_response_ref is None
             or payload is None
-            or not _accepts_hindsight_retain(
-                payload,
-                expected_scope_id,
-                len(expected_source_ids),
+            or (
+                skipped_dispatch
+                and (attempt.outcome != AttemptOutcome.FAILED or attempt.raw_error_ref is None)
+            )
+            or (
+                not skipped_dispatch
+                and (
+                    attempt.outcome != AttemptOutcome.SUCCEEDED
+                    or attempt.raw_response_ref is None
+                    or not _accepts_hindsight_retain(
+                        payload,
+                        expected_scope_id,
+                        len(expected_source_ids),
+                    )
+                )
             )
         ):
             issues.append(_issue(rule_id, attempt_id, "dispatch-receipt-mismatch"))
             continue
         dispatched.extend(expected_source_ids)
-        dispatch_raw_refs.append(attempt.raw_response_ref)
-    if (
-        tuple(dispatched) != plan.ordered_source_unit_ids
-        or plan.accepted_source_unit_ids != plan.ordered_source_unit_ids
-        or plan.rejected_source_unit_ids
+        if raw_reference is not None:
+            dispatch_raw_refs.append(raw_reference)
+    if tuple(dispatched) != plan.ordered_source_unit_ids or set(
+        plan.accepted_source_unit_ids
+    ) | set(plan.rejected_source_unit_ids) | set(plan.skipped_source_unit_ids) != set(
+        plan.ordered_source_unit_ids
     ):
         issues.append(_issue(rule_id, plan.ingestion_occurrence_id, "dispatch-partition-mismatch"))
     if (
@@ -1969,11 +2205,7 @@ def _hindsight_plan_closure(
         )
     except ValueError:
         projection = None
-    if (
-        projection is None
-        or projection.ordered_source_unit_ids != plan.projected_source_unit_ids
-        or plan.projected_source_unit_ids != plan.accepted_source_unit_ids
-    ):
+    if projection is None or projection.ordered_source_unit_ids != plan.projected_source_unit_ids:
         issues.append(
             _issue(rule_id, plan.ingestion_occurrence_id, "projection-source-order-mismatch")
         )
@@ -2000,7 +2232,20 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
     for case in _contracts(snapshot, CaseRecordV3):
         plan = plans.get(case.ingestion_occurrence_id)
         if (
-            case.state != CaseState.COMPLETED
+            case.state not in {CaseState.COMPLETED, CaseState.ERROR}
+            or (
+                case.state == CaseState.ERROR
+                and not (
+                    (
+                        case.evaluation_disposition == CaseEvaluationDisposition.UNJUDGED
+                        and case.error_stage == "judge"
+                    )
+                    or (
+                        case.evaluation_disposition == CaseEvaluationDisposition.NOT_RUN
+                        and case.error_stage == "answer"
+                    )
+                )
+            )
             or plan is None
             or case.adapter_profile_id != plan.adapter_profile_id
             or case.case_occurrence_id not in plan.ordered_case_occurrence_ids
@@ -2074,9 +2319,11 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
             for item in case_attempts
             if item is not None and item.stage == "post_query_projection"
         ]
-        expected_judge_count = (
-            1 if case.evaluation_disposition == CaseEvaluationDisposition.JUDGED else 0
-        )
+        expected_judge = case.evaluation_disposition == CaseEvaluationDisposition.JUDGED
+        expected_judge_attempts = case.evaluation_disposition in {
+            CaseEvaluationDisposition.JUDGED,
+            CaseEvaluationDisposition.UNJUDGED,
+        }
         live_case = any(isinstance(item, AttemptRecordV4) for item in case_attempts)
         projection_attempts_close = (
             len(pre_query_attempts) == len(post_query_attempts) == 1
@@ -2086,17 +2333,45 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
         if (
             len(query_attempts) != 1
             or query_attempts[0].raw_response_ref != case.retrieval_raw_ref
-            or len(answer_attempts) != 1
-            or answer_attempts[0].raw_response_ref != case.answer_raw_ref
-            or len(judge_attempts) != expected_judge_count
-            or any(item.raw_response_ref is None for item in judge_attempts)
+            or not _model_attempt_chain_closes(
+                snapshot,
+                answer_attempts,
+                prompt_ref=case.prompt_raw_ref,
+                final_response_ref=case.answer_raw_ref,
+                require_success=(case.evaluation_disposition != CaseEvaluationDisposition.NOT_RUN),
+            )
+            or bool(judge_attempts) != expected_judge_attempts
+            or (
+                expected_judge
+                and not _model_attempt_chain_closes(
+                    snapshot,
+                    judge_attempts,
+                    prompt_ref=case.judge_prompt_raw_ref,
+                    final_response_ref=None,
+                    require_success=True,
+                )
+            )
+            or (
+                case.evaluation_disposition == CaseEvaluationDisposition.UNJUDGED
+                and not _model_attempt_chain_closes(
+                    snapshot,
+                    judge_attempts,
+                    prompt_ref=case.judge_prompt_raw_ref,
+                    final_response_ref=None,
+                    require_success=False,
+                )
+            )
             or (
                 live_case
                 and (
-                    not projection_attempts_close or len(case_attempts) != 4 + expected_judge_count
+                    not projection_attempts_close
+                    or len(case_attempts) != 3 + len(answer_attempts) + len(judge_attempts)
                 )
             )
-            or (not live_case and len(case_attempts) != 2 + expected_judge_count)
+            or (
+                not live_case
+                and len(case_attempts) != 1 + len(answer_attempts) + len(judge_attempts)
+            )
         ):
             issues.append(_issue(rule_id, case.case_occurrence_id, "case-attempt-ledger-mismatch"))
         if not _accounting_ledger_closes(
@@ -2124,25 +2399,49 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
         answer_messages_sha256 = _single_user_message_fingerprint(prompt)
         judge_prompt = snapshot.raw_payloads.get(case.judge_prompt_raw_ref or "")
         judge_messages_sha256 = _single_user_message_fingerprint(judge_prompt)
+        answer_completed = case.evaluation_disposition != CaseEvaluationDisposition.NOT_RUN
         if (
             prompt is None
-            or not isinstance(output, str)
             or hashlib.sha256(prompt).hexdigest() != case.prompt_sha256
             or answer_messages_sha256 is None
-            or len(answer_attempts) != 1
-            or answer_attempts[0].request_messages_sha256 != answer_messages_sha256
-            or hashlib.sha256(output.encode("utf-8")).hexdigest() != case.parsed_answer_sha256
+            or not answer_attempts
+            or (
+                len(answer_attempts) == 1
+                and answer_attempts[0].request_messages_sha256 != answer_messages_sha256
+            )
+            or (
+                answer_completed
+                and (
+                    not isinstance(output, str)
+                    or hashlib.sha256(output.encode("utf-8")).hexdigest()
+                    != case.parsed_answer_sha256
+                )
+            )
+            or (
+                not answer_completed
+                and (case.answer_raw_ref is not None or case.parsed_answer_sha256 is not None)
+            )
         ):
             issues.append(_issue(rule_id, case.case_occurrence_id, "prompt-answer-mismatch"))
         if case.evaluation_disposition == CaseEvaluationDisposition.JUDGED:
             if (
                 case.judge_prompt_raw_ref is None
                 or judge_messages_sha256 is None
-                or len(judge_attempts) != 1
-                or judge_attempts[0].request_messages_sha256 != judge_messages_sha256
+                or not judge_attempts
+                or (
+                    len(judge_attempts) == 1
+                    and judge_attempts[0].request_messages_sha256 != judge_messages_sha256
+                )
             ):
                 issues.append(_issue(rule_id, case.case_occurrence_id, "judge-prompt-mismatch"))
-        elif case.judge_prompt_raw_ref is not None:
+        elif (
+            case.evaluation_disposition
+            not in {
+                CaseEvaluationDisposition.UNJUDGED,
+                CaseEvaluationDisposition.NOT_RUN,
+            }
+            and case.judge_prompt_raw_ref is not None
+        ):
             issues.append(_issue(rule_id, case.case_occurrence_id, "judge-prompt-mismatch"))
     return tuple(issues)
 
@@ -2393,6 +2692,28 @@ def _metric_fraction_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
     attempts = {item.attempt_id: item for item in _attempt_records(snapshot)}
     issues: list[ValidationIssue] = []
     for case in _contracts(snapshot, CaseRecordV3):
+        if case.evaluation_disposition == CaseEvaluationDisposition.NOT_RUN:
+            if (
+                case.state != CaseState.ERROR
+                or case.error_stage != "answer"
+                or case.answer_raw_ref is not None
+                or case.parsed_answer_sha256 is not None
+                or case.evaluation_raw_ref is not None
+                or case.metric_numerator is not None
+                or case.metric_denominator is not None
+            ):
+                issues.append(_issue(rule_id, case.case_occurrence_id, "metric-fraction-mismatch"))
+            continue
+        if case.evaluation_disposition == CaseEvaluationDisposition.UNJUDGED:
+            if (
+                case.state != CaseState.ERROR
+                or case.error_stage != "judge"
+                or case.evaluation_raw_ref is not None
+                or case.metric_numerator is not None
+                or case.metric_denominator is not None
+            ):
+                issues.append(_issue(rule_id, case.case_occurrence_id, "metric-fraction-mismatch"))
+            continue
         evaluation = _raw_object(snapshot, case.evaluation_raw_ref)
         answer = _raw_object(snapshot, case.answer_raw_ref)
         output = _model_output_text(answer)
@@ -2418,16 +2739,19 @@ def _metric_fraction_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         )
         judged_trace_matches = True
         if case.evaluation_disposition == CaseEvaluationDisposition.JUDGED:
-            if len(judge_attempts) != 1 or judge_attempts[0].raw_response_ref is None:
+            successful_judges = tuple(
+                attempt for attempt in judge_attempts if attempt.outcome == AttemptOutcome.SUCCEEDED
+            )
+            if len(successful_judges) != 1 or successful_judges[0] is not judge_attempts[-1]:
                 judged_trace_matches = False
             else:
-                judge_document = _raw_object(snapshot, judge_attempts[0].raw_response_ref)
+                judge_attempt = successful_judges[0]
+                judge_document = _raw_object(snapshot, judge_attempt.raw_response_ref)
                 judge_output = _model_output_text(judge_document)
                 judged_trace_matches = bool(
                     isinstance(judge_output, str)
                     and isinstance(trace_document, dict)
-                    and trace_document.get("judge_raw_reference")
-                    == judge_attempts[0].raw_response_ref
+                    and trace_document.get("judge_raw_reference") == judge_attempt.raw_response_ref
                     and trace_document.get("judge_answer_sha256")
                     == hashlib.sha256(judge_output.encode("utf-8")).hexdigest()
                 )
@@ -2639,8 +2963,17 @@ def _hindsight_native_projection_evidence(
         raw_payloads=snapshot.raw_payloads,
         references=references,
         bank_id=plan.scope_id,
-        ordered_source_unit_ids=plan.ordered_source_unit_ids,
-        ordered_source_payload_sha256=manifest_plan.ordered_source_unit_bytes_sha256,
+        ordered_source_unit_ids=plan.projected_source_unit_ids,
+        ordered_source_payload_sha256=tuple(
+            dict(
+                zip(
+                    plan.ordered_source_unit_ids,
+                    manifest_plan.ordered_source_unit_bytes_sha256,
+                    strict=True,
+                )
+            )[source_id]
+            for source_id in plan.projected_source_unit_ids
+        ),
     )
 
 
@@ -2680,6 +3013,182 @@ def _single_user_message_fingerprint(payload: bytes | None) -> str | None:
     except UnicodeDecodeError:
         return None
     return canonical_sha256((("user", text),))
+
+
+def _model_attempt_chain_closes(
+    snapshot: _NativeCapsuleSnapshot,
+    attempts: list[NativeAttemptRecord],
+    *,
+    prompt_ref: str | None,
+    final_response_ref: str | None,
+    require_success: bool = True,
+) -> bool:
+    if not attempts or len(attempts) > 18 or prompt_ref is None:
+        return False
+    if attempts[0].retry_of_attempt_id is not None:
+        return False
+    has_receipts = bool(
+        set(attempt.attempt_id for attempt in attempts)
+        & {receipt.attempt_id for receipt in _contracts(snapshot, AttemptReceiptRecord)}
+    )
+    prompt = snapshot.raw_payloads.get(prompt_ref)
+    if prompt is None:
+        return False
+    try:
+        prompt_text = prompt.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    if require_success and (
+        attempts[-1].outcome != AttemptOutcome.SUCCEEDED
+        or attempts[-1].raw_response_ref is None
+        or (final_response_ref is not None and attempts[-1].raw_response_ref != final_response_ref)
+    ):
+        return False
+    predecessor_attempts = attempts[:-1] if require_success else attempts
+    if any(
+        attempt.outcome not in {AttemptOutcome.FAILED, AttemptOutcome.UNKNOWN_OUTCOME}
+        for attempt in predecessor_attempts
+    ):
+        return False
+    if len(attempts) == 1:
+        if attempts[0].request_messages_sha256 != canonical_sha256((("user", prompt_text),)):
+            return False
+        return not has_receipts or _model_attempt_receipt_layers_close(
+            attempts,
+            ((("user", prompt_text),),),
+            snapshot,
+            require_success=require_success,
+        )
+
+    request_messages: list[tuple[tuple[str, str], ...]] = []
+    for attempt in attempts:
+        reference = attempt.request_messages_sha256
+        payload = snapshot.raw_payloads.get(reference or "")
+        if reference is None or payload is None or hashlib.sha256(payload).hexdigest() != reference:
+            return False
+        try:
+            document = json.loads(payload)
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        if not isinstance(document, list):
+            return False
+        messages: list[tuple[str, str]] = []
+        for item in document:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or item[0] not in {"user", "assistant"}
+                or not isinstance(item[1], str)
+            ):
+                return False
+            messages.append((item[0], item[1]))
+        request_messages.append(tuple(messages))
+    if request_messages[0] != (("user", prompt_text),):
+        return False
+    for index, (previous, current) in enumerate(zip(attempts, attempts[1:], strict=False)):
+        previous_messages = request_messages[index]
+        if current.retry_of_attempt_id != previous.attempt_id:
+            return False
+        current_messages = request_messages[index + 1]
+        previous_output = _model_output_text(
+            _raw_object(snapshot, previous.raw_error_ref or previous.raw_response_ref)
+        )
+        if previous_output is None:
+            if current_messages != previous_messages:
+                return False
+            continue
+        if (
+            len(current_messages) != len(previous_messages) + 2
+            or current_messages[:-2] != previous_messages
+            or current_messages[-2] != ("assistant", previous_output)
+            or current_messages[-1][0] != "user"
+            or not current_messages[-1][1].startswith(
+                "The previous response failed output validation: "
+            )
+            or not current_messages[-1][1].endswith(
+                "Return a corrected response that satisfies the required output format."
+            )
+        ):
+            return False
+    return not has_receipts or _model_attempt_receipt_layers_close(
+        attempts,
+        tuple(request_messages),
+        snapshot,
+        require_success=require_success,
+    )
+
+
+def _model_attempt_receipt_layers_close(
+    attempts: list[NativeAttemptRecord],
+    request_messages: tuple[tuple[tuple[str, str], ...], ...],
+    snapshot: _NativeCapsuleSnapshot,
+    *,
+    require_success: bool,
+) -> bool:
+    receipts = {item.attempt_id: item for item in _contracts(snapshot, AttemptReceiptRecord)}
+    final_receipt = receipts.get(attempts[-1].attempt_id)
+    if require_success and (
+        final_receipt is None
+        or final_receipt.receipt_kind != AttemptReceiptKind.RESPONSE
+        or final_receipt.raw_response_ref != attempts[-1].raw_response_ref
+    ):
+        return False
+    predecessor_count = len(attempts) - 1 if require_success else len(attempts)
+    for index in range(predecessor_count):
+        attempt = attempts[index]
+        receipt = receipts.get(attempt.attempt_id)
+        if receipt is None:
+            return False
+        same_messages = (
+            index + 1 < len(attempts) and request_messages[index + 1] == request_messages[index]
+        )
+        terminal_failure = index + 1 == len(attempts)
+        if attempt.outcome == AttemptOutcome.UNKNOWN_OUTCOME:
+            if (
+                receipt.receipt_kind != AttemptReceiptKind.UNKNOWN_OUTCOME
+                or receipt.failure_kind not in {"timeout", "transport_error"}
+                or (not same_messages and not terminal_failure)
+            ):
+                return False
+            continue
+        if (
+            receipt.receipt_kind != AttemptReceiptKind.ERROR
+            or receipt.raw_error_ref != attempt.raw_error_ref
+            or receipt.raw_error_ref is None
+        ):
+            return False
+        retryable_status = receipt.supplier_status_code in {408, 409, 429} or (
+            isinstance(receipt.supplier_status_code, int)
+            and 500 <= receipt.supplier_status_code <= 599
+        )
+        if same_messages:
+            if not retryable_status:
+                return False
+        elif terminal_failure and retryable_status:
+            pass
+        elif (
+            receipt.failure_kind != "output_contract_error"
+            or receipt.supplier_status_code not in {None, 200}
+        ):
+            return False
+
+    outer_attempts = 0
+    segment_start = 0
+    while segment_start < len(attempts):
+        segment_end = segment_start + 1
+        while (
+            segment_end < len(attempts)
+            and request_messages[segment_end] == request_messages[segment_start]
+        ):
+            segment_end += 1
+        segment_length = segment_end - segment_start
+        outer_attempts += (segment_length + 2) // 3
+        for boundary in range(segment_start + 2, segment_end - 1, 3):
+            receipt = receipts.get(attempts[boundary].attempt_id)
+            if receipt is None or receipt.supplier_status_code != 429:
+                return False
+        segment_start = segment_end
+    return outer_attempts <= 6
 
 
 def _canonical_visible_timestamp(value: str | None) -> str | None:

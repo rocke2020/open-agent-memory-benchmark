@@ -257,19 +257,30 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertEqual(operator.count("$target_effort"), 3)
         self.assertIn(".llm.config.model == $target_model", operator)
 
-    def test_all_provider_internal_retry_paths_are_disabled_and_proven(self) -> None:
+    def test_all_provider_extraction_retries_share_one_required_input_and_are_proven(self) -> None:
         compose = self.read("compose.yaml")
         openviking_config = self.read("openviking/ov.conf")
         retry_guard = self.read("retry-guard/sitecustomize.py")
         operator = self.read("bin/provider-services")
+        plan_environment = self.read("lib/plan_environment.sh")
+        precheck = (REPOSITORY_ROOT / "precheck.sh").read_text(encoding="utf-8")
 
+        self.assertEqual(compose.count("OAMB_EXTRACTION_MAX_RETRIES: ${OAMB_EXTRACTION_MAX_RETRIES:?required}"), 3)
         self.assertIn('HINDSIGHT_API_LLM_MAX_RETRIES: "0"', compose)
-        self.assertIn('HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES: "0"', compose)
+        self.assertIn(
+            "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES: ${OAMB_EXTRACTION_MAX_RETRIES:?required}",
+            compose,
+        )
         self.assertIn('HINDSIGHT_API_WORKER_MAX_RETRIES: "0"', compose)
         self.assertEqual(compose.count("./retry-guard/sitecustomize.py:"), 3)
         self.assertEqual(openviking_config.count('"max_retries": 0'), 2)
         self.assertIn('kwargs["max_retries"] = INTERNAL_RETRY_COUNT', retry_guard)
-        self.assertIn("module._MEMORY_EXTRACTION_MAX_RETRIES =", retry_guard)
+        self.assertIn('os.environ["OAMB_EXTRACTION_MAX_RETRIES"]', retry_guard)
+        self.assertIn("module._MEMORY_EXTRACTION_MAX_RETRIES = EXTRACTION_MAX_RETRIES", retry_guard)
+        self.assertIn(".execution.extraction_max_retries", plan_environment)
+        self.assertNotIn('OAMB_EXTRACTION_MAX_RETRIES="$(jq', precheck)
+        self.assertIn('"extraction_max_retries":', operator)
+        self.assertIn('.extraction_max_retries == 10', operator)
         for filename in (
             "hindsight-retry-config.json",
             "mem0-retry-config.json",

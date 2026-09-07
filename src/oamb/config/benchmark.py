@@ -183,7 +183,15 @@ _RETRIEVAL_BINDING_KEYS = frozenset(
         "proof_kind",
     }
 )
-_EXECUTION_KEYS = frozenset({"max_retries_per_operation", "operation_timeout_seconds"})
+_EXECUTION_KEYS = frozenset(
+    {
+        "max_retries_per_operation",
+        "extraction_max_retries",
+        "model_max_attempts",
+        "model_transport_max_retries",
+        "operation_timeout_seconds",
+    }
+)
 _ENVIRONMENT_REFERENCE = re.compile(r"(?:LLM|OAMB)_[A-Z0-9_]+")
 
 
@@ -325,9 +333,18 @@ class RetrievalConfiguration:
 class EvaluationControls:
     max_retries_per_operation: int
     operation_timeout_seconds: int
+    extraction_max_retries: int = 10
+    model_max_attempts: int = 6
+    model_transport_max_retries: int = 2
 
-    def as_tuple(self) -> tuple[int, int]:
-        return (self.max_retries_per_operation, self.operation_timeout_seconds)
+    def as_tuple(self) -> tuple[int, int, int, int, int]:
+        return (
+            self.max_retries_per_operation,
+            self.extraction_max_retries,
+            self.model_max_attempts,
+            self.model_transport_max_retries,
+            self.operation_timeout_seconds,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -622,13 +639,29 @@ def _parse_evaluation_controls(value: object) -> EvaluationControls:
         document["max_retries_per_operation"],
         "execution max_retries_per_operation",
     )
+    if retries != 2:
+        raise BenchmarkConfigurationError("execution batch retry count must equal 2")
     timeout = _require_positive_integer(
         document["operation_timeout_seconds"],
         "execution operation_timeout_seconds",
     )
+    extraction_retries = _require_non_negative_integer(
+        document["extraction_max_retries"], "execution extraction_max_retries"
+    )
+    model_attempts = _require_positive_integer(
+        document["model_max_attempts"], "execution model_max_attempts"
+    )
+    model_transport_retries = _require_non_negative_integer(
+        document["model_transport_max_retries"], "execution model_transport_max_retries"
+    )
+    if (extraction_retries, model_attempts, model_transport_retries) != (10, 6, 2):
+        raise BenchmarkConfigurationError("execution layered retry values do not match the profile")
     return EvaluationControls(
         max_retries_per_operation=retries,
         operation_timeout_seconds=timeout,
+        extraction_max_retries=extraction_retries,
+        model_max_attempts=model_attempts,
+        model_transport_max_retries=model_transport_retries,
     )
 
 

@@ -421,6 +421,19 @@ ensure_provider_environment "$RUN_LABEL" "$MEM0_CHECKOUT"
 uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan"
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
 
+uv run --locked python - "$DATASET_SOURCE" <<'PY'
+import sys
+from pathlib import Path
+
+from oamb.live import validate_lme60_mem0_input_encoding
+
+source_count = validate_lme60_mem0_input_encoding(Path(sys.argv[1]))
+print(
+    f"input encoding: PASS (60 questions, {source_count} sources, "
+    "zero model/provider calls)"
+)
+PY
+
 if [[ "$START_LOCAL_EMBEDDING" == true ]]; then
   start_local_embedding "$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)"
 else

@@ -51,7 +51,11 @@ complete runtime, then `run.sh --full_test` runs all three providers in
 parallel, validates their capsules, builds the comparison, and opens its offline
 report. Smoke mode is an optional one-question diagnostic.
 
-`execution.max_retries_per_operation` in `configs/benchmark.yml` accepts `0`, `1`, or `2` additional attempts; the default is `2`. After an eligible ingestion or readiness failure has settled, OAMB rebuilds the question group's complete frozen history in a fresh provider scope, including previously successful source sessions. Incorrect answers, a judge's `no`, and valid empty memory do not trigger a history rebuild. Every attempt's available token usage, resource measurements, and actual billing evidence remain in the operational totals.
+`execution.max_retries_per_operation` in `configs/benchmark.yml` is fixed at `2` additional batch submissions, for three total attempts after up to 10 native extraction retries per submission. A settled batch that exhausts those attempts is recorded as skipped, and the remaining history continues in the same question scope. Answer and judge each use six outer attempts with two transport retries per attempt. Every physical attempt's available token usage, resource measurements, and actual billing evidence remain in the operational totals; see the [runtime retry flow](src/oamb/runtime/native_run.py).
+
+LongMemEval [visible evidence](src/oamb/workloads/visible_evidence.py) preserves provider-returned empty text in its original position and JSONL representation. The [report parser](src/oamb/reporting/comparison_project.py) accepts the same representation; evidence identity and kind must remain non-empty.
+
+LongMemEval source messages also preserve empty string content through the [Mem0 adapter](src/oamb/memory_systems/mem0/adapter.py) and [REST request encoder](src/oamb/memory_systems/mem0/wire.py), matching the dataset and native service schema. Message roles remain non-empty strings, and non-string content is rejected.
 
 The 900-second timeout applies to each external attempt. These controls do not impose a whole-run, aggregate-token, storage, resource, memory, or cost cap. Tokens, latency, storage, resources, and cost are measured results; unavailable measurements remain unavailable rather than becoming zero.
 
@@ -128,7 +132,7 @@ Run the complete balanced LME-60 comparison with:
 ./run.sh --full_test
 ```
 
-Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. Smoke, full, and resume progress show `history_rebuild_attempts` separately from `completed_questions`; a retry still waiting in backoff does not count as admitted. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
+Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. All three use up to 10 native extraction retries and three ingestion submissions per batch. After a settled batch exhausts its submissions, OAMB records the skipped sources, preserves any partial memory, and continues the question’s remaining history in the same scope. Answer and judge calls have independent limits of six outer attempts and two transport retries per attempt; invalid output is fed back with its validation error. The report identifies partial ingestion and unjudged results, and retains physical attempts and available usage evidence. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
 
 For optional debugging, run the frozen question `72e3ee87` once on all three
 providers in parallel. `--smoke_test` is the default, so these are identical:

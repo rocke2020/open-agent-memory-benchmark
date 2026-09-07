@@ -251,6 +251,12 @@ def reduce_native_run_report(
         limitations.append("supplier billing completeness is unavailable")
     if not accounting.cost_complete:
         limitations.append("complete cost evidence is unavailable")
+    skipped_source_count = sum(len(plan.skipped_source_unit_ids) for plan in plans)
+    if skipped_source_count:
+        limitations.append(
+            f"partial ingestion: {skipped_source_count} source(s) were skipped after settled "
+            "batch failure; projected provider state may include partial writes"
+        )
     return build_run_report_model(
         report_spec_hash=canonical_sha256(report_spec),
         source_binding=source_binding,
@@ -852,6 +858,13 @@ def _record_projections(
                     ),
                     ("case_occurrence_ids", ",".join(plan.ordered_case_occurrence_ids)),
                     ("source_unit_count", str(len(plan.ordered_source_unit_ids))),
+                    ("accepted_source_count", str(len(plan.accepted_source_unit_ids))),
+                    ("rejected_source_count", str(len(plan.rejected_source_unit_ids))),
+                    ("skipped_source_count", str(len(plan.skipped_source_unit_ids))),
+                    (
+                        "partial_ingestion",
+                        "true" if plan.skipped_source_unit_ids else "false",
+                    ),
                 ),
             )
         )

@@ -280,8 +280,8 @@ def test_continuation_rejects_resolved_plan_drift_before_creating_target(
     mutated_config = tmp_path / "benchmark.yml"
     mutated_config.write_text(
         lme6_configuration_text().replace(
-            "max_retries_per_operation: 2",
-            "max_retries_per_operation: 1",
+            "operation_timeout_seconds: 900",
+            "operation_timeout_seconds: 901",
             1,
         ),
         encoding="utf-8",
@@ -728,7 +728,7 @@ def test_lme60_cells_use_their_frozen_workload_and_producer_role(
     assert built.control.run_spec.case_manifest_hash == (
         "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
     )
-    assert built.control.budget.max_attempts == 26_575
+    assert built.control.budget.max_attempts == 28_015
     assert built.control.max_retries_per_operation == 2
     attempts_by_binding = {
         ceiling.role_binding_id: ceiling.max_attempts
@@ -738,8 +738,8 @@ def test_lme60_cells_use_their_frozen_workload_and_producer_role(
     assert attempts_by_binding == {
         binding_by_role[producer_role_id].binding_id: 8_478,
         binding_by_role["embedding"].binding_id: 8_538,
-        binding_by_role["answer"].binding_id: 180,
-        binding_by_role["judge"].binding_id: 180,
+        binding_by_role["answer"].binding_id: 1_080,
+        binding_by_role["judge"].binding_id: 1_080,
     }
 
 
@@ -1200,7 +1200,7 @@ def test_cell_retry_guard_reopens_bound_proof_with_reduced_environment(
     assert set(cell.environment) < set(environment)
     # A later current-pointer selection cannot replace this cell's frozen receipt.
     (receipts / "service-verification-current.sha256").write_text("a" * 64 + "\n")
-    assert live._validated_cell_internal_retry_count(cell) == 0
+    assert live._validated_cell_internal_retry_count(cell) == 10
 
     manifest_hash = receipt_document["profiles"][0]["proof_manifest_sha256"]
     manifest = json.loads((receipts / f"proofs/manifests/{manifest_hash}.json").read_bytes())

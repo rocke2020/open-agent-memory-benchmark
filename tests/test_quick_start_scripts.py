@@ -18,6 +18,9 @@ HOST_EMBEDDING_SCRIPT = REPOSITORY_ROOT / "provider-services" / "lib" / "host_em
 PLAN_ENVIRONMENT_SCRIPT = REPOSITORY_ROOT / "provider-services" / "lib" / "plan_environment.sh"
 PROVIDER_ENVIRONMENT_SCRIPT = REPOSITORY_ROOT / "provider-services" / "lib" / "env.sh"
 RESOLVED_PLAN_HASH = "a" * 64
+LONGMEMEVAL_SOURCE = (
+    REPOSITORY_ROOT / "datasets" / "longmemeval-cleaned" / "longmemeval_s_cleaned.json"
+)
 
 PROVIDER_MODEL_CONNECTION_ALIASES = (
     "OAMB_HINDSIGHT_LLM_BASE_URL",
@@ -199,11 +202,17 @@ PY
         """
 printf 'uv %s\n' "$*" >> "$OAMB_TEST_TRACE"
 case " $* " in
+  *" python - "*"longmemeval_s_cleaned.json"*)
+    if [ "${OAMB_TEST_INPUT_ENCODING_FAIL:-}" = "1" ]; then
+      printf 'planted full-input encoding failure\n' >&2
+      exit 46
+    fi
+    ;;
   *" oamb doctor "*)
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--output" ]; then
         mkdir -p "$2"
-        printf '%s\n' '{"schema_name":"resolved_comparison_plan","model_roles":[{"role_id":"hindsight_extraction","model":"plan-hindsight","thinking_effort":"low"},{"role_id":"mem0_extraction","model":"plan-mem0","thinking_effort":"high"},{"role_id":"openviking_semantic_understanding","model":"plan-openviking","thinking_effort":"max"},{"role_id":"embedding","model":"plan-embedding","thinking_effort":"not_applicable"}]}' > "$2/resolved-plan.json"
+        printf '%s\n' '{"schema_name":"resolved_comparison_plan","execution":{"extraction_max_retries":10},"model_roles":[{"role_id":"hindsight_extraction","model":"plan-hindsight","thinking_effort":"low"},{"role_id":"mem0_extraction","model":"plan-mem0","thinking_effort":"high"},{"role_id":"openviking_semantic_understanding","model":"plan-openviking","thinking_effort":"max"},{"role_id":"embedding","model":"plan-embedding","thinking_effort":"not_applicable"}]}' > "$2/resolved-plan.json"
         break
       fi
       shift
@@ -255,6 +264,44 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         "OAMB_EMBEDDING_STARTUP_ATTEMPTS": "3",
     }
     return root, env, trace
+
+
+@pytest.mark.skipif(
+    not LONGMEMEVAL_SOURCE.exists(), reason="download the pinned LongMemEval S dataset"
+)
+def test_full_input_precheck_encodes_every_frozen_lme60_mem0_source() -> None:
+    from oamb.live import validate_lme60_mem0_input_encoding
+
+    assert validate_lme60_mem0_input_encoding(LONGMEMEVAL_SOURCE) == 2_826
+
+
+def test_precheck_stops_before_provider_start_when_full_input_encoding_fails(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env["OAMB_TEST_INPUT_ENCODING_FAIL"] = "1"
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 46
+    assert "planted full-input encoding failure" in result.stderr
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    assert any(
+        "uv run --locked python -" in line and "longmemeval_s_cleaned.json" in line
+        for line in calls
+    )
+    assert not any(line.startswith("provider-services ") for line in calls)
+    assert not any(line.startswith("embedding ") for line in calls)
+    assert not any(line.startswith("curl ") for line in calls)
 
 
 @pytest.mark.parametrize(
@@ -641,6 +688,11 @@ def _write_fake_oamb(fake_bin: Path) -> None:
 	rmdir "$trace_lock"
 	trace_lock_owned=false
 	trap - EXIT TERM INT HUP
+	if [[ " $* " == *" python - "*"longmemeval_s_cleaned.json"* ]] && \
+	   [ "${OAMB_TEST_INPUT_ENCODING_FAIL:-}" = "1" ]; then
+	  printf 'planted full-input encoding failure\n' >&2
+	  exit 46
+	fi
 	case " $* " in
 	  *" oamb run "*)
 	    cells=()
@@ -969,7 +1021,10 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         json.dumps(
             {
                 "resolved_plan_hash": RESOLVED_PLAN_HASH,
-                "execution": {"max_parallel_providers_per_dataset": 3},
+                "execution": {
+                    "max_parallel_providers_per_dataset": 3,
+                    "extraction_max_retries": 10,
+                },
                 "model_roles": [
                     {
                         "role_id": "hindsight_extraction",
@@ -1102,6 +1157,7 @@ def test_run_dry_run_validates_without_dispatch(
         in calls
     )
     assert "uv run --locked python -" in calls
+    assert "longmemeval_s_cleaned.json" in calls
     assert "oamb run" not in calls
     assert "oamb capsule validate" not in calls
     assert "oamb compare" not in calls
@@ -1112,6 +1168,29 @@ def test_run_dry_run_validates_without_dispatch(
         f"run: PASS (dry-run, {expected_mode}, {expected_questions} questions, "
         "3 providers, zero model/provider calls)"
     ) in result.stdout
+
+
+def test_run_full_input_encoding_failure_prevents_benchmark_dispatch(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    env["OAMB_TEST_INPUT_ENCODING_FAIL"] = "1"
+
+    result = subprocess.run(
+        [str(script), "--full_test"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 46
+    assert "planted full-input encoding failure" in result.stderr
+    calls = trace.read_text(encoding="utf-8")
+    assert "provider-services doctor" in calls
+    assert "longmemeval_s_cleaned.json" in calls
+    assert "oamb run" not in calls
 
 
 def test_run_smoke_runs_the_dry_run_gate_before_dispatch(tmp_path: Path) -> None:

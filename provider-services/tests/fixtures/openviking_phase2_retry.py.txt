@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+"""OpenViking v0.4.16 pinned phase-2 retry boundary fixture.
+
+Source commit: 499995f3ed2e7f551a715179c4053772c51ff819
+Sources: openviking/session/session.py lines 2510-2527 and
+openviking/utils/model_retry.py lines 368-405.
+Modified: lifted the nested phase-2 function to module scope and removed logging;
+the retry loop and classifier argument binding are unchanged.
+"""
+
+import asyncio
+
+
+_MEMORY_EXTRACTION_MAX_RETRIES = 3
+_MEMORY_EXTRACTION_RETRY_BASE_DELAY_SECONDS = 1.0
+_MEMORY_EXTRACTION_RETRY_MAX_DELAY_SECONDS = 8.0
+
+
+async def retry_async(
+    func,
+    *,
+    max_retries,
+    base_delay=0.5,
+    max_delay=8.0,
+    jitter=True,
+    is_retryable,
+    logger=None,
+    operation_name="operation",
+):
+    attempt = 0
+    while True:
+        try:
+            return await func()
+        except Exception as error:
+            if max_retries <= 0 or attempt >= max_retries or not is_retryable(error):
+                raise
+            await asyncio.sleep(0)
+            attempt += 1
+
+
+async def _run_retryable_phase2_step(operation_name, fn):
+    return await retry_async(
+        fn,
+        max_retries=_MEMORY_EXTRACTION_MAX_RETRIES,
+        base_delay=_MEMORY_EXTRACTION_RETRY_BASE_DELAY_SECONDS,
+        max_delay=_MEMORY_EXTRACTION_RETRY_MAX_DELAY_SECONDS,
+        is_retryable=is_retryable_api_error,
+        logger=None,
+        operation_name=operation_name,
+    )

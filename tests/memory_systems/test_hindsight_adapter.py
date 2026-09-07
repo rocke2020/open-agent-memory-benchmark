@@ -16,8 +16,9 @@ import pytest
 
 from oamb.artifacts.store import ArtifactStore
 from oamb.contracts.accounting import ProofStatus
-from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
+    IngestionDispatchReceipt,
     IngestionDispatchRequest,
     IngestionReceipt,
     IngestionRequest,
@@ -53,6 +54,36 @@ def _version_bytes() -> bytes:
 
 def _fixture_bytes(name: str) -> bytes:
     return (FIXTURE_ROOT / name).read_bytes()
+
+
+def test_hindsight_evidence_accepts_a_proven_empty_projection() -> None:
+    from oamb.artifacts.validation.hindsight_evidence import reconstruct_hindsight_projection
+
+    bank_id = "fixture-bank"
+    expected = canonical_json_bytes(
+        {
+            "profile": "hindsight-rest-v1",
+            "bank_id": bank_id,
+            "documents": [],
+            "memories": [],
+            "mental_models": [],
+            "observations": [],
+        }
+    )
+    synthetic = hashlib.sha256(expected).hexdigest()
+    empty = _fixture_bytes("empty-page.json")
+    empty_ref = hashlib.sha256(empty).hexdigest()
+
+    projection = reconstruct_hindsight_projection(
+        raw_payloads={synthetic: expected, empty_ref: empty},
+        references=(synthetic, synthetic, empty_ref, empty_ref, empty_ref, empty_ref),
+        bank_id=bank_id,
+        ordered_source_unit_ids=(),
+        ordered_source_payload_sha256=(),
+    )
+
+    assert projection.ordered_source_unit_ids == ()
+    assert projection.document_to_source_unit == {}
 
 
 def _bank_config_bytes(bank_id: str) -> bytes:
@@ -861,6 +892,49 @@ async def test_readiness_rejects_a_truncated_frozen_dispatch_set_before_projecti
         )
 
     assert len(service.requests) == call_count
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_readiness_rejects_skipped_dispatch_when_aggregate_hides_skipped_sources(
+    tmp_path: Path,
+) -> None:
+    occurrence_id = "a" * 64
+    service = _HindsightFixtureService(occurrence_id)
+    adapter = _adapter(tmp_path, httpx.MockTransport(service))
+    scope = await _resolve_and_allocate(adapter, occurrence_id)
+    source = _source("source-1", 1)
+    dispatch = adapter.plan_ingestion(
+        IngestionRequest(scope=scope, ordered_source_units=(source,))
+    )[0]
+    raw = b'{"error":"settled"}'
+    skipped = IngestionDispatchReceipt(
+        attempt_id="c" * 64,
+        dispatch=dispatch,
+        accepted_source_unit_ids=(),
+        rejected_source_unit_ids=(),
+        skipped_source_unit_ids=(source.source_unit_id,),
+        raw_reference=RawReferenceHandle(hashlib.sha256(raw).hexdigest()),
+        raw_response_bytes=raw,
+        usage_records=(),
+    )
+    forged = IngestionReceipt(
+        ingestion_occurrence_id=occurrence_id,
+        accepted_source_unit_ids=(),
+        rejected_source_unit_ids=(),
+        skipped_source_unit_ids=(),
+        raw_references=(skipped.raw_reference,),
+        dispatch_receipts=(skipped,),
+    )
+
+    with pytest.raises(ValueError, match="source partition"):
+        adapter._validate_readiness_request(
+            ReadinessRequest(
+                scope=scope,
+                expected_source_unit_ids=(),
+                ingestion_receipt=forged,
+            )
+        )
     await adapter.close()
 
 

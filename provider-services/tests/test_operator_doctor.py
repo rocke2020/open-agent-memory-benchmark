@@ -178,6 +178,7 @@ class OperatorDoctorTests(unittest.TestCase):
         plan.write_text(
             json.dumps(
                 {
+                    "execution": {"extraction_max_retries": 10},
                     "model_roles": [
                         {
                             "role_id": "hindsight_extraction",
@@ -228,7 +229,8 @@ class OperatorDoctorTests(unittest.TestCase):
             '  [ -n "${OAMB_MEM0_LLM_MODEL:-}" ] || exit 41\n'
             '  [ -n "${OAMB_EMBEDDING_MODEL:-}" ] || exit 42\n'
             '  [ "${OAMB_MEM0_LLM_REASONING_EFFORT:-}" = high ] || exit 43\n'
-            '  printf \'compose-env=%s|%s|%s\\n\' "$OAMB_MEM0_POSTGRES_PASSWORD" "$OAMB_MEM0_LLM_MODEL" "$OAMB_MEM0_LLM_REASONING_EFFORT"\n'
+            '  [ "${OAMB_EXTRACTION_MAX_RETRIES:-}" = 10 ] || exit 44\n'
+            '  printf \'compose-env=%s|%s|%s|%s\\n\' "$OAMB_MEM0_POSTGRES_PASSWORD" "$OAMB_MEM0_LLM_MODEL" "$OAMB_MEM0_LLM_REASONING_EFFORT" "$OAMB_EXTRACTION_MAX_RETRIES"\n'
             "fi\n"
             "exit 0\n",
         )
@@ -270,7 +272,7 @@ class OperatorDoctorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("doctor: PASS", result.stdout)
         self.assertIn(
-            "compose-env=test-value-oamb_mem0_postgres_password|plan-mem0|high",
+            "compose-env=test-value-oamb_mem0_postgres_password|plan-mem0|high|10",
             result.stdout,
         )
         self.assertNotIn("PROCESS_OVERRIDE_SENTINEL", result.stdout)

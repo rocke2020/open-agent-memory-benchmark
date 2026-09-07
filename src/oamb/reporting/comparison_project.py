@@ -834,6 +834,21 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
     numerator = sum(int(item["metric_numerator"]) for item in judged)
     denominator = sum(int(item["metric_denominator"]) for item in judged)
     limitations: list[str] = []
+    skipped_source_count = sum(
+        len(skipped)
+        for ingestion_plan in snapshot.ingestion_plans
+        if isinstance((skipped := ingestion_plan.get("skipped_source_unit_ids", [])), list)
+    )
+    partial_history_count = sum(
+        bool(ingestion_plan.get("skipped_source_unit_ids"))
+        for ingestion_plan in snapshot.ingestion_plans
+    )
+    if skipped_source_count:
+        limitations.append(
+            "Partial ingestion: "
+            f"{skipped_source_count} source(s) across {partial_history_count} history scope(s) "
+            "were skipped after settled batch failure; judged results retain that provenance"
+        )
     if len(judged) != len(snapshot.cases):
         limitations.append(
             f"{len(snapshot.cases) - len(judged)} of {len(snapshot.cases)} cases are outside the "
@@ -888,6 +903,10 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
         },
         "retrieval_binding_id": snapshot.cell.retrieval_binding_id,
         "observed_time": _observed_time(snapshot),
+        "ingestion": {
+            "partial_history_count": partial_history_count,
+            "skipped_source_count": skipped_source_count,
+        },
         "accounting": _accounting_document(plan, snapshot),
         "limitations": limitations,
     }
@@ -1684,10 +1703,9 @@ def _visible_context_text(snapshot: _CellSnapshot, case: Mapping[str, Any]) -> s
                 for field in (
                     "provider_evidence_identity",
                     "evidence_kind",
-                    "text",
                 )
-            ):
-                raise ValueError("visible evidence line has empty identity or text")
+            ) or not isinstance(item["text"], str):
+                raise ValueError("visible evidence line has empty identity/kind or non-string text")
             source_unit_id = item["source_unit_id"]
             if source_unit_id is not None and (
                 not isinstance(source_unit_id, str) or not source_unit_id
@@ -2516,6 +2534,25 @@ def _render_html(export: Mapping[str, Any]) -> bytes:
     assert isinstance(limitations, tuple)
     assert isinstance(accuracy_decision, Mapping)
     cell_rows = "".join(_provider_summary_row(item) for item in cells)
+    partial_ingestion_cells = tuple(
+        item
+        for item in cells
+        if isinstance(item.get("ingestion"), Mapping)
+        and item["ingestion"].get("partial_history_count", 0)
+    )
+    partial_ingestion_note = (
+        '<p class="dataset-notice"><strong>Partial ingestion:</strong> '
+        + _escape(
+            "; ".join(
+                f"{item['provider_id']} skipped {item['ingestion']['skipped_source_count']} "
+                f"source(s) across {item['ingestion']['partial_history_count']} history scope(s)"
+                for item in partial_ingestion_cells
+            )
+        )
+        + ". Judged results retain this provenance.</p>"
+        if partial_ingestion_cells
+        else ""
+    )
     secondary_accounting = _secondary_accounting_html(cells)
     comparison_rows = "".join(
         "<tr>"
@@ -2612,6 +2649,7 @@ a { color:inherit; }
 <section><h2>Provider decision summary</h2><p class="metric-key"><strong>Four decision metrics:</strong> Accuracy · Ctx tokens · Indexing tokens · Index / recall latency</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Ctx tokens are the exact retrieval context shown to the answer model.</p>
 <p><strong>{_escape(accuracy_decision_text)}</strong></p>
 <div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Judged accuracy</th><th>Ctx tokens</th><th>Indexing tokens</th><th>Index-ready latency (s)</th><th>Recall latency (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
+{partial_ingestion_note}
 {_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Ctx tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Index-ready latency spans first ingest through readiness per isolated context; recall latency is the provider memory-query request. Both show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
 {accuracy_by_type}
 <section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points. Exact McNemar p uses the matched discordant outcomes.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th><th>Discordant A/B</th><th>Exact McNemar p</th><th>Decision</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>

@@ -756,16 +756,17 @@ def test_composed_cell_uses_normal_comparison_and_report_path(
     )
     assert export["coverage"]["provider_specific_result_count"] == 8
     assert composed_cell["accounting"]["infrastructure_retries"] == {
-        "rejection_count": 1,
+        "rejection_count": 0,
         "internal_retry_count": 0,
-        "scheduled_retry_count": 1,
-        "total_retry_count": 1,
-        "backoff_seconds": 1,
+        "scheduled_retry_count": 0,
+        "total_retry_count": 0,
+        "backoff_seconds": 0,
         "measurement_coverage": "complete",
     }
     assert composed_cell["observed_time"]["indexing_ready"]["status"] == "measured"
     assert composed_cell["observed_time"]["indexing_ready"]["count"] == 2
-    assert any("aborted" in item for item in composed_cell["limitations"])
+    assert composed_cell["accounting"]["attempts"]["retry_count"] == 1
+    assert composed_cell["accounting"]["attempts"]["failed_count"] == 1
 
 
 @pytest.mark.parametrize("invalid_kind", ["missing", "duplicate", "overlap"])

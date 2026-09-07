@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 
@@ -100,6 +101,26 @@ def test_lme_evidence_rejects_a_native_read_truncation() -> None:
                 candidates=(truncated,),
             )
         )
+
+
+def test_lme_evidence_preserves_empty_provider_text_in_order() -> None:
+    batch = NativeEvidenceBatch(
+        raw_reference=RawReferenceHandle("a" * 64),
+        candidates=(
+            _candidate("empty-abstract", "", 1),
+            _candidate("with-abstract", "provider content", 2),
+        ),
+    )
+
+    visible = build_lme_visible_evidence(batch)
+    items = [json.loads(line) for line in visible.canonical_bytes.splitlines()]
+
+    assert [item["text"] for item in items] == ["", "provider content"]
+    assert visible.included_native_ids == ("native-1", "native-2")
+    assert visible.kept_count == visible.candidate_count == 2
+    assert visible.dropped_count == 0
+    assert visible.sha256 == hashlib.sha256(visible.canonical_bytes).hexdigest()
+    assert visible.token_count == count_o200k_tokens(visible.canonical_bytes)
 
 
 def test_lme_evidence_requires_an_explicit_provider_evidence_identity() -> None:

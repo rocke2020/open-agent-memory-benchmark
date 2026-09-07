@@ -26,8 +26,8 @@ from .ids import (
     plan_manifest_entry_id,
 )
 
-INGESTION_RETRY_UNIT = "whole_history_through_ready_projection"
-INGESTION_RECOVERY_STRATEGY = "fresh_scope_full_history_rebuild_v2"
+INGESTION_RETRY_UNIT = "batch_dispatch"
+INGESTION_RECOVERY_STRATEGY = "same_scope_batch_retry_skip_v1"
 INFRASTRUCTURE_RETRY_BACKOFF_SECONDS = (1, 2)
 INFRASTRUCTURE_MAX_TOTAL_RETRIES = len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS)
 INFRASTRUCTURE_RETRY_POLICY_HASH = canonical_sha256(

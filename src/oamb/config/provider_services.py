@@ -526,12 +526,13 @@ def _validate_proof_semantics(
         )
     elif filename == "hindsight-retry-config.json":
         expected = {
+            "extraction_max_retries": 10,
             "llm_base_url_host": value.get("llm_base_url_host"),
             "llm_max_retries": 0,
             "NO_PROXY": value.get("NO_PROXY"),
             "no_proxy": value.get("no_proxy"),
             "openai_sdk_max_retries": 0,
-            "retain_llm_max_retries": 0,
+            "retain_llm_max_retries": 10,
             "worker_max_retries": 0,
         }
         valid = (
@@ -587,6 +588,7 @@ def _validate_proof_semantics(
         valid = (
             set(value)
             == {
+                "extraction_max_retries",
                 "llm_base_url_host",
                 "NO_PROXY",
                 "no_proxy",
@@ -594,7 +596,9 @@ def _validate_proof_semantics(
             }
             and _valid_llm_no_proxy_proof(value)
             and (
-                type(value["openai_sdk_max_retries"]) is int
+                type(value["extraction_max_retries"]) is int
+                and value["extraction_max_retries"] == 10
+                and type(value["openai_sdk_max_retries"]) is int
                 and value["openai_sdk_max_retries"] == 0
             )
         )
@@ -636,8 +640,9 @@ def _validate_proof_semantics(
     elif filename == "openviking-retry-config.json":
         expected = {
             "embedding_max_retries": 0,
+            "extraction_max_retries": 10,
             "llm_base_url_host": value.get("llm_base_url_host"),
-            "memory_extraction_max_retries": 0,
+            "memory_extraction_max_retries": 10,
             "NO_PROXY": value.get("NO_PROXY"),
             "no_proxy": value.get("no_proxy"),
             "openai_sdk_max_retries": 0,
@@ -731,7 +736,7 @@ def _validate_profile_proof_store(
             expected_thinking_effort=expected_thinking_effort,
         )
         if filename.endswith("-retry-config.json"):
-            internal_retry_count = 0
+            internal_retry_count = 10
     if internal_retry_count is None:
         raise ProviderServiceBindingError("provider retry proof is missing")
     return internal_retry_count

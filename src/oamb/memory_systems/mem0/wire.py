@@ -129,10 +129,12 @@ def encode_add_request(
         raise ValueError("messages must not be empty")
     encoded_messages: list[dict[str, str]] = []
     for role, content in messages:
+        if not isinstance(content, str):
+            raise ValueError("message content must be a string")
         encoded_messages.append(
             {
                 "role": _require_non_empty_string(role, field_name="message role"),
-                "content": _require_non_empty_string(content, field_name="message content"),
+                "content": content,
             }
         )
     return _encode_exact_json(

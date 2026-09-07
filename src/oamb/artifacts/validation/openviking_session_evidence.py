@@ -164,24 +164,43 @@ def reconstruct_openviking_session_plan(
     scope_payload = _payload(raw_payloads, plan.scope_raw_refs[0])
     _parse_not_found(scope_payload, expected_resource=memory_root, expected_type="file")
     if (
-        plan.ordered_source_unit_ids != plan.accepted_source_unit_ids
-        or plan.rejected_source_unit_ids
-        or plan.projected_source_unit_ids != plan.ordered_source_unit_ids
+        set(plan.accepted_source_unit_ids)
+        | set(plan.rejected_source_unit_ids)
+        | set(plan.skipped_source_unit_ids)
+        != set(plan.ordered_source_unit_ids)
+        or not set(plan.projected_source_unit_ids)
+        <= (set(plan.accepted_source_unit_ids) | set(plan.skipped_source_unit_ids))
         or len(plan.ordered_dispatch_attempt_ids) != len(plan.ordered_source_unit_ids)
     ):
         raise ValueError("OpenViking session source ledger is not exact and ordered")
-    for attempt_id in plan.ordered_dispatch_attempt_ids:
+    for source_id, attempt_id in zip(
+        plan.ordered_source_unit_ids, plan.ordered_dispatch_attempt_ids, strict=True
+    ):
         attempt = attempts.get(attempt_id)
-        if (
-            attempt is None
-            or attempt.stage != "memory_ingest"
-            or attempt.outcome != AttemptOutcome.SUCCEEDED
+        skipped = source_id in plan.skipped_source_unit_ids
+        if attempt is None or attempt.stage != "memory_ingest":
+            raise ValueError("OpenViking session dispatch attempt is incomplete")
+        if skipped:
+            if (
+                attempt.outcome != AttemptOutcome.FAILED
+                or attempt.raw_error_ref not in plan.readiness_evidence_refs
+            ):
+                raise ValueError("OpenViking skipped session lacks terminal failure evidence")
+        elif (
+            attempt.outcome != AttemptOutcome.SUCCEEDED
             or attempt.raw_response_ref not in plan.readiness_evidence_refs
         ):
             raise ValueError("OpenViking session dispatch attempt is incomplete")
+    final_attempts_by_source = dict(
+        zip(plan.ordered_source_unit_ids, plan.ordered_dispatch_attempt_ids, strict=True)
+    )
     expected_sessions = tuple(
-        openviking_session_id(plan.ingestion_occurrence_id, source_id)
-        for source_id in plan.ordered_source_unit_ids
+        _session_id_for_attempt(
+            plan.ingestion_occurrence_id,
+            source_id,
+            _batch_attempt_ordinal(attempts[final_attempts_by_source[source_id]], attempts),
+        )
+        for source_id in plan.accepted_source_unit_ids
     )
     created, committed, completed, archived = _session_terminal_evidence(
         raw_payloads,
@@ -212,6 +231,34 @@ def reconstruct_openviking_session_plan(
     ):
         raise ValueError("OpenViking session projection state is invalid")
     return OpenVikingSessionPlanEvidence(memory_root, memory_uris, state_sha256)
+
+
+def _batch_attempt_ordinal(attempt: Any, attempts: Mapping[str, Any]) -> int:
+    ordinal = 1
+    seen = {attempt.attempt_id}
+    predecessor_id = attempt.retry_of_attempt_id
+    while predecessor_id is not None:
+        if predecessor_id in seen or predecessor_id not in attempts:
+            raise ValueError("OpenViking session retry chain is incomplete")
+        seen.add(predecessor_id)
+        ordinal += 1
+        predecessor_id = attempts[predecessor_id].retry_of_attempt_id
+    if ordinal > 3:
+        raise ValueError("OpenViking session retry chain exceeds the batch allowance")
+    return ordinal
+
+
+def _session_id_for_attempt(
+    ingestion_occurrence_id: str,
+    source_id: str,
+    batch_attempt_ordinal: int,
+) -> str:
+    identity = (
+        source_id
+        if batch_attempt_ordinal == 1
+        else f"{source_id}:batch-attempt:{batch_attempt_ordinal}"
+    )
+    return openviking_session_id(ingestion_occurrence_id, identity)
 
 
 def reconstruct_openviking_session_projection(

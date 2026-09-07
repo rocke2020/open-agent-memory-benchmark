@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -26,6 +27,7 @@ from oamb.contracts.ports import (
     SourceUnit,
 )
 from oamb.memory_systems.mem0 import Mem0RestAdapter
+from oamb.memory_systems.mem0.adapter import _source_messages
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "adapters" / "mem0"
 RUN_ID = "a" * 64
@@ -124,14 +126,38 @@ def _adapter(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "lme_messages",
+    (
+        None,
+        (("user", ""), ("assistant", "I remember."), ("user", "Tea."), ("assistant", "")),
+    ),
+    ids=("plain-source", "lme-empty-turns"),
+)
+@pytest.mark.parametrize(
     "add_response",
     (b'{"results":[]}', (FIXTURES / "rest" / "add-success.json").read_bytes()),
 )
 async def test_add_completion_and_empty_projection_are_black_box_outcomes(
     add_response: bytes,
+    lme_messages: tuple[tuple[str, str], ...] | None,
 ) -> None:
     public_requests: list[httpx.Request] = []
     inspector_requests: list[httpx.Request] = []
+    messages = [
+        {"role": role, "content": content}
+        for role, content in lme_messages or (("user", "source 1"),)
+    ]
+    source = _source()
+    if lme_messages is not None:
+        payload = json.dumps(messages, separators=(",", ":")).encode()
+        source = replace(
+            source,
+            payload_bytes=payload,
+            payload_sha256=hashlib.sha256(payload).hexdigest(),
+            source_reference="session-empty-turns",
+            occurred_at="2026-01-01T00:00:00+00:00",
+            context_text="LongMemEval session session-empty-turns",
+        )
 
     def public_handler(request: httpx.Request) -> httpx.Response:
         public_requests.append(request)
@@ -141,7 +167,7 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
         if request.url.path == "/memories":
             assert request.method == "POST"
             assert json.loads(request.content) == {
-                "messages": [{"role": "user", "content": "source 1"}],
+                "messages": messages,
                 "run_id": RUN_ID,
                 "metadata": {
                     "oamb_ingestion_occurrence_id": RUN_ID,
@@ -192,7 +218,7 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
         )
     )
     dispatch = adapter.plan_ingestion(
-        IngestionRequest(scope=scope, ordered_source_units=(_source(),))
+        IngestionRequest(scope=scope, ordered_source_units=(source,))
     )[0]
     dispatch_receipt = await adapter.ingest(
         IngestionDispatchRequest(
@@ -241,6 +267,12 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
     ]
     assert sum(request.url.path == "/v1/projection" for request in inspector_requests) >= 4
     assert {item.sha256 for item in store.raw}
+
+
+def test_empty_non_lme_source_remains_invalid() -> None:
+    source = replace(_source(), payload_bytes=b"", payload_sha256=hashlib.sha256(b"").hexdigest())
+    with pytest.raises(ValueError, match="source payload must not be empty"):
+        _source_messages(source)
 
 
 @pytest.mark.asyncio

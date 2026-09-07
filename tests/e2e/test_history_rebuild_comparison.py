@@ -20,7 +20,6 @@ from oamb.contracts.specifications import (
 from oamb.contracts.states import ValidationDisposition
 from oamb.reporting.comparison_project import ValidatedCellRoot, build_comparison_project
 from oamb.runtime.case_partition import build_case_partition_spec
-from oamb.runtime.native_run import NativeRunInterrupted
 from oamb.workloads.longmemeval import LME_JUDGE_PROMPT_PACK_ID
 from tests.e2e.test_history_rebuild_vertical_slice import _run, _two_source_workload
 from tests.e2e.test_native_recorded_exact_profile import (
@@ -146,34 +145,19 @@ def _controlled_cell(
     return completed.capsule_root, service.occurrences
 
 
-@pytest.mark.parametrize("recover_rebuild", (False, True))
-def test_rebuilt_and_clean_recorded_hindsight_cells_publish_normal_comparison(
+def test_partial_and_clean_recorded_hindsight_cells_publish_normal_comparison(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    recover_rebuild: bool,
 ) -> None:
     """Recorded HTTP/model fixtures prove the public consumer path without provider calls."""
 
     plan = _comparison_plan()
-    recovery_parts: tuple[Path, ...] = ()
-    if recover_rebuild:
-        with pytest.raises(NativeRunInterrupted):
-            _controlled_cell(
-                tmp_path,
-                monkeypatch,
-                plan=plan,
-                cell_index=0,
-                fail_first_history=True,
-                stop_during_backoff=True,
-            )
-        recovery_parts = (tmp_path / "cell-0/history-comparison-1",)
     rebuilt_root, rebuilt_occurrences = _controlled_cell(
         tmp_path,
         monkeypatch,
         plan=plan,
         cell_index=0,
-        fail_first_history=not recover_rebuild,
-        recovery_parts=recovery_parts,
+        fail_first_history=True,
     )
     clean_root, clean_occurrences = _controlled_cell(
         tmp_path, monkeypatch, plan=plan, cell_index=1, fail_first_history=False
@@ -209,7 +193,7 @@ def test_rebuilt_and_clean_recorded_hindsight_cells_publish_normal_comparison(
         for path in (clean_root / "source/ingestion-plans").glob("*.json")
     )
     assert tuple(item["ingestion_occurrence_id"] for item in rebuilt_plans) == (
-        rebuilt_occurrences[1],
+        rebuilt_occurrences[0],
     )
     assert tuple(item["ingestion_occurrence_id"] for item in clean_plans) == (clean_occurrences[0],)
     assert rebuilt["case_count"] == clean["case_count"] == 1
@@ -218,12 +202,12 @@ def test_rebuilt_and_clean_recorded_hindsight_cells_publish_normal_comparison(
         rebuilt["accounting"]["attempts"]["attempt_count"]
         > clean["accounting"]["attempts"]["attempt_count"]
     )
-    assert rebuilt["accounting"]["attempts"]["failed_count"] == 1
+    assert rebuilt["accounting"]["attempts"]["failed_count"] == 3
     assert clean["accounting"]["attempts"]["failed_count"] == 0
     rebuilt_indexing = rebuilt["accounting"]["tokens"]["indexing"]
     clean_indexing = clean["accounting"]["tokens"]["indexing"]
     assert rebuilt_indexing["supplier_usage_coverage"]["record_count"] == 4
     assert clean_indexing["supplier_usage_coverage"]["record_count"] == 2
-    assert rebuilt_indexing["totals"]["input_tokens"]["value"] == 33
+    assert rebuilt_indexing["totals"]["input_tokens"]["value"] == 11
     assert clean_indexing["totals"]["input_tokens"]["value"] == 22
     assert export["coverage"]["provider_specific_result_count"] == 2

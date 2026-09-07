@@ -86,12 +86,58 @@ def _classify(basis: str, body: bytes, status: int, **options: Any) -> str | Non
         "settlement_basis": basis,
         "raw_response_bytes": body,
         "status_code": status,
-        "internal_retry_count": 0,
+        "internal_retry_count": 10,
         "expected_task_id": TASK_ID,
         "expected_session_id": SESSION_ID,
         **options,
     }
     return classify_settled_ingestion_failure(**arguments)
+
+
+def test_live_native_retry_proof_count_ten_is_accepted() -> None:
+    assert (
+        _classify(
+            MEM0_BASIS,
+            _raw(
+                {
+                    "detail": "Provider memory extraction failed after retries.",
+                    "code": "provider_extraction_failed",
+                    "request_id": "1234abcd",
+                }
+            ),
+            502,
+            internal_retry_count=10,
+        )
+        == "provider_ingestion_error"
+    )
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "Fact extraction failed: 2/3 chunks failed. First failures: "
+        "chunk 0: JSONDecodeError: Expecting value: line 1 column 1 (char 0), "
+        "chunk 2: RuntimeError: schema returned non-dict facts",
+        "Fact extraction failed: 6/8 chunks failed. First failures: "
+        "chunk 0: JSONDecodeError: bad, chunk 1: ValidationError: schema, "
+        "chunk 2: RuntimeError: non-dict, chunk 3: ValueError: missing facts, "
+        "chunk 4: RuntimeError: unusable facts",
+    ),
+)
+def test_hindsight_terminal_mixed_extraction_aggregate_is_settled(detail: str) -> None:
+    assert _classify(HINDSIGHT_BASIS, _raw({"detail": detail}), 500) == "provider_ingestion_error"
+
+
+def test_openviking_bound_failed_task_accepts_nonempty_extraction_error() -> None:
+    assert (
+        _classify(
+            OPENVIKING_BASIS,
+            _ok(_task(error="ValidationError: extracted memory schema mismatch")),
+            200,
+            internal_retry_count=10,
+        )
+        == "provider_ingestion_error"
+    )
 
 
 @pytest.mark.parametrize(
@@ -161,7 +207,7 @@ def test_exact_pinned_terminal_receipts_have_one_normalized_reason(
     assert _classify(basis, body, status) == expected
 
 
-@pytest.mark.parametrize("proof_count", (None, 1, 2, -1, False, True))
+@pytest.mark.parametrize("proof_count", (None, 0, 1, 2, -1, False, True))
 @pytest.mark.parametrize(
     ("basis", "status", "body"),
     (
@@ -187,13 +233,9 @@ def test_missing_or_nonzero_internal_retry_proof_cannot_qualify(
     "detail",
     (
         "Connection error.",
-        HINDSIGHT_DETAIL + " AuthenticationError: invalid credential",
         HINDSIGHT_DETAIL.replace("1/1", "2/2"),
         HINDSIGHT_DETAIL.replace("1/1", "6/6"),
         HINDSIGHT_DETAIL.replace("chunk 0", "chunk 1"),
-        HINDSIGHT_DETAIL.replace("APIConnectionError", "APITimeoutError"),
-        "Fact extraction failed: 2/2 chunks failed. First failures: "
-        "chunk 0: APIConnectionError: Connection error., chunk 1: AuthenticationError: denied",
         "Fact extraction failed: 2/2 chunks failed. First failures: "
         "chunk 0: APIConnectionError: Connection error., chunk 0: APIConnectionError: Connection error.",
     ),
@@ -205,21 +247,9 @@ def test_hindsight_requires_complete_unambiguous_connection_failures(detail: str
 @pytest.mark.parametrize(
     "detail",
     (
-        HINDSIGHT_INVALID_JSON_DETAIL.replace("Invalid control character at:", "Expecting value:"),
-        HINDSIGHT_INVALID_JSON_DETAIL.replace("line 8", "line 0"),
-        HINDSIGHT_INVALID_JSON_DETAIL.replace("line 8", "line 08"),
-        HINDSIGHT_INVALID_JSON_DETAIL.replace("column 36", "column 0"),
-        HINDSIGHT_INVALID_JSON_DETAIL.replace("column 36", "column -1"),
-        HINDSIGHT_INVALID_JSON_DETAIL.replace("char 243", "char -1"),
-        HINDSIGHT_INVALID_JSON_DETAIL.replace("char 243", "char 0243"),
         HINDSIGHT_INVALID_JSON_DETAIL.replace("1/1", "2/2"),
         HINDSIGHT_INVALID_JSON_DETAIL.replace("1/1", "6/6"),
         HINDSIGHT_INVALID_JSON_DETAIL.replace("chunk 0", "chunk 1"),
-        HINDSIGHT_INVALID_JSON_DETAIL + " trailing data",
-        HINDSIGHT_INVALID_JSON_DETAIL + " AuthenticationError: denied",
-        "Fact extraction failed: 2/2 chunks failed. First failures: "
-        "chunk 0: JSONDecodeError: Invalid control character at: line 8 column 36 (char 243), "
-        "chunk 1: APIConnectionError: Connection error.",
         "Fact extraction failed: 2/2 chunks failed. First failures: "
         "chunk 0: JSONDecodeError: Invalid control character at: line 8 column 36 (char 243), "
         "chunk 0: JSONDecodeError: Invalid control character at: line 8 column 36 (char 243)",
@@ -255,8 +285,6 @@ def test_mem0_does_not_retry_auth_configuration_timeout_or_opaque_errors(code: s
         {"task_id": "other-task"},
         {"resource_id": "other-session"},
         {"task_type": "add_resource"},
-        {"error": "AuthenticationError: denied"},
-        {"error": "peer closed connection"},
         {"error": None},
     ),
 )
@@ -302,7 +330,7 @@ def test_duplicate_failure_fields_are_rejected() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("proof_count", (None, 0))
+@pytest.mark.parametrize("proof_count", (None, 0, 10))
 @pytest.mark.parametrize(
     ("detail", "failure_kind"),
     (
@@ -346,19 +374,19 @@ async def test_hindsight_adapter_preserves_exact_terminal_receipt_and_proof_gate
         )
     error = caught.value
     assert type(error).__name__ == (
-        "SettledTransientIngestionFailure" if proof_count == 0 else "MemorySystemCallFailure"
+        "SettledTransientIngestionFailure" if proof_count == 10 else "MemorySystemCallFailure"
     )
     assert error.raw_response_bytes == raw
     assert error.raw_reference is not None
     assert error.raw_reference.sha256 == hashlib.sha256(raw).hexdigest()
     assert error.status_code == 500
-    if proof_count == 0:
+    if proof_count == 10:
         assert error.failure_kind == failure_kind
     await adapter.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("proof_count", (None, 0))
+@pytest.mark.parametrize("proof_count", (None, 0, 10))
 async def test_mem0_adapter_promotes_only_proven_terminal_add_failure(
     proof_count: int | None,
 ) -> None:
@@ -418,7 +446,7 @@ async def test_mem0_adapter_promotes_only_proven_terminal_add_failure(
             IngestionDispatchRequest(scope=scope, attempt_id="d" * 64, dispatch=dispatch)
         )
     assert type(caught.value).__name__ == (
-        "SettledTransientIngestionFailure" if proof_count == 0 else "MemorySystemCallFailure"
+        "SettledTransientIngestionFailure" if proof_count == 10 else "MemorySystemCallFailure"
     )
     assert caught.value.raw_response_bytes == raw
     await adapter.close()
@@ -440,7 +468,7 @@ async def test_openviking_terminal_failure_retains_commit_and_all_poll_evidence(
             task_id = request.url.path.rsplit("/", 1)[-1]
             session_id = next(
                 json.loads(call.content)["session_id"]
-                for call in service.calls
+                for call in reversed(service.calls)
                 if call.url.path == "/api/v1/sessions" and call.method == "POST"
             )
             return httpx.Response(
@@ -466,7 +494,7 @@ async def test_openviking_terminal_failure_retains_commit_and_all_poll_evidence(
         transport=httpx.MockTransport(handler),
         task_poll_interval_seconds=0,
         maximum_task_polls=3,
-        internal_retry_count=0,
+        internal_retry_count=10,
     )
     await adapter.resolve()
     scope = await adapter.allocate_ingestion_scope(
@@ -494,6 +522,22 @@ async def test_openviking_terminal_failure_retains_commit_and_all_poll_evidence(
         for ref in refs
         if ref is not None
     )
+    with pytest.raises(MemorySystemCallFailure):
+        await adapter.ingest(
+            IngestionDispatchRequest(
+                scope=scope,
+                attempt_id="e" * 64,
+                dispatch=dispatch,
+                batch_attempt_ordinal=2,
+            )
+        )
+    created_session_ids = [
+        json.loads(call.content)["session_id"]
+        for call in service.calls
+        if call.url.path == "/api/v1/sessions" and call.method == "POST"
+    ]
+    assert len(created_session_ids) == 2
+    assert len(set(created_session_ids)) == 2
     await adapter.close()
 
 
@@ -590,7 +634,7 @@ async def test_mem0_fresh_occurrence_binds_add_projection_and_search_requests() 
         runtime_binding_hash="f" * 64,
         transport=httpx.MockTransport(public),
         inspector_transport=httpx.MockTransport(inspector),
-        internal_retry_count=0,
+        internal_retry_count=10,
     )
     await adapter.resolve()
     scope = await adapter.allocate_ingestion_scope(

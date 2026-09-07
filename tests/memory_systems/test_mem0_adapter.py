@@ -402,6 +402,37 @@ def test_add_encoder_emits_only_exact_v2_0_19_fields() -> None:
     assert encoded == expected
 
 
+@pytest.mark.parametrize(
+    ("messages", "accepted"),
+    (
+        ((("user", ""), ("assistant", "")), True),
+        ((("", "text"),), False),
+        (((None, "text"),), False),
+        ((("user", None),), False),
+        ((("user", 123),), False),
+    ),
+)
+def test_add_encoder_preserves_empty_text_and_rejects_invalid_message_types(
+    messages: Any, accepted: bool
+) -> None:
+    mem0 = importlib.import_module("oamb.memory_systems.mem0")
+    metadata = mem0.Mem0SourceMetadata(
+        ingestion_occurrence_id=RUN_ID,
+        ingestion_plan_id=PLAN_ID,
+        source_unit_id=SOURCE_ID,
+        source_ordinal=1,
+    )
+    if not accepted:
+        with pytest.raises(ValueError):
+            mem0.encode_add_request(messages=messages, run_id=RUN_ID, metadata=metadata)
+        return
+    encoded = mem0.encode_add_request(messages=messages, run_id=RUN_ID, metadata=metadata)
+    assert json.loads(encoded)["messages"] == [
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": ""},
+    ]
+
+
 def test_rest_request_surface_allows_only_exact_nondestructive_posts() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
     metadata = mem0.Mem0SourceMetadata(

@@ -109,6 +109,9 @@ _EXECUTION_KEYS = (
     "ingestion_retry_unit",
     "ingestion_recovery_strategy",
     "max_retries_per_operation",
+    "extraction_max_retries",
+    "model_max_attempts",
+    "model_transport_max_retries",
     "operation_timeout_seconds",
     "max_parallel_datasets",
     "max_parallel_providers_per_dataset",
@@ -213,6 +216,9 @@ class ResolvedExecution:
     ingestion_retry_unit: str
     ingestion_recovery_strategy: str
     max_retries_per_operation: int
+    extraction_max_retries: int
+    model_max_attempts: int
+    model_transport_max_retries: int
     operation_timeout_seconds: int
     max_parallel_datasets: int
     max_parallel_providers_per_dataset: int
@@ -563,6 +569,9 @@ def _authorization_document(execution: ResolvedExecution) -> dict[str, object]:
             "ingestion_retry_unit",
             "ingestion_recovery_strategy",
             "max_retries_per_operation",
+            "extraction_max_retries",
+            "model_max_attempts",
+            "model_transport_max_retries",
             "operation_timeout_seconds",
             "per_cell_base_operation_count",
             "per_cell_retry_eligible_operation_count",
@@ -581,16 +590,6 @@ def _maximum_output_tokens_per_call(_role_id: ModelRoleId) -> int | None:
     return None
 
 
-def _history_rebuild_ingress_budget(
-    *,
-    group_count: int,
-    source_count: int,
-) -> tuple[int, int]:
-    if group_count < 1 or source_count < group_count:
-        raise ValueError("history rebuild inventory must contain every non-empty group")
-    return source_count + 3 * group_count, 3 * source_count + 3 * group_count
-
-
 def _resolve_execution(
     selection: str,
     controls: EvaluationControls,
@@ -607,24 +606,31 @@ def _resolve_execution(
         question_concurrency = 2
     else:
         raise ResolvedPlanError(f"unsupported resolved execution selection: {selection}")
-    ingress_operations, ingress_owner_authorizations = _history_rebuild_ingress_budget(
-        group_count=case_count,
-        source_count=source_count,
-    )
     base_operations = 1 + source_count + 8 * case_count
-    retry_eligible_operations = ingress_operations + 2 * case_count
+    retry_eligible_operations = source_count + 2 * case_count
     base_owner_authorizations = base_operations + 2 * source_count + case_count
+    model_additional_attempts = (
+        2
+        * case_count
+        * (controls.model_max_attempts * (controls.model_transport_max_retries + 1) - 1)
+    )
     maximum_operations = (
-        base_operations + retry_eligible_operations * controls.max_retries_per_operation
+        base_operations
+        + source_count * controls.max_retries_per_operation
+        + model_additional_attempts
     )
     maximum_owner_authorizations = (
         base_owner_authorizations
-        + (ingress_owner_authorizations + 2 * case_count) * controls.max_retries_per_operation
+        + 3 * source_count * controls.max_retries_per_operation
+        + model_additional_attempts
     )
     return ResolvedExecution(
         ingestion_retry_unit=INGESTION_RETRY_UNIT,
         ingestion_recovery_strategy=INGESTION_RECOVERY_STRATEGY,
         max_retries_per_operation=controls.max_retries_per_operation,
+        extraction_max_retries=controls.extraction_max_retries,
+        model_max_attempts=controls.model_max_attempts,
+        model_transport_max_retries=controls.model_transport_max_retries,
         operation_timeout_seconds=controls.operation_timeout_seconds,
         max_parallel_datasets=1,
         max_parallel_providers_per_dataset=3,
@@ -769,7 +775,18 @@ def _parse_execution(value: object, *, selection: str) -> ResolvedExecution:
             document["operation_timeout_seconds"],
             "resolved execution operation timeout",
         ),
+        extraction_max_retries=_require_non_negative_integer(
+            document["extraction_max_retries"], "resolved extraction max retries"
+        ),
+        model_max_attempts=_require_positive_integer(
+            document["model_max_attempts"], "resolved model max attempts"
+        ),
+        model_transport_max_retries=_require_non_negative_integer(
+            document["model_transport_max_retries"], "resolved model transport max retries"
+        ),
     )
+    if controls.as_tuple()[:4] != (2, 10, 6, 2):
+        raise ResolvedPlanError("resolved execution layered retry values do not match the profile")
     expected = _resolve_execution(selection, controls)
     if dict(document) != _execution_document(expected):
         raise ResolvedPlanError("resolved execution derivation is invalid")

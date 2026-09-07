@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -158,6 +158,58 @@ def test_ingestion_receipt_binds_ordered_dispatch_receipts_for_readiness() -> No
     )
 
     assert readiness.ingestion_receipt.dispatch_receipts == (dispatch_receipt,)
+
+
+def test_ingestion_batch_attempt_ordinal_is_bounded_and_skipped_sources_are_preserved() -> None:
+    ingestion_dispatch_type = _port_type("IngestionDispatch")
+    source = _source("source-1", 1)
+    scope = ports.ScopeReceipt(
+        ingestion_occurrence_id="a" * 64,
+        scope_id="scope-1",
+        raw_reference=ports.RawReferenceHandle("1" * 64),
+    )
+    dispatch = ingestion_dispatch_type(
+        dispatch_ordinal_1_indexed=1,
+        operation_kind="fixture_ingest",
+        request_fingerprint="b" * 64,
+        ordered_source_units=(source,),
+    )
+
+    request = ports.IngestionDispatchRequest(
+        scope=scope,
+        attempt_id="c" * 64,
+        dispatch=dispatch,
+        batch_attempt_ordinal=3,
+    )
+    receipt = ports.IngestionDispatchReceipt(
+        attempt_id=request.attempt_id,
+        dispatch=dispatch,
+        accepted_source_unit_ids=(),
+        rejected_source_unit_ids=(),
+        skipped_source_unit_ids=("source-1",),
+        raw_reference=ports.RawReferenceHandle("2" * 64),
+        raw_response_bytes=b'{"error":"settled"}',
+        usage_records=(),
+    )
+    ingestion = ports.IngestionReceipt(
+        ingestion_occurrence_id=scope.ingestion_occurrence_id,
+        accepted_source_unit_ids=(),
+        rejected_source_unit_ids=(),
+        skipped_source_unit_ids=("source-1",),
+        raw_references=(receipt.raw_reference,),
+        dispatch_receipts=(receipt,),
+    )
+
+    assert request.batch_attempt_ordinal == 3
+    assert ingestion.skipped_source_unit_ids == ("source-1",)
+    for invalid_ordinal in (0, 4, True, 1.0):
+        with pytest.raises(ValueError, match="batch attempt ordinal"):
+            ports.IngestionDispatchRequest(
+                scope=scope,
+                attempt_id="d" * 64,
+                dispatch=dispatch,
+                batch_attempt_ordinal=cast(Any, invalid_ordinal),
+            )
 
 
 def test_scope_receipt_binds_ordered_allocation_supporting_raw_references() -> None:

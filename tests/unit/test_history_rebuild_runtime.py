@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 from collections.abc import Coroutine
 from dataclasses import replace
@@ -22,7 +21,6 @@ from oamb.contracts.ports import (
     MemorySystemCallUnknownOutcome,
     NativeEvidenceBatch,
     RetrievalRequest,
-    RuntimeResolution,
     ScopeAllocationRequest,
     ScopeReceipt,
     SettledTransientIngestionFailure,
@@ -166,66 +164,6 @@ def _pipeline(
     )
 
 
-@pytest.mark.parametrize("retries", (0, 1, 2))
-def test_whole_history_limit_counts_all_attempts_and_preserves_partial_scopes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    retries: int,
-) -> None:
-    monkeypatch.setattr(native, "INFRASTRUCTURE_RETRY_BACKOFF_SECONDS", (1, 2)[:retries])
-    waits: list[int] = []
-
-    async def wait(seconds: int) -> None:
-        waits.append(seconds)
-
-    monkeypatch.setattr(native, "_infrastructure_retry_sleep", wait)
-    memory = _PartialHistoryMemory(ArtifactStore(tmp_path), failures=3)
-    _state, operation = _pipeline(tmp_path, memory)
-    with pytest.raises(RuntimeError):
-        asyncio.run(operation)
-    assert len(memory.scopes) == retries + 1
-    assert len(memory.sentinels) == retries + 1
-    assert waits == [1, 2][:retries]
-    assert memory.retrieval_scopes == []
-    records = [
-        json.loads(p.read_bytes()) for p in (tmp_path / "source/history-attempts").glob("*.json")
-    ]
-    assert sorted(r["history_attempt_ordinal"] for r in records) == list(range(1, retries + 2))
-    assert all(r["status"] == "retryable_failed_settled" for r in records)
-
-
-def test_partial_history_failure_rebuilds_from_first_source_and_selects_only_new_scope(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    waits: list[int] = []
-
-    async def wait(seconds: int) -> None:
-        events = list((tmp_path / "source/history-retries").glob("*.json"))
-        assert len(events) == 1, "retry must be durable before waiting"
-        assert json.loads(events[0].read_bytes())["retry_scheduled"] is True
-        waits.append(seconds)
-
-    monkeypatch.setattr(native, "_infrastructure_retry_sleep", wait)
-    memory = _PartialHistoryMemory(ArtifactStore(tmp_path), failures=1)
-    _state, operation = _pipeline(tmp_path, memory)
-    plans, cases = asyncio.run(operation)
-    assert len(plans) == len(cases) == 1
-    assert len(memory.scopes) == 2
-    old, new = memory.scopes
-    expected = [(b"partial accepted",), (b"partial rejected",)]
-    assert [payload for scope, payload in memory.dispatch_log if scope == old.scope_id] == expected
-    assert [payload for scope, payload in memory.dispatch_log if scope == new.scope_id] == expected
-    assert memory.sentinels == {old.scope_id: "OLD_SCOPE_ONLY_SENTINEL"}
-    assert memory.retrieval_scopes == [new.scope_id]
-    assert (
-        plans[0].ingestion_occurrence_id
-        == cases[0].ingestion_occurrence_id
-        == new.ingestion_occurrence_id
-    )
-    assert waits == [1]
-
-
 @pytest.mark.parametrize("failure_kind", ("ordinary", "unknown"))
 def test_unclassified_or_unknown_failure_never_allocates_a_successor(
     tmp_path: Path,
@@ -239,95 +177,12 @@ def test_unclassified_or_unknown_failure_never_allocates_a_successor(
     assert not list((tmp_path / "source/history-retries").glob("*.json"))
 
 
-def test_stop_during_backoff_preserves_scheduled_slot_without_allocating_successor(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stop = threading.Event()
-
-    async def wait(_seconds: int) -> None:
-        stop.set()
-
-    monkeypatch.setattr(native, "_infrastructure_retry_sleep", wait)
-    memory = _PartialHistoryMemory(ArtifactStore(tmp_path), failures=1)
-    _state, operation = _pipeline(tmp_path, memory, stop)
-    with pytest.raises(native.NativeRunInterrupted):
-        asyncio.run(operation)
-    assert len(memory.scopes) == 1
-    events = [
-        json.loads(p.read_bytes()) for p in (tmp_path / "source/history-retries").glob("*.json")
-    ]
-    assert len(events) == 1
-    assert events[0]["retry_scheduled"] is True
-
-
-@pytest.mark.parametrize("value", (True, -1, 3))
+@pytest.mark.parametrize("value", (True, -1, 0, 1, 3))
 def test_native_control_cannot_bypass_frozen_retry_limit(value: int) -> None:
     from tests.unit.test_t10_native_run_control import _control
 
     with pytest.raises(ValueError, match="retry limit"):
         replace(_control(), max_retries_per_operation=value)
-
-
-def test_final_inventory_keeps_both_histories_and_only_selected_case(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from oamb.contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
-    from oamb.runtime.case_partition import build_case_partition_spec
-
-    workload = _NativeFixtureWorkload()
-    dataset = workload.resolve_sources()
-    manifest = workload.build_case_manifest(dataset)
-    plan = manifest.ingestion_plans[1]
-    partition = build_case_partition_spec(
-        run_id="history-final-inventory",
-        resolved_plan_hash="1" * 64,
-        cell_spec_hash="2" * 64,
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=workload.iter_case_plans(manifest),
-        requested_case_manifest_entry_ids=plan.ordered_case_manifest_entry_ids,
-        budget_policy_hash="3" * 64,
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
-
-    class Memory(_PartialHistoryMemory):
-        async def resolve(self) -> RuntimeResolution:
-            return replace(await super().resolve(), memory_system_id="hindsight")
-
-    memory = Memory(ArtifactStore(tmp_path / partition.run_id), failures=1)
-    memory.case_manifest_id = plan.ordered_case_manifest_entry_ids[0]
-
-    async def wait(_seconds: int) -> None:
-        pass
-
-    monkeypatch.setattr(native, "_infrastructure_retry_sleep", wait)
-    ready = asyncio.run(
-        native._run_native_vertical_slice(
-            output_root=tmp_path,
-            run_id=partition.run_id,
-            adapter_profile_id="recorded-native-fixture-v1",
-            workload=workload,
-            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
-            artifact_store_factory=ArtifactStore,
-            memory_factory=lambda _store, _plans: memory,
-            model_factory=_RecordedNativeModel,
-            answer_role_binding_id="recorded-answer-v1",
-            judge_model_factory=None,
-            judge_role_binding_id=None,
-            close_timeout_seconds=1,
-            partition=partition,
-        )
-    )
-    assert len(memory.scopes) == 2
-    assert ready.ingestion_occurrence_ids == tuple(s.ingestion_occurrence_id for s in memory.scopes)
-    assert ready.case_occurrence_ids == (
-        case_occurrence_id(
-            memory.scopes[-1].ingestion_occurrence_id,
-            memory.case_manifest_id,
-        ),
-    )
 
 
 def test_recovery_preparation_failure_constructs_no_provider_or_model(

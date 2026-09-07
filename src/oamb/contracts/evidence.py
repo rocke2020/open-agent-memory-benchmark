@@ -901,6 +901,13 @@ class AttemptReceiptRecord(StrictContract):
     receipt_observed_at: UtcDateTime
     provider_request_wall_seconds: NonNegativeDecimal
 
+    failure_kind: NonEmptyStr | None = None
+    supplier_status_code: int | None = None
+    settlement_basis: NonEmptyStr | None = None
+    internal_retry_count: NonNegativeInt | None = None
+    settlement_task_id: NonEmptyStr | None = None
+    settlement_session_id: NonEmptyStr | None = None
+
     @model_validator(mode="after")
     def receipt_and_timing_shape(self) -> Self:
         if self.receipt_observed_at < self.dispatch_started_at:
@@ -1043,6 +1050,7 @@ class _NativeIngestionPlanRecord(StrictContract):
     ordered_dispatch_source_unit_ids: tuple[tuple[Sha256, ...], ...]
     accepted_source_unit_ids: tuple[Sha256, ...]
     rejected_source_unit_ids: tuple[Sha256, ...]
+    skipped_source_unit_ids: tuple[Sha256, ...] = ()
     readiness_evidence_refs: tuple[Sha256, ...]
     inventory_raw_ref: Sha256 | None
     projected_source_unit_ids: tuple[Sha256, ...]
@@ -1062,6 +1070,7 @@ class _NativeIngestionPlanRecord(StrictContract):
             ("dispatch", self.ordered_dispatch_attempt_ids),
             ("accepted", self.accepted_source_unit_ids),
             ("rejected", self.rejected_source_unit_ids),
+            ("skipped", self.skipped_source_unit_ids),
             ("attempt", self.attempt_ids),
         ):
             if len(set(values)) != len(values):
@@ -1069,8 +1078,14 @@ class _NativeIngestionPlanRecord(StrictContract):
         intended = set(self.ordered_source_unit_ids)
         accepted = set(self.accepted_source_unit_ids)
         rejected = set(self.rejected_source_unit_ids)
-        if accepted & rejected or not (accepted | rejected) <= intended:
-            raise ValueError("native ingestion accepted/rejected source partition is invalid")
+        skipped = set(self.skipped_source_unit_ids)
+        if (
+            accepted & rejected
+            or accepted & skipped
+            or rejected & skipped
+            or not (accepted | rejected | skipped) <= intended
+        ):
+            raise ValueError("native ingestion source partition is invalid")
         if not set(self.ordered_dispatch_attempt_ids) <= set(self.attempt_ids):
             raise ValueError(
                 "native ingestion dispatch attempts are absent from the attempt ledger"
@@ -1089,7 +1104,7 @@ class _NativeIngestionPlanRecord(StrictContract):
                 "native ingestion dispatch source ledger does not close the source order"
             )
         if self.state in {IngestionPlanState.READY, IngestionPlanState.SEALED}:
-            if accepted | rejected != intended:
+            if accepted | rejected | skipped != intended:
                 raise ValueError("ready native ingestion requires a closed source partition")
             if (
                 self.scope_id is None
@@ -1110,12 +1125,19 @@ class IngestionPlanRecordV2(_NativeIngestionPlanRecord):
     schema_version: Literal[2] = 2
 
     @model_validator(mode="after")
-    def native_plan_projection_closes_accepted_sources(self) -> Self:
-        if (
-            self.state in {IngestionPlanState.READY, IngestionPlanState.SEALED}
-            and self.projected_source_unit_ids != self.accepted_source_unit_ids
+    def native_plan_projection_is_source_ordered_observed_subset(self) -> Self:
+        projected = self.projected_source_unit_ids
+        intended_positions = {
+            source_id: index for index, source_id in enumerate(self.ordered_source_unit_ids)
+        }
+        observable = set(self.accepted_source_unit_ids) | set(self.skipped_source_unit_ids)
+        if len(set(projected)) != len(projected) or any(
+            source_id not in observable for source_id in projected
         ):
-            raise ValueError("native ingestion projection does not match accepted source order")
+            raise ValueError("native ingestion projection is not an observed source-ordered subset")
+        positions = tuple(intended_positions[source_id] for source_id in projected)
+        if positions != tuple(sorted(positions)):
+            raise ValueError("native ingestion projection is not an observed source-ordered subset")
         return self
 
 
@@ -1131,11 +1153,13 @@ class IngestionPlanRecordV3(_NativeIngestionPlanRecord):
         projected = self.projected_source_unit_ids
         if len(set(projected)) != len(projected):
             raise ValueError("Mem0 REST projected source identities must be unique")
-        accepted = self.accepted_source_unit_ids
-        accepted_positions = {source_id: index for index, source_id in enumerate(accepted)}
-        if any(source_id not in accepted_positions for source_id in projected):
-            raise ValueError("Mem0 REST projected source identity was not accepted")
-        positions = tuple(accepted_positions[source_id] for source_id in projected)
+        observable = set(self.accepted_source_unit_ids) | set(self.skipped_source_unit_ids)
+        intended_positions = {
+            source_id: index for index, source_id in enumerate(self.ordered_source_unit_ids)
+        }
+        if any(source_id not in observable for source_id in projected):
+            raise ValueError("Mem0 REST projected source identity was not accepted or skipped")
+        positions = tuple(intended_positions[source_id] for source_id in projected)
         if positions != tuple(sorted(positions)):
             raise ValueError("Mem0 REST projected source identities changed source order")
         return self
@@ -1417,11 +1441,13 @@ class HistoryAttemptRecord(StrictContract):
                 or self.settlement_basis is None
                 or not self.settlement_evidence_refs
                 or self.settlement_status_code is None
-                or self.internal_retry_count != 0
+                or self.internal_retry_count != 10
                 or self.failure_kind is None
                 or self.ingestion_plan_record_hash is not None
             ):
-                raise ValueError("retryable failed history lacks settled zero-retry evidence")
+                raise ValueError(
+                    "retryable failed history lacks configured extraction retry evidence"
+                )
             expected_basis = {
                 "hindsight": HINDSIGHT_SETTLEMENT_BASIS,
                 "mem0": MEM0_SETTLEMENT_BASIS,

@@ -370,22 +370,32 @@ load_plan_model_environment "$PLAN" || die "cannot load model configuration from
 
 "$ROOT/provider-services/bin/provider-services" doctor
 uv run --locked python - "$PLAN" "$ROOT/.env" "$ROOT/provider-services/.runtime" \
-  "${CELLS[@]}" <<'PY'
+  "$DATASET_SOURCE" "${CELLS[@]}" <<'PY'
 import os
 import sys
 from pathlib import Path
 
 from oamb.config.doctor import load_resolved_plan_for_run
-from oamb.live import load_live_environment, validate_live_readiness_receipt
+from oamb.live import (
+    load_live_environment,
+    validate_live_readiness_receipt,
+    validate_lme60_mem0_input_encoding,
+)
 
 plan_path = Path(sys.argv[1])
 env_file = Path(sys.argv[2])
 runtime = Path(sys.argv[3])
-expected_cells = tuple(sys.argv[4:])
+dataset_source = Path(sys.argv[4])
+expected_cells = tuple(sys.argv[5:])
 plan = load_resolved_plan_for_run(plan_path)
 actual_cells = tuple(cell.cell_id for cell in plan.cells)
 if actual_cells != expected_cells:
     raise SystemExit(f"unexpected plan cells: {actual_cells!r}")
+source_count = validate_lme60_mem0_input_encoding(dataset_source)
+print(
+    f"input encoding: PASS (60 questions, {source_count} sources, "
+    "zero model/provider calls)"
+)
 environment = load_live_environment(
     provider_env_path=env_file,
     model_env_path=env_file,

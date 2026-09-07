@@ -78,7 +78,7 @@ def _attempt_fields(*, ordinal: int = 1, status: str = "ready") -> dict[str, obj
             settlement_basis="hindsight_sync_extraction_drained_v1",
             settlement_evidence_refs=(HASHES[8],),
             settlement_status_code=500,
-            internal_retry_count=0,
+            internal_retry_count=10,
             failure_kind="transient_upstream_failure",
             ingestion_plan_record_hash=None,
         )
@@ -130,19 +130,19 @@ def test_ingestion_occurrence_first_identity_is_stable_and_successors_are_distin
             ingestion_occurrence_id("run", "hindsight", HASHES[0], history_attempt_ordinal=invalid)
 
 
-def test_settled_transient_failure_requires_exact_raw_classification_and_zero_retries() -> None:
+def test_settled_transient_failure_requires_exact_raw_classification_and_native_retries() -> None:
     raw_reference = RawReferenceHandle(sha256=hashlib.sha256(HINDSIGHT_FAILURE).hexdigest())
     failure = SettledTransientIngestionFailure(
         "retain failed after work drained",
         settlement_basis="hindsight_sync_extraction_drained_v1",
-        internal_retry_count=0,
+        internal_retry_count=10,
         failure_kind="supplier_connection",
         raw_reference=raw_reference,
         raw_response_bytes=HINDSIGHT_FAILURE,
         status_code=500,
     )
     assert failure.failure_kind == "supplier_connection"
-    assert failure.internal_retry_count == 0
+    assert failure.internal_retry_count == 10
 
     for update in (
         {"internal_retry_count": 1},
@@ -152,7 +152,7 @@ def test_settled_transient_failure_requires_exact_raw_classification_and_zero_re
     ):
         arguments = {
             "settlement_basis": "hindsight_sync_extraction_drained_v1",
-            "internal_retry_count": 0,
+            "internal_retry_count": 10,
             "failure_kind": "supplier_connection",
             "raw_reference": raw_reference,
             "raw_response_bytes": HINDSIGHT_FAILURE,
@@ -181,7 +181,7 @@ def test_ready_history_attempt_requires_complete_ready_record_and_fresh_occurren
             )
 
 
-def test_retryable_failed_history_requires_settled_zero_internal_retry_evidence() -> None:
+def test_retryable_failed_history_requires_configured_extraction_retry_evidence() -> None:
     record = _attempt(status="retryable_failed_settled")
     assert record.terminal_failure_attempt_id in record.operation_attempt_ids
 

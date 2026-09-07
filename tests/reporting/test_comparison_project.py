@@ -76,6 +76,7 @@ def _write_cell_root(
     include_case_content: bool = False,
     indexing_usage_mode: str = "complete",
     raw_question_ids: tuple[str, ...] | None = None,
+    skipped_source_count: int = 0,
 ) -> ValidationResult:
     cell = plan.cells[cell_index]
     run_id = f"run-{cell.cell_id}"
@@ -329,6 +330,18 @@ def _write_cell_root(
                 indexing_usage_mode=indexing_usage_mode,
             )
         )
+        if skipped_source_count:
+            ingestion_plan = next(
+                document
+                for record_kind, _relative_path, document in records
+                if record_kind == "ingestion_plan_record"
+            )
+            ingestion_plan.update(
+                ordered_source_unit_ids=[f"source-{index}" for index in range(2)],
+                accepted_source_unit_ids=["source-0"],
+                rejected_source_unit_ids=[],
+                skipped_source_unit_ids=["source-1"],
+            )
 
     entries: list[dict[str, object]] = []
     for ordinal, (record_kind, relative_path, document) in enumerate(records, start=1):
@@ -1067,6 +1080,51 @@ def test_project_emits_exact_three_pairs_and_eighteen_results(
     assert export["retrieval_generation"] == "disabled"
     assert all(item["runtime_proof_state"] == "unavailable" for item in export["retrieval"])
     assert any("runtime retrieval proof" in item for item in export["limitations"])
+
+
+def test_project_displays_partial_ingestion_without_removing_judged_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    sources: dict[str, ValidatedCellRoot] = {}
+    for index, cell in enumerate(plan.cells):
+        root = tmp_path / "partial-capsules" / cell.cell_id
+        validation = _write_cell_root(
+            root,
+            plan,
+            cell_index=index,
+            metric_numerators=(1, 1, 1, 1, 0, 0),
+            include_accounting=True,
+            skipped_source_count=1,
+        )
+        sources[cell.cell_id] = ValidatedCellRoot(root=root, validation_result=validation)
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: next(
+            source.validation_result for source in sources.values() if source.root == root
+        ),
+    )
+
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / "partial-report",
+    )
+    export = json.loads(built.export_path.read_bytes())
+
+    assert all(
+        cell["ingestion"]
+        == {
+            "partial_history_count": 1,
+            "skipped_source_count": 1,
+        }
+        for cell in export["cells"]
+    )
+    assert all(cell["judged_case_count"] == 6 for cell in export["cells"])
+    assert "Partial ingestion" in built.html_path.read_text()
 
 
 def test_project_reports_separated_accounting_and_preserves_unavailable_measurements(
@@ -2473,7 +2531,20 @@ def test_model_output_parser_rejects_multiple_choices_and_hash_mismatch() -> Non
         comparison_project._model_output_text(one, expected_sha256="f" * 64)
 
 
-def test_visible_context_parser_rejects_an_empty_source_unit_identity() -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "accepted"),
+    (
+        ("source_unit_id", "", False),
+        ("provider_evidence_identity", "", False),
+        ("evidence_kind", "", False),
+        ("text", "", True),
+        ("text", None, False),
+        ("text", 42, False),
+    ),
+)
+def test_visible_context_parser_preserves_empty_text_but_rejects_invalid_fields(
+    field: str, value: object, accepted: bool
+) -> None:
     from oamb.reporting import comparison_project
 
     payload = canonical_json_bytes(
@@ -2483,8 +2554,9 @@ def test_visible_context_parser_rejects_an_empty_source_unit_identity() -> None:
             "occurred_end": None,
             "occurred_start": None,
             "provider_evidence_identity": "provider-item",
-            "source_unit_id": "",
+            "source_unit_id": None,
             "text": "context",
+            field: value,
         }
     )
     reference = hashlib.sha256(payload).hexdigest()
@@ -2497,8 +2569,11 @@ def test_visible_context_parser_rejects_an_empty_source_unit_identity() -> None:
         "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
     }
 
-    with pytest.raises(comparison_project.ComparisonProjectError, match="strict UTF-8 JSONL"):
-        comparison_project._visible_context_text(snapshot, case)
+    if accepted:
+        assert comparison_project._visible_context_text(snapshot, case) == payload.decode("utf-8")
+    else:
+        with pytest.raises(comparison_project.ComparisonProjectError, match="strict UTF-8 JSONL"):
+            comparison_project._visible_context_text(snapshot, case)
 
 
 @pytest.mark.parametrize(

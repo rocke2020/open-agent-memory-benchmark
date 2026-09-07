@@ -146,8 +146,11 @@ retrieval:
       proof_kind: source_verified_endpoint_and_complete_outbound_trace
 
 execution:
-  # Each eligible operation owns its own retry count; zero means one initial call.
+  # Batch ingestion retries after the initial submission; two means three submissions.
   max_retries_per_operation: 2
+  extraction_max_retries: 10
+  model_max_attempts: 6
+  model_transport_max_retries: 2
   # Covers one external attempt, including provider task polling.
   operation_timeout_seconds: 900
 

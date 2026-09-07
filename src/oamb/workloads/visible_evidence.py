@@ -100,8 +100,8 @@ def verify_visible_evidence_hash(evidence: VisibleEvidence) -> None:
 
 
 def _item_bytes(candidate: NativeEvidenceCandidate, identity: str) -> bytes:
-    if not candidate.evidence_kind or not candidate.content:
-        raise ValueError("visible evidence requires non-empty kind and text")
+    if not candidate.evidence_kind:
+        raise ValueError("visible evidence requires a non-empty kind")
     item = {
         "provider_evidence_identity": identity,
         "source_unit_id": candidate.source_unit_id,

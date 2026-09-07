@@ -95,7 +95,8 @@ class HindsightAdapter:
         self._allocation_lock = asyncio.Lock()
         self._allocated_occurrences: dict[str, str] = {}
         self._planned_dispatches_by_scope: dict[str, tuple[IngestionDispatch, ...]] = {}
-        self._attempted_dispatches: set[tuple[str, str]] = set()
+        self._attempted_dispatches: set[tuple[str, str, int]] = set()
+        self._next_batch_attempt_ordinals: dict[tuple[str, str], int] = {}
         self._ready_sources: dict[str, tuple[SourceUnit, ...]] = {}
         self._ready_document_sources: dict[str, dict[str, str]] = {}
         self._ready_occurrences: dict[str, str] = {}
@@ -373,14 +374,18 @@ class HindsightAdapter:
         if dispatch.request_fingerprint != expected_fingerprint:
             raise ValueError("Hindsight retain dispatch fingerprint does not match its request")
         dispatch_key = (request.scope.scope_id, request.dispatch.request_fingerprint)
-        if dispatch_key in self._attempted_dispatches:
+        expected_batch_attempt = self._next_batch_attempt_ordinals.get(dispatch_key, 1)
+        if request.batch_attempt_ordinal != expected_batch_attempt:
+            raise ValueError("Hindsight retain batch attempt is not the next allowed retry")
+        attempt_key = (*dispatch_key, request.batch_attempt_ordinal)
+        if attempt_key in self._attempted_dispatches:
             raise ValueError("Hindsight retain dispatch was already attempted and cannot replay")
-        self._attempted_dispatches.add(dispatch_key)
+        self._attempted_dispatches.add(attempt_key)
         items = [self._retain_item(source) for source in request.dispatch.ordered_source_units]
         try:
             response = await self._client.retain(request.scope.scope_id, items)
         except MemorySystemCallCancelledBeforeDispatch:
-            self._attempted_dispatches.remove(dispatch_key)
+            self._attempted_dispatches.remove(attempt_key)
             raise
         except MemorySystemCallFailure as exc:
             if (
@@ -396,6 +401,9 @@ class HindsightAdapter:
                     internal_retry_count=self._internal_retry_count,
                 )
                 if reason is not None:
+                    self._next_batch_attempt_ordinals[dispatch_key] = (
+                        request.batch_attempt_ordinal + 1
+                    )
                     raise SettledTransientIngestionFailure(
                         "Hindsight synchronous extraction settled with a supplier failure",
                         failure_kind=reason,
@@ -426,6 +434,7 @@ class HindsightAdapter:
         source_ids = tuple(
             source.source_unit_id for source in request.dispatch.ordered_source_units
         )
+        self._next_batch_attempt_ordinals[dispatch_key] = 0
         return IngestionDispatchReceipt(
             attempt_id=request.attempt_id,
             dispatch=request.dispatch,
@@ -505,14 +514,31 @@ class HindsightAdapter:
             raise ValueError("Hindsight readiness receipt names another ingestion occurrence")
         if not planned_source_ids:
             raise ValueError("Hindsight readiness requires expected source IDs")
-        if request.expected_source_unit_ids != planned_source_ids:
-            raise ValueError("Hindsight readiness source inventory differs from the frozen plan")
-        if receipt.accepted_source_unit_ids != planned_source_ids:
-            raise ValueError("Hindsight readiness receipt source inventory does not match expected")
-        if receipt.rejected_source_unit_ids:
-            raise ValueError("Hindsight readiness receipt contains rejected sources")
+        if request.expected_source_unit_ids != receipt.accepted_source_unit_ids:
+            raise ValueError("Hindsight readiness expected inventory differs from accepted sources")
         if tuple(item.dispatch for item in receipt.dispatch_receipts) != planned_dispatches:
             raise ValueError("Hindsight readiness receipts do not match the frozen dispatch set")
+        if (
+            receipt.accepted_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.accepted_source_unit_ids
+            )
+            or receipt.rejected_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.rejected_source_unit_ids
+            )
+            or receipt.skipped_source_unit_ids
+            != tuple(
+                source_id
+                for item in receipt.dispatch_receipts
+                for source_id in item.skipped_source_unit_ids
+            )
+        ):
+            raise ValueError("Hindsight readiness aggregate source partition is invalid")
         expected_raw_references = tuple(
             dispatch_receipt.raw_reference for dispatch_receipt in receipt.dispatch_receipts
         )
@@ -526,15 +552,29 @@ class HindsightAdapter:
             dispatch_source_ids = tuple(
                 source.source_unit_id for source in dispatch.ordered_source_units
             )
-            if dispatch_receipt.accepted_source_unit_ids != dispatch_source_ids:
+            partitions = (
+                set(dispatch_receipt.accepted_source_unit_ids),
+                set(dispatch_receipt.rejected_source_unit_ids),
+                set(dispatch_receipt.skipped_source_unit_ids),
+            )
+            if any(
+                left & right
+                for index, left in enumerate(partitions)
+                for right in partitions[index + 1 :]
+            ) or set().union(*partitions) != set(dispatch_source_ids):
                 raise ValueError("Hindsight readiness dispatch receipt is not source-bound")
-            if dispatch_receipt.rejected_source_unit_ids:
-                raise ValueError("Hindsight readiness dispatch rejected a source")
             if (
                 hashlib.sha256(dispatch_receipt.raw_response_bytes).hexdigest()
                 != dispatch_receipt.raw_reference.sha256
             ):
                 raise ValueError("Hindsight readiness raw receipt hash does not match")
+            if dispatch_receipt.skipped_source_unit_ids:
+                sources.extend(
+                    source
+                    for source in dispatch.ordered_source_units
+                    if source.source_unit_id not in dispatch_receipt.rejected_source_unit_ids
+                )
+                continue
             retain_result = parse_retain_response(
                 dispatch_receipt.raw_response_bytes,
                 expected_bank_id=request.scope.scope_id,
@@ -551,8 +591,13 @@ class HindsightAdapter:
                 raise ValueError("Hindsight readiness usage is not bound to the raw receipt")
             sources.extend(dispatch.ordered_source_units)
         source_ids = tuple(source.source_unit_id for source in sources)
-        if source_ids != planned_source_ids:
-            raise ValueError("Hindsight readiness dispatch sources do not match expected order")
+        observable_source_ids = tuple(
+            source_id
+            for source_id in planned_source_ids
+            if source_id not in receipt.rejected_source_unit_ids
+        )
+        if source_ids != observable_source_ids:
+            raise ValueError("Hindsight readiness dispatch sources do not match observable order")
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Hindsight readiness source IDs are not unique")
         return tuple(sources)

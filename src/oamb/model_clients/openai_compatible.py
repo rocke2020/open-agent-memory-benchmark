@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import math
-from dataclasses import replace
 from typing import Literal, cast
 
 import httpx
@@ -19,7 +18,6 @@ from oamb.contracts.accounting import (
     TokenUsageRecordV2,
     TokenUsageRecordV3,
 )
-from oamb.contracts.evidence import infrastructure_supplier_call_id
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
     ArtifactStorePort,
@@ -219,18 +217,8 @@ class OpenAICompatibleModelClient:
                 raw_bytes,
                 status_code=response.status_code,
             )
-            usage_request = request
-            if rejection is not None:
-                usage_request = replace(
-                    request,
-                    attempt_id=infrastructure_supplier_call_id(
-                        request.attempt_id,
-                        request.supplier_call_ordinal,
-                        raw_reference.sha256,
-                    ),
-                )
             usage_ids = self._seal_unavailable_usage(
-                usage_request,
+                request,
                 raw_reference,
                 reason=f"supplier_http_status_{response.status_code}",
             )

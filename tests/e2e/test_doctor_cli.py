@@ -155,10 +155,13 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
     )
     assert "rerank=false" not in (output / "resolved-plan.json").read_text(encoding="utf-8")
     assert document["execution"] == {
-        "comparison_max_operation_attempt_count": 28_677,
-        "comparison_max_owner_authorization_count": 79_725,
-        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild_v2",
-        "ingestion_retry_unit": "whole_history_through_ready_projection",
+        "comparison_max_operation_attempt_count": 32_997,
+        "comparison_max_owner_authorization_count": 84_045,
+        "ingestion_recovery_strategy": "same_scope_batch_retry_skip_v1",
+        "ingestion_retry_unit": "batch_dispatch",
+        "extraction_max_retries": 10,
+        "model_max_attempts": 6,
+        "model_transport_max_retries": 2,
         "max_parallel_datasets": 1,
         "max_parallel_history_ingestions_per_provider": 2,
         "max_parallel_providers_per_dataset": 3,
@@ -167,9 +170,9 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         "operation_timeout_seconds": 900,
         "per_cell_base_operation_count": 3_307,
         "per_cell_base_owner_authorization_count": 9_019,
-        "per_cell_max_operation_attempt_count": 9_559,
-        "per_cell_max_owner_authorization_count": 26_575,
-        "per_cell_retry_eligible_operation_count": 3_126,
+        "per_cell_max_operation_attempt_count": 10_999,
+        "per_cell_max_owner_authorization_count": 28_015,
+        "per_cell_retry_eligible_operation_count": 2_946,
     }
     assert all(cell["recipient"] for cell in document["cells"])
     assert all(role["recipient"] for role in document["model_roles"])
@@ -187,10 +190,13 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
     assert document["dataset"]["selection"] == "lme6"
     assert document["decision"] is None
     assert document["execution"] == {
-        "comparison_max_operation_attempt_count": 3_027,
-        "comparison_max_owner_authorization_count": 8_445,
-        "ingestion_recovery_strategy": "fresh_scope_full_history_rebuild_v2",
-        "ingestion_retry_unit": "whole_history_through_ready_projection",
+        "comparison_max_operation_attempt_count": 3_459,
+        "comparison_max_owner_authorization_count": 8_877,
+        "ingestion_recovery_strategy": "same_scope_batch_retry_skip_v1",
+        "ingestion_retry_unit": "batch_dispatch",
+        "extraction_max_retries": 10,
+        "model_max_attempts": 6,
+        "model_transport_max_retries": 2,
         "max_parallel_datasets": 1,
         "max_parallel_history_ingestions_per_provider": 3,
         "max_parallel_providers_per_dataset": 3,
@@ -199,9 +205,9 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
         "operation_timeout_seconds": 900,
         "per_cell_base_operation_count": 349,
         "per_cell_base_owner_authorization_count": 955,
-        "per_cell_max_operation_attempt_count": 1_009,
-        "per_cell_max_owner_authorization_count": 2_815,
-        "per_cell_retry_eligible_operation_count": 330,
+        "per_cell_max_operation_attempt_count": 1_153,
+        "per_cell_max_owner_authorization_count": 2_959,
+        "per_cell_retry_eligible_operation_count": 312,
     }
     assert tuple(cell["cell_id"] for cell in document["cells"]) == (
         "hindsight-lme6",
@@ -228,10 +234,10 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "recipient=llm-api" in result.output
     assert "decision: accuracy delta >= 0.05 and exact McNemar p <= 0.05" in result.output
     assert "evaluation controls: retries=2; operation timeout=900s" in result.output
-    assert "ingestion retry unit: whole_history_through_ready_projection" in result.output
-    assert "ingestion recovery strategy: fresh_scope_full_history_rebuild_v2" in result.output
-    assert "per-cell authorization: 9559 calls; 26575 owner allocations" in result.output
-    assert "three-cell authorization: 28677 calls; 79725 owner allocations" in result.output
+    assert "ingestion retry unit: batch_dispatch" in result.output
+    assert "ingestion recovery strategy: same_scope_batch_retry_skip_v1" in result.output
+    assert "per-cell authorization: 10999 calls; 28015 owner allocations" in result.output
+    assert "three-cell authorization: 32997 calls; 84045 owner allocations" in result.output
     assert "credential values: [REDACTED]" in result.output
     assert "api_key" not in result.output.lower()
     assert "authorization: bearer" not in result.output.lower()
@@ -368,8 +374,8 @@ def test_model_endpoint_and_evaluation_control_changes_change_cell_identity(tmp_
 
     control_config = _write_mutated_config(
         tmp_path,
-        "max_retries_per_operation: 2",
-        "max_retries_per_operation: 1",
+        "operation_timeout_seconds: 900",
+        "operation_timeout_seconds: 901",
     )
     control_output = tmp_path / "control"
     assert _invoke_doctor(config=control_config, output=control_output).exit_code == 0

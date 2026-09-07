@@ -215,6 +215,15 @@ class IngestionDispatchRequest:
     scope: ScopeReceipt
     attempt_id: str
     dispatch: IngestionDispatch
+    batch_attempt_ordinal: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.batch_attempt_ordinal) is not int or self.batch_attempt_ordinal not in {
+            1,
+            2,
+            3,
+        }:
+            raise ValueError("ingestion batch attempt ordinal must be 1, 2, or 3")
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +235,7 @@ class IngestionDispatchReceipt:
     raw_reference: RawReferenceHandle
     raw_response_bytes: bytes
     usage_records: tuple[TokenUsageRecordV3, ...]
+    skipped_source_unit_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +245,7 @@ class IngestionReceipt:
     rejected_source_unit_ids: tuple[str, ...]
     raw_references: tuple[RawReferenceHandle, ...]
     dispatch_receipts: tuple[IngestionDispatchReceipt, ...]
+    skipped_source_unit_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

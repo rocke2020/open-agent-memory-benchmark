@@ -163,6 +163,38 @@ def test_native_ingestion_record_closes_scope_dispatch_and_projection() -> None:
         )
 
 
+def test_native_ingestion_record_accepts_partial_projection_with_skipped_sources() -> None:
+    evidence = _evidence()
+    complete = _plan(evidence)
+
+    partial = evidence.IngestionPlanRecordV2(
+        **{
+            **complete.model_dump(mode="python"),
+            "accepted_source_unit_ids": (SHA_B,),
+            "skipped_source_unit_ids": (SHA_C,),
+            "projected_source_unit_ids": (SHA_B, SHA_C),
+        }
+    )
+
+    assert partial.skipped_source_unit_ids == (SHA_C,)
+    assert partial.projected_source_unit_ids == (SHA_B, SHA_C)
+
+
+def test_native_ingestion_record_rejects_overlapping_partial_source_states() -> None:
+    evidence = _evidence()
+    complete = _plan(evidence)
+
+    with pytest.raises(ValidationError, match="partition"):
+        evidence.IngestionPlanRecordV2(
+            **{
+                **complete.model_dump(mode="python"),
+                "accepted_source_unit_ids": (SHA_B,),
+                "skipped_source_unit_ids": (SHA_B, SHA_C),
+                "projected_source_unit_ids": (SHA_B,),
+            }
+        )
+
+
 @pytest.mark.parametrize("projected", ((), (SHA_B,), (SHA_B, SHA_C)))
 def test_mem0_v3_separates_completed_sources_from_visible_projection(
     projected: tuple[str, ...],
