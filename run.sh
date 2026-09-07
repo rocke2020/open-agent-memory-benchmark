@@ -871,6 +871,13 @@ run_full_resume() {
   }
   trap forward_resume_stop INT TERM HUP
 
+  # Keep terminal-wide signals at the supervisor so each worker sees one forwarded stop.
+  resume_enabled_monitor_mode=false
+  if [[ "$-" != *m* ]]; then
+    set -m
+    resume_enabled_monitor_mode=true
+  fi
+
   any_failed=false
   admitted_count=0
   batch_start=0
@@ -924,6 +931,9 @@ run_full_resume() {
       break
     fi
   done
+  if [[ "$resume_enabled_monitor_mode" == true ]]; then
+    set +m
+  fi
 
   for ((index = 0; index < admitted_count; index++)); do
     cell=${pending_cells[$index]}

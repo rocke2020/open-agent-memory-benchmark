@@ -815,6 +815,70 @@ PY
 	      fi
 	      if [ -n "${OAMB_TEST_RECOVERY_SIGNAL_READY:-}" ]; then
 	        mkdir -p "$OAMB_TEST_RECOVERY_SIGNAL_READY"
+	        if [ -n "${OAMB_TEST_RECOVERY_SIGNAL_DRAIN_DIR:-}" ]; then
+	          exec python3 - "$capsule" "$result_map" "$cell" "$OAMB_TEST_PLAN_HASH" \
+	            "$active_marker" "$OAMB_TEST_RECOVERY_SIGNAL_READY" \
+	            "$OAMB_TEST_RECOVERY_SIGNAL_DRAIN_DIR" <<'PY'
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+capsule, result_map, cell, plan_hash, active_marker, ready_dir, drain_dir = sys.argv[1:]
+capsule_path = Path(capsule)
+result_path = Path(result_map)
+ready_path = Path(ready_dir)
+drain_path = Path(drain_dir)
+drain_path.mkdir(parents=True, exist_ok=True)
+signal_count = 0
+
+
+def handle_signal(_signum: int, _frame: object) -> None:
+    global signal_count
+    signal_count += 1
+    if signal_count == 1:
+        (drain_path / f"{cell}-first").touch()
+        return
+    (drain_path / f"{cell}-hard").touch()
+    raise SystemExit(91)
+
+
+for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(signum, handle_signal)
+(ready_path / cell).touch()
+while signal_count == 0:
+    time.sleep(0.01)
+time.sleep(0.5)
+(capsule_path / "fake-failed").touch()
+result_path.write_text(
+    json.dumps(
+        {
+            "schema_name": "live_run_result_map",
+            "schema_version": 1,
+            "resolved_plan_hash": plan_hash,
+            "status": "failed",
+            "cells": [
+                {
+                    "cell_id": cell,
+                    "status": "failed",
+                    "capsule_root": capsule,
+                    "detail": "planted interruption",
+                }
+            ],
+            "capsule_roots": {},
+        },
+        separators=(",", ":"),
+    )
+    + "\n",
+    encoding="utf-8",
+)
+if active_marker:
+    Path(active_marker).unlink(missing_ok=True)
+raise SystemExit(44)
+PY
+	        fi
 	        : > "$OAMB_TEST_RECOVERY_SIGNAL_READY/$cell"
 	        while :; do /bin/sleep 0.05; done
 	      fi
@@ -2269,6 +2333,55 @@ def test_run_full_resume_drains_signal_and_records_parts_for_another_resume(tmp_
     assert final_state["attempt"] == 2
     assert [len(cell["parts"]) for cell in final_state["cells"]] == [3, 3, 3]
     assert all(cell["final_capsule_root"] for cell in final_state["cells"])
+
+
+@pytest.mark.parametrize("stop_signal", (signal.SIGINT, signal.SIGTERM))
+def test_run_full_resume_process_group_signal_reaches_each_worker_once(
+    tmp_path: Path,
+    stop_signal: signal.Signals,
+) -> None:
+    root, env, _trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    _write_interrupted_full_result_map(root)
+    signal_ready = tmp_path / "signal-ready"
+    signal_drain = tmp_path / "signal-drain"
+    env["OAMB_TEST_RECOVERY_SIGNAL_READY"] = str(signal_ready)
+    env["OAMB_TEST_RECOVERY_SIGNAL_DRAIN_DIR"] = str(signal_drain)
+    process = subprocess.Popen(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if signal_ready.is_dir() and len(tuple(signal_ready.iterdir())) == 3:
+            break
+        time.sleep(0.02)
+    else:
+        process.kill()
+        stdout, stderr = process.communicate(timeout=5)
+        pytest.fail(f"recovery workers did not reach signal barrier\n{stdout}\n{stderr}")
+
+    os.killpg(process.pid, stop_signal)
+    stdout, stderr = process.communicate(timeout=20)
+
+    assert process.returncode != 0, stdout + stderr
+    assert sorted(path.name for path in signal_drain.glob("*-first")) == [
+        "hindsight-lme60-first",
+        "mem0-lme60-first",
+        "openviking-lme60-first",
+    ]
+    assert not tuple(signal_drain.glob("*-hard")), stdout + stderr
+    state_path = (
+        root / "outputs" / "full-test" / "lme60-test" / "results" / "full-resume-state.json"
+    )
+    interrupted_state = json.loads(state_path.read_bytes())
+    assert [len(cell["parts"]) for cell in interrupted_state["cells"]] == [2, 2, 2]
+    assert "preserved parts will be reused by the next --resume" in stderr
 
 
 def test_run_full_resume_preserves_second_interruption_for_next_resume(tmp_path: Path) -> None:
