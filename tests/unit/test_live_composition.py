@@ -1249,6 +1249,62 @@ def test_parallel_live_cells_drain_after_root_stop_signal(
     assert drained.value == len(cells)
 
 
+def test_parallel_live_cell_failure_stops_and_drains_peer_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb import live
+
+    cells = tuple(
+        live.build_live_cell(
+            plan=_plan(),
+            cell_id=cell_id,
+            output_root=tmp_path / "capsules",
+            provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+            provider_project_id="oamb-providers-test-live",
+            provider_evidence=_provider_evidence(),
+            environment=_environment(),
+            run_label="peer-terminal-failure",
+            observed_at=NOW,
+            code_revision="source-tree-test",
+        )
+        for cell_id in ("hindsight-lme6", "mem0-lme6", "openviking-lme6")
+    )
+    context = multiprocessing.get_context("fork")
+    started = context.Value("i", 0)
+    all_started = context.Event()
+    drained = context.Value("i", 0)
+
+    def execute(cell: live.LiveCell, *, stop_event: Any | None = None) -> object:
+        with started.get_lock():
+            started.value += 1
+            if started.value == len(cells):
+                all_started.set()
+        if not all_started.wait(timeout=2):
+            raise RuntimeError("parallel cells did not reach the planted barrier")
+        if cell.cell.provider_id == "hindsight":
+            raise RuntimeError("planted terminal cell failure")
+        if stop_event is None or not stop_event.wait(timeout=2):
+            raise RuntimeError("terminal peer failure did not request a shared stop")
+        with drained.get_lock():
+            drained.value += 1
+        return SimpleNamespace(capsule_root=cell.capsule_root)
+
+    monkeypatch.setattr(live, "execute_live_cell", execute)
+
+    with pytest.raises(
+        live.LiveCellExecutionError, match="planted terminal cell failure"
+    ) as failure:
+        live.execute_live_cells(cells)
+
+    assert drained.value == 2
+    assert tuple(outcome.status for outcome in failure.value.outcomes) == (
+        "failed",
+        "completed",
+        "completed",
+    )
+
+
 def test_single_live_cell_rejects_mismatched_completion_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

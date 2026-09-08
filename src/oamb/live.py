@@ -875,7 +875,8 @@ def execute_live_cells(cells: tuple[LiveCell, ...]) -> tuple[LiveCellCompletion,
         return (LiveCellCompletion(cell.cell.cell_id, completed.capsule_root),)
 
     context = multiprocessing.get_context("fork")
-    stop_events = tuple(context.Event() for _cell in cells)
+    shared_stop_event = context.Event()
+    stop_events = tuple(shared_stop_event for _cell in cells)
     previous_signal_handlers = _install_live_stop_handlers(stop_events)
     try:
         return _execute_parallel_live_cells(cells, context, stop_events)
@@ -1079,6 +1080,7 @@ def _execute_live_cell_worker(
         completed = execute_live_cell(cell, stop_event=stop_event)
         sender.send(("completed", cell.cell.cell_id, str(completed.capsule_root)))
     except BaseException as exc:
+        stop_event.set()
         sender.send(("failed", cell.cell.cell_id, type(exc).__name__, str(exc)))
     finally:
         sender.close()

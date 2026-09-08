@@ -313,7 +313,8 @@ def test_fatal_history_logs_original_reason_before_active_sibling_settles(
             control=SimpleNamespace(
                 max_parallel_history_ingestions=2,
                 max_parallel_questions=2,
-            )
+            ),
+            stop_event=asyncio.Event(),
         )
         run = asyncio.create_task(
             native_run._execute_history_question_pipeline(
@@ -341,10 +342,12 @@ def test_fatal_history_logs_original_reason_before_active_sibling_settles(
             "reason=ValueError: raw-planning-reason; draining admitted operations"
             in capfd.readouterr().err
         )
+        stop_requested = state.stop_event.is_set()
 
         release_sibling.set()
         with pytest.raises(ValueError, match="raw-planning-reason"):
             await run
+        assert stop_requested, "fatal history did not publish the shared stop before draining"
 
     asyncio.run(scenario())
 

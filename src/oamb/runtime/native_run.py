@@ -1680,6 +1680,8 @@ async def _run_native_vertical_slice(
         if judge_model_factory is not None:
             judge_model = judge_model_factory(model_store)
         setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = ()
+        if _native_stop_requested(state):
+            raise NativeRunInterrupted("native run stopped admission before runtime resolution")
         if control is not None:
             runtime_parent_id = _initial_history_occurrence(
                 state,
@@ -1791,6 +1793,8 @@ async def _run_native_vertical_slice(
             terminal_case_publisher=terminal_case_publisher,
         )
     except BaseException as exc:
+        if state.stop_event is not None:
+            state.stop_event.set()
         execution_error = exc
     if state.history_occurrence_bindings:
         ingestion_occurrence_ids, case_occurrence_ids = _executed_occurrence_ids(
@@ -2022,6 +2026,9 @@ async def _execute_history_question_pipeline(
             return True, await operation()
         except BaseException:
             admission_stopped = True
+            stop_event = getattr(state, "stop_event", None)
+            if stop_event is not None:
+                stop_event.set()
             raise
         finally:
             permits.release()

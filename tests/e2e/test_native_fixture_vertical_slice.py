@@ -948,6 +948,128 @@ def test_planned_stop_during_retry_backoff_starts_no_later_supplier_call(
     assert not (provider_runtime / "active-operation").exists()
 
 
+def test_runtime_resolve_failure_requests_peer_stop_before_close_finishes(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    stop_event = context.Event()
+    close_started = context.Event()
+    release_close = context.Event()
+    runner_errors: list[BaseException] = []
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    provider_runtime = (tmp_path / "failing-provider-runtime").resolve()
+    control = _control(
+        run_id="native-runtime-resolve-peer-stop",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
+
+    class FailingResolveMemory(_RecordedNativeMemory):
+        async def resolve(self) -> RuntimeResolution:
+            raise RuntimeError("planted runtime resolve failure")
+
+        async def close(self) -> None:
+            close_started.set()
+            while not release_close.is_set():
+                await asyncio.sleep(0.01)
+            await super().close()
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> FailingResolveMemory:
+        return FailingResolveMemory(store)
+
+    def run_fixture() -> None:
+        try:
+            run_native_vertical_slice(
+                output_root=tmp_path / "capsules",
+                run_id=control.run_spec.run_id,
+                adapter_profile_id="recorded-native-fixture-v1",
+                workload=workload,
+                visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+                artifact_store_factory=ArtifactStore,
+                memory_factory=memory_factory,
+                model_factory=_RecordedNativeModel,
+                answer_role_binding_id="answer-binding",
+                control=control,
+                stop_event=stop_event,
+            )
+        except BaseException as exc:
+            runner_errors.append(exc)
+
+    runner = threading.Thread(target=run_fixture)
+    runner.start()
+    assert close_started.wait(timeout=5), "runtime failure did not begin provider close"
+    stop_requested_before_close = stop_event.is_set()
+    release_close.set()
+    runner.join(timeout=10)
+
+    assert not runner.is_alive()
+    assert runner_errors
+    assert "planted runtime resolve failure" in str(runner_errors[0])
+    assert stop_requested_before_close, "runtime failure did not stop peers before close"
+
+
+def test_pre_requested_stop_skips_runtime_resolve_dispatch(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("fork")
+    stop_event = context.Event()
+    stop_event.set()
+    resolve_calls = context.Value("i", 0)
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    provider_runtime = (tmp_path / "stopped-provider-runtime").resolve()
+    control = _control(
+        run_id="native-runtime-resolve-pre-stopped",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
+
+    class TrackingResolveMemory(_RecordedNativeMemory):
+        async def resolve(self) -> RuntimeResolution:
+            with resolve_calls.get_lock():
+                resolve_calls.value += 1
+            return await super().resolve()
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> TrackingResolveMemory:
+        return TrackingResolveMemory(store)
+
+    with pytest.raises(NativeRunInterrupted):
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=control.run_spec.run_id,
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=memory_factory,
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="answer-binding",
+            control=control,
+            stop_event=stop_event,
+        )
+
+    assert resolve_calls.value == 0
+
+
 def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
