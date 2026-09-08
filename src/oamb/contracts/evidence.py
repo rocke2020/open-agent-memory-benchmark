@@ -1582,6 +1582,7 @@ class HistoryRetryCarryRecord(StrictContract):
     allowances: tuple[HistoryRetryAllowance, ...]
     retry_policy_hash: Sha256
     max_retries_per_operation: NonNegativeInt
+    execution_configuration_family_hash: Sha256 | None = None
 
     @model_validator(mode="after")
     def carry_is_closed(self) -> Self:
@@ -1601,9 +1602,10 @@ class HistoryRetryCarryRecord(StrictContract):
             raise ValueError("history retry carry allowances must be unique canonical order")
         if any(item.consumed_retries > self.max_retries_per_operation for item in self.allowances):
             raise ValueError("history retry carry allowance exceeds policy")
-        expected_id = history_retry_carry_id(
-            self.model_dump(mode="python", exclude={"carry_record_id"})
-        )
+        identity_fields = self.model_dump(mode="python", exclude={"carry_record_id"})
+        if self.execution_configuration_family_hash is None:
+            identity_fields.pop("execution_configuration_family_hash")
+        expected_id = history_retry_carry_id(identity_fields)
         if self.carry_record_id != expected_id:
             raise ValueError("history retry carry identity does not match its fields")
         return self
@@ -1657,6 +1659,8 @@ class CapsuleCompositionRecord(StrictContract):
     budget_policy_hash: Sha256
     retry_policy_hash: Sha256
     execution_configuration_hash: Sha256
+    target_execution_configuration_hash: Sha256 | None = None
+    target_execution_configuration_family_hash: Sha256 | None = None
     ordered_parts: tuple[CapsuleCompositionPartBinding, ...]
     ordered_contributions: tuple[CapsuleCompositionContribution, ...]
     exact_union_hash: Sha256
@@ -1678,8 +1682,16 @@ class CapsuleCompositionRecord(StrictContract):
         )
         if self.exact_union_hash != expected_union_hash:
             raise ValueError("composition exact-union hash does not match its contributions")
+        if (self.target_execution_configuration_hash is None) != (
+            self.target_execution_configuration_family_hash is None
+        ):
+            raise ValueError("composition target execution hashes must be paired")
         expected_id = capsule_composition_id(
-            self.model_dump(mode="python", exclude={"composition_id"})
+            self.model_dump(
+                mode="python",
+                exclude={"composition_id"},
+                exclude_none=True,
+            )
         )
         if self.composition_id != expected_id:
             raise ValueError("capsule composition identity does not match its fields")

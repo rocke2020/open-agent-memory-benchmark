@@ -14,6 +14,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from oamb.artifacts.atomic import ArtifactCollisionError, read_regular_file, sha256_file
+from oamb.artifacts.recovery_safety import history_group_is_terminal_known
 from oamb.artifacts.validation.hindsight_evidence import (
     HindsightProjectionEvidence,
     reconstruct_hindsight_projection,
@@ -733,12 +734,20 @@ def _manifest_schema_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
             carried_history_attempts, carried_history_events = (), ()
             issues.append(_issue(rule_id, "history-carry", "history-carry-source-mismatch"))
         history_attempts = (*carried_history_attempts, *local_history_attempts)
+        carried_plan_ids = {item.ingestion_plan_id for item in carried_history_attempts}
+        fresh_scope_rebuild_plan_ids = frozenset(
+            allowance.ingestion_plan_id
+            for carry in _contracts(snapshot, HistoryRetryCarryRecord)
+            for allowance in carry.allowances
+            if allowance.consumed_retries == 0 and allowance.ingestion_plan_id in carried_plan_ids
+        )
         history_issues = _history_closure_issues(
             snapshot,
             plans,
             history_attempts,
             (*carried_history_events, *_contracts(snapshot, HistoryRetryEvent)),
             frozenset(item.history_attempt_id for item in local_history_attempts),
+            fresh_scope_rebuild_plan_ids,
         )
         issues.extend(history_issues)
         issues.extend(_history_carry_issues(snapshot))
@@ -941,6 +950,7 @@ def _history_closure_issues(
     attempts: tuple[HistoryAttemptRecord, ...],
     events: tuple[HistoryRetryEvent, ...],
     local_attempt_ids: frozenset[str],
+    fresh_scope_rebuild_plan_ids: frozenset[str],
 ) -> tuple[ValidationIssue, ...]:
     if not attempts:
         return ()
@@ -983,10 +993,20 @@ def _history_closure_issues(
     for plan_id in {item.ingestion_plan_id for item in attempts}:
         chain = tuple(
             sorted(
-                (item for item in attempts if item.ingestion_plan_id == plan_id),
+                (
+                    item
+                    for item in attempts
+                    if item.ingestion_plan_id == plan_id
+                    and (
+                        plan_id not in fresh_scope_rebuild_plan_ids
+                        or item.history_attempt_id in local_attempt_ids
+                    )
+                ),
                 key=lambda item: item.history_attempt_ordinal,
             )
         )
+        if not chain:
+            continue
         first = chain[0]
         if tuple(item.history_attempt_ordinal for item in chain) != tuple(
             range(1, len(chain) + 1)
@@ -1136,14 +1156,13 @@ def _history_closure_issues(
     return tuple(issues)
 
 
-def _carried_history_records(
+def _carried_history_snapshots(
     snapshot: _NativeCapsuleSnapshot,
     seen: dict[str, str] | None = None,
-) -> tuple[tuple[HistoryAttemptRecord, ...], tuple[HistoryRetryEvent, ...]]:
+) -> tuple[_NativeCapsuleSnapshot, ...]:
     if seen is None:
         seen = {}
-    attempts: list[HistoryAttemptRecord] = []
-    events: list[HistoryRetryEvent] = []
+    snapshots: list[_NativeCapsuleSnapshot] = []
     for carry in _contracts(snapshot, HistoryRetryCarryRecord):
         for binding in carry.source_part_bindings:
             embedded = snapshot.root / binding.embedded_root
@@ -1155,12 +1174,151 @@ def _carried_history_records(
                     raise ValueError("carried history capsule identity collides")
                 continue
             seen[binding.capsule_id] = manifest_hash
-            attempts.extend(_contracts(embedded_snapshot, HistoryAttemptRecord))
-            events.extend(_contracts(embedded_snapshot, HistoryRetryEvent))
-            nested_attempts, nested_events = _carried_history_records(embedded_snapshot, seen)
-            attempts.extend(nested_attempts)
-            events.extend(nested_events)
-    return tuple(attempts), tuple(events)
+            snapshots.append(embedded_snapshot)
+            snapshots.extend(_carried_history_snapshots(embedded_snapshot, seen))
+    return tuple(snapshots)
+
+
+def _carried_history_records(
+    snapshot: _NativeCapsuleSnapshot,
+) -> tuple[tuple[HistoryAttemptRecord, ...], tuple[HistoryRetryEvent, ...]]:
+    snapshots = _carried_history_snapshots(snapshot)
+    return (
+        tuple(
+            item
+            for predecessor in snapshots
+            for item in _contracts(predecessor, HistoryAttemptRecord)
+        ),
+        tuple(
+            item for predecessor in snapshots for item in _contracts(predecessor, HistoryRetryEvent)
+        ),
+    )
+
+
+def _terminal_known_fresh_scope_rebuild_closes(
+    plan_id: str,
+    group_attempts: tuple[HistoryAttemptRecord, ...],
+    snapshots: tuple[_NativeCapsuleSnapshot, ...],
+) -> bool:
+    owning_snapshots = tuple(
+        snapshot
+        for snapshot in snapshots
+        if any(
+            item.ingestion_plan_id == plan_id for item in _contracts(snapshot, HistoryAttemptRecord)
+        )
+    )
+    if not owning_snapshots or any(
+        len(runs := _contracts(snapshot, RunRecord)) != 1 or runs[0].state != RunState.ABORTED
+        for snapshot in owning_snapshots
+    ):
+        return False
+    return history_group_is_terminal_known(
+        group_attempts,
+        tuple(
+            attempt
+            for snapshot in owning_snapshots
+            for attempt in (
+                *_contracts(snapshot, AttemptRecordV2),
+                *_contracts(snapshot, AttemptRecordV4),
+            )
+        ),
+        tuple(
+            receipt
+            for snapshot in owning_snapshots
+            for receipt in _contracts(snapshot, AttemptReceiptRecord)
+        ),
+    )
+
+
+def _snapshot_contributes_completed_plan(
+    snapshot: _NativeCapsuleSnapshot,
+    plan_id: str,
+) -> bool:
+    matching_plans = tuple(
+        plan for plan in _ingestion_plans(snapshot) if plan.ingestion_plan_id == plan_id
+    )
+    if len(matching_plans) != 1 or matching_plans[0].state != IngestionPlanState.SEALED:
+        return False
+    plan = matching_plans[0]
+    cases_by_occurrence = {
+        case.case_occurrence_id: case for case in _contracts(snapshot, CaseRecordV3)
+    }
+    if any(
+        (case := cases_by_occurrence.get(case_id)) is None or case.state != CaseState.COMPLETED
+        for case_id in plan.ordered_case_occurrence_ids
+    ):
+        return False
+    histories = tuple(
+        item
+        for item in _contracts(snapshot, HistoryAttemptRecord)
+        if item.ingestion_plan_id == plan_id
+    )
+    ready = tuple(item for item in histories if item.status == "ready")
+    return bool(
+        not histories
+        or len(ready) == 1
+        and ready[0].ingestion_occurrence_id == plan.ingestion_occurrence_id
+        and ready[0].ingestion_plan_record_hash == canonical_sha256(plan)
+    )
+
+
+def _carried_graph_is_closed(
+    snapshots: tuple[_NativeCapsuleSnapshot, ...],
+    allowance_plan_ids: frozenset[str],
+) -> bool:
+    histories = tuple(
+        item for snapshot in snapshots for item in _contracts(snapshot, HistoryAttemptRecord)
+    )
+    attempts = tuple(
+        item
+        for snapshot in snapshots
+        for item in (
+            *_contracts(snapshot, AttemptRecordV2),
+            *_contracts(snapshot, AttemptRecordV4),
+        )
+    )
+    receipts = tuple(
+        item for snapshot in snapshots for item in _contracts(snapshot, AttemptReceiptRecord)
+    )
+    if (
+        any(item.status == "unknown" for item in histories)
+        or any(item.outcome == AttemptOutcome.UNKNOWN_OUTCOME for item in attempts)
+        or any(item.receipt_kind == AttemptReceiptKind.UNKNOWN_OUTCOME for item in receipts)
+    ):
+        return False
+    source_selected_plan_ids = {
+        plan_id
+        for snapshot in snapshots
+        for partition in _contracts(snapshot, CasePartitionSpec)
+        for plan_id in partition.selected_ingestion_plan_ids
+    }
+    for plan_id in source_selected_plan_ids - allowance_plan_ids:
+        contributors = tuple(
+            snapshot
+            for snapshot in snapshots
+            if _snapshot_contributes_completed_plan(snapshot, plan_id)
+        )
+        if len(contributors) != 1:
+            return False
+        contributor = contributors[0]
+        carried_by_contributor = {
+            nested.manifest.capsule_id
+            for nested in _carried_history_snapshots(contributor)
+            if nested.manifest is not None
+        }
+        attempted_elsewhere = {
+            snapshot.manifest.capsule_id
+            for snapshot in snapshots
+            if snapshot is not contributor
+            and snapshot.manifest is not None
+            and any(
+                item.ingestion_plan_id == plan_id
+                for item in _contracts(snapshot, HistoryAttemptRecord)
+            )
+        }
+        if not attempted_elsewhere <= carried_by_contributor:
+            return False
+    return True
 
 
 def _history_carry_issues(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationIssue, ...]:
@@ -1180,6 +1338,21 @@ def _history_carry_issues(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         != set(partitions[0].selected_ingestion_plan_ids)
     ):
         return (_issue(rule_id, carry.carry_record_id, "history-carry-binding-mismatch"),)
+    if any(
+        allowance.execution_run_id != carry.run_id
+        or allowance.next_history_attempt_ordinal != 1
+        or allowance.consumed_retries != 0
+        or allowance.previous_retry_event_id is not None
+        or allowance.predecessor_history_attempt_id is not None
+        for allowance in carry.allowances
+    ):
+        return (
+            _issue(
+                rule_id,
+                carry.carry_record_id,
+                "history-carry-allowance-mismatch",
+            ),
+        )
     for binding in carry.source_part_bindings:
         embedded = snapshot.root / binding.embedded_root
         try:
@@ -1195,11 +1368,43 @@ def _history_carry_issues(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         ):
             return (_issue(rule_id, binding.capsule_id, "history-carry-source-mismatch"),)
     try:
-        predecessor_attempts, predecessor_events = _carried_history_records(snapshot)
+        predecessor_snapshots = _carried_history_snapshots(snapshot)
     except ValueError:
         return (_issue(rule_id, carry.carry_record_id, "history-carry-source-mismatch"),)
-    events_by_id = {item.history_retry_event_id: item for item in predecessor_events}
-    attempts_by_id = {item.history_attempt_id: item for item in predecessor_attempts}
+    expected_family_hash = carry.execution_configuration_family_hash
+    predecessor_family_hashes = tuple(
+        _snapshot_execution_configuration_family_hash(item) for item in predecessor_snapshots
+    )
+    controlled_current = bool(
+        _contracts(snapshot, RunSpec)
+        or _contracts(snapshot, RunPreflightRecord)
+        or _contracts(snapshot, BudgetSpecV4)
+    )
+    current_family_hash = (
+        _snapshot_execution_configuration_family_hash(snapshot)
+        if controlled_current
+        else expected_family_hash
+    )
+    if (
+        expected_family_hash is None
+        or current_family_hash != expected_family_hash
+        or any(item != expected_family_hash for item in predecessor_family_hashes)
+    ):
+        return (
+            _issue(
+                rule_id,
+                carry.carry_record_id,
+                "history-carry-execution-configuration-family-mismatch",
+            ),
+        )
+    allowance_plan_ids = frozenset(item.ingestion_plan_id for item in carry.allowances)
+    if not _carried_graph_is_closed(predecessor_snapshots, allowance_plan_ids):
+        return (_issue(rule_id, carry.carry_record_id, "history-carry-graph-mismatch"),)
+    predecessor_attempts = tuple(
+        item
+        for predecessor in predecessor_snapshots
+        for item in _contracts(predecessor, HistoryAttemptRecord)
+    )
     issues: list[ValidationIssue] = []
     for allowance in carry.allowances:
         group_attempts = tuple(
@@ -1207,29 +1412,74 @@ def _history_carry_issues(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
             for item in predecessor_attempts
             if item.ingestion_plan_id == allowance.ingestion_plan_id
         )
-        if allowance.consumed_retries == 0:
-            closes = not group_attempts and allowance.execution_run_id == carry.run_id
-        else:
-            predecessor = attempts_by_id.get(allowance.predecessor_history_attempt_id or "")
-            event = events_by_id.get(allowance.previous_retry_event_id or "")
-            closes = bool(
-                predecessor is not None
-                and event is not None
-                and predecessor.status == "retryable_failed_settled"
-                and event.retry_scheduled
-                and event.failed_history_attempt_id == predecessor.history_attempt_id
-                and event.successor_execution_run_id == allowance.execution_run_id
-                and event.successor_history_attempt_ordinal
-                == allowance.next_history_attempt_ordinal
-                and allowance.consumed_retries == event.retry_ordinal
-                and max(item.history_attempt_ordinal for item in group_attempts)
-                == predecessor.history_attempt_ordinal
+        closes = bool(
+            not group_attempts
+            or _terminal_known_fresh_scope_rebuild_closes(
+                allowance.ingestion_plan_id,
+                group_attempts,
+                predecessor_snapshots,
             )
+        )
         if not closes:
             issues.append(
                 _issue(rule_id, allowance.ingestion_plan_id, "history-carry-allowance-mismatch")
             )
     return tuple(issues)
+
+
+def _snapshot_execution_configuration_family_hash(
+    snapshot: _NativeCapsuleSnapshot,
+) -> str | None:
+    partitions = _contracts(snapshot, CasePartitionSpec)
+    case_manifests = _contracts(snapshot, CaseManifest)
+    dataset_manifests = _contracts(snapshot, DatasetManifest)
+    run_specs = _contracts(snapshot, RunSpec)
+    preflights = _contracts(snapshot, RunPreflightRecord)
+    budgets = _contracts(snapshot, BudgetSpecV4)
+    if (
+        len(partitions) != 1
+        or len(case_manifests) != 1
+        or len(dataset_manifests) != 1
+        or len(run_specs) > 1
+        or len(preflights) > 1
+        or len(budgets) > 1
+    ):
+        return None
+    run_spec = run_specs[0] if run_specs else None
+    preflight = preflights[0] if preflights else None
+    budget = budgets[0] if budgets else None
+    runtime_bindings = tuple(
+        (plan.memory_system_id, plan.adapter_profile_id, plan.runtime_binding_hash)
+        for plan in _ingestion_plans(snapshot)
+    )
+    if run_spec is not None and preflight is not None:
+        controlled_runtime_binding = (
+            run_spec.memory_system_id,
+            preflight.adapter_profile_id,
+            run_spec.runtime_binding_hash,
+        )
+        if runtime_bindings and any(
+            item != controlled_runtime_binding for item in runtime_bindings
+        ):
+            return None
+        runtime_bindings = (controlled_runtime_binding,)
+    try:
+        from oamb.artifacts.composition import (
+            build_composition_execution_configuration_family_hash,
+        )
+
+        return build_composition_execution_configuration_family_hash(
+            partition=partitions[0],
+            case_manifest=case_manifests[0],
+            dataset_manifest=dataset_manifests[0],
+            runtime_bindings=runtime_bindings,
+            run_spec=run_spec,
+            preflight=preflight,
+            budget=budget,
+            role_bindings=_contracts(snapshot, ModelRoleBindingV2),
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _infrastructure_retry_issues(

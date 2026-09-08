@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
@@ -269,11 +270,9 @@ def run_command(
 
     from .artifacts.composition import (
         CapsuleCompositionError,
-        CapsuleCompositionTarget,
         analyze_capsule_recovery,
     )
     from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
-    from .contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
     from .live import (
         LiveCellExecutionError,
         LiveCellOutcome,
@@ -338,22 +337,6 @@ def run_command(
         if recover_from:
             if len(selected_cells) != 1:
                 raise LiveConfigurationError("recovery requires exactly one selected cell")
-            recovery_cell = selected_cells[0]
-            recovery = analyze_capsule_recovery(
-                tuple(recover_from),
-                target=CapsuleCompositionTarget(
-                    resolved_plan_hash=plan.resolved_plan_hash,
-                    cell_spec_hash=recovery_cell.cell_spec_hash,
-                    target_case_manifest_hash=recovery_cell.case_manifest_hash,
-                    budget_policy_hash=recovery_cell.authorization_hash,
-                    retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-                ),
-            )
-            if not recovery.remaining_case_manifest_entry_ids and recovery_analysis_output is None:
-                raise LiveConfigurationError(
-                    "recovery parts already contain every target whole group; compose them"
-                )
-            recovery_case_ids = recovery.remaining_case_manifest_entry_ids
         full_lme60 = False
         if plan.dataset.selection == "lme60":
             target_case_count = len(LME60_EXPECTED_QUESTION_IDS)
@@ -429,9 +412,10 @@ def run_command(
         if recover_from:
             if len(built_cells) != 1:
                 raise AssertionError("recovery live cell inventory is not singular")
+            full_target = live_composition_target(built_cells[0])
             recovery = analyze_capsule_recovery(
                 tuple(recover_from),
-                target=live_composition_target(built_cells[0]),
+                target=full_target,
             )
             typer.echo(
                 "recovery reusable groups: " + ",".join(recovery.reusable_ingestion_plan_ids)
@@ -449,6 +433,10 @@ def run_command(
                     "schema_version": 1,
                     "resolved_plan_hash": plan.resolved_plan_hash,
                     "cell_id": selected_cells[0].cell_id,
+                    "execution_configuration_hash": (full_target.execution_configuration_hash),
+                    "execution_configuration_family_hash": (
+                        full_target.execution_configuration_family_hash
+                    ),
                     "source_manifest_sha256s": recovery.source_manifest_sha256s,
                     "reusable_ingestion_plan_ids": recovery.reusable_ingestion_plan_ids,
                     "quarantined_ingestion_plan_ids": recovery.quarantined_ingestion_plan_ids,
@@ -464,6 +452,18 @@ def run_command(
                 )
                 typer.echo(f"recovery analysis: {recovery_analysis_output}")
                 return
+            if not recovery.remaining_case_manifest_entry_ids:
+                raise LiveConfigurationError(
+                    "recovery parts already contain every target whole group; compose them"
+                )
+            recovery_case_ids = recovery.remaining_case_manifest_entry_ids
+            built_cells[0] = replace(
+                built_cells[0],
+                requested_case_manifest_entry_ids=recovery_case_ids,
+                recovery_execution_configuration_family_hash=(
+                    full_target.execution_configuration_family_hash
+                ),
+            )
 
         def emit_outcomes(
             outcomes: tuple[LiveCellOutcome, ...],
@@ -683,6 +683,20 @@ def capsule_compose(
         Path,
         typer.Option("--output", help="Create-only composed capsule root."),
     ],
+    execution_configuration_hash: Annotated[
+        str | None,
+        typer.Option(
+            "--execution-configuration-hash",
+            help="Current full execution hash from the create-only recovery analysis.",
+        ),
+    ] = None,
+    execution_configuration_family_hash: Annotated[
+        str | None,
+        typer.Option(
+            "--execution-configuration-family-hash",
+            help="Revision-excluding family hash from the recovery analysis.",
+        ),
+    ] = None,
 ) -> None:
     """Compose compatible immutable part capsules into one complete cell root."""
 
@@ -699,6 +713,10 @@ def capsule_compose(
         cells = tuple(item for item in resolved.cells if item.cell_id == cell)
         if len(cells) != 1:
             raise CapsuleCompositionError("unknown composition target cell")
+        if (execution_configuration_hash is None) != (execution_configuration_family_hash is None):
+            raise CapsuleCompositionError(
+                "composition execution configuration hashes must be supplied together"
+            )
         selected = cells[0]
         composed = compose_capsules(
             tuple(part),
@@ -709,6 +727,8 @@ def capsule_compose(
                 target_case_manifest_hash=selected.case_manifest_hash,
                 budget_policy_hash=selected.authorization_hash,
                 retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
+                execution_configuration_hash=execution_configuration_hash,
+                execution_configuration_family_hash=(execution_configuration_family_hash),
             ),
         )
     except (OSError, CapsuleCompositionError, ResolvedPlanError, ValueError) as exc:

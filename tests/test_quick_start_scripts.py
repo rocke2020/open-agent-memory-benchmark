@@ -745,6 +745,8 @@ document = {
     "schema_version": 1,
     "resolved_plan_hash": plan_hash,
     "cell_id": cell,
+    "execution_configuration_hash": "e" * 64,
+    "execution_configuration_family_hash": "f" * 64,
     "source_manifest_sha256s": [f"{index + 1:064x}" for index in range(source_count)],
     "reusable_ingestion_plan_ids": [f"reusable-{index}" for index in range(reusable)],
     "quarantined_ingestion_plan_ids": [
@@ -813,6 +815,70 @@ PY
 	      fi
 	      if [ -n "${OAMB_TEST_RECOVERY_SIGNAL_READY:-}" ]; then
 	        mkdir -p "$OAMB_TEST_RECOVERY_SIGNAL_READY"
+	        if [ -n "${OAMB_TEST_RECOVERY_SIGNAL_DRAIN_DIR:-}" ]; then
+	          exec python3 - "$capsule" "$result_map" "$cell" "$OAMB_TEST_PLAN_HASH" \
+	            "$active_marker" "$OAMB_TEST_RECOVERY_SIGNAL_READY" \
+	            "$OAMB_TEST_RECOVERY_SIGNAL_DRAIN_DIR" <<'PY'
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+capsule, result_map, cell, plan_hash, active_marker, ready_dir, drain_dir = sys.argv[1:]
+capsule_path = Path(capsule)
+result_path = Path(result_map)
+ready_path = Path(ready_dir)
+drain_path = Path(drain_dir)
+drain_path.mkdir(parents=True, exist_ok=True)
+signal_count = 0
+
+
+def handle_signal(_signum: int, _frame: object) -> None:
+    global signal_count
+    signal_count += 1
+    if signal_count == 1:
+        (drain_path / f"{cell}-first").touch()
+        return
+    (drain_path / f"{cell}-hard").touch()
+    raise SystemExit(91)
+
+
+for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(signum, handle_signal)
+(ready_path / cell).touch()
+while signal_count == 0:
+    time.sleep(0.01)
+time.sleep(0.5)
+(capsule_path / "fake-failed").touch()
+result_path.write_text(
+    json.dumps(
+        {
+            "schema_name": "live_run_result_map",
+            "schema_version": 1,
+            "resolved_plan_hash": plan_hash,
+            "status": "failed",
+            "cells": [
+                {
+                    "cell_id": cell,
+                    "status": "failed",
+                    "capsule_root": capsule,
+                    "detail": "planted interruption",
+                }
+            ],
+            "capsule_roots": {},
+        },
+        separators=(",", ":"),
+    )
+    + "\n",
+    encoding="utf-8",
+)
+if active_marker:
+    Path(active_marker).unlink(missing_ok=True)
+raise SystemExit(44)
+PY
+	        fi
 	        : > "$OAMB_TEST_RECOVERY_SIGNAL_READY/$cell"
 	        while :; do /bin/sleep 0.05; done
 	      fi
@@ -1332,6 +1398,14 @@ def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path
         "unique_case_count": 1,
         "provider_specific_result_count": 3,
     }
+
+
+def test_run_progress_has_no_legacy_history_successor_path() -> None:
+    source = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'progress_records(root, "history-retries"' not in source
+    assert "successor_history_attempt_ordinal" not in source
+    assert 'record.get("history_attempt_ordinal") != 1' in source
 
 
 def test_run_reports_live_cell_progress_while_provider_is_running(tmp_path: Path) -> None:
@@ -1900,6 +1974,94 @@ def test_run_full_resume_recovers_providers_concurrently_and_composes_report(
     assert all(cell["final_capsule_root"] for cell in state["cells"])
 
 
+def test_run_full_resume_reconciles_published_part_before_dispatch(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    source_roots = _write_interrupted_full_result_map(root)
+    full_root = root / "outputs" / "full-test" / "lme60-test"
+    results = full_root / "results"
+    state_path = results / "full-resume-state.json"
+    cells = ("hindsight-lme60", "mem0-lme60", "openviking-lme60")
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_name": "full_test_resume_state",
+                "schema_version": 1,
+                "resolved_plan_hash": RESOLVED_PLAN_HASH,
+                "attempt": 1,
+                "cells": [
+                    {
+                        "cell_id": cell,
+                        "parts": [str(source_root)],
+                        "final_capsule_root": None,
+                        "final_validation": None,
+                    }
+                    for cell, source_root in zip(cells, source_roots, strict=True)
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    recovered_cell = cells[0]
+    recovered_provider = "hindsight"
+    recovered_output = full_root / "capsules" / "resume" / "1" / recovered_provider
+    recovered_capsule = recovered_output / f"{recovered_cell}-recovery-capsule"
+    recovered_capsule.mkdir(parents=True)
+    (recovered_capsule / "fake-completed").write_text("completed\n", encoding="utf-8")
+    (results / f"resume-1-{recovered_provider}.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "live_run_result_map",
+                "schema_version": 1,
+                "resolved_plan_hash": RESOLVED_PLAN_HASH,
+                "status": "completed",
+                "cells": [
+                    {
+                        "cell_id": recovered_cell,
+                        "status": "completed",
+                        "capsule_root": str(recovered_capsule),
+                        "detail": None,
+                    }
+                ],
+                "capsule_roots": {recovered_cell: str(recovered_capsule)},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    recovery_calls = [
+        line
+        for line in calls
+        if "oamb run" in line
+        and "--recover-from" in line
+        and "--recovery-analysis-output" not in line
+    ]
+    assert not any(f"--cell {recovered_cell}" in line for line in recovery_calls)
+    hindsight_analysis = next(
+        line
+        for line in calls
+        if "--recovery-analysis-output" in line and f"--cell {recovered_cell}" in line
+    )
+    assert hindsight_analysis.count("--recover-from") == 2
+    final_state = json.loads(state_path.read_bytes())
+    assert final_state["attempt"] == 2
+    assert [len(cell["parts"]) for cell in final_state["cells"]] == [2, 2, 2]
+
+
 def test_run_full_resume_obeys_two_provider_cap_while_preserving_overlap(tmp_path: Path) -> None:
     root, env, _trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
@@ -2171,6 +2333,55 @@ def test_run_full_resume_drains_signal_and_records_parts_for_another_resume(tmp_
     assert final_state["attempt"] == 2
     assert [len(cell["parts"]) for cell in final_state["cells"]] == [3, 3, 3]
     assert all(cell["final_capsule_root"] for cell in final_state["cells"])
+
+
+@pytest.mark.parametrize("stop_signal", (signal.SIGINT, signal.SIGTERM))
+def test_run_full_resume_process_group_signal_reaches_each_worker_once(
+    tmp_path: Path,
+    stop_signal: signal.Signals,
+) -> None:
+    root, env, _trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    _write_interrupted_full_result_map(root)
+    signal_ready = tmp_path / "signal-ready"
+    signal_drain = tmp_path / "signal-drain"
+    env["OAMB_TEST_RECOVERY_SIGNAL_READY"] = str(signal_ready)
+    env["OAMB_TEST_RECOVERY_SIGNAL_DRAIN_DIR"] = str(signal_drain)
+    process = subprocess.Popen(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if signal_ready.is_dir() and len(tuple(signal_ready.iterdir())) == 3:
+            break
+        time.sleep(0.02)
+    else:
+        process.kill()
+        stdout, stderr = process.communicate(timeout=5)
+        pytest.fail(f"recovery workers did not reach signal barrier\n{stdout}\n{stderr}")
+
+    os.killpg(process.pid, stop_signal)
+    stdout, stderr = process.communicate(timeout=20)
+
+    assert process.returncode != 0, stdout + stderr
+    assert sorted(path.name for path in signal_drain.glob("*-first")) == [
+        "hindsight-lme60-first",
+        "mem0-lme60-first",
+        "openviking-lme60-first",
+    ]
+    assert not tuple(signal_drain.glob("*-hard")), stdout + stderr
+    state_path = (
+        root / "outputs" / "full-test" / "lme60-test" / "results" / "full-resume-state.json"
+    )
+    interrupted_state = json.loads(state_path.read_bytes())
+    assert [len(cell["parts"]) for cell in interrupted_state["cells"]] == [2, 2, 2]
+    assert "preserved parts will be reused by the next --resume" in stderr
 
 
 def test_run_full_resume_preserves_second_interruption_for_next_resume(tmp_path: Path) -> None:

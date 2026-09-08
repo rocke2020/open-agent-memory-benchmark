@@ -50,8 +50,6 @@ from oamb.contracts.evidence import (
     CaseRecordV3,
     CloseErrorRecord,
     HistoryAttemptRecord,
-    HistoryRetryAllowance,
-    HistoryRetryEvent,
     IngestionPlanRecordV2,
     IngestionPlanRecordV3,
     OccurrenceClaimRecord,
@@ -588,6 +586,7 @@ class _NativeRunRequest:
     partition: CasePartitionSpec | None = None
     stop_event: _NativeStopSignal | None = None
     recovery_parts: tuple[Path, ...] = ()
+    recovery_execution_configuration_family_hash: str | None = None
 
 
 class _NativeStopSignal(Protocol):
@@ -638,10 +637,6 @@ class _NativeExecutionState:
     attempt_accounting: dict[str, tuple[tuple[str, ...], str, str]] = field(default_factory=dict)
     history_records: list[HistoryAttemptRecord] = field(default_factory=list)
     history_scopes: dict[str, ScopeReceipt] = field(default_factory=dict)
-    history_allowances: dict[str, HistoryRetryAllowance] = field(default_factory=dict)
-    history_events: dict[str, HistoryRetryEvent] = field(default_factory=dict)
-    history_claims: dict[str, str] = field(default_factory=dict)
-    history_source_bindings: tuple[tuple[str, str], ...] = ()
     history_occurrence_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
     case_occurrence_bindings: dict[str, str] = field(default_factory=dict)
     publish_history_progress: Callable[[], None] | None = None
@@ -926,6 +921,7 @@ def run_native_vertical_slice(
     partition: CasePartitionSpec | None = None,
     stop_event: _NativeStopSignal | None = None,
     recovery_parts: tuple[Path, ...] = (),
+    recovery_execution_configuration_family_hash: str | None = None,
 ) -> NativeRunArtifacts:
     """Compose one deterministic native capsule without selecting any live transport."""
 
@@ -951,6 +947,18 @@ def run_native_vertical_slice(
         raise ValueError("case partition run ID does not match the requested run")
     if recovery_parts and (partition is None or continuation is not None):
         raise ValueError("history recovery requires a fresh case-partition run")
+    if bool(recovery_parts) != bool(recovery_execution_configuration_family_hash):
+        raise ValueError(
+            "history recovery requires the current execution configuration family hash"
+        )
+    if recovery_execution_configuration_family_hash is not None and (
+        len(recovery_execution_configuration_family_hash) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in recovery_execution_configuration_family_hash
+        )
+    ):
+        raise ValueError("history recovery execution configuration family hash is invalid")
     capsule_root = Path(output_root) / run_id
     if continuation is not None:
         if control is None:
@@ -1019,6 +1027,7 @@ def run_native_vertical_slice(
         partition=partition,
         stop_event=stop_event,
         recovery_parts=recovery_parts,
+        recovery_execution_configuration_family_hash=(recovery_execution_configuration_family_hash),
     )
     try:
         completed = _run_native_supervised(request)
@@ -1279,6 +1288,11 @@ async def _run_native_with_cell_deadline(
             partition=getattr(request, "partition", None),
             stop_event=getattr(request, "stop_event", None),
             recovery_parts=getattr(request, "recovery_parts", ()),
+            recovery_execution_configuration_family_hash=getattr(
+                request,
+                "recovery_execution_configuration_family_hash",
+                None,
+            ),
         )
 
     if request.control is None:
@@ -1623,6 +1637,7 @@ async def _run_native_vertical_slice(
     partition: CasePartitionSpec | None = None,
     stop_event: _NativeStopSignal | None = None,
     recovery_parts: tuple[Path, ...] = (),
+    recovery_execution_configuration_family_hash: str | None = None,
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
     store = artifact_store_factory(capsule_root)
@@ -1708,7 +1723,11 @@ async def _run_native_vertical_slice(
 
             if partition is None or continuation is not None:
                 raise ValueError("history recovery requires a fresh case-partition run")
-            carry, pending_events = prepare_history_recovery(
+            if recovery_execution_configuration_family_hash is None:
+                raise ValueError(
+                    "history recovery requires the current execution configuration family hash"
+                )
+            carry = prepare_history_recovery(
                 part_roots=recovery_parts,
                 capsule_root=capsule_root,
                 run_id=run_id,
@@ -1719,15 +1738,9 @@ async def _run_native_vertical_slice(
                 if control
                 else len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS),
                 memory_system_id=control.run_spec.memory_system_id if control else None,
+                execution_configuration_family_hash=(recovery_execution_configuration_family_hash),
             )
             _seal(state, "history-carries", carry.carry_record_id, carry)
-            state.history_allowances = {item.ingestion_plan_id: item for item in carry.allowances}
-            state.history_events = {item.history_retry_event_id: item for item in pending_events}
-            state.history_source_bindings = tuple(
-                (item.capsule_id, item.manifest_sha256) for item in carry.source_part_bindings
-            )
-            for event in pending_events:
-                _claim_history_successor(state, event)
         memory = memory_factory(store, ingestion_plans)
         model_store: ArtifactStorePort = store
         if state.pending_model_usage is not None:
@@ -1930,12 +1943,11 @@ def _initial_history_occurrence(
     memory_system_id: str,
     plan_id: str,
 ) -> str:
-    allowance = state.history_allowances.get(plan_id)
     return ingestion_occurrence_id(
-        allowance.execution_run_id if allowance else state.run_id,
+        state.run_id,
         memory_system_id,
         plan_id,
-        history_attempt_ordinal=allowance.next_history_attempt_ordinal if allowance else 1,
+        history_attempt_ordinal=1,
     )
 
 
@@ -2266,45 +2278,6 @@ def _raise_pipeline_errors(results: Sequence[object]) -> None:
         raise BaseExceptionGroup("multiple admitted pipeline tasks failed", list(errors))
 
 
-class HistoryRebuildExhausted(RuntimeError):
-    """The settled failed history has consumed its frozen reconstruction allowance."""
-
-
-def _claim_history_successor(state: _NativeExecutionState, event: HistoryRetryEvent) -> str:
-    existing = state.history_claims.get(event.history_retry_event_id)
-    if existing is not None:
-        return existing
-    occurrence = event.successor_ingestion_occurrence_id
-    if occurrence is None or not event.retry_scheduled:
-        raise ValueError("history successor has no scheduled occurrence")
-    if state.control is not None:
-        if state.provider_lifecycle is None:
-            raise ValueError("history successor has no lifecycle authority")
-        payload = state.provider_lifecycle.claim_history_successor(
-            retry_event_id=event.history_retry_event_id,
-            retry_event_sha256=canonical_sha256(event),
-            ingestion_plan_id=event.ingestion_plan_id,
-            successor_ingestion_occurrence_id=occurrence,
-            claimant_run_id=state.run_id,
-            claimant_capsule_id=state.run_id,
-            source_part_manifest_bindings=state.history_source_bindings,
-        )
-    else:
-        payload = canonical_json_bytes(
-            {
-                "operation": "fixture_history_successor_admission",
-                "retry_event_id": event.history_retry_event_id,
-                "retry_event_sha256": canonical_sha256(event),
-                "ingestion_plan_id": event.ingestion_plan_id,
-                "successor_ingestion_occurrence_id": occurrence,
-                "claimant_run_id": state.run_id,
-            }
-        )
-    reference = _seal_raw(state.store, payload, media_type="application/json")
-    state.history_claims[event.history_retry_event_id] = reference
-    return reference
-
-
 def _seal_history_attempt(
     *,
     state: _NativeExecutionState,
@@ -2314,7 +2287,6 @@ def _seal_history_attempt(
     execution_run_id: str,
     ordinal: int,
     maximum_retries: int,
-    previous_event: HistoryRetryEvent | None,
     started_at: datetime,
     ready_record: NativeIngestionPlanRecord | None = None,
     error: BaseException | None = None,
@@ -2389,12 +2361,8 @@ def _seal_history_attempt(
             if scope is not None
             else ()
         ),
-        "previous_retry_event_id": previous_event.history_retry_event_id
-        if previous_event
-        else None,
-        "admission_claim_raw_ref": state.history_claims.get(previous_event.history_retry_event_id)
-        if previous_event
-        else None,
+        "previous_retry_event_id": None,
+        "admission_claim_raw_ref": None,
         "status": status,
         "operation_attempt_ids": tuple(record.attempt_id for record in operations),
         "terminal_failure_attempt_id": failure.attempt_id if failure is not None else None,
@@ -2472,7 +2440,6 @@ async def _execute_history(
             execution_run_id=state.run_id,
             ordinal=1,
             maximum_retries=0,
-            previous_event=None,
             started_at=started_at,
             error=error,
         )
@@ -2485,7 +2452,6 @@ async def _execute_history(
         execution_run_id=state.run_id,
         ordinal=1,
         maximum_retries=0,
-        previous_event=None,
         started_at=started_at,
         ready_record=records[0],
     )
@@ -4872,7 +4838,7 @@ def _contains_infrastructure_retry_exhausted(error: BaseException) -> bool:
 def _is_pure_infrastructure_retry_exhaustion(error: BaseException) -> bool:
     """Return true only when every terminal root is one safe retry exhaustion."""
 
-    if isinstance(error, (InfrastructureRetryExhausted, HistoryRebuildExhausted)):
+    if isinstance(error, InfrastructureRetryExhausted):
         return True
     if isinstance(error, BaseExceptionGroup):
         return bool(error.exceptions) and all(

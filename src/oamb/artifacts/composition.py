@@ -15,6 +15,8 @@ from oamb.artifacts.validation.native import validate_partition_capsule
 from oamb.contracts.evidence import (
     AttemptIntentRecord,
     AttemptIntentRecordV3,
+    AttemptReceiptKind,
+    AttemptReceiptRecord,
     AttemptRecordV2,
     AttemptRecordV4,
     CapsuleCompositionContribution,
@@ -46,11 +48,14 @@ from oamb.contracts.specifications import (
     RunSpec,
 )
 from oamb.contracts.states import (
+    AttemptOutcome,
     CaseState,
     IngestionPlanState,
     RunState,
     ValidationDisposition,
 )
+
+from .recovery_safety import history_group_is_terminal_known
 
 COMPOSITION_VALIDATION_PROFILE_ID = "oamb-capsule-composition-v1"
 _ROTATABLE_MODEL_ENDPOINT_REFERENCE = "LLM_BASE_URL"
@@ -87,6 +92,7 @@ class CapsuleCompositionTarget:
     budget_policy_hash: str
     retry_policy_hash: str
     execution_configuration_hash: str | None = None
+    execution_configuration_family_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +108,7 @@ class _PartSnapshot:
     cases: tuple[CaseRecordV3, ...]
     attempts: tuple[AttemptRecordV2 | AttemptRecordV4, ...]
     intents: tuple[AttemptIntentRecord | AttemptIntentRecordV3, ...]
+    receipts: tuple[AttemptReceiptRecord, ...]
     history_attempts: tuple[HistoryAttemptRecord, ...]
     history_retry_events: tuple[HistoryRetryEvent, ...]
     history_retry_carries: tuple[HistoryRetryCarryRecord, ...]
@@ -138,7 +145,7 @@ def compose_capsules(
     parts = tuple(_load_part(root) for root in resolved_roots)
     if len({part.manifest.capsule_id for part in parts}) != len(parts):
         raise CapsuleCompositionError("duplicate composition capsule")
-    composition = _compose_record(parts)
+    composition = _compose_record(parts, target=target)
     if target is not None and (
         composition.resolved_plan_hash != target.resolved_plan_hash
         or composition.cell_spec_hash != target.cell_spec_hash
@@ -230,32 +237,75 @@ def _require_attempted_groups_recoverable(
     contributions_by_plan: dict[str, CapsuleCompositionContribution],
 ) -> None:
     attempts = tuple(item for part in parts for item in part.history_attempts)
-    events = tuple(item for part in parts for item in part.history_retry_events)
-    intents = tuple(item for part in parts for item in part.intents)
-    for plan_id in {item.ingestion_plan_id for item in attempts} - set(contributions_by_plan):
-        plan_attempts = sorted(
-            (item for item in attempts if item.ingestion_plan_id == plan_id),
-            key=lambda item: item.history_attempt_ordinal,
+    if (
+        any(item.status == "unknown" for item in attempts)
+        or any(
+            item.outcome == AttemptOutcome.UNKNOWN_OUTCOME
+            for part in parts
+            for item in part.attempts
         )
-        last = plan_attempts[-1]
-        pending = tuple(
-            event
-            for event in events
-            if event.ingestion_plan_id == plan_id
-            and event.failed_history_attempt_id == last.history_attempt_id
-            and event.retry_scheduled
+        or any(
+            item.receipt_kind == AttemptReceiptKind.UNKNOWN_OUTCOME
+            for part in parts
+            for item in part.receipts
         )
-        if (
-            last.status != "retryable_failed_settled"
-            or len(pending) != 1
-            or any(
-                intent.parent_id == pending[0].successor_ingestion_occurrence_id
-                for intent in intents
-            )
-        ):
+    ):
+        raise CapsuleCompositionError("attempted history group has unknown outcome")
+    parts_by_capsule_id = {part.manifest.capsule_id: part for part in parts}
+    for plan_id, contribution in contributions_by_plan.items():
+        contributor = parts_by_capsule_id[contribution.source_capsule_id]
+        carried_capsule_ids = {
+            binding.capsule_id
+            for carry in contributor.history_retry_carries
+            for binding in carry.source_part_bindings
+        }
+        attempted_predecessor_capsule_ids = {
+            part.manifest.capsule_id
+            for part in parts
+            if part is not contributor
+            and any(item.ingestion_plan_id == plan_id for item in part.history_attempts)
+        }
+        if not attempted_predecessor_capsule_ids <= carried_capsule_ids:
             raise CapsuleCompositionError(
-                "attempted history group has no eligible pending retry allowance"
+                "completed history group was attempted outside its validated recovery chain"
             )
+    selected_plan_ids = {
+        plan_id for part in parts for plan_id in part.partition.selected_ingestion_plan_ids
+    }
+    for plan_id in selected_plan_ids - set(contributions_by_plan):
+        owning_parts = tuple(
+            part for part in parts if plan_id in part.partition.selected_ingestion_plan_ids
+        )
+        if not owning_parts or any(part.run.state != RunState.ABORTED for part in owning_parts):
+            raise CapsuleCompositionError(
+                "incomplete history group is not owned only by aborted parts"
+            )
+    for plan_id in {item.ingestion_plan_id for item in attempts} - set(contributions_by_plan):
+        plan_attempts = tuple(item for item in attempts if item.ingestion_plan_id == plan_id)
+        if _aborted_group_is_terminal_known(parts, plan_id, plan_attempts):
+            continue
+        raise CapsuleCompositionError(
+            "attempted history group is not eligible for terminal-known fresh-scope rebuild"
+        )
+
+
+def _aborted_group_is_terminal_known(
+    parts: tuple[_PartSnapshot, ...],
+    plan_id: str,
+    history_attempts: tuple[HistoryAttemptRecord, ...],
+) -> bool:
+    owning_parts = tuple(
+        part
+        for part in parts
+        if any(item.ingestion_plan_id == plan_id for item in part.history_attempts)
+    )
+    if not owning_parts or any(part.run.state != RunState.ABORTED for part in owning_parts):
+        return False
+    return history_group_is_terminal_known(
+        history_attempts,
+        tuple(attempt for part in owning_parts for attempt in part.attempts),
+        tuple(receipt for part in owning_parts for receipt in part.receipts),
+    )
 
 
 def load_composition_record(root: Path) -> CapsuleCompositionRecord:
@@ -335,6 +385,7 @@ def _load_part(root: Path) -> _PartSnapshot:
     intents = tuple(
         item for item in contracts if isinstance(item, (AttemptIntentRecord, AttemptIntentRecordV3))
     )
+    receipts = tuple(item for item in contracts if isinstance(item, AttemptReceiptRecord))
     history_attempts = tuple(item for item in contracts if isinstance(item, HistoryAttemptRecord))
     history_retry_events = tuple(item for item in contracts if isinstance(item, HistoryRetryEvent))
     history_retry_carries = tuple(
@@ -361,6 +412,7 @@ def _load_part(root: Path) -> _PartSnapshot:
         cases=cases,
         attempts=attempts,
         intents=intents,
+        receipts=receipts,
         history_attempts=history_attempts,
         history_retry_events=history_retry_events,
         history_retry_carries=history_retry_carries,
@@ -371,9 +423,13 @@ def _load_part(root: Path) -> _PartSnapshot:
     )
 
 
-def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecord:
+def _compose_record(
+    parts: tuple[_PartSnapshot, ...],
+    *,
+    target: CapsuleCompositionTarget | None = None,
+) -> CapsuleCompositionRecord:
     first = parts[0]
-    compatibility = _require_compatible_parts(parts)
+    compatibility = _require_compatible_parts(parts, target=target)
     operation_attempt_ids = tuple(attempt.attempt_id for part in parts for attempt in part.attempts)
     if len(set(operation_attempt_ids)) != len(operation_attempt_ids):
         raise CapsuleCompositionError("duplicate operation attempt across composition parts")
@@ -381,6 +437,7 @@ def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecor
         sorted((_part_binding(part) for part in parts), key=lambda item: item.capsule_id)
     )
     contributions_by_plan = _contributions_by_plan(parts)
+    _require_attempted_groups_recoverable(parts, contributions_by_plan)
     target_plan_ids = tuple(plan.ingestion_plan_id for plan in first.case_manifest.ingestion_plans)
     missing = tuple(plan_id for plan_id in target_plan_ids if plan_id not in contributions_by_plan)
     if missing:
@@ -407,6 +464,15 @@ def _compose_record(parts: tuple[_PartSnapshot, ...]) -> CapsuleCompositionRecor
             ["oamb-capsule-composition-exact-union-v1", contributions]
         ),
     }
+    if target is not None and compatibility not in {_compatibility_key(part) for part in parts}:
+        fields.update(
+            {
+                "target_execution_configuration_hash": (target.execution_configuration_hash),
+                "target_execution_configuration_family_hash": (
+                    target.execution_configuration_family_hash
+                ),
+            }
+        )
     return CapsuleCompositionRecord.model_validate(
         {"composition_id": capsule_composition_id(fields), **fields}
     )
@@ -418,9 +484,14 @@ def _require_compatible_parts(
     target: CapsuleCompositionTarget | None = None,
 ) -> str:
     first = parts[0]
-    compatibility = _compatibility_key(first)
-    if any(_compatibility_key(part) != compatibility for part in parts[1:]):
-        raise CapsuleCompositionError("incompatible composition parts")
+    compatibility_keys = tuple(_compatibility_key(part) for part in parts)
+    compatibility = compatibility_keys[0]
+    if target is not None and (target.execution_configuration_hash is None) != (
+        target.execution_configuration_family_hash is None
+    ):
+        raise CapsuleCompositionError(
+            "recovery execution configuration hashes must be supplied together"
+        )
     if target is not None and (
         first.partition.resolved_plan_hash != target.resolved_plan_hash
         or first.partition.cell_spec_hash != target.cell_spec_hash
@@ -429,15 +500,50 @@ def _require_compatible_parts(
         or first.partition.retry_policy_hash != target.retry_policy_hash
     ):
         raise CapsuleCompositionError("recovery parts do not match the requested target")
+    family_keys: tuple[str, ...] | None = None
+    if target is not None and target.execution_configuration_family_hash is not None:
+        family_keys = tuple(_compatibility_family_key(part) for part in parts)
+        if (
+            len(set(family_keys)) != 1
+            or family_keys[0] != target.execution_configuration_family_hash
+        ):
+            raise CapsuleCompositionError(
+                "recovery parts do not match the requested execution configuration family"
+            )
+    target_configuration_matches = bool(
+        target is None
+        or target.execution_configuration_hash is None
+        or compatibility == target.execution_configuration_hash
+    )
+    if len(set(compatibility_keys)) == 1 and target_configuration_matches:
+        return compatibility
+    if target is None:
+        raise CapsuleCompositionError("incompatible composition parts")
     if (
-        target is not None
-        and target.execution_configuration_hash is not None
-        and compatibility != target.execution_configuration_hash
+        target.execution_configuration_hash is None
+        or target.execution_configuration_family_hash is None
     ):
         raise CapsuleCompositionError(
             "recovery parts do not match the requested execution configuration"
         )
-    return compatibility
+    if any(
+        compatibility_key != target.execution_configuration_hash
+        and part.run.state != RunState.ABORTED
+        for part, compatibility_key in zip(parts, compatibility_keys, strict=True)
+    ):
+        raise CapsuleCompositionError(
+            "revision-drifted recovery part is not aborted and does not match the requested "
+            "execution configuration"
+        )
+    assert family_keys is not None
+    return canonical_sha256(
+        [
+            "oamb-mixed-code-revision-execution-configuration-v1",
+            target.execution_configuration_hash,
+            target.execution_configuration_family_hash,
+            tuple(sorted(compatibility_keys)),
+        ]
+    )
 
 
 def _contributions_by_plan(
@@ -453,6 +559,18 @@ def _contributions_by_plan(
 
 
 def _compatibility_key(part: _PartSnapshot) -> str:
+    return _part_execution_configuration_hash(part, include_code_revision=True)
+
+
+def _compatibility_family_key(part: _PartSnapshot) -> str:
+    return _part_execution_configuration_hash(part, include_code_revision=False)
+
+
+def _part_execution_configuration_hash(
+    part: _PartSnapshot,
+    *,
+    include_code_revision: bool,
+) -> str:
     runtime_bindings = tuple(
         (
             plan.memory_system_id,
@@ -472,7 +590,12 @@ def _compatibility_key(part: _PartSnapshot) -> str:
         ):
             raise CapsuleCompositionError("runtime binding inventory is inconsistent")
         runtime_bindings = (controlled_runtime_binding,)
-    return build_composition_execution_configuration_hash(
+    builder = (
+        build_composition_execution_configuration_hash
+        if include_code_revision
+        else build_composition_execution_configuration_family_hash
+    )
+    return builder(
         partition=part.partition,
         case_manifest=part.case_manifest,
         dataset_manifest=part.dataset_manifest,
@@ -495,16 +618,70 @@ def build_composition_execution_configuration_hash(
     budget: BudgetSpecV4 | None,
     role_bindings: tuple[ModelRoleBindingV2, ...],
 ) -> str:
+    return _build_composition_execution_configuration_hash(
+        partition=partition,
+        case_manifest=case_manifest,
+        dataset_manifest=dataset_manifest,
+        runtime_bindings=runtime_bindings,
+        run_spec=run_spec,
+        preflight=preflight,
+        budget=budget,
+        role_bindings=role_bindings,
+        include_code_revision=True,
+    )
+
+
+def build_composition_execution_configuration_family_hash(
+    *,
+    partition: CasePartitionSpec,
+    case_manifest: CaseManifest,
+    dataset_manifest: DatasetManifest,
+    runtime_bindings: tuple[tuple[str, str, str], ...],
+    run_spec: RunSpec | None,
+    preflight: RunPreflightRecord | RunPreflightRecordV2 | None,
+    budget: BudgetSpecV4 | None,
+    role_bindings: tuple[ModelRoleBindingV2, ...],
+) -> str:
+    """Bind recovery controls while excluding revision and rotatable LLM connections."""
+
+    return _build_composition_execution_configuration_hash(
+        partition=partition,
+        case_manifest=case_manifest,
+        dataset_manifest=dataset_manifest,
+        runtime_bindings=runtime_bindings,
+        run_spec=run_spec,
+        preflight=preflight,
+        budget=budget,
+        role_bindings=role_bindings,
+        include_code_revision=False,
+    )
+
+
+def _build_composition_execution_configuration_hash(
+    *,
+    partition: CasePartitionSpec,
+    case_manifest: CaseManifest,
+    dataset_manifest: DatasetManifest,
+    runtime_bindings: tuple[tuple[str, str, str], ...],
+    run_spec: RunSpec | None,
+    preflight: RunPreflightRecord | RunPreflightRecordV2 | None,
+    budget: BudgetSpecV4 | None,
+    role_bindings: tuple[ModelRoleBindingV2, ...],
+    include_code_revision: bool,
+) -> str:
     live_configuration: object = "fixture"
     control_records = (run_spec, preflight, budget)
     if all(record is not None for record in control_records):
         assert run_spec is not None and preflight is not None and budget is not None
+        run_spec_exclusions = {"run_id", "budget_id", "environment_hash"}
+        if not include_code_revision:
+            run_spec_exclusions.add("code_revision")
         live_configuration = {
-            # Credential values are rotatable connection evidence. Stable provider
-            # scope, runtime, and non-LLM endpoint identities remain below.
+            # LLM endpoint and credential values are rotatable connection evidence.
+            # Stable provider scope, runtime, and non-LLM endpoints remain below.
             "run_spec": run_spec.model_dump(
                 mode="python",
-                exclude={"run_id", "budget_id", "environment_hash"},
+                exclude=run_spec_exclusions,
             ),
             "preflight": preflight.model_dump(
                 mode="python",
@@ -539,7 +716,11 @@ def build_composition_execution_configuration_hash(
         raise CapsuleCompositionError("execution configuration control inventory is incomplete")
     return canonical_sha256(
         [
-            "oamb-composition-execution-configuration-v1",
+            (
+                "oamb-composition-execution-configuration-v1"
+                if include_code_revision
+                else "oamb-composition-execution-configuration-family-v1"
+            ),
             partition.resolved_plan_hash,
             partition.cell_spec_hash,
             partition.dataset_manifest_hash,
@@ -560,6 +741,12 @@ def capsule_execution_configuration_hash(root: Path) -> str:
     """Reopen one validated immutable capsule and return its composition key."""
 
     return _compatibility_key(_load_part(Path(root).resolve(strict=True)))
+
+
+def capsule_execution_configuration_family_hash(root: Path) -> str:
+    """Reopen one validated capsule and return its revision-excluding family key."""
+
+    return _compatibility_family_key(_load_part(Path(root).resolve(strict=True)))
 
 
 def _part_binding(part: _PartSnapshot) -> CapsuleCompositionPartBinding:
@@ -710,6 +897,8 @@ __all__ = [
     "CapsuleCompositionError",
     "CapsuleCompositionTarget",
     "build_composition_execution_configuration_hash",
+    "build_composition_execution_configuration_family_hash",
+    "capsule_execution_configuration_family_hash",
     "capsule_execution_configuration_hash",
     "compose_capsules",
     "inspect_embedded_composition",

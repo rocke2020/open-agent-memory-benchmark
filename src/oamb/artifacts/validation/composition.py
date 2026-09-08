@@ -9,6 +9,7 @@ from oamb.artifacts.atomic import read_regular_file, sha256_file
 from oamb.artifacts.composition import (
     COMPOSITION_VALIDATION_PROFILE_ID,
     CapsuleCompositionError,
+    CapsuleCompositionTarget,
     _compose_record,
     _load_part,
     inspect_embedded_composition,
@@ -36,7 +37,20 @@ def validate_composed_capsule(capsule_root: Path) -> ValidationResult:
         _verify_outer_manifest(root, manifest)
         composition, embedded_roots = inspect_embedded_composition(root)
         parts = tuple(_load_part(embedded_root) for embedded_root in embedded_roots)
-        recomputed = _compose_record(parts)
+        target = None
+        if composition.target_execution_configuration_hash is not None:
+            target = CapsuleCompositionTarget(
+                resolved_plan_hash=composition.resolved_plan_hash,
+                cell_spec_hash=composition.cell_spec_hash,
+                target_case_manifest_hash=composition.target_case_manifest_hash,
+                budget_policy_hash=composition.budget_policy_hash,
+                retry_policy_hash=composition.retry_policy_hash,
+                execution_configuration_hash=(composition.target_execution_configuration_hash),
+                execution_configuration_family_hash=(
+                    composition.target_execution_configuration_family_hash
+                ),
+            )
+        recomputed = _compose_record(parts, target=target)
         if recomputed != composition:
             raise CapsuleCompositionError("composition record differs from embedded parts")
         expected_run_spec_hash = canonical_sha256(

@@ -218,6 +218,25 @@ def test_recovery_preparation_failure_constructs_no_provider_or_model(
         constructed.append("client")
         raise AssertionError("client construction must follow recovery closure")
 
+    with pytest.raises(
+        ValueError,
+        match="current execution configuration family hash",
+    ):
+        native.run_native_vertical_slice(
+            output_root=tmp_path,
+            run_id=partition.run_id,
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=factory,
+            model_factory=factory,
+            answer_role_binding_id="recorded-answer-v1",
+            partition=partition,
+            recovery_parts=(tmp_path / "predecessor",),
+        )
+    assert constructed == []
+
     monkeypatch.setattr(recovery, "prepare_history_recovery", reject)
     with pytest.raises(ValueError, match="recovery preparation rejected"):
         asyncio.run(
@@ -236,6 +255,9 @@ def test_recovery_preparation_failure_constructs_no_provider_or_model(
                 close_timeout_seconds=1,
                 partition=partition,
                 recovery_parts=(tmp_path / "predecessor",),
+                recovery_execution_configuration_family_hash=canonical_sha256(
+                    ["current-execution-family"]
+                ),
             )
         )
     assert constructed == []

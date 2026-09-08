@@ -103,6 +103,7 @@ def _write_cell_root(
                 "case_manifest_hash": case_manifest_hash,
                 "workload_id": plan.dataset.workload_id,
                 "memory_system_id": cell.provider_id,
+                "code_revision": "fixture-revision",
             },
         ),
         (
@@ -1909,6 +1910,7 @@ def _lme60_cell_document(
         "judged_case_count": 60,
         "judged_numerator": sum(outcomes),
         "judged_denominator": 60,
+        "code_revisions": ("fixture-revision",),
         "results": _lme60_results(outcomes),
     }
 
