@@ -77,11 +77,11 @@ def test_start_vllm_metal_uses_sibling_environment_not_shell_path(tmp_path: Path
 
     assert result.returncode == 0, result.stderr
     lines = capture.read_text(encoding="utf-8").splitlines()
-    assert lines[:2] == ["1", "0.06"]
+    assert lines[:2] == ["1", "0.10"]
     assert lines[2] == (
         f"serve {model_path} --tokenizer {hf_dir} --hf-config-path {hf_dir} "
         '--hf-overrides {"matryoshka_dimensions":[1024]} --runner pooling '
-        "--max-model-len 8192 --max-num-batched-tokens 8192 --additional-config "
+        "--max-model-len 32768 --max-num-batched-tokens 32768 --additional-config "
         '{"turboquant":true,"k_quant":"q8_0","v_quant":"q8_0"} '
         f"--host 127.0.0.1 --port 18000 --served-model-name {EMBEDDING_MODEL}"
     )

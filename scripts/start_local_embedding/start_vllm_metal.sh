@@ -9,6 +9,8 @@ VLLM_METAL_BIN="$VLLM_METAL_VENV/bin/vllm"
 EMBEDDING_MODEL="${OAMB_EMBEDDING_MODEL:?OAMB_EMBEDDING_MODEL must come from the resolved benchmark plan}"
 EMBEDDING_GGUF_PATH="${OAMB_VLLM_METAL_GGUF_PATH:-$HOME/.cache/qmd/models/Qwen3-Embedding-0.6B-Q8_0.gguf}"
 EMBEDDING_HF_DIR="${OAMB_VLLM_METAL_HF_DIR:-$HOME/.cache/oamb-vllm-metal/Qwen3-Embedding-0.6B-hf}"
+readonly EMBEDDING_CONTEXT_LENGTH_TOKENS=32768
+readonly EMBEDDING_MEMORY_FRACTION=0.10
 
 if [[ ! -x "$VLLM_METAL_BIN" ]]; then
   echo "vLLM-Metal executable not found: $VLLM_METAL_BIN" >&2
@@ -30,14 +32,14 @@ fi
 
 exec env \
   VLLM_METAL_BUILD_FROM_SOURCE=1 \
-  VLLM_METAL_MEMORY_FRACTION=0.06 \
+  VLLM_METAL_MEMORY_FRACTION="$EMBEDDING_MEMORY_FRACTION" \
   "$VLLM_METAL_BIN" serve "$EMBEDDING_GGUF_PATH" \
   --tokenizer "$EMBEDDING_HF_DIR" \
   --hf-config-path "$EMBEDDING_HF_DIR" \
   --hf-overrides '{"matryoshka_dimensions":[1024]}' \
   --runner pooling \
-  --max-model-len 8192 \
-  --max-num-batched-tokens 8192 \
+  --max-model-len "$EMBEDDING_CONTEXT_LENGTH_TOKENS" \
+  --max-num-batched-tokens "$EMBEDDING_CONTEXT_LENGTH_TOKENS" \
   --additional-config '{"turboquant":true,"k_quant":"q8_0","v_quant":"q8_0"}' \
   --host 127.0.0.1 \
   --port 18000 \
