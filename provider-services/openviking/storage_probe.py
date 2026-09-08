@@ -17,7 +17,6 @@ EXPECTED_OPENVIKING_VERSION = "0.4.16"
 EXPECTED_COLLECTION = "context"
 EXPECTED_DIMENSION = 1024
 MAX_METADATA_BYTES = 1024 * 1024
-MAX_STORAGE_ENTRIES = 10_000
 
 
 class ProbeError(RuntimeError):
@@ -49,8 +48,6 @@ def _storage_entries(root: Path) -> list[Path]:
             if path.is_symlink():
                 raise ProbeError(f"symlink is forbidden in storage tree: {path.name}")
             entries.append(path)
-            if len(entries) > MAX_STORAGE_ENTRIES:
-                raise ProbeError("storage tree exceeds probe entry limit")
     return entries
 
 
