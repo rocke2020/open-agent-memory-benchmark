@@ -34,7 +34,7 @@ from oamb.contracts.specifications import (
     run_preflight_record_hash,
 )
 from oamb.runtime.native_run import NativeRunControl
-from oamb.runtime.resume import ProviderLifecycleBridge
+from oamb.runtime.provider_lifecycle import ProviderLifecycleBridge
 
 NOW = datetime(2026, 8, 30, 8, 0, tzinfo=UTC)
 

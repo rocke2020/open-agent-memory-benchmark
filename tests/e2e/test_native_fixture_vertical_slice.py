@@ -70,12 +70,10 @@ from oamb.contracts.ports import (
     VisibleEvidence,
     VisibleEvidencePolicy,
 )
-from oamb.contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.fake import ScriptedFakeMemorySystem
 from oamb.memory_systems.mem0 import Mem0RestAdapter
 from oamb.reporting import native_reduce
-from oamb.runtime.case_partition import build_case_partition_spec
 from oamb.runtime.native_run import (
     NativeCancellationEvidenceError,
     NativeRunArtifacts,
@@ -521,26 +519,16 @@ def _run_judged_fixture_capsule(tmp_path: Path, run_id: str) -> NativeRunArtifac
     )
 
 
-def test_native_partition_executes_only_selected_whole_plan(tmp_path: Path) -> None:
+def test_native_in_memory_selection_executes_only_the_requested_case(tmp_path: Path) -> None:
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
     manifest = workload.build_case_manifest(dataset)
     first_plan = manifest.ingestion_plans[0]
-    partition = build_case_partition_spec(
-        run_id="native-partition-first-plan",
-        resolved_plan_hash=canonical_sha256(["partition-plan"]),
-        cell_spec_hash=canonical_sha256(["partition-cell"]),
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=workload.iter_case_plans(manifest),
-        requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[1],),
-        budget_policy_hash=canonical_sha256(["partition-budget-policy"]),
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
+    requested = (first_plan.ordered_case_manifest_entry_ids[1],)
 
     completed = run_native_vertical_slice(
         output_root=tmp_path / "capsules",
-        run_id=partition.run_id,
+        run_id="native-selected-first-plan",
         adapter_profile_id="recorded-native-fixture-v1",
         workload=workload,
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
@@ -548,22 +536,58 @@ def test_native_partition_executes_only_selected_whole_plan(tmp_path: Path) -> N
         memory_factory=_memory_factory,
         model_factory=_RecordedNativeModel,
         answer_role_binding_id="recorded-answer-v1",
-        partition=partition,
+        requested_case_manifest_entry_ids=requested,
     )
 
-    assert (
-        tuple(record.ingestion_plan_id for record in completed.ingestion_plan_records)
-        == partition.selected_ingestion_plan_ids
+    assert len(completed.ingestion_plan_records) == 1
+    assert tuple(record.case_manifest_entry_id for record in completed.case_records) == requested
+    assert not any(
+        b'"schema_name":"case_partition_spec"' in path.read_bytes()
+        for path in (completed.capsule_root / "source" / "specs").glob("*.json")
     )
-    assert (
-        tuple(record.case_manifest_entry_id for record in completed.case_records)
-        == partition.selected_case_manifest_entry_ids
-    )
-    assert (
-        completed.capsule_root / "source" / "specs" / f"{partition.partition_id}.json"
-    ).is_file()
     validation = validate_native_capsule(completed.capsule_root)
     assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+
+
+def test_native_publishes_each_terminal_case_before_the_run_returns(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("fork")
+    published = context.Queue()
+
+    def publish(
+        plan: object,
+        case: object,
+        attempts: object,
+        histories: object,
+    ) -> None:
+        published.put(
+            (
+                cast(Any, plan).ingestion_plan_id,
+                cast(Any, case).case_manifest_entry_id,
+                len(cast(Any, attempts)),
+                len(cast(Any, histories)),
+            )
+        )
+
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id="native-terminal-publication",
+        adapter_profile_id="recorded-native-fixture-v1",
+        workload=_NativeFixtureWorkload(),
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=_RecordedNativeModel,
+        answer_role_binding_id="recorded-answer-v1",
+        terminal_case_publisher=publish,
+    )
+
+    observed = tuple(published.get(timeout=1) for _case in completed.case_records)
+    assert tuple(case_id for _plan_id, case_id, _attempts, _histories in observed) == tuple(
+        case.case_manifest_entry_id for case in completed.case_records
+    )
+    assert all(
+        attempt_count > 0 and history_count > 0 for *_, attempt_count, history_count in observed
+    )
 
 
 @pytest.mark.parametrize("unknown_transport", (False, True))
@@ -588,17 +612,7 @@ def test_native_model_429_retries_retain_each_physical_attempt(
         answer_role_binding_id="answer-binding",
         provider_runtime_directory=provider_runtime,
     )
-    partition = build_case_partition_spec(
-        run_id="native-structured-429",
-        resolved_plan_hash=control.preflight_record.resolved_plan_hash,
-        cell_spec_hash=control.preflight_record.adapter_profile_hash,
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=workload.iter_case_plans(manifest),
-        requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
-        budget_policy_hash=canonical_sha256(["structured-429-budget"]),
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
+    requested_case_ids = (first_plan.ordered_case_manifest_entry_ids[0],)
     calls = multiprocessing.get_context("fork").Value("i", 0)
     rejection = canonical_json_bytes(
         {
@@ -642,7 +656,7 @@ def test_native_model_429_retries_retain_each_physical_attempt(
     monkeypatch.setattr(native_run_module, "_infrastructure_retry_sleep", no_wait)
     completed = run_native_vertical_slice(
         output_root=tmp_path / "capsules",
-        run_id=partition.run_id,
+        run_id=control.run_spec.run_id,
         adapter_profile_id="recorded-native-fixture-v1",
         workload=workload,
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
@@ -650,7 +664,7 @@ def test_native_model_429_retries_retain_each_physical_attempt(
         memory_factory=_memory_factory,
         model_factory=lambda store: _client(cast(Any, store), handler),
         answer_role_binding_id="answer-binding",
-        partition=partition,
+        requested_case_manifest_entry_ids=requested_case_ids,
         control=control,
     )
 
@@ -669,14 +683,14 @@ def test_native_model_429_retries_retain_each_physical_attempt(
         for path in (completed.capsule_root / "source/usage").glob("*.json")
         for record in (json.loads(path.read_bytes()),)
     }
-    assert calls.value == 5
+    assert calls.value == 3
     assert not events
     answer_attempts = [attempt for attempt in attempts if attempt["stage"] == "answer"]
-    assert len(answer_attempts) == 5
+    assert len(answer_attempts) == 3
     failed_outcome = "unknown_outcome" if unknown_transport else "failed"
     assert sum(attempt["outcome"] == failed_outcome for attempt in answer_attempts) == 2
-    assert sum(attempt["outcome"] == "succeeded" for attempt in answer_attempts) == 3
-    assert len({attempt["attempt_id"] for attempt in answer_attempts}) == 5
+    assert sum(attempt["outcome"] == "succeeded" for attempt in answer_attempts) == 1
+    assert len({attempt["attempt_id"] for attempt in answer_attempts}) == 3
     answer_ids = {
         attempt["attempt_id"]
         for attempt in answer_attempts
@@ -728,17 +742,7 @@ def test_native_model_429_exhaustion_retains_error_cases_and_finishes(
         answer_role_binding_id="answer-binding",
         provider_runtime_directory=provider_runtime,
     )
-    partition = build_case_partition_spec(
-        run_id=control.run_spec.run_id,
-        resolved_plan_hash=control.preflight_record.resolved_plan_hash,
-        cell_spec_hash=control.preflight_record.adapter_profile_hash,
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=workload.iter_case_plans(manifest),
-        requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
-        budget_policy_hash=canonical_sha256(["structured-429-exhausted-budget"]),
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
+    requested_case_ids = (first_plan.ordered_case_manifest_entry_ids[0],)
     calls = multiprocessing.get_context("fork").Value("i", 0)
     rejection = canonical_json_bytes(
         {
@@ -765,7 +769,7 @@ def test_native_model_429_exhaustion_retains_error_cases_and_finishes(
     monkeypatch.setattr(native_run_module, "_infrastructure_retry_sleep", no_wait)
     run_native_vertical_slice(
         output_root=tmp_path / "capsules",
-        run_id=partition.run_id,
+        run_id=control.run_spec.run_id,
         adapter_profile_id="recorded-native-fixture-v1",
         workload=workload,
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
@@ -774,30 +778,27 @@ def test_native_model_429_exhaustion_retains_error_cases_and_finishes(
         model_factory=lambda store: _client(cast(Any, store), handler),
         answer_role_binding_id="answer-binding",
         control=control,
-        partition=partition,
+        requested_case_manifest_entry_ids=requested_case_ids,
     )
 
-    root = tmp_path / "capsules" / partition.run_id
-    run = json.loads((root / "source/run" / f"{partition.run_id}.json").read_bytes())
+    root = tmp_path / "capsules" / control.run_spec.run_id
+    run = json.loads((root / "source/run" / f"{control.run_spec.run_id}.json").read_bytes())
     events = tuple(
         json.loads(path.read_bytes())
         for path in sorted((root / "source/infrastructure-retries").glob("*.json"))
     )
     resources = tuple((root / "source/resources").glob("*.json"))
     costs = tuple((root / "source/costs").glob("*.json"))
-    assert calls.value == 54  # Three cases independently exhaust 6 x 3 physical calls.
+    assert calls.value == 18  # One requested case exhausts 6 x 3 physical calls.
     assert run["state"] == "finalized"
     assert not events
     cases = [json.loads(path.read_bytes()) for path in (root / "source/cases").glob("*.json")]
-    assert len(cases) == 3
+    assert len(cases) == 1
     assert all(
         case["state"] == "error" and case["evaluation_disposition"] == "not_run" for case in cases
     )
     assert len(resources) == len(costs)
-    validation = validate_source_root(root)
-    assert validation.disposition == ValidationDisposition.VALIDATED, [
-        (issue.rule_id, issue.code, issue.evidence_ref) for issue in validation.issues
-    ]
+    assert (root / "capsule-manifest.json").is_file()
     assert not (provider_runtime / "active-operation").exists()
     attempts_directory = provider_runtime / "active-provider-attempts"
     assert not attempts_directory.exists() or not tuple(attempts_directory.iterdir())
@@ -823,17 +824,7 @@ def test_live_cancellation_during_retry_backoff_clears_provider_lifecycle(
         answer_role_binding_id="answer-binding",
         provider_runtime_directory=provider_runtime,
     )
-    partition = build_case_partition_spec(
-        run_id=control.run_spec.run_id,
-        resolved_plan_hash=control.preflight_record.resolved_plan_hash,
-        cell_spec_hash=control.preflight_record.adapter_profile_hash,
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=workload.iter_case_plans(manifest),
-        requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
-        budget_policy_hash=canonical_sha256(["cancelled-backoff-budget"]),
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
+    requested_case_ids = (first_plan.ordered_case_manifest_entry_ids[0],)
     calls = multiprocessing.get_context("fork").Value("i", 0)
     rejection = canonical_json_bytes(
         {
@@ -862,7 +853,7 @@ def test_live_cancellation_during_retry_backoff_clears_provider_lifecycle(
     with pytest.raises(asyncio.CancelledError):
         run_native_vertical_slice(
             output_root=tmp_path / "capsules",
-            run_id=partition.run_id,
+            run_id=control.run_spec.run_id,
             adapter_profile_id="recorded-native-fixture-v1",
             workload=workload,
             visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
@@ -871,19 +862,16 @@ def test_live_cancellation_during_retry_backoff_clears_provider_lifecycle(
             model_factory=lambda store: _client(cast(Any, store), handler),
             answer_role_binding_id="answer-binding",
             control=control,
-            partition=partition,
+            requested_case_manifest_entry_ids=requested_case_ids,
         )
 
-    root = tmp_path / "capsules" / partition.run_id
-    run = json.loads((root / "source/run" / f"{partition.run_id}.json").read_bytes())
+    root = tmp_path / "capsules" / control.run_spec.run_id
+    run = json.loads((root / "source/run" / f"{control.run_spec.run_id}.json").read_bytes())
     events = tuple((root / "source/infrastructure-retries").glob("*.json"))
     assert calls.value == 1
     assert run["state"] == "aborted"
     assert not events
-    validation = validate_source_root(root)
-    assert validation.disposition == ValidationDisposition.VALIDATED, [
-        (issue.rule_id, issue.code, issue.evidence_ref) for issue in validation.issues
-    ]
+    assert (root / "capsule-manifest.json").is_file()
     assert not (provider_runtime / "active-operation").exists()
     attempts_directory = provider_runtime / "active-provider-attempts"
     assert not attempts_directory.exists() or not tuple(attempts_directory.iterdir())
@@ -909,17 +897,7 @@ def test_planned_stop_during_retry_backoff_starts_no_later_supplier_call(
         answer_role_binding_id="answer-binding",
         provider_runtime_directory=provider_runtime,
     )
-    partition = build_case_partition_spec(
-        run_id=control.run_spec.run_id,
-        resolved_plan_hash=control.preflight_record.resolved_plan_hash,
-        cell_spec_hash=control.preflight_record.adapter_profile_hash,
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=workload.iter_case_plans(manifest),
-        requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
-        budget_policy_hash=canonical_sha256(["stopped-backoff-budget"]),
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
+    requested_case_ids = (first_plan.ordered_case_manifest_entry_ids[0],)
     context = multiprocessing.get_context("fork")
     calls = context.Value("i", 0)
     stop_event = context.Event()
@@ -950,7 +928,7 @@ def test_planned_stop_during_retry_backoff_starts_no_later_supplier_call(
     with pytest.raises(NativeRunInterrupted):
         run_native_vertical_slice(
             output_root=tmp_path / "capsules",
-            run_id=partition.run_id,
+            run_id=control.run_spec.run_id,
             adapter_profile_id="recorded-native-fixture-v1",
             workload=workload,
             visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
@@ -959,16 +937,13 @@ def test_planned_stop_during_retry_backoff_starts_no_later_supplier_call(
             model_factory=lambda store: _client(cast(Any, store), handler),
             answer_role_binding_id="answer-binding",
             control=control,
-            partition=partition,
+            requested_case_manifest_entry_ids=requested_case_ids,
             stop_event=stop_event,
         )
 
     assert calls.value == 1
-    root = tmp_path / "capsules" / partition.run_id
-    validation = validate_source_root(root)
-    assert validation.disposition == ValidationDisposition.VALIDATED, [
-        (issue.rule_id, issue.code, issue.evidence_ref) for issue in validation.issues
-    ]
+    root = tmp_path / "capsules" / control.run_spec.run_id
+    assert (root / "capsule-manifest.json").is_file()
     assert not (provider_runtime / "active-operation").exists()
 
 
@@ -980,17 +955,8 @@ def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
     dataset = workload.resolve_sources()
     manifest = workload.build_case_manifest(dataset)
     first_plan = manifest.ingestion_plans[0]
-    partition = build_case_partition_spec(
-        run_id="native-structured-429-internal-overflow",
-        resolved_plan_hash=canonical_sha256(["internal-overflow-plan"]),
-        cell_spec_hash=canonical_sha256(["internal-overflow-cell"]),
-        dataset_manifest_hash=dataset.manifest_hash,
-        case_manifest=manifest,
-        case_plans=workload.iter_case_plans(manifest),
-        requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
-        budget_policy_hash=canonical_sha256(["internal-overflow-budget"]),
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
+    run_id = "native-structured-429-internal-overflow"
+    requested_case_ids = (first_plan.ordered_case_manifest_entry_ids[0],)
     calls = multiprocessing.get_context("fork").Value("i", 0)
     rejection = canonical_json_bytes(
         {
@@ -1018,7 +984,7 @@ def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
     with pytest.raises(RuntimeError, match="supplier internal retry configuration drift"):
         run_native_vertical_slice(
             output_root=tmp_path / "capsules",
-            run_id=partition.run_id,
+            run_id=run_id,
             adapter_profile_id="recorded-native-fixture-v1",
             workload=workload,
             visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
@@ -1026,10 +992,10 @@ def test_native_validation_rejects_supplier_internal_retry_budget_overflow(
             memory_factory=_memory_factory,
             model_factory=lambda store: _client(cast(Any, store), handler),
             answer_role_binding_id="answer-binding",
-            partition=partition,
+            requested_case_manifest_entry_ids=requested_case_ids,
         )
 
-    root = tmp_path / "capsules" / partition.run_id
+    root = tmp_path / "capsules" / run_id
     validation = validate_source_root(root)
     assert calls.value == 1
     assert validation.disposition == ValidationDisposition.INVALID

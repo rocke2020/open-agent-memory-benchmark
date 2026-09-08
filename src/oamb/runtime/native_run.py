@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -124,7 +124,6 @@ from oamb.contracts.specifications import (
     BudgetScopeKindV2,
     BudgetScopeKindV3,
     BudgetSpecV4,
-    CasePartitionSpec,
     DispatchBudgetOwnerKind,
     DispatchBudgetRoute,
     MemorySystemRuntimeBindingV2,
@@ -151,19 +150,17 @@ from oamb.runtime.budget import (
 from oamb.runtime.budget import (
     BudgetOwnerAllocation as RuntimeBudgetOwnerAllocation,
 )
-from oamb.runtime.case_partition import select_partition_execution
+from oamb.runtime.case_selection import select_case_execution
 from oamb.runtime.infrastructure_retry import (
     InfrastructureBackoffCancelled,
     InfrastructureRetryExhausted,
 )
 from oamb.runtime.memory_query import execute_read_only_retrieval
 from oamb.runtime.model_completion_retry import execute_model_completion_retry
-from oamb.runtime.native_continuation import (
-    ImportedAttemptAccounting,
-    NativeContinuation,
-    PartialPlanContinuation,
+from oamb.runtime.provider_lifecycle import (
+    ProviderLifecycleBridge,
+    ProviderLifecycleError,
 )
-from oamb.runtime.resume import ProviderLifecycleBridge, ResumeRejectedError
 from oamb.runtime.source_records import seal_source_contract
 
 NATIVE_FIXTURE_STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -175,6 +172,15 @@ NATIVE_OWNER_NAME = "native-run-owner.json"
 NATIVE_OWNER_ID = "native-fixture-owner-v1"
 
 NativeIngestionPlanRecord: TypeAlias = IngestionPlanRecordV2 | IngestionPlanRecordV3
+TerminalCasePublisher: TypeAlias = Callable[
+    [
+        NativeIngestionPlanRecord,
+        CaseRecordV3,
+        Mapping[str, AttemptRecordV2 | AttemptRecordV4],
+        tuple[HistoryAttemptRecord, ...],
+    ],
+    None,
+]
 _LiveDispatchResult = TypeVar("_LiveDispatchResult")
 
 
@@ -580,13 +586,11 @@ class _NativeRunRequest:
     judge_role_binding_id: str | None
     close_timeout_seconds: float
     control: NativeRunControl | None
-    continuation: NativeContinuation | None = None
     lease: RunLeaseRecord | None = None
     provider_lifecycle: ProviderLifecycleBridge | None = None
-    partition: CasePartitionSpec | None = None
+    requested_case_manifest_entry_ids: tuple[str, ...] = ()
+    terminal_case_publisher: TerminalCasePublisher | None = None
     stop_event: _NativeStopSignal | None = None
-    recovery_parts: tuple[Path, ...] = ()
-    recovery_execution_configuration_family_hash: str | None = None
 
 
 class _NativeStopSignal(Protocol):
@@ -685,17 +689,6 @@ class _LiveDispatchArtifacts:
     usage_record_ids: tuple[str, ...]
     resource_record_id: str
     cost_record_id: str
-
-
-def _imported_dispatch_artifacts(
-    accounting: ImportedAttemptAccounting,
-) -> _LiveDispatchArtifacts:
-    return _LiveDispatchArtifacts(
-        attempt_id=accounting.attempt_id,
-        usage_record_ids=accounting.usage_record_ids,
-        resource_record_id=accounting.resource_record_id,
-        cost_record_id=accounting.cost_record_id,
-    )
 
 
 async def _execute_live_memory_dispatch(
@@ -883,12 +876,7 @@ def _new_execution_state(
         owner_id=control.owner_id if control is not None else NATIVE_OWNER_ID,
         budget_id=(control.budget.budget_id if control is not None else "native-fixture-budget-v1"),
         budget_scope_id=control.run_spec.run_id if control is not None else None,
-        started_at=(
-            request.continuation.initialized.aborted_run.started_at
-            if request.continuation is not None
-            and request.continuation.initialized.aborted_run.started_at is not None
-            else lease.acquired_at
-        ),
+        started_at=lease.acquired_at,
         live_timing=control is not None,
         monotonic_started=control.monotonic_clock() if control is not None else None,
         wall_clock=control.wall_clock if control is not None else None,
@@ -917,11 +905,9 @@ def run_native_vertical_slice(
     judge_role_binding_id: str | None = None,
     close_timeout_seconds: float = NATIVE_CLOSE_TIMEOUT_SECONDS,
     control: NativeRunControl | None = None,
-    continuation: NativeContinuation | None = None,
-    partition: CasePartitionSpec | None = None,
+    requested_case_manifest_entry_ids: tuple[str, ...] = (),
+    terminal_case_publisher: TerminalCasePublisher | None = None,
     stop_event: _NativeStopSignal | None = None,
-    recovery_parts: tuple[Path, ...] = (),
-    recovery_execution_configuration_family_hash: str | None = None,
 ) -> NativeRunArtifacts:
     """Compose one deterministic native capsule without selecting any live transport."""
 
@@ -943,31 +929,7 @@ def run_native_vertical_slice(
             judge_role_binding_id not in control.preflight_record.role_binding_ids
         ):
             raise ValueError("live native judge role is outside the preflight inventory")
-    if partition is not None and partition.run_id != run_id:
-        raise ValueError("case partition run ID does not match the requested run")
-    if recovery_parts and (partition is None or continuation is not None):
-        raise ValueError("history recovery requires a fresh case-partition run")
-    if bool(recovery_parts) != bool(recovery_execution_configuration_family_hash):
-        raise ValueError(
-            "history recovery requires the current execution configuration family hash"
-        )
-    if recovery_execution_configuration_family_hash is not None and (
-        len(recovery_execution_configuration_family_hash) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in recovery_execution_configuration_family_hash
-        )
-    ):
-        raise ValueError("history recovery execution configuration family hash is invalid")
     capsule_root = Path(output_root) / run_id
-    if continuation is not None:
-        if control is None:
-            raise ValueError("native continuation requires live control")
-        if (
-            continuation.initialized.run_id != run_id
-            or continuation.initialized.target_root != capsule_root.absolute()
-        ):
-            raise ValueError("native continuation target differs from the requested run")
     _acquire_native_run_owner(capsule_root, run_id, control=control)
     lease: RunLeaseRecord | None = None
     lifecycle: ProviderLifecycleBridge | None = None
@@ -982,7 +944,6 @@ def run_native_vertical_slice(
             adapter_profile_id,
             control=control,
             acquired_at=observed_at,
-            previous=(continuation.previous_lease if continuation is not None else None),
         )
         store = artifact_store_factory(capsule_root)
         lifecycle = ProviderLifecycleBridge(
@@ -1021,13 +982,11 @@ def run_native_vertical_slice(
         judge_role_binding_id=judge_role_binding_id,
         close_timeout_seconds=close_timeout_seconds,
         control=control,
-        continuation=continuation,
         lease=lease,
         provider_lifecycle=lifecycle,
-        partition=partition,
+        requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
+        terminal_case_publisher=terminal_case_publisher,
         stop_event=stop_event,
-        recovery_parts=recovery_parts,
-        recovery_execution_configuration_family_hash=(recovery_execution_configuration_family_hash),
     )
     try:
         completed = _run_native_supervised(request)
@@ -1044,7 +1003,7 @@ def run_native_vertical_slice(
                         run_spec_hash=live_run_spec_hash,
                     ),
                 )
-            except ResumeRejectedError as release_error:
+            except ProviderLifecycleError as release_error:
                 if "active provider attempt" not in str(release_error):
                     raise
                 lifecycle.release_supervised_aborted_run(
@@ -1281,18 +1240,16 @@ async def _run_native_with_cell_deadline(
             judge_role_binding_id=request.judge_role_binding_id,
             close_timeout_seconds=request.close_timeout_seconds,
             control=request.control,
-            continuation=getattr(request, "continuation", None),
             lease=request.lease,
             provider_lifecycle=request.provider_lifecycle,
             lifecycle_sender=sender,
-            partition=getattr(request, "partition", None),
-            stop_event=getattr(request, "stop_event", None),
-            recovery_parts=getattr(request, "recovery_parts", ()),
-            recovery_execution_configuration_family_hash=getattr(
+            requested_case_manifest_entry_ids=getattr(
                 request,
-                "recovery_execution_configuration_family_hash",
-                None,
+                "requested_case_manifest_entry_ids",
+                (),
             ),
+            terminal_case_publisher=getattr(request, "terminal_case_publisher", None),
+            stop_event=getattr(request, "stop_event", None),
         )
 
     if request.control is None:
@@ -1630,14 +1587,12 @@ async def _run_native_vertical_slice(
     judge_role_binding_id: str | None,
     close_timeout_seconds: float,
     control: NativeRunControl | None = None,
-    continuation: NativeContinuation | None = None,
     lease: RunLeaseRecord | None = None,
     provider_lifecycle: ProviderLifecycleBridge | None = None,
     lifecycle_sender: Connection | None = None,
-    partition: CasePartitionSpec | None = None,
+    requested_case_manifest_entry_ids: tuple[str, ...] = (),
+    terminal_case_publisher: TerminalCasePublisher | None = None,
     stop_event: _NativeStopSignal | None = None,
-    recovery_parts: tuple[Path, ...] = (),
-    recovery_execution_configuration_family_hash: str | None = None,
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
     store = artifact_store_factory(capsule_root)
@@ -1645,16 +1600,15 @@ async def _run_native_vertical_slice(
     case_manifest = workload.build_case_manifest(dataset_manifest)
     ingestion_plans = workload.iter_ingestion_plans(case_manifest)
     case_plans = workload.iter_case_plans(case_manifest)
-    if partition is not None:
-        if partition.run_id != run_id:
-            raise ValueError("case partition run ID does not match the native run")
-        ingestion_plans, case_plans = select_partition_execution(
-            partition=partition,
-            dataset_manifest_hash=dataset_manifest.manifest_hash,
+    if requested_case_manifest_entry_ids:
+        selected = select_case_execution(
             case_manifest=case_manifest,
             ingestion_plans=ingestion_plans,
             case_plans=case_plans,
+            requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
         )
+        ingestion_plans = selected.ingestion_plans
+        case_plans = selected.case_plans
     if not ingestion_plans or not case_plans:
         raise ValueError("native capsule requires at least one ingestion plan and case")
     request_identity = _NativeRunRequest(
@@ -1673,7 +1627,8 @@ async def _run_native_vertical_slice(
         control=control,
         lease=lease,
         provider_lifecycle=provider_lifecycle,
-        partition=partition,
+        requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
+        terminal_case_publisher=terminal_case_publisher,
         stop_event=stop_event,
     )
     lease = lease or _native_run_lease(run_id, adapter_profile_id, control=control)
@@ -1703,8 +1658,6 @@ async def _run_native_vertical_slice(
     case_occurrence_ids: tuple[str, ...] = ()
     _seal(state, "specs", "dataset-manifest", dataset_manifest)
     _seal(state, "specs", "case-manifest", case_manifest)
-    if partition is not None:
-        _seal(state, "specs", partition.partition_id, partition)
     if control is not None:
         _require_live_manifest_closure(control, dataset_manifest, case_manifest)
         _seal_live_control(state, control)
@@ -1718,29 +1671,6 @@ async def _run_native_vertical_slice(
             )
         )
     try:
-        if recovery_parts:
-            from oamb.artifacts.history_recovery import prepare_history_recovery
-
-            if partition is None or continuation is not None:
-                raise ValueError("history recovery requires a fresh case-partition run")
-            if recovery_execution_configuration_family_hash is None:
-                raise ValueError(
-                    "history recovery requires the current execution configuration family hash"
-                )
-            carry = prepare_history_recovery(
-                part_roots=recovery_parts,
-                capsule_root=capsule_root,
-                run_id=run_id,
-                selected_ingestion_plan_ids=tuple(
-                    plan.ingestion_plan_id for plan in ingestion_plans
-                ),
-                max_retries_per_operation=control.max_retries_per_operation
-                if control
-                else len(INFRASTRUCTURE_RETRY_BACKOFF_SECONDS),
-                memory_system_id=control.run_spec.memory_system_id if control else None,
-                execution_configuration_family_hash=(recovery_execution_configuration_family_hash),
-            )
-            _seal(state, "history-carries", carry.carry_record_id, carry)
         memory = memory_factory(store, ingestion_plans)
         model_store: ArtifactStorePort = store
         if state.pending_model_usage is not None:
@@ -1758,22 +1688,19 @@ async def _run_native_vertical_slice(
             runtime_fingerprint = canonical_sha256(
                 ["oamb-live-runtime-resolve-v1", run_id, adapter_profile_id]
             )
-            if continuation is None:
-                runtime_result, runtime_artifacts = await _execute_live_memory_dispatch(
-                    state,
-                    parent_kind="ingestion_plan",
-                    parent_id=runtime_parent_id,
-                    stage="runtime_resolve",
-                    ordinal=1,
-                    request_fingerprint=runtime_fingerprint,
-                    role_binding_id=adapter_profile_id,
-                    call=memory.resolve,
-                    raw_reference=lambda _result: None,
-                )
-                runtime = runtime_result
-                setup_artifacts = (runtime_artifacts,)
-            else:
-                runtime = await memory.resolve()
+            runtime_result, runtime_artifacts = await _execute_live_memory_dispatch(
+                state,
+                parent_kind="ingestion_plan",
+                parent_id=runtime_parent_id,
+                stage="runtime_resolve",
+                ordinal=1,
+                request_fingerprint=runtime_fingerprint,
+                role_binding_id=adapter_profile_id,
+                call=memory.resolve,
+                raw_reference=lambda _result: None,
+            )
+            runtime = runtime_result
+            setup_artifacts = (runtime_artifacts,)
         else:
             runtime = await memory.resolve()
         capabilities = await memory.capabilities()
@@ -1860,7 +1787,7 @@ async def _run_native_vertical_slice(
             answer_role_binding_id=answer_role_binding_id,
             judge_role_binding_id=judge_role_binding_id,
             setup_artifacts=setup_artifacts,
-            continuation=continuation,
+            terminal_case_publisher=terminal_case_publisher,
         )
     except BaseException as exc:
         execution_error = exc
@@ -2049,7 +1976,7 @@ async def _execute_history_question_pipeline(
     answer_role_binding_id: str,
     judge_role_binding_id: str | None,
     setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
-    continuation: NativeContinuation | None = None,
+    terminal_case_publisher: TerminalCasePublisher | None = None,
 ) -> tuple[tuple[NativeIngestionPlanRecord, ...], tuple[CaseRecordV3, ...]]:
     history_limit = state.control.max_parallel_history_ingestions if state.control else 1
     question_limit = state.control.max_parallel_questions if state.control else 1
@@ -2058,23 +1985,6 @@ async def _execute_history_question_pipeline(
     admission_stopped = False
     plan_records: list[NativeIngestionPlanRecord | None] = [None] * len(plans)
     case_records: list[CaseRecordV3 | None] = [None] * len(case_plans)
-    completed_plan_ids: set[str] = set()
-    if continuation is not None:
-        plan_index_by_id = {plan.ingestion_plan_id: index for index, plan in enumerate(plans)}
-        case_index_by_id = {
-            case.case_manifest_entry_id: index for index, case in enumerate(case_plans)
-        }
-        for plan_record in continuation.completed_plan_records:
-            index = plan_index_by_id.get(plan_record.ingestion_plan_id)
-            if index is None:
-                raise ValueError("continued ingestion plan is outside the frozen workload")
-            plan_records[index] = plan_record
-            completed_plan_ids.add(plan_record.ingestion_plan_id)
-        for case_record in continuation.completed_case_records:
-            index = case_index_by_id.get(case_record.case_manifest_entry_id)
-            if index is None:
-                raise ValueError("continued case is outside the frozen workload")
-            case_records[index] = case_record
     case_by_id = {
         case.case_manifest_entry_id: (index, case) for index, case in enumerate(case_plans)
     }
@@ -2118,6 +2028,7 @@ async def _execute_history_question_pipeline(
     async def execute_question(
         *,
         plan: IngestionPlan,
+        plan_record: NativeIngestionPlanRecord,
         case_index: int,
         case_plan: CasePlan,
         scope: ScopeReceipt,
@@ -2148,6 +2059,13 @@ async def _execute_history_question_pipeline(
         if result is None:
             raise AssertionError("admitted question did not produce a result")
         case_records[case_index] = result
+        if terminal_case_publisher is not None:
+            terminal_case_publisher(
+                plan_record,
+                result,
+                dict(state.operation_records),
+                tuple(state.history_records),
+            )
 
     async def execute_history(plan_index: int, plan: IngestionPlan) -> None:
         async def operation() -> tuple[NativeIngestionPlanRecord, ScopeReceipt]:
@@ -2160,12 +2078,6 @@ async def _execute_history_question_pipeline(
                 runtime_binding_hash=runtime_binding_hash,
                 adapter_profile_id=adapter_profile_id,
                 setup_artifacts=setup_artifacts if plan_index == 0 else (),
-                continuation=(
-                    continuation.partial_plan
-                    if continuation is not None
-                    and continuation.partial_plan.ingestion_plan_id == plan.ingestion_plan_id
-                    else None
-                ),
             )
             if len(records) != 1 or set(scopes) != {plan.ingestion_plan_id}:
                 raise AssertionError("admitted history did not close one record and scope")
@@ -2194,6 +2106,7 @@ async def _execute_history_question_pipeline(
             tuple(
                 execute_question(
                     plan=plan,
+                    plan_record=plan_record,
                     case_index=case_index,
                     case_plan=case_plan,
                     scope=scope,
@@ -2204,11 +2117,7 @@ async def _execute_history_question_pipeline(
         _raise_pipeline_errors(question_results)
 
     history_results = await _settle_pipeline_operations(
-        tuple(
-            execute_history(index, plan)
-            for index, plan in enumerate(plans)
-            if plan.ingestion_plan_id not in completed_plan_ids
-        )
+        tuple(execute_history(index, plan) for index, plan in enumerate(plans))
     )
     _raise_pipeline_errors(history_results)
     if _native_stop_requested(state) and (
@@ -2406,11 +2315,8 @@ async def _execute_history(
     runtime_binding_hash: str,
     adapter_profile_id: str,
     setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
-    continuation: PartialPlanContinuation | None = None,
 ) -> tuple[tuple[NativeIngestionPlanRecord, ...], dict[str, ScopeReceipt]]:
     _raise_if_native_stop_requested(state)
-    if continuation is not None:
-        raise ValueError("same-scope batch continuation requires a new complete run")
     started_at = state.timestamp()
     occurrence = ingestion_occurrence_id(state.run_id, memory_system_id, plan.ingestion_plan_id)
     if occurrence in state.history_occurrence_bindings:
@@ -2586,7 +2492,6 @@ async def _execute_ingestion_plans_serial(
     runtime_binding_hash: str,
     adapter_profile_id: str,
     setup_artifacts: tuple[_LiveDispatchArtifacts, ...] = (),
-    continuation: PartialPlanContinuation | None = None,
     history_attempt_ordinal: int = 1,
     execution_run_id: str | None = None,
 ) -> tuple[tuple[NativeIngestionPlanRecord, ...], dict[str, ScopeReceipt]]:
@@ -2609,36 +2514,7 @@ async def _execute_ingestion_plans_serial(
         plan_artifacts: list[_LiveDispatchArtifacts] = list(
             setup_artifacts if plan is plans[0] else ()
         )
-        imported_readiness_references: tuple[RawReferenceHandle, ...] = ()
-        if continuation is not None:
-            if (
-                continuation.ingestion_plan_id != plan.ingestion_plan_id
-                or continuation.ingestion_occurrence_id != occurrence_id
-            ):
-                raise ValueError("native continuation partial plan identity mismatch")
-            adopt = getattr(memory, "adopt_ingestion_scope", None)
-            if adopt is None:
-                raise ValueError("native continuation adapter cannot adopt an ingestion scope")
-            adopted_scope = await adopt(
-                scope_request,
-                completed_session_task_ids=tuple(
-                    item.task_id for item in continuation.completed_dispatches
-                ),
-                failed_session_task_id=continuation.failed_task_id,
-            )
-            if (
-                adopted_scope.ingestion_occurrence_id != continuation.scope.ingestion_occurrence_id
-                or adopted_scope.scope_id != continuation.scope.scope_id
-            ):
-                raise ValueError("native continuation adopted the wrong scope")
-            scope = continuation.scope
-            plan_artifacts.append(_imported_dispatch_artifacts(continuation.scope_accounting))
-            imported_readiness_references = tuple(
-                reference
-                for item in continuation.completed_dispatches
-                for reference in item.evidence_references
-            )
-        elif state.control is not None:
+        if state.control is not None:
 
             async def allocate_scope(
                 request: ScopeAllocationRequest = scope_request,
@@ -2683,28 +2559,13 @@ async def _execute_ingestion_plans_serial(
         if dispatched_sources != expected_sources:
             raise ValueError("native ingestion dispatches changed source order")
 
-        imported_dispatches = continuation.completed_dispatches if continuation is not None else ()
-        for imported, dispatch in zip(imported_dispatches, dispatches, strict=False):
-            if (
-                imported.ordinal != dispatch.dispatch_ordinal_1_indexed
-                or imported.receipt.dispatch != dispatch
-            ):
-                raise ValueError("native continuation dispatch prefix differs from the frozen plan")
-        dispatch_receipts = [item.receipt for item in imported_dispatches]
-        dispatch_attempt_ids: list[str] = [item.receipt.attempt_id for item in imported_dispatches]
-        usage_record_ids: list[str] = [
-            usage_id
-            for item in imported_dispatches
-            for usage_id in item.accounting.usage_record_ids
-        ]
-        resource_record_ids: list[str] = [
-            item.accounting.resource_record_id for item in imported_dispatches
-        ]
-        cost_record_ids: list[str] = [
-            item.accounting.cost_record_id for item in imported_dispatches
-        ]
-        all_dispatch_attempt_ids = list(dispatch_attempt_ids)
-        for dispatch in dispatches[len(imported_dispatches) :]:
+        dispatch_receipts: list[IngestionDispatchReceipt] = []
+        dispatch_attempt_ids: list[str] = []
+        usage_record_ids: list[str] = []
+        resource_record_ids: list[str] = []
+        cost_record_ids: list[str] = []
+        all_dispatch_attempt_ids: list[str] = []
+        for dispatch in dispatches:
             receipt, physical_ids = await _execute_ingestion_batch(
                 state,
                 memory=memory,
@@ -2839,12 +2700,7 @@ async def _execute_ingestion_plans_serial(
             rejected_source_unit_ids=ingestion_receipt.rejected_source_unit_ids,
             skipped_source_unit_ids=ingestion_receipt.skipped_source_unit_ids,
             readiness_evidence_refs=tuple(
-                dict.fromkeys(
-                    (
-                        *(item.sha256 for item in imported_readiness_references),
-                        *(item.sha256 for item in readiness.evidence_references),
-                    )
-                )
+                dict.fromkeys(item.sha256 for item in readiness.evidence_references)
             ),
             inventory_raw_ref=projection.inventory.raw_reference.sha256,
             projected_source_unit_ids=projection.inventory.ordered_source_unit_ids,
@@ -3392,7 +3248,6 @@ async def _execute_cases_serial(
                     usage_record_ids=(*query_usage_ids, *answer_result.usage_record_ids),
                     resource_record_ids=(*query_resource_ids, *answer_result.resource_record_ids),
                     cost_record_ids=(*query_cost_ids, *answer_result.cost_record_ids),
-                    answer_receipt=answer_result.receipt,
                 )
             )
             continue
@@ -4881,23 +4736,16 @@ def _native_run_lease(
     *,
     control: NativeRunControl | None = None,
     acquired_at: datetime | None = None,
-    previous: RunLeaseRecord | None = None,
 ) -> RunLeaseRecord:
     provider_project_id = (
         control.preflight_record.provider_project_id if control is not None else "native-fixture"
     )
-    if previous is not None and (
-        previous.run_id != run_id
-        or previous.provider_project_id != provider_project_id
-        or previous.provider_profile_id != adapter_profile_id
-    ):
-        raise ValueError("native continuation lease identity changed")
     candidate = RunLeaseRecord(
         lease_record_hash="0" * 64,
         run_id=run_id,
         provider_project_id=provider_project_id,
         provider_profile_id=adapter_profile_id,
-        lease_epoch=(previous.lease_epoch + 1 if previous is not None else 1),
+        lease_epoch=1,
         owner_id=control.owner_id if control is not None else NATIVE_OWNER_ID,
         host_fingerprint=(
             control.host_fingerprint
@@ -4905,9 +4753,7 @@ def _native_run_lease(
             else canonical_sha256(["oamb-native-fixture-host-v1"])
         ),
         process_id=control.process_id if control is not None else 1,
-        predecessor_lease_record_hash=(
-            previous.lease_record_hash if previous is not None else None
-        ),
+        predecessor_lease_record_hash=None,
         acquired_at=(
             acquired_at
             if acquired_at is not None

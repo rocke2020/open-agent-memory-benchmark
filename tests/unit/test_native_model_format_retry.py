@@ -4,8 +4,17 @@ import json
 from pathlib import Path
 
 from oamb.artifacts.store import ArtifactStore
+from oamb.artifacts.validation.native import validate_native_capsule
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
-from oamb.contracts.ports import ModelReceipt, ModelRequest, RawPayloadSealRequest
+from oamb.contracts.ports import (
+    ModelCallFailure,
+    ModelReceipt,
+    ModelRequest,
+    RawPayloadSealRequest,
+    RawReferenceHandle,
+)
+from oamb.contracts.states import ValidationDisposition
+from oamb.runtime.native_progress import _model_outer_attempt_count
 from oamb.runtime.native_run import NativeRunArtifacts, run_native_vertical_slice
 from oamb.workloads.visible_evidence import LME_VISIBLE_EVIDENCE_POLICY
 from tests.e2e.test_native_fixture_vertical_slice import (
@@ -55,13 +64,15 @@ class CorrectableModel(_RecordedNativeModel):
 
 
 class ExhaustedJudge(CorrectableModel):
+    malformed_output = "perhaps"
+
     async def complete(self, request: ModelRequest) -> ModelReceipt:
         payload = {
             "operation": "model_complete",
             "attempt_id": request.attempt_id,
             "stage": request.stage,
             "prompt": request.messages[0][1],
-            "output_text": "perhaps",
+            "output_text": self.malformed_output,
         }
         raw = self._store.seal_raw(
             RawPayloadSealRequest(
@@ -73,14 +84,51 @@ class ExhaustedJudge(CorrectableModel):
         )
         return ModelReceipt(
             raw_reference=raw,
-            output_text="perhaps",
+            output_text=self.malformed_output,
             usage_reference_ids=(),
             model="fixture-model",
             raw_response_bytes=canonical_json_bytes(payload),
         )
 
 
-def _run(tmp_path: Path, *, judge: type[CorrectableModel] = CorrectableModel) -> NativeRunArtifacts:
+class ExhaustedAnswer(ExhaustedJudge):
+    malformed_output = ""
+
+
+class TransportThenExhaustedJudge(ExhaustedJudge):
+    def __init__(self, store: ArtifactStore) -> None:
+        super().__init__(store)
+        self._failed_messages: set[tuple[tuple[str, str], ...]] = set()
+
+    async def complete(self, request: ModelRequest) -> ModelReceipt:
+        if request.messages not in self._failed_messages:
+            self._failed_messages.add(request.messages)
+            payload = canonical_json_bytes(
+                {
+                    "operation": "model_complete",
+                    "attempt_id": request.attempt_id,
+                    "stage": request.stage,
+                    "failure": "HTTP 500",
+                }
+            )
+            raise ModelCallFailure(
+                "HTTP 500",
+                raw_reference=RawReferenceHandle(canonical_sha256(json.loads(payload))),
+                raw_response_bytes=payload,
+                usage_reference_ids=(),
+                retryable=True,
+                failure_kind="supplier_error",
+                supplier_status_code=500,
+            )
+        return await super().complete(request)
+
+
+def _run(
+    tmp_path: Path,
+    *,
+    answer: type[CorrectableModel] = CorrectableModel,
+    judge: type[CorrectableModel] = CorrectableModel,
+) -> NativeRunArtifacts:
     return run_native_vertical_slice(
         output_root=tmp_path / "capsules",
         run_id="model-format-retry",
@@ -89,7 +137,7 @@ def _run(tmp_path: Path, *, judge: type[CorrectableModel] = CorrectableModel) ->
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
         artifact_store_factory=ArtifactStore,
         memory_factory=_memory_factory,
-        model_factory=CorrectableModel,
+        model_factory=answer,
         answer_role_binding_id="recorded-answer-v1",
         judge_model_factory=judge,
         judge_role_binding_id="fake-judge-v1",
@@ -143,3 +191,33 @@ def test_judge_format_exhaustion_retains_answer_and_continues_other_cases(tmp_pa
     judges = [attempt for attempt in attempts if attempt["stage"] == "judge"]
     assert len(judges) == 6
     assert all(attempt["outcome"] == "failed" for attempt in judges)
+
+
+def test_answer_format_exhaustion_seals_valid_provider_failed_cases(tmp_path: Path) -> None:
+    completed = _run(tmp_path, answer=ExhaustedAnswer)
+
+    assert completed.case_records
+    assert all(record.state == "error" for record in completed.case_records)
+    assert all(record.error_stage == "answer" for record in completed.case_records)
+    assert all(record.evaluation_disposition == "not_run" for record in completed.case_records)
+    assert all(record.answer_raw_ref is None for record in completed.case_records)
+    assert all(record.parsed_answer_sha256 is None for record in completed.case_records)
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+
+
+def test_judge_outer_attempt_count_ignores_recovered_transport_retries(tmp_path: Path) -> None:
+    completed = _run(tmp_path, judge=TransportThenExhaustedJudge)
+    failed = next(record for record in completed.case_records if record.error_stage == "judge")
+    attempts = [
+        json.loads(path.read_bytes())
+        for path in (completed.capsule_root / "source/attempts").glob("*.json")
+    ]
+    judges = tuple(
+        attempt
+        for attempt in attempts
+        if attempt["parent_id"] == failed.case_occurrence_id and attempt["stage"] == "judge"
+    )
+
+    assert len(judges) == 12
+    assert _model_outer_attempt_count(judges, max_transport_retries=2) == 6

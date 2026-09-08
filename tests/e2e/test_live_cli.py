@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -26,41 +28,21 @@ def _lme6_plan() -> ResolvedPlan:
     return build_resolved_plan(load_lme6_configuration())
 
 
-def test_continuation_stops_before_environment_or_provider_preparation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from oamb.config.doctor import resolved_plan_bytes
+def _hold_full_resume_lock(path: str, ready: object, release: object) -> None:
+    from oamb.runtime.full_progress import acquire_full_resume_lock
 
-    resolved_plan = tmp_path / "resolved-plan.json"
-    resolved_plan.write_bytes(resolved_plan_bytes(_lme6_plan()))
-    entered_environment = False
+    with acquire_full_resume_lock(Path(path)):
+        cast(Any, ready).set()
+        if not cast(Any, release).wait(timeout=5):
+            raise RuntimeError("test did not release the full resume lock")
 
-    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
-        nonlocal entered_environment
-        entered_environment = True
-        raise AssertionError("unsupported continuation reached runtime preparation")
 
-    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
-    output = tmp_path / "successor"
-    result = CliRunner().invoke(
-        app,
-        [
-            "run",
-            str(resolved_plan),
-            "--cell",
-            "openviking-lme6",
-            "--continue-from",
-            str(tmp_path / "aborted-base"),
-            "--output-root",
-            str(output),
-        ],
-    )
+def test_run_help_excludes_deleted_recovery_options() -> None:
+    result = CliRunner().invoke(app, ["run", "--help"])
 
-    assert result.exit_code != 0
-    assert "no-mutation" in result.output
-    assert not entered_environment
-    assert not output.exists()
+    assert result.exit_code == 0, result.output
+    for option in ("--continue-from", "--recover-from", "--recovery-analysis-output"):
+        assert option not in result.output
 
 
 def test_root_environment_template_contains_model_placeholders_without_credentials() -> None:
@@ -164,7 +146,7 @@ def test_live_question_run_writes_machine_readable_result_map(
     }
 
 
-def test_full_lme60_dispatches_all_cells_without_bounded_proof(
+def test_full_lme60_requires_canonical_progress_before_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -219,9 +201,9 @@ def test_full_lme60_dispatches_all_cells_without_bounded_proof(
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    assert selected_cell_ids == tuple(cell.cell_id for cell in plan.cells)
-    assert "bounded" not in result.output
+    assert result.exit_code == 2
+    assert "full LME-60 requires canonical progress" in result.output
+    assert selected_cell_ids == ()
 
 
 @pytest.mark.parametrize("selector", ("--question", "--case"))
@@ -307,101 +289,6 @@ def test_multi_case_lme60_selection_uses_readiness_without_bounded_proof(
     assert runtime_loaded is True
     assert len(requested_case_ids) == selected_count
     assert "bounded" not in result.output
-
-
-@pytest.mark.parametrize("has_remaining", (True, False))
-def test_recovery_analysis_output_closes_current_execution_without_dispatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    has_remaining: bool,
-) -> None:
-    from oamb.artifacts import composition
-    from oamb.config import doctor
-
-    plan = _lme6_plan()
-    selected_cell = plan.cells[0]
-    resolved_plan = tmp_path / "resolved-plan.json"
-    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
-    recovery_root = tmp_path / "part"
-    recovery_root.mkdir()
-    analysis_output = tmp_path / "recovery-analysis.json"
-    executed = False
-    recovery = SimpleNamespace(
-        source_capsule_ids=(canonical_sha256(["source-capsule"]),),
-        source_manifest_sha256s=(canonical_sha256(["source-manifest"]),),
-        reusable_ingestion_plan_ids=(canonical_sha256(["reusable-plan"]),),
-        quarantined_ingestion_plan_ids=(canonical_sha256(["quarantined-plan"]),),
-        remaining_ingestion_plan_ids=(
-            (canonical_sha256(["remaining-plan"]),) if has_remaining else ()
-        ),
-        remaining_case_manifest_entry_ids=(
-            (canonical_sha256(["remaining-case"]),) if has_remaining else ()
-        ),
-    )
-
-    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(composition, "analyze_capsule_recovery", lambda *_a, **_k: recovery)
-    monkeypatch.setattr(live, "load_live_environment", lambda **_kwargs: {})
-    monkeypatch.setattr(
-        live,
-        "load_live_provider_evidence",
-        lambda **_kwargs: ("provider-project", {selected_cell.provider_id: object()}),
-    )
-
-    def build_recovery_cell(**kwargs: object) -> object:
-        assert kwargs["recovery_parts"] == (recovery_root,)
-        return object()
-
-    monkeypatch.setattr(live, "build_live_cell", build_recovery_cell)
-    monkeypatch.setattr(
-        live,
-        "live_composition_target",
-        lambda _cell: SimpleNamespace(
-            execution_configuration_hash=canonical_sha256(["current-execution"]),
-            execution_configuration_family_hash=canonical_sha256(["current-execution-family"]),
-        ),
-    )
-
-    def execute(_cells: object) -> tuple[live.LiveCellCompletion, ...]:
-        nonlocal executed
-        executed = True
-        return ()
-
-    monkeypatch.setattr(live, "execute_live_cells", execute)
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "run",
-            str(resolved_plan),
-            "--output-root",
-            str(tmp_path / "capsules"),
-            "--cell",
-            selected_cell.cell_id,
-            "--run-label",
-            "recovery-analysis",
-            "--recover-from",
-            str(recovery_root),
-            "--recovery-analysis-output",
-            str(analysis_output),
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert executed is False
-    assert json.loads(analysis_output.read_bytes()) == {
-        "cell_id": selected_cell.cell_id,
-        "execution_configuration_hash": canonical_sha256(["current-execution"]),
-        "execution_configuration_family_hash": canonical_sha256(["current-execution-family"]),
-        "quarantined_ingestion_plan_ids": list(recovery.quarantined_ingestion_plan_ids),
-        "remaining_case_manifest_entry_ids": list(recovery.remaining_case_manifest_entry_ids),
-        "remaining_ingestion_plan_ids": list(recovery.remaining_ingestion_plan_ids),
-        "resolved_plan_hash": plan.resolved_plan_hash,
-        "reusable_ingestion_plan_ids": list(recovery.reusable_ingestion_plan_ids),
-        "schema_name": "capsule_recovery_analysis",
-        "schema_version": 1,
-        "source_manifest_sha256s": list(recovery.source_manifest_sha256s),
-    }
 
 
 def test_failed_parallel_run_preserves_completed_capsule_in_result_map(
@@ -604,3 +491,312 @@ def test_live_run_rejects_existing_result_map_before_runtime_loading(
     assert "result map already exists" in result.output
     assert result_map.read_text(encoding="utf-8") == "preserve me"
     assert runtime_loaded is False
+
+
+def test_full_progress_failure_stops_before_environment_or_provider_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.config import doctor
+    from oamb.runtime.full_progress import FullProgressError
+
+    plan = _plan()
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    runtime_loaded = False
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(
+        live,
+        "load_full_resume_selection",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            FullProgressError("progress cannot parse or validate")
+        ),
+    )
+
+    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
+        nonlocal runtime_loaded
+        runtime_loaded = True
+        raise AssertionError("invalid progress reached environment loading")
+
+    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            str(resolved_plan),
+            "--output-root",
+            str(tmp_path / "capsules"),
+            "--run-label",
+            "simple-resume",
+            "--full-progress-root",
+            str(tmp_path / "results"),
+            "--full-resume-lock",
+            str(tmp_path / "full-test-resume.lock"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "progress cannot parse" in result.output
+    assert runtime_loaded is False
+
+
+def test_full_resume_lock_contention_cannot_replace_the_current_run_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.config import doctor
+
+    plan = _plan()
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    lock_path = tmp_path / "full-test-resume.lock"
+    pointer = tmp_path / "full-test-current"
+    pointer.write_text("active-run\n", encoding="utf-8")
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_full_resume_lock,
+        args=(str(lock_path), ready, release),
+    )
+    holder.start()
+    assert ready.wait(timeout=2)
+    runtime_loaded = False
+
+    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
+        nonlocal runtime_loaded
+        runtime_loaded = True
+        raise AssertionError("lock contention reached runtime loading")
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
+    try:
+        result = CliRunner().invoke(
+            app,
+            [
+                "run",
+                str(resolved_plan),
+                "--output-root",
+                str(tmp_path / "capsules"),
+                "--run-label",
+                "contending-fresh-run",
+                "--full-progress-root",
+                str(tmp_path / "contending-run" / "results"),
+                "--full-resume-lock",
+                str(lock_path),
+                "--full-resume-pointer",
+                str(pointer),
+            ],
+        )
+    finally:
+        release.set()
+        holder.join(timeout=2)
+
+    assert holder.exitcode == 0
+    assert result.exit_code != 0
+    assert "another full resume command holds the lock" in result.output
+    assert pointer.read_bytes() == b"active-run\n"
+    assert runtime_loaded is False
+
+
+def test_full_progress_builds_only_cells_with_remaining_questions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.config import doctor
+
+    plan = _plan()
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    remaining = {
+        plan.cells[0].cell_id: (canonical_sha256(["remaining-hindsight"]),),
+        plan.cells[1].cell_id: (),
+        plan.cells[2].cell_id: (canonical_sha256(["remaining-openviking"]),),
+    }
+    progress_by_cell = {
+        cell.cell_id: SimpleNamespace(
+            results=tuple(range(60 - len(remaining[cell.cell_id]))),
+            remaining_question_ids=remaining[cell.cell_id],
+        )
+        for cell in plan.cells
+    }
+    selection = SimpleNamespace(
+        progress_by_cell=progress_by_cell,
+        remaining_case_manifest_entry_ids=remaining,
+    )
+    built: list[dict[str, object]] = []
+    capsule_roots = {cell.cell_id: tmp_path / "capsules" / cell.cell_id for cell in plan.cells}
+    for root in capsule_roots.values():
+        root.mkdir(parents=True)
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
+    monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
+    pointer = tmp_path / "full-test-current"
+
+    def load_environment(**_kwargs: object) -> dict[str, str]:
+        assert pointer.read_bytes() == b"fresh-run\n"
+        return {}
+
+    monkeypatch.setattr(live, "load_live_environment", load_environment)
+    monkeypatch.setattr(
+        live,
+        "load_live_provider_evidence",
+        lambda **_kwargs: (
+            "provider-project",
+            {cell.provider_id: object() for cell in plan.cells},
+        ),
+    )
+
+    def build_cell(**kwargs: object) -> SimpleNamespace:
+        built.append(kwargs)
+        return SimpleNamespace(cell_id=kwargs["cell_id"])
+
+    monkeypatch.setattr(live, "build_live_cell", build_cell)
+    monkeypatch.setattr(
+        live,
+        "execute_live_cells",
+        lambda cells: tuple(
+            live.LiveCellCompletion(cell.cell_id, capsule_roots[cell.cell_id]) for cell in cells
+        ),
+    )
+    progress_root = tmp_path / "fresh-run" / "results"
+    progress_root.mkdir(parents=True)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            str(resolved_plan),
+            "--output-root",
+            str(tmp_path / "capsules"),
+            "--run-label",
+            "simple-resume",
+            "--full-progress-root",
+            str(progress_root),
+            "--full-resume-lock",
+            str(tmp_path / "full-test-resume.lock"),
+            "--full-resume-pointer",
+            str(pointer),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert tuple(item["cell_id"] for item in built) == (
+        plan.cells[0].cell_id,
+        plan.cells[2].cell_id,
+    )
+    assert pointer.read_bytes() == b"fresh-run\n"
+    for item in built:
+        cell_id = str(item["cell_id"])
+        provider_id = next(cell.provider_id for cell in plan.cells if cell.cell_id == cell_id)
+        assert item["requested_case_manifest_entry_ids"] == remaining[cell_id]
+        assert item["expected_progress"] is progress_by_cell[cell_id]
+        assert item["progress_path"] == progress_root / f"progress-{provider_id}.json"
+
+
+def test_full_progress_rehearsal_stops_before_runtime_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.config import doctor
+
+    plan = _plan()
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    counts = (19, 20, 14)
+    selection = SimpleNamespace(
+        progress_by_cell={
+            cell.cell_id: SimpleNamespace(
+                results=tuple(range(count)),
+                remaining_question_ids=tuple(range(60 - count)),
+            )
+            for cell, count in zip(plan.cells, counts, strict=True)
+        },
+        remaining_case_manifest_entry_ids={cell.cell_id: ("case",) for cell in plan.cells},
+    )
+    runtime_loaded = False
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
+
+    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
+        nonlocal runtime_loaded
+        runtime_loaded = True
+        raise AssertionError("rehearsal reached runtime loading")
+
+    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            str(resolved_plan),
+            "--output-root",
+            str(tmp_path / "capsules"),
+            "--run-label",
+            "simple-resume",
+            "--full-progress-root",
+            str(tmp_path / "results"),
+            "--full-resume-lock",
+            str(tmp_path / "resume.lock"),
+            "--full-resume-rehearsal",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "reused=19 remaining=41" in result.output
+    assert "reused=20 remaining=40" in result.output
+    assert "reused=14 remaining=46" in result.output
+    assert "zero_dispatch=true" in result.output
+    assert runtime_loaded is False
+
+
+def test_compare_accepts_only_the_three_canonical_full_progress_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.config import doctor
+    from oamb.reporting import comparison_project
+
+    plan = _plan()
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    progresses = {cell.cell_id: object() for cell in plan.cells}
+    selection = SimpleNamespace(progress_by_cell=progresses, case_manifest=object())
+    captured: dict[str, object] = {}
+    report_root = tmp_path / "report"
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
+
+    def build_progress_report(*args: object, **kwargs: object) -> SimpleNamespace:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            comparison_paths=(),
+            export_path=report_root / "report.json",
+            html_path=report_root / "report.html",
+        )
+
+    monkeypatch.setattr(
+        comparison_project,
+        "build_full_progress_comparison_project",
+        build_progress_report,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "compare",
+            str(resolved_plan),
+            "--full-progress-root",
+            str(tmp_path / "results"),
+            "--output-root",
+            str(report_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["args"] == (plan, progresses)
+    assert cast(dict[str, object], captured["kwargs"])["case_manifest"] is selection.case_manifest

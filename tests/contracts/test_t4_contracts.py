@@ -484,7 +484,6 @@ def test_t4_contract_versions_are_registered_explicitly() -> None:
         ("attempt_intent_record", 1),
         ("attempt_receipt_record", 1),
         ("checkpoint_manifest", 1),
-        ("recovery_decision_record", 1),
         ("close_error_record", 1),
         ("source_evidence_binding", 1),
         ("derivation_spec", 1),

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol
 
 from oamb.contracts.base import StrictContract
 from oamb.contracts.evidence import (
@@ -34,22 +33,12 @@ from .budget import (
 from .budget import (
     BudgetOwnerAllocation as RuntimeBudgetOwnerAllocation,
 )
+from .provider_lifecycle import ProviderLifecyclePort
 from .source_records import seal_source_contract
 
 
 class AttemptOrderingError(ValueError):
     """Raised before a write when transaction records do not form one attempt."""
-
-
-class ProviderLifecyclePort(Protocol):
-    def mark_attempt_dispatched(self, *, attempt_id: str, intent_record_hash: str) -> None: ...
-
-    def clear_attempt_after_receipt(
-        self,
-        *,
-        attempt_id: str,
-        expected_intent_record_hash: str,
-    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

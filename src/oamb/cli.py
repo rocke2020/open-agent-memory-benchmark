@@ -5,14 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import typer
 
-from .artifacts.atomic import atomic_write_bytes
+from .artifacts.atomic import atomic_replace_bytes, atomic_write_bytes
 from .contracts.evidence import ValidationResult
 from .contracts.ids import canonical_json_bytes, canonical_sha256
 from .contracts.specifications import RunSpec
@@ -214,27 +213,34 @@ def run_command(
         str | None,
         typer.Option("--run-label", help="Fresh operator-chosen run label."),
     ] = None,
-    continue_from: Annotated[
+    full_progress_root: Annotated[
         Path | None,
         typer.Option(
-            "--continue-from",
-            help="Unavailable: OpenViking same-scope replay lacks task-specific mutation proof.",
+            "--full-progress-root",
+            help="Directory containing the three canonical LME-60 progress files.",
         ),
     ] = None,
-    recover_from: Annotated[
-        list[Path] | None,
-        typer.Option(
-            "--recover-from",
-            help="Validated immutable part; repeat to derive only remaining whole groups.",
-        ),
-    ] = None,
-    recovery_analysis_output: Annotated[
+    full_resume_lock: Annotated[
         Path | None,
         typer.Option(
-            "--recovery-analysis-output",
-            help="Create-only recovery analysis JSON; validate and stop before dispatch.",
+            "--full-resume-lock",
+            help="Process-owned nonblocking lock file outside the full-run output.",
         ),
     ] = None,
+    full_resume_pointer: Annotated[
+        Path | None,
+        typer.Option(
+            "--full-resume-pointer",
+            help="Publish this progress root for shell resume after acquiring its lock.",
+        ),
+    ] = None,
+    full_resume_rehearsal: Annotated[
+        bool,
+        typer.Option(
+            "--full-resume-rehearsal",
+            help="Validate progress and remaining selection, then stop before runtime loading.",
+        ),
+    ] = False,
     provider_runtime: Annotated[
         Path,
         typer.Option("--provider-runtime", help="Verified provider runtime directory."),
@@ -254,72 +260,108 @@ def run_command(
 ) -> None:
     """Execute frozen cells and seal source capsules."""
 
-    if continue_from is not None:
+    if (full_progress_root is None) != (full_resume_lock is None):
         raise typer.BadParameter(
-            "OpenViking same-scope continuation lacks task-specific no-mutation and "
-            "work-settlement proof; use --recover-from for validated fresh-scope recovery"
+            "--full-progress-root and --full-resume-lock must be supplied together"
+        )
+    if full_resume_rehearsal and full_progress_root is None:
+        raise typer.BadParameter(
+            "--full-resume-rehearsal requires --full-progress-root and --full-resume-lock"
+        )
+    if full_resume_pointer is not None and full_progress_root is None:
+        raise typer.BadParameter("--full-resume-pointer requires full progress and its lock")
+    if full_resume_pointer is not None and full_resume_rehearsal:
+        raise typer.BadParameter("rehearsal cannot publish the full resume pointer")
+    if full_progress_root is not None and any((cell, case, question)):
+        raise typer.BadParameter(
+            "full progress resume cannot be combined with case, cell, or question selection"
         )
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
-        if case or question or recover_from or recovery_analysis_output or result_map:
+        if (
+            case
+            or question
+            or result_map
+            or full_progress_root is not None
+            or full_resume_pointer is not None
+            or full_resume_rehearsal
+        ):
             raise typer.BadParameter(
-                "partition, recovery, and result-map options require a live resolved plan"
+                "live selection, result-map, and progress options require a live resolved plan"
             )
         _run_fake_resolved_plan(resolved_plan, scenario=scenario)
         return
 
-    from .artifacts.composition import (
-        CapsuleCompositionError,
-        analyze_capsule_recovery,
-    )
     from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
     from .live import (
         LiveCellExecutionError,
         LiveCellOutcome,
         LiveConfigurationError,
         build_live_cell,
-        build_live_continuation_cell,
         execute_live_cells,
-        live_composition_target,
+        load_full_resume_selection,
         load_live_environment,
         load_live_provider_evidence,
         resolve_live_question_case_ids,
         select_live_cells,
         validate_live_readiness_receipt,
     )
+    from .runtime.full_progress import (
+        acquire_full_resume_lock,
+        canonical_full_progress_path,
+    )
     from .workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
 
     if output_root is None:
         raise typer.BadParameter("live run requires --output-root")
-    if continue_from is None and run_label is None:
+    if run_label is None:
         raise typer.BadParameter("fresh live run requires --run-label")
-    if continue_from is not None and run_label is not None:
-        raise typer.BadParameter("--continue-from and --run-label are mutually exclusive")
-    if continue_from is not None and case:
-        raise typer.BadParameter("--continue-from and --case are mutually exclusive")
-    if continue_from is not None and question:
-        raise typer.BadParameter("--continue-from and --question are mutually exclusive")
-    if recover_from and continue_from is not None:
-        raise typer.BadParameter("--recover-from and --continue-from are mutually exclusive")
-    if recover_from and case:
-        raise typer.BadParameter("--recover-from and --case are mutually exclusive")
-    if recover_from and question:
-        raise typer.BadParameter("--recover-from and --question are mutually exclusive")
-    if recovery_analysis_output is not None and not recover_from:
-        raise typer.BadParameter("--recovery-analysis-output requires --recover-from")
-    if recovery_analysis_output is not None and result_map is not None:
-        raise typer.BadParameter(
-            "--recovery-analysis-output and --result-map are mutually exclusive"
-        )
-    if recovery_analysis_output is not None and (
-        recovery_analysis_output.exists() or recovery_analysis_output.is_symlink()
-    ):
-        raise typer.BadParameter("recovery analysis output already exists")
     if result_map is not None and (result_map.exists() or result_map.is_symlink()):
         raise typer.BadParameter("result map already exists")
+    resume_lock_context = None
     try:
         plan = load_resolved_plan_for_run(resolved_plan)
         selected_cells = select_live_cells(plan, tuple(cell or ()))
+        resume_selection = None
+        if full_progress_root is not None:
+            assert full_resume_lock is not None
+            candidate_lock = acquire_full_resume_lock(full_resume_lock)
+            candidate_lock.__enter__()
+            resume_lock_context = candidate_lock
+            selected_cells = plan.cells
+            resume_selection = load_full_resume_selection(
+                plan=plan,
+                progress_root=full_progress_root,
+            )
+            for frozen_cell in selected_cells:
+                progress = resume_selection.progress_by_cell[frozen_cell.cell_id]
+                typer.echo(
+                    f"full progress: PASS cell={frozen_cell.cell_id} "
+                    f"reused={len(progress.results)} "
+                    f"remaining={len(progress.remaining_question_ids)}"
+                )
+            if full_resume_pointer is not None:
+                execution_label = full_progress_root.parent.name
+                if (
+                    full_progress_root.name != "results"
+                    or not execution_label
+                    or any(
+                        not (character.isascii() and (character.isalnum() or character in "._-"))
+                        for character in execution_label
+                    )
+                ):
+                    raise LiveConfigurationError(
+                        "full progress root does not identify a canonical execution label"
+                    )
+                atomic_replace_bytes(
+                    full_resume_pointer,
+                    f"{execution_label}\n".encode(),
+                    trusted_root=full_resume_pointer.parent,
+                )
+                typer.echo(f"full resume pointer: PASS label={execution_label}")
+            if full_resume_rehearsal:
+                typer.echo("full progress rehearsal: PASS zero_dispatch=true")
+                return
         if case and question:
             raise LiveConfigurationError("--case and --question are mutually exclusive")
         selected_case_ids = tuple(case or ())
@@ -332,26 +374,29 @@ def run_command(
                 dataset_path,
                 tuple(question),
             )
-        recovery_case_ids: tuple[str, ...] = ()
-        recovery = None
-        if recover_from:
-            if len(selected_cells) != 1:
-                raise LiveConfigurationError("recovery requires exactly one selected cell")
         full_lme60 = False
         if plan.dataset.selection == "lme60":
             target_case_count = len(LME60_EXPECTED_QUESTION_IDS)
             effective_case_count = (
-                target_case_count
-                if continue_from is not None or recover_from or not selected_case_ids
-                else len(selected_case_ids)
+                target_case_count if not selected_case_ids else len(selected_case_ids)
             )
-            full_lme60 = bool(
-                continue_from is None
-                and not recover_from
-                and effective_case_count == target_case_count
+            full_lme60 = effective_case_count == target_case_count
+            if full_lme60:
+                if selected_cells != plan.cells:
+                    raise LiveConfigurationError("full LME-60 requires all three frozen cells")
+                if full_progress_root is None:
+                    raise LiveConfigurationError(
+                        "full LME-60 requires canonical progress and its resume lock"
+                    )
+        if resume_selection is not None:
+            selected_cells = tuple(
+                frozen_cell
+                for frozen_cell in selected_cells
+                if resume_selection.remaining_case_manifest_entry_ids[frozen_cell.cell_id]
             )
-            if full_lme60 and selected_cells != plan.cells:
-                raise LiveConfigurationError("full LME-60 requires all three frozen cells")
+            if not selected_cells:
+                typer.echo("full progress: PASS complete=180 zero_dispatch=true")
+                return
         environment = load_live_environment(
             provider_env_path=provider_env,
             model_env_path=model_env,
@@ -374,95 +419,37 @@ def run_command(
         code_revision = _live_source_revision()
         observed_at = datetime.now(UTC)
         built_cells = []
-        if continue_from is not None:
-            if len(selected_cells) != 1:
-                raise LiveConfigurationError("continuation requires exactly one selected cell")
-            frozen_cell = selected_cells[0]
+        assert run_label is not None
+        for frozen_cell in selected_cells:
+            requested_case_ids = selected_case_ids
+            progress_path = None
+            expected_progress = None
+            if resume_selection is not None:
+                assert full_progress_root is not None
+                requested_case_ids = resume_selection.remaining_case_manifest_entry_ids[
+                    frozen_cell.cell_id
+                ]
+                progress_path = canonical_full_progress_path(
+                    full_progress_root,
+                    frozen_cell.provider_id,
+                )
+                expected_progress = resume_selection.progress_by_cell[frozen_cell.cell_id]
             built_cells.append(
-                build_live_continuation_cell(
+                build_live_cell(
                     plan=plan,
                     cell_id=frozen_cell.cell_id,
-                    base_capsule_root=continue_from,
                     output_root=output_root,
                     provider_runtime_directory=provider_runtime.resolve(),
                     provider_project_id=provider_project,
                     provider_evidence=evidence_by_provider[frozen_cell.provider_id],
                     environment=environment,
+                    run_label=run_label,
+                    observed_at=observed_at,
+                    code_revision=code_revision,
+                    requested_case_manifest_entry_ids=requested_case_ids,
+                    progress_path=progress_path,
+                    expected_progress=expected_progress,
                 )
-            )
-        else:
-            assert run_label is not None
-            for frozen_cell in selected_cells:
-                built_cells.append(
-                    build_live_cell(
-                        plan=plan,
-                        cell_id=frozen_cell.cell_id,
-                        output_root=output_root,
-                        provider_runtime_directory=provider_runtime.resolve(),
-                        provider_project_id=provider_project,
-                        provider_evidence=evidence_by_provider[frozen_cell.provider_id],
-                        environment=environment,
-                        run_label=run_label,
-                        observed_at=observed_at,
-                        code_revision=code_revision,
-                        requested_case_manifest_entry_ids=(recovery_case_ids or selected_case_ids),
-                        recovery_parts=tuple(recover_from or ()),
-                    )
-                )
-        if recover_from:
-            if len(built_cells) != 1:
-                raise AssertionError("recovery live cell inventory is not singular")
-            full_target = live_composition_target(built_cells[0])
-            recovery = analyze_capsule_recovery(
-                tuple(recover_from),
-                target=full_target,
-            )
-            typer.echo(
-                "recovery reusable groups: " + ",".join(recovery.reusable_ingestion_plan_ids)
-            )
-            typer.echo(
-                "recovery quarantined groups: " + ",".join(recovery.quarantined_ingestion_plan_ids)
-            )
-            typer.echo(
-                "recovery remaining groups: " + ",".join(recovery.remaining_ingestion_plan_ids)
-            )
-            typer.echo("recovery source manifests: " + ",".join(recovery.source_manifest_sha256s))
-            if recovery_analysis_output is not None:
-                analysis_document = {
-                    "schema_name": "capsule_recovery_analysis",
-                    "schema_version": 1,
-                    "resolved_plan_hash": plan.resolved_plan_hash,
-                    "cell_id": selected_cells[0].cell_id,
-                    "execution_configuration_hash": (full_target.execution_configuration_hash),
-                    "execution_configuration_family_hash": (
-                        full_target.execution_configuration_family_hash
-                    ),
-                    "source_manifest_sha256s": recovery.source_manifest_sha256s,
-                    "reusable_ingestion_plan_ids": recovery.reusable_ingestion_plan_ids,
-                    "quarantined_ingestion_plan_ids": recovery.quarantined_ingestion_plan_ids,
-                    "remaining_ingestion_plan_ids": recovery.remaining_ingestion_plan_ids,
-                    "remaining_case_manifest_entry_ids": (
-                        recovery.remaining_case_manifest_entry_ids
-                    ),
-                }
-                atomic_write_bytes(
-                    recovery_analysis_output,
-                    canonical_json_bytes(analysis_document),
-                    trusted_root=recovery_analysis_output.parent,
-                )
-                typer.echo(f"recovery analysis: {recovery_analysis_output}")
-                return
-            if not recovery.remaining_case_manifest_entry_ids:
-                raise LiveConfigurationError(
-                    "recovery parts already contain every target whole group; compose them"
-                )
-            recovery_case_ids = recovery.remaining_case_manifest_entry_ids
-            built_cells[0] = replace(
-                built_cells[0],
-                requested_case_manifest_entry_ids=recovery_case_ids,
-                recovery_execution_configuration_family_hash=(
-                    full_target.execution_configuration_family_hash
-                ),
             )
 
         def emit_outcomes(
@@ -556,13 +543,15 @@ def run_command(
         LiveCellExecutionError,
         LiveConfigurationError,
         ResolvedPlanError,
-        CapsuleCompositionError,
         OSError,
         ValueError,
     ) as exc:
         raise typer.BadParameter(str(exc)) from exc
     except BaseExceptionGroup as exc:
         raise typer.BadParameter(str(exc)) from exc
+    finally:
+        if resume_lock_context is not None:
+            resume_lock_context.__exit__(None, None, None)
 
 
 def _run_fake_resolved_plan(resolved_plan: Path, *, scenario: str) -> None:
@@ -665,100 +654,36 @@ def capsule_validate(
         raise typer.Exit(code=1)
 
 
-@capsule_app.command("compose")
-def capsule_compose(
-    plan: Annotated[
-        Path,
-        typer.Option("--plan", help="Canonical resolved-plan JSON path."),
-    ],
-    cell: Annotated[
-        str,
-        typer.Option("--cell", help="Frozen target cell ID."),
-    ],
-    part: Annotated[
-        list[Path],
-        typer.Option("--part", help="Sealed part capsule root; repeat for every part."),
-    ],
-    output: Annotated[
-        Path,
-        typer.Option("--output", help="Create-only composed capsule root."),
-    ],
-    execution_configuration_hash: Annotated[
-        str | None,
-        typer.Option(
-            "--execution-configuration-hash",
-            help="Current full execution hash from the create-only recovery analysis.",
-        ),
-    ] = None,
-    execution_configuration_family_hash: Annotated[
-        str | None,
-        typer.Option(
-            "--execution-configuration-family-hash",
-            help="Revision-excluding family hash from the recovery analysis.",
-        ),
-    ] = None,
-) -> None:
-    """Compose compatible immutable part capsules into one complete cell root."""
-
-    from .artifacts.composition import (
-        CapsuleCompositionError,
-        CapsuleCompositionTarget,
-        compose_capsules,
-    )
-    from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
-    from .contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
-
-    try:
-        resolved = load_resolved_plan_for_run(plan)
-        cells = tuple(item for item in resolved.cells if item.cell_id == cell)
-        if len(cells) != 1:
-            raise CapsuleCompositionError("unknown composition target cell")
-        if (execution_configuration_hash is None) != (execution_configuration_family_hash is None):
-            raise CapsuleCompositionError(
-                "composition execution configuration hashes must be supplied together"
-            )
-        selected = cells[0]
-        composed = compose_capsules(
-            tuple(part),
-            output,
-            target=CapsuleCompositionTarget(
-                resolved_plan_hash=resolved.resolved_plan_hash,
-                cell_spec_hash=selected.cell_spec_hash,
-                target_case_manifest_hash=selected.case_manifest_hash,
-                budget_policy_hash=selected.authorization_hash,
-                retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-                execution_configuration_hash=execution_configuration_hash,
-                execution_configuration_family_hash=(execution_configuration_family_hash),
-            ),
-        )
-    except (OSError, CapsuleCompositionError, ResolvedPlanError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    typer.echo(f"capsule: {composed.capsule_root}")
-
-
 @app.command("compare")
 def compare_command(
     resolved_plan: Annotated[
         Path,
         typer.Argument(help="Canonical resolved-plan JSON path.", metavar="RESOLVED_PLAN"),
     ],
-    cell_root: Annotated[
-        list[str],
-        typer.Option("--cell-root", help="CELL_ID=sealed source-root; repeat per cell."),
-    ],
-    validation: Annotated[
-        list[str],
-        typer.Option("--validation", help="CELL_ID=validation JSON; repeat per cell."),
-    ],
     output_root: Annotated[
         Path,
         typer.Option("--output-root", help="Create-only comparison report directory."),
     ],
+    cell_root: Annotated[
+        list[str] | None,
+        typer.Option("--cell-root", help="CELL_ID=sealed source-root; repeat per cell."),
+    ] = None,
+    validation: Annotated[
+        list[str] | None,
+        typer.Option("--validation", help="CELL_ID=validation JSON; repeat per cell."),
+    ] = None,
     dataset_source: Annotated[
         Path | None,
         typer.Option(
             "--dataset-source",
             help="Exact frozen dataset file used to add local-only question and answer details.",
+        ),
+    ] = None,
+    full_progress_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--full-progress-root",
+            help="Directory containing the three canonical complete progress files.",
         ),
     ] = None,
     diagnostic: Annotated[
@@ -772,35 +697,54 @@ def compare_command(
     """Freshly validate frozen cells and build every pair plus offline report."""
 
     from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
+    from .live import load_full_resume_selection
     from .reporting.comparison_project import (
         ComparisonProjectError,
         ValidatedCellRoot,
         build_comparison_project,
+        build_full_progress_comparison_project,
     )
 
     try:
         plan = load_resolved_plan_for_run(resolved_plan)
-        roots = _named_paths(cell_root, label="cell root")
-        validations = _named_paths(validation, label="validation")
-        expected = {cell.cell_id for cell in plan.cells}
-        if set(roots) != expected or set(validations) != expected:
-            raise typer.BadParameter("cell roots and validations must name every frozen cell")
-        sources = {
-            cell.cell_id: ValidatedCellRoot(
-                root=roots[cell.cell_id],
-                validation_result=ValidationResult.model_validate_json(
-                    validations[cell.cell_id].read_bytes()
-                ),
+        if full_progress_root is not None:
+            if cell_root or validation or diagnostic:
+                raise typer.BadParameter(
+                    "full progress comparison cannot use capsule roots, validations, or diagnostic mode"
+                )
+            selection = load_full_resume_selection(
+                plan=plan,
+                progress_root=full_progress_root,
             )
-            for cell in plan.cells
-        }
-        built = build_comparison_project(
-            plan,
-            sources,
-            output_root=output_root,
-            dataset_source=dataset_source,
-            diagnostic=diagnostic,
-        )
+            built = build_full_progress_comparison_project(
+                plan,
+                selection.progress_by_cell,
+                case_manifest=selection.case_manifest,
+                output_root=output_root,
+                dataset_source=dataset_source,
+            )
+        else:
+            roots = _named_paths(cell_root or [], label="cell root")
+            validations = _named_paths(validation or [], label="validation")
+            expected = {cell.cell_id for cell in plan.cells}
+            if set(roots) != expected or set(validations) != expected:
+                raise typer.BadParameter("cell roots and validations must name every frozen cell")
+            sources = {
+                cell.cell_id: ValidatedCellRoot(
+                    root=roots[cell.cell_id],
+                    validation_result=ValidationResult.model_validate_json(
+                        validations[cell.cell_id].read_bytes()
+                    ),
+                )
+                for cell in plan.cells
+            }
+            built = build_comparison_project(
+                plan,
+                sources,
+                output_root=output_root,
+                dataset_source=dataset_source,
+                diagnostic=diagnostic,
+            )
     except (OSError, ComparisonProjectError, ResolvedPlanError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     for comparison_path in built.comparison_paths:

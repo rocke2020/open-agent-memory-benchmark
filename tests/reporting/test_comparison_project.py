@@ -2578,6 +2578,50 @@ def test_visible_context_parser_preserves_empty_text_but_rejects_invalid_fields(
             comparison_project._visible_context_text(snapshot, case)
 
 
+def test_visible_context_parser_accepts_an_empty_evidence_sequence() -> None:
+    from oamb.reporting import comparison_project
+
+    payload = b""
+    reference = hashlib.sha256(payload).hexdigest()
+    snapshot = cast(Any, SimpleNamespace(raw_payloads={reference: payload}))
+    case = {
+        "visible_evidence_byte_count": 0,
+        "visible_evidence_raw_ref": reference,
+        "visible_evidence_sha256": reference,
+        "visible_evidence_token_count": 0,
+        "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
+    }
+
+    assert comparison_project._visible_context_text(snapshot, case) == ""
+
+
+def test_visible_context_parser_treats_unicode_line_separator_as_json_text() -> None:
+    from oamb.reporting import comparison_project
+
+    payload = canonical_json_bytes(
+        {
+            "evidence_kind": "memory",
+            "mentioned_at": None,
+            "occurred_end": None,
+            "occurred_start": None,
+            "provider_evidence_identity": "provider-item",
+            "source_unit_id": None,
+            "text": "before\u2028after",
+        }
+    )
+    reference = hashlib.sha256(payload).hexdigest()
+    snapshot = cast(Any, SimpleNamespace(raw_payloads={reference: payload}))
+    case = {
+        "visible_evidence_byte_count": len(payload),
+        "visible_evidence_raw_ref": reference,
+        "visible_evidence_sha256": reference,
+        "visible_evidence_token_count": count_o200k_tokens(payload),
+        "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
+    }
+
+    assert comparison_project._visible_context_text(snapshot, case) == payload.decode("utf-8")
+
+
 @pytest.mark.parametrize(
     ("cell_index", "path", "body"),
     (

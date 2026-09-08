@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from oamb.artifacts import atomic as atomic_module
 from oamb.artifacts.atomic import (
     ATOMIC_WRITE_BOUNDARIES,
     ArtifactCollisionError,
@@ -132,3 +133,49 @@ def test_atomic_write_does_not_use_replacing_rename(
     atomic_write_bytes(target, b"create only")
 
     assert target.read_bytes() == b"create only"
+
+
+def test_atomic_replace_publishes_new_complete_bytes_over_an_existing_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "progress.json"
+    target.write_bytes(b"old complete progress")
+
+    result = atomic_module.atomic_replace_bytes(target, b"new complete progress")
+
+    assert target.read_bytes() == b"new complete progress"
+    assert result.sha256 == hashlib.sha256(b"new complete progress").hexdigest()
+    assert result.byte_count == len(b"new complete progress")
+    assert result.created is False
+    assert not tuple(tmp_path.glob(".progress.json.tmp-*"))
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected"),
+    [
+        ("after_temporary_write", b"old complete progress"),
+        ("after_file_fsync", b"old complete progress"),
+        ("after_target_replace", b"new complete progress"),
+        ("after_target_directory_fsync", b"new complete progress"),
+    ],
+)
+def test_atomic_replace_exposes_only_old_or_new_complete_bytes_after_a_fault(
+    tmp_path: Path,
+    boundary: str,
+    expected: bytes,
+) -> None:
+    target = tmp_path / "progress.json"
+    target.write_bytes(b"old complete progress")
+
+    def crash_at(current: object, _path: Path) -> None:
+        if str(current) == boundary:
+            raise InjectedCrash(boundary)
+
+    with pytest.raises(InjectedCrash, match=boundary):
+        atomic_module.atomic_replace_bytes(
+            target,
+            b"new complete progress",
+            fault_hook=crash_at,
+        )
+
+    assert target.read_bytes() == expected

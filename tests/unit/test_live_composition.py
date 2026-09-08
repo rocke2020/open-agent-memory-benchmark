@@ -7,7 +7,6 @@ import multiprocessing
 import os
 import signal
 import time
-from dataclasses import replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -16,20 +15,15 @@ from typing import Any
 
 import pytest
 
-from oamb.artifacts.store import ArtifactStore
 from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import ResolvedPlan, build_resolved_plan
-from oamb.contracts.evidence import RunRecord
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.specifications import (
-    CasePartitionSpec,
     RunPreflightRecord,
     SourceEvidenceBinding,
     SourceEvidenceKind,
 )
-from oamb.contracts.states import ResumeDisposition, RunState
-from oamb.runtime.source_records import seal_source_contract
-from tests.benchmark_configuration import lme6_configuration_text, load_lme6_configuration
+from tests.benchmark_configuration import load_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 LME60_BENCHMARK_CONFIG = REPOSITORY_ROOT / "configs" / "benchmark.yml"
@@ -80,76 +74,6 @@ def _environment() -> dict[str, str]:
         "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
         "OAMB_EMBEDDING_MODEL": models.embedding.model,
     }
-
-
-def _aborted_openviking_capsule(
-    tmp_path: Path,
-    *,
-    plan: ResolvedPlan,
-    environment: dict[str, str],
-    provider_evidence: SourceEvidenceBinding,
-) -> Path:
-    from oamb.live import build_live_cell
-
-    built = build_live_cell(
-        plan=plan,
-        cell_id="openviking-lme6",
-        output_root=tmp_path / "base-capsules",
-        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-        provider_project_id="oamb-providers-test-live",
-        provider_evidence=provider_evidence,
-        environment=environment,
-        run_label="continuation-base",
-        observed_at=NOW,
-        code_revision="source-tree-test",
-    )
-    store = ArtifactStore(built.capsule_root)
-    run_spec = built.control.run_spec
-    preflight = built.control.preflight_record
-    budget = built.control.budget
-    seal_source_contract(
-        store,
-        relative_path="source/specs/run-spec.json",
-        record_id=run_spec.run_id,
-        record=run_spec,
-    )
-    seal_source_contract(
-        store,
-        relative_path="source/specs/run-preflight.json",
-        record_id=preflight.preflight_record_hash,
-        record=preflight,
-    )
-    seal_source_contract(
-        store,
-        relative_path="source/specs/budget.json",
-        record_id=budget.budget_id,
-        record=budget,
-    )
-    for binding in built.control.role_bindings:
-        seal_source_contract(
-            store,
-            relative_path=f"source/model-role-bindings/{binding.binding_id}.json",
-            record_id=binding.binding_id,
-            record=binding,
-        )
-    run = RunRecord(
-        run_id=built.run_id,
-        run_spec_hash=canonical_sha256(run_spec),
-        state=RunState.ABORTED,
-        resume_disposition=ResumeDisposition.NOT_APPLICABLE,
-        started_at=NOW,
-        ended_at=NOW,
-        ingestion_occurrence_ids=(),
-        case_occurrence_ids=(),
-    )
-    seal_source_contract(
-        store,
-        relative_path=f"source/run/{built.run_id}.json",
-        record_id=built.run_id,
-        record=run,
-    )
-    store.finalize_capsule(run_id=built.run_id, run_spec_hash=canonical_sha256(run_spec))
-    return built.capsule_root
 
 
 @pytest.mark.parametrize(
@@ -265,121 +189,6 @@ def test_missing_runtime_value_or_existing_capsule_fails_before_factory(
         build(_environment())
 
 
-def test_continuation_rejects_resolved_plan_drift_before_creating_target(
-    tmp_path: Path,
-) -> None:
-    from oamb.live import LiveConfigurationError, build_live_continuation_cell
-
-    base_plan = _plan()
-    evidence = _provider_evidence()
-    base = _aborted_openviking_capsule(
-        tmp_path,
-        plan=base_plan,
-        environment=_environment(),
-        provider_evidence=evidence,
-    )
-    mutated_config = tmp_path / "benchmark.yml"
-    mutated_config.write_text(
-        lme6_configuration_text().replace(
-            "operation_timeout_seconds: 900",
-            "operation_timeout_seconds: 901",
-            1,
-        ),
-        encoding="utf-8",
-    )
-    changed_plan = build_resolved_plan(load_benchmark_configuration(mutated_config))
-
-    with pytest.raises(LiveConfigurationError, match="resolved plan"):
-        build_live_continuation_cell(
-            plan=changed_plan,
-            cell_id="openviking-lme6",
-            base_capsule_root=base,
-            output_root=tmp_path / "continuation",
-            provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-            provider_project_id="oamb-providers-test-live",
-            provider_evidence=evidence,
-            environment=_environment(),
-        )
-    assert not (tmp_path / "continuation").exists()
-
-
-def test_continuation_rejects_matching_plan_without_no_mutation_proof(
-    tmp_path: Path,
-) -> None:
-    from oamb.live import LiveConfigurationError, build_live_continuation_cell
-
-    plan = _plan()
-    evidence = _provider_evidence()
-    environment = _environment()
-    base = _aborted_openviking_capsule(
-        tmp_path,
-        plan=plan,
-        environment=environment,
-        provider_evidence=evidence,
-    )
-
-    before = {
-        path.relative_to(base): path.read_bytes() for path in base.rglob("*") if path.is_file()
-    }
-    with pytest.raises(LiveConfigurationError, match="no-mutation.*proof"):
-        build_live_continuation_cell(
-            plan=plan,
-            cell_id="openviking-lme6",
-            base_capsule_root=base,
-            output_root=tmp_path / "continuation",
-            provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-            provider_project_id="oamb-providers-test-live",
-            provider_evidence=evidence,
-            environment=environment,
-        )
-    assert not (tmp_path / "continuation").exists()
-    assert before == {
-        path.relative_to(base): path.read_bytes() for path in base.rglob("*") if path.is_file()
-    }
-
-
-@pytest.mark.parametrize("drift", ["environment", "provider_evidence"])
-def test_continuation_rejects_runtime_binding_drift_before_creating_target(
-    tmp_path: Path,
-    drift: str,
-) -> None:
-    from oamb.live import LiveConfigurationError, build_live_continuation_cell
-
-    plan = _plan()
-    evidence = _provider_evidence()
-    environment = _environment()
-    base = _aborted_openviking_capsule(
-        tmp_path,
-        plan=plan,
-        environment=environment,
-        provider_evidence=evidence,
-    )
-    current_environment = dict(environment)
-    current_evidence = evidence
-    if drift == "environment":
-        current_environment["OAMB_OPENVIKING_BASE_URL"] = "http://127.0.0.1:64931"
-    else:
-        current_evidence = evidence.model_copy(
-            update={
-                "binding_id": canonical_sha256(["changed-provider-evidence"]),
-                "source_root_hash": canonical_sha256(["changed-provider-root"]),
-            }
-        )
-
-    with pytest.raises(LiveConfigurationError, match="continuation .* differs"):
-        build_live_continuation_cell(
-            plan=plan,
-            cell_id="openviking-lme6",
-            base_capsule_root=base,
-            output_root=tmp_path / "continuation",
-            provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-            provider_project_id="oamb-providers-test-live",
-            provider_evidence=current_evidence,
-            environment=current_environment,
-        )
-    assert not (tmp_path / "continuation").exists()
-
-
 @pytest.mark.parametrize(
     ("cell_id", "adapter_module", "adapter_name"),
     (
@@ -414,10 +223,6 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
             captured.update(kwargs)
 
     def record_memory_factory(**kwargs: object) -> object:
-        assert kwargs["recovery_parts"] == (tmp_path / "predecessor",)
-        assert kwargs["recovery_execution_configuration_family_hash"] == canonical_sha256(
-            ["current-execution-family"]
-        )
         memory_factory = kwargs["memory_factory"]
         assert callable(memory_factory)
         memory_factory(object(), object())
@@ -443,11 +248,6 @@ def test_live_memory_factory_receives_the_resolved_memory_operation_timeout(
         run_label="timeout-wiring",
         observed_at=NOW,
         code_revision="source-tree-test",
-        recovery_parts=(tmp_path / "predecessor",),
-    )
-    built = replace(
-        built,
-        recovery_execution_configuration_family_hash=canonical_sha256(["current-execution-family"]),
     )
 
     live.execute_live_cell(built)
@@ -512,83 +312,6 @@ def test_live_model_factories_receive_the_model_call_timeout(
 
     assert [item["read_timeout_seconds"] for item in captured] == [900.0, 900.0]
     assert [item["total_timeout_seconds"] for item in captured] == [900.0, 900.0]
-
-
-def test_unknown_live_case_partition_fails_before_native_runner_or_clients(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from oamb import live
-    from oamb.runtime import native_run
-    from oamb.runtime.case_partition import CasePartitionSelectionError
-    from oamb.workloads.fake import GeneratedFakeWorkload
-
-    def forbidden_runner(**_kwargs: object) -> object:
-        raise AssertionError("native runner must not receive an invalid case partition")
-
-    monkeypatch.setattr(native_run, "run_native_vertical_slice", forbidden_runner)
-    monkeypatch.setattr(live, "build_longmemeval_bundle", lambda _path, _selection: object())
-    monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: GeneratedFakeWorkload())
-    built = live.build_live_cell(
-        plan=_plan(),
-        cell_id="hindsight-lme6",
-        output_root=tmp_path / "capsules",
-        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-        provider_project_id="oamb-providers-test-live",
-        provider_evidence=_provider_evidence(),
-        environment=_environment(),
-        run_label="invalid-case-selection",
-        observed_at=NOW,
-        code_revision="source-tree-test",
-        requested_case_manifest_entry_ids=(canonical_sha256(["unknown-live-case"]),),
-    )
-
-    with pytest.raises(CasePartitionSelectionError, match="unknown"):
-        live.execute_live_cell(built)
-
-
-def test_default_live_cell_persists_the_full_case_partition(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from oamb import live
-    from oamb.runtime import native_run
-    from oamb.workloads.fake import GeneratedFakeWorkload
-
-    workload = GeneratedFakeWorkload()
-    captured: dict[str, object] = {}
-
-    def record_partition(**kwargs: object) -> object:
-        captured["partition"] = kwargs["partition"]
-        return SimpleNamespace(capsule_root=tmp_path / "capsule")
-
-    monkeypatch.setattr(native_run, "run_native_vertical_slice", record_partition)
-    monkeypatch.setattr(live, "build_longmemeval_bundle", lambda _path, _selection: object())
-    monkeypatch.setattr(live, "LongMemEvalWorkload", lambda _bundle: workload)
-    built = live.build_live_cell(
-        plan=_plan(),
-        cell_id="hindsight-lme6",
-        output_root=tmp_path / "capsules",
-        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-        provider_project_id="oamb-providers-test-live",
-        provider_evidence=_provider_evidence(),
-        environment=_environment(),
-        run_label="full-partition",
-        observed_at=NOW,
-        code_revision="source-tree-test",
-    )
-
-    live.execute_live_cell(built)
-
-    partition = captured["partition"]
-    manifest = workload.build_case_manifest(workload.resolve_sources())
-    assert isinstance(partition, CasePartitionSpec)
-    assert partition.requested_case_manifest_entry_ids == tuple(
-        case.case_manifest_entry_id for case in manifest.cases
-    )
-    assert partition.selected_ingestion_plan_ids == tuple(
-        plan.ingestion_plan_id for plan in manifest.ingestion_plans
-    )
 
 
 def test_dangling_capsule_root_symlink_is_not_a_fresh_cell(tmp_path: Path) -> None:
@@ -1436,7 +1159,7 @@ def test_three_isolated_live_cells_are_dispatched_in_parallel(
 
 
 @pytest.mark.parametrize("pointer_name", ("active-operation", "active-provider-attempt"))
-def test_recovery_cell_build_rejects_active_lifecycle_ownership(
+def test_selected_cell_build_rejects_active_lifecycle_ownership(
     tmp_path: Path,
     pointer_name: str,
 ) -> None:
@@ -1451,16 +1174,15 @@ def test_recovery_cell_build_rejects_active_lifecycle_ownership(
         live.build_live_cell(
             plan=_lme60_plan(),
             cell_id="hindsight-lme60",
-            output_root=tmp_path / "recovery-capsules",
+            output_root=tmp_path / "selected-capsules",
             provider_runtime_directory=runtime,
             provider_project_id="oamb-providers-test-live",
             provider_evidence=_provider_evidence(),
             environment=_environment(),
-            run_label="recovery-active-owner",
+            run_label="selected-active-owner",
             observed_at=NOW,
             code_revision="source-tree-test",
             requested_case_manifest_entry_ids=(canonical_sha256(["remaining-case"]),),
-            recovery_parts=(tmp_path / "validated-aborted-part",),
         )
 
 

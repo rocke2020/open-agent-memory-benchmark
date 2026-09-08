@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import TypeVar, cast
 
 from oamb.artifacts.atomic import read_regular_file
-from oamb.artifacts.capsule_graph import read_capsule_graph
 from oamb.artifacts.validation.native import validate_native_capsule
 from oamb.artifacts.validation.reduction import (
     AccountingValidationInput,
@@ -480,7 +479,7 @@ def _load_report_records(
     costs: list[CostRecord] = []
     raw_paths: dict[str, Path] = {}
     source_schema_versions = ["capsule_manifest@1"]
-    graph = read_capsule_graph(root)
+    graph = ((root, manifest),)
     for graph_index, (capsule_root, capsule_manifest) in enumerate(graph):
         for entry in capsule_manifest.source_entries:
             path = capsule_root / entry.relative_path

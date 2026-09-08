@@ -22,7 +22,7 @@ Usage: ./run.sh [--smoke_test | --full_test] [--resume] [--dry-run]
 
 --smoke_test  Run one LME-60 question on every provider (default).
 --full_test   Run all 60 questions on every provider in parallel.
---resume      Resume an interrupted --full_test from immutable whole-group parts.
+--resume      Resume only unfinished --full_test questions from canonical progress.
 --dry-run     Validate configuration and readiness with zero model/provider calls.
 EOF
 }
@@ -48,7 +48,6 @@ finish_logging() {
 report_provider_progress() {
   python3 - "$@" <<'PY'
 import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -57,76 +56,13 @@ output_root = Path(sys.argv[1])
 total_questions = int(sys.argv[2])
 elapsed_seconds = int(sys.argv[3])
 command_active = sys.argv[4] == "true"
-resume_label = sys.argv[5] if len(sys.argv) == 9 else None
-reused, remaining, quarantined = map(int, sys.argv[6:9]) if resume_label else (0, 0, 0)
-providers = (resume_label.removesuffix("-lme60"),) if resume_label else ("hindsight", "mem0", "openviking")
+providers = ("hindsight", "mem0", "openviking")
 provider_specs = {provider: [] for provider in providers}
 terminal_statuses = {
     "finalized": "execution-completed",
     "aborted": "aborted",
     "infrastructure_blocked": "infrastructure_blocked",
 }
-
-
-def unique_object(pairs):
-    value = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError("duplicate evidence field")
-        value[key] = item
-    return value
-
-
-def sha256(value):
-    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-
-
-def progress_records(root, folder, schema, versions, identity):
-    directory = root / "source" / folder
-    if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
-        raise ValueError("invalid progress evidence directory")
-    for path in directory.glob("*.json"):
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("invalid progress evidence file")
-        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
-        if (
-            not isinstance(value, dict)
-            or value.get("schema_name") != schema
-            or type(value.get("schema_version")) is not int
-            or value["schema_version"] not in versions
-            or not sha256(value.get(identity))
-            or path.stem != value[identity]
-        ):
-            raise ValueError("invalid progress evidence identity")
-        yield value
-
-
-def history_rebuild_attempts(root, run_id, provider):
-    try:
-        if not (root / "source/parts").is_dir():
-            return "0"
-        histories = set()
-        plan_ids = set()
-        for record in progress_records(root, "history-attempts", "history_attempt_record", {1}, "history_attempt_id"):
-            occurrence = record.get("ingestion_occurrence_id")
-            plan_id = record.get("ingestion_plan_id")
-            if (
-                record.get("run_id") != run_id
-                or record.get("execution_run_id") != run_id
-                or record.get("memory_system_id") != provider
-                or not sha256(occurrence) or occurrence in histories
-                or not sha256(plan_id) or plan_id in plan_ids
-                or record.get("history_attempt_ordinal") != 1
-                or record.get("previous_retry_event_id") is not None
-                or record.get("admission_claim_raw_ref") is not None
-                or record.get("status") not in {"ready", "retryable_failed_settled", "failed", "unknown", "cancelled"}
-            ):
-                raise ValueError("invalid history progress record")
-            histories.add(occurrence)
-            plan_ids.add(plan_id)
-        return str(len(histories))
-    except (OSError, ValueError, KeyError, TypeError):
-        return "unavailable"
 
 
 for path in output_root.glob("*/source/specs/run-spec.json"):
@@ -139,13 +75,13 @@ for path in output_root.glob("*/source/specs/run-spec.json"):
         continue
 
 for provider, specs in provider_specs.items():
-    status = elapsed = progress = rebuilds = "unavailable"
+    status = elapsed = progress = "unavailable"
     completed = None
     if len(specs) == 1:
         capsule_root, spec = specs[0]
         completed = min(
             sum(path.is_file() for path in (capsule_root / "source/cases").glob("*.json")),
-            remaining if resume_label else total_questions,
+            total_questions,
         )
         progress = f"{completed} ({completed}/{total_questions}, {completed * 100 // total_questions}%)"
         records = list((capsule_root / "source/run").glob("*.json"))
@@ -153,7 +89,6 @@ for provider, specs in provider_specs.items():
             run_id = spec["run_id"]
             if not isinstance(run_id, str) or not run_id:
                 raise ValueError("missing run identity")
-            rebuilds = history_rebuild_attempts(capsule_root, run_id, provider)
             if len(records) == 1:
                 record = json.loads(records[0].read_text(encoding="utf-8"))
                 if (
@@ -175,13 +110,7 @@ for provider, specs in provider_specs.items():
                 elapsed = f"{elapsed_seconds}s"
         except (OSError, ValueError, KeyError, TypeError):
             pass
-    if resume_label:
-        unfinished = remaining - completed if completed is not None else "unavailable"
-        done = reused + completed if completed is not None else "unavailable"
-        question_progress = f"{done * 100 // total_questions}% ({done}/{total_questions})" if isinstance(done, int) else "unavailable"
-        print(f"run: {resume_label} status={status}, elapsed={elapsed}, reused={reused}, remaining={unfinished}, running=unavailable, completed={completed if completed is not None else 'unavailable'}, failed=unavailable, quarantined={quarantined}, history_rebuild_attempts={rebuilds}, completed_questions={done}, question_progress={question_progress}")
-    else:
-        print(f"provider={provider} status={status}, elapsed={elapsed}, history_rebuild_attempts={rebuilds}, completed_questions={progress}")
+    print(f"provider={provider} status={status}, elapsed={elapsed}, completed_questions={progress}")
 PY
 }
 
@@ -209,7 +138,7 @@ run_provider_cells_with_status() {
   local started_seconds=$SECONDS
   printf 'run: providers=hindsight,mem0,openviking status=starting (%s)\n' "$context"
   for provider in hindsight mem0 openviking; do
-    printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s), history_rebuild_attempts=0\n' \
+    printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s)\n' \
       "$provider" "$total_questions"
   done
   provider_status_heartbeat "$output_root" "$total_questions" &
@@ -313,6 +242,25 @@ esac
 PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
 
+if [[ "$RESUME" == true ]]; then
+  early_resume_pointer="$WORK_DIR/full-test-current"
+  [[ -f "$early_resume_pointer" && ! -L "$early_resume_pointer" ]] || \
+    die "no resumable full run; start one with ./run.sh --full_test"
+  early_execution_label="$(<"$early_resume_pointer")"
+  case "$early_execution_label" in
+    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run resume pointer is invalid" ;;
+  esac
+  early_mode_dir="$OUTPUTS_ROOT/full-test/$early_execution_label"
+  [[ -d "$early_mode_dir" && ! -L "$early_mode_dir" ]] || \
+    die "resumable full-run output is missing: $early_mode_dir"
+  uv run --locked oamb run "$PLAN" \
+    --run-label "simple-resume-rehearsal" \
+    --output-root "$early_mode_dir/capsules/simple-resume-rehearsal" \
+    --full-progress-root "$early_mode_dir/results" \
+    --full-resume-lock "$WORK_DIR/full-test-resume.lock" \
+    --full-resume-rehearsal
+fi
+
 "$ROOT/provider-services/bin/provider-services" doctor
 uv run --locked python - "$PLAN" "$ROOT/.env" "$ROOT/provider-services/.runtime" \
   "$DATASET_SOURCE" "${CELLS[@]}" <<'PY'
@@ -387,219 +335,53 @@ else
 fi
 mkdir -p "$MODE_DIR/results" "$MODE_DIR/validations" "$MODE_DIR/capsules"
 if [[ "$MODE" == "full" && "$RESUME" == false ]]; then
-  resume_pointer_next="$(mktemp "$WORK_DIR/.full-test-current.XXXXXX")"
-  printf '%s\n' "$EXECUTION_LABEL" > "$resume_pointer_next"
-  mv "$resume_pointer_next" "$FULL_RESUME_POINTER"
+  uv run --locked python - "$PLAN" "$MODE_DIR/results" <<'PY'
+import sys
+from pathlib import Path
+
+from oamb.config.doctor import load_resolved_plan_for_run
+from oamb.runtime.full_progress import (
+    canonical_full_progress_path,
+    empty_full_progress,
+    initialize_full_progress,
+)
+from oamb.workloads.longmemeval import build_longmemeval_bundle
+
+plan = load_resolved_plan_for_run(Path(sys.argv[1]))
+progress_root = Path(sys.argv[2])
+dataset_path = Path(plan.dataset.path)
+if not dataset_path.is_absolute():
+    dataset_path = Path.cwd() / dataset_path
+manifest = build_longmemeval_bundle(dataset_path, plan.dataset.selection).case_manifest
+ordered_question_ids = tuple(case.raw_question_id for case in manifest.cases)
+if (
+    plan.dataset.selection != "lme60"
+    or len(ordered_question_ids) != 60
+    or manifest.manifest_hash != plan.dataset.case_manifest_hash
+):
+    raise SystemExit("fresh full progress does not match the frozen LME-60 manifest")
+paths = tuple(
+    canonical_full_progress_path(progress_root, cell.provider_id) for cell in plan.cells
+)
+if any(path.exists() or path.is_symlink() for path in paths):
+    raise SystemExit("fresh full progress target already exists")
+for cell, path in zip(plan.cells, paths, strict=True):
+    initialize_full_progress(
+        path,
+        empty_full_progress(
+            resolved_plan_hash=plan.resolved_plan_hash,
+            cell_id=cell.cell_id,
+            provider_id=cell.provider_id,
+            workload_id=cell.workload_id,
+            case_manifest_hash=cell.case_manifest_hash,
+            ordered_question_ids=ordered_question_ids,
+        ),
+    )
+    print(f"full progress: initialized cell={cell.cell_id} reused=0 remaining=60")
+PY
 fi
 
 VALIDATION_PATH=""
-RESUME_LOCK=""
-
-release_resume_lock() {
-  if [[ -n "$RESUME_LOCK" ]]; then
-    rmdir "$RESUME_LOCK" 2>/dev/null || true
-    RESUME_LOCK=""
-  fi
-}
-
-
-resume_result_map_is_bound() {
-  local result_map=$1
-  local expected_cells
-  expected_cells="$(jq -cn --args '$ARGS.positional' "${CELLS[@]}")"
-  jq -e --arg plan_hash "$PLAN_HASH" --argjson expected "$expected_cells" '
-    (keys | sort) == ["capsule_roots", "cells", "resolved_plan_hash",
-                      "schema_name", "schema_version", "status"] and
-    .schema_name == "live_run_result_map" and
-    .schema_version == 1 and
-    .resolved_plan_hash == $plan_hash and
-    (.status == "completed" or .status == "failed") and
-    (.capsule_roots | type) == "object" and
-    (.cells | type) == "array" and
-    [.cells[].cell_id] == $expected and
-    all(.cells[];
-      (keys | sort) == ["capsule_root", "cell_id", "detail", "status"] and
-      (.status == "completed" or .status == "failed" or .status == "not_started") and
-      (.capsule_root | type) == "string" and
-      (.capsule_root | length) > 0)
-  ' "$result_map" >/dev/null 2>&1
-}
-
-resume_state_is_bound() {
-  local state_path=$1
-  local expected_cells
-  expected_cells="$(jq -cn --args '$ARGS.positional' "${CELLS[@]}")"
-  jq -e --arg plan_hash "$PLAN_HASH" --argjson expected "$expected_cells" '
-    (keys | sort) == ["attempt", "cells", "resolved_plan_hash",
-                      "schema_name", "schema_version"] and
-    .schema_name == "full_test_resume_state" and
-    .schema_version == 1 and
-    .resolved_plan_hash == $plan_hash and
-    (.attempt | type) == "number" and .attempt >= 0 and
-    .attempt == (.attempt | floor) and
-    [.cells[].cell_id] == $expected and
-    all(.cells[];
-      (keys | sort) == ["cell_id", "final_capsule_root", "final_validation", "parts"] and
-      (.parts | type) == "array" and
-      (.parts | length) > 0 and
-      all(.parts[]; type == "string" and length > 0) and
-      (.parts | unique | length) == (.parts | length) and
-      (.final_capsule_root == null or (
-        (.final_capsule_root | type) == "string" and
-        (.final_capsule_root | length) > 0)) and
-      (.final_validation == null or (
-        (.final_validation | type) == "string" and
-        (.final_validation | length) > 0)))
-  ' "$state_path" >/dev/null 2>&1
-}
-
-atomic_replace_resume_state() {
-  local input=$1
-  local temporary
-  temporary="$(mktemp "$MODE_DIR/results/.full-resume-state.XXXXXX")"
-  jq -cS . "$input" > "$temporary" || die "cannot serialize resume state"
-  mv "$temporary" "$RESUME_STATE"
-  rm -f "$input"
-}
-
-initialize_resume_state() {
-  local candidate root temporary_state
-  local -a candidates=()
-  if [[ -e "$RESUME_STATE" ]]; then
-    [[ -f "$RESUME_STATE" && ! -L "$RESUME_STATE" ]] || \
-      die "resume state is not a regular file: $RESUME_STATE"
-    resume_state_is_bound "$RESUME_STATE" || \
-      die "resume state is malformed or does not match the current resolved plan"
-  else
-    for candidate in "$MODE_DIR/results/full.json" "$MODE_DIR"/results/full-retry-*.json; do
-      [[ -f "$candidate" && ! -L "$candidate" ]] || continue
-      resume_result_map_is_bound "$candidate" || continue
-      candidates+=("$candidate")
-    done
-    ((${#candidates[@]} > 0)) || \
-      die "no resumable full-run result map; --resume never starts a fresh full run"
-    ((${#candidates[@]} == 1)) || \
-      die "ambiguous full-run source selection; preserve one explicit resume state"
-    candidate=${candidates[0]}
-    temporary_state="$(mktemp "$MODE_DIR/results/.full-resume-initial.XXXXXX")"
-    jq -cS --arg plan_hash "$PLAN_HASH" '
-      {
-        schema_name: "full_test_resume_state",
-        schema_version: 1,
-        resolved_plan_hash: $plan_hash,
-        attempt: 0,
-        cells: [.cells[] | {
-          cell_id,
-          parts: [.capsule_root],
-          final_capsule_root: null,
-          final_validation: null
-        }]
-      }
-    ' "$candidate" > "$temporary_state" || die "cannot initialize resume state"
-    atomic_replace_resume_state "$temporary_state"
-  fi
-  while IFS= read -r root; do
-    [[ -d "$root" ]] || die "resume source capsule is missing: $root"
-  done < <(jq -r '.cells[].parts[]' "$RESUME_STATE")
-}
-
-update_resume_state() {
-  local temporary
-  temporary="$(mktemp "$MODE_DIR/results/.full-resume-update.XXXXXX")"
-  jq "$@" "$RESUME_STATE" > "$temporary" || die "cannot update resume state"
-  atomic_replace_resume_state "$temporary"
-}
-
-append_resume_part() {
-  local cell=$1
-  local capsule_root=$2
-  update_resume_state --arg cell "$cell" --arg root "$capsule_root" '
-    .cells |= map(
-      if .cell_id == $cell then
-        .parts = (
-          if (.parts | index($root)) == null then .parts + [$root] else .parts end
-        ) |
-        .final_capsule_root = null |
-        .final_validation = null
-      else . end
-    )
-  '
-}
-
-reconcile_resume_worker_results() {
-  local completed_attempt attempt cell provider result_map capsule_root expected_output
-  local capsule_parent expected_parent validation
-  completed_attempt="$(jq -er '.attempt' "$RESUME_STATE")"
-  for ((attempt = 1; attempt <= completed_attempt; attempt++)); do
-    for cell in "${CELLS[@]}"; do
-      provider="${cell%-lme60}"
-      result_map="$MODE_DIR/results/resume-$attempt-$provider.json"
-      [[ -e "$result_map" ]] || continue
-      [[ -f "$result_map" && ! -L "$result_map" ]] || \
-        die "resume worker result map is not a regular file: $result_map"
-      capsule_root="$(resume_result_root "$result_map" "$cell")" || \
-        die "resume worker result map is malformed or unbound: $result_map"
-      expected_output="$MODE_DIR/capsules/resume/$attempt/$provider"
-      [[ -d "$capsule_root" && ! -L "$capsule_root" ]] || \
-        die "resume worker capsule is missing or malformed: $capsule_root"
-      [[ -d "$expected_output" && ! -L "$expected_output" ]] || \
-        die "resume worker output root is missing or malformed: $expected_output"
-      capsule_parent="$(cd "$(dirname "$capsule_root")" && pwd -P)"
-      expected_parent="$(cd "$expected_output" && pwd -P)"
-      [[ "$capsule_parent" == "$expected_parent" ]] || \
-        die "resume worker capsule is outside its attempt-owned output root: $capsule_root"
-      validation="$MODE_DIR/validations/resume-reconcile-$attempt-$provider-$(date -u +%Y%m%d-%H%M%S)-$$.json"
-      validate_capsule_result "$capsule_root" "$validation" || \
-        die "resume worker capsule reconciliation failed: $capsule_root"
-      append_resume_part "$cell" "$capsule_root"
-    done
-  done
-}
-
-complete_resume_cell() {
-  local cell=$1
-  local capsule_root=$2
-  local validation=$3
-  update_resume_state --arg cell "$cell" --arg root "$capsule_root" \
-    --arg validation "$validation" '
-      .cells |= map(
-        if .cell_id == $cell then
-          .final_capsule_root = $root | .final_validation = $validation
-        else . end
-      )
-    '
-}
-
-increment_resume_attempt() {
-  update_resume_state '.attempt += 1'
-  RESUME_ATTEMPT="$(jq -er '.attempt' "$RESUME_STATE")"
-}
-
-resume_parts_for_cell() {
-  local cell=$1
-  jq -er --arg cell "$cell" '.cells[] | select(.cell_id == $cell) | .parts[]' \
-    "$RESUME_STATE"
-}
-
-resume_result_root() {
-  local result_map=$1
-  local cell=$2
-  jq -er --arg plan_hash "$PLAN_HASH" --arg cell "$cell" '
-    if (
-      (keys | sort) == ["capsule_roots", "cells", "resolved_plan_hash",
-                        "schema_name", "schema_version", "status"] and
-      .schema_name == "live_run_result_map" and
-      .schema_version == 1 and
-      .resolved_plan_hash == $plan_hash and
-      (.status == "completed" or .status == "failed") and
-      (.cells | length) == 1 and
-      .cells[0].cell_id == $cell and
-      (.cells[0].status == "completed" or .cells[0].status == "failed") and
-      (.cells[0].capsule_root | type) == "string" and
-      (.cells[0].capsule_root | length) > 0
-    ) then .cells[0].capsule_root else false end
-  ' "$result_map"
-}
 
 validate_capsule_result() {
   local capsule_root=$1
@@ -634,427 +416,18 @@ validate_capsule() {
     die "capsule validation failed: $capsule_root"
 }
 
-run_resume_analysis() {
-  local cell=$1
-  local provider=$2
-  local analysis_output=$3
-  local log_path=$4
-  local -a arguments=(
-    uv run --locked oamb run "$PLAN"
-    --cell "$cell"
-    --run-label "$EXECUTION_LABEL-full-resume-analysis-$RESUME_ATTEMPT-$provider"
-    --output-root "$MODE_DIR/capsules/resume-analysis-$RESUME_ATTEMPT/$provider"
-    --recovery-analysis-output "$analysis_output"
-  )
-  local part
-  while IFS= read -r part; do
-    arguments+=(--recover-from "$part")
-  done < <(resume_parts_for_cell "$cell")
-  "${arguments[@]}" > "$log_path" 2>&1
-}
-
-resume_status_heartbeat() {
-  local label=$1
-  local output_root=$2
-  local reused=$3
-  local remaining=$4
-  local quarantined=$5
-  local elapsed_seconds=0
-  local timer_pid=""
-  trap '[ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true; exit 0' TERM INT HUP
-  while :; do
-    sleep "$STATUS_INTERVAL_SECONDS" &
-    timer_pid=$!
-    wait "$timer_pid" || exit 0
-    elapsed_seconds=$((elapsed_seconds + STATUS_INTERVAL_SECONDS))
-    report_provider_progress "$output_root" 60 "$elapsed_seconds" true \
-      "$label" "$reused" "$remaining" "$quarantined"
-  done
-}
-
-wait_for_child() {
-  local child_pid=$1
-  local child_code
-  while :; do
-    if wait "$child_pid"; then
-      return 0
-    else
-      child_code=$?
-      kill -0 "$child_pid" 2>/dev/null || return "$child_code"
-    fi
-  done
-}
-
-run_resume_worker() {
-  local cell=$1
-  local provider=$2
-  local output_root=$3
-  local result_map=$4
-  local log_path=$5
-  local reused=$6
-  local remaining=$7
-  local quarantined=$8
-  local command_pid=""
-  local heartbeat_pid=""
-  local command_code=0
-  local started_seconds=$SECONDS
-  local part
-  local -a arguments=(
-    uv run --locked oamb run "$PLAN"
-    --cell "$cell"
-    --run-label "$EXECUTION_LABEL-full-resume-$RESUME_ATTEMPT-$provider"
-    --output-root "$output_root"
-    --result-map "$result_map"
-  )
-  while IFS= read -r part; do
-    arguments+=(--recover-from "$part")
-  done < <(resume_parts_for_cell "$cell")
-  forward_worker_stop() {
-    [[ -z "$command_pid" ]] || kill -TERM "$command_pid" 2>/dev/null || true
-  }
-  trap forward_worker_stop TERM INT HUP
-  resume_status_heartbeat "$cell" "$output_root" "$reused" "$remaining" \
-    "$quarantined" &
-  heartbeat_pid=$!
-  "${arguments[@]}" >> "$log_path" 2>&1 &
-  command_pid=$!
-  while :; do
-    if wait "$command_pid"; then
-      command_code=0
-      break
-    else
-      command_code=$?
-      kill -0 "$command_pid" 2>/dev/null || break
-    fi
-  done
-  kill "$heartbeat_pid" 2>/dev/null || true
-  wait "$heartbeat_pid" 2>/dev/null || true
-  report_provider_progress "$output_root" 60 "$((SECONDS - started_seconds))" false \
-    "$cell" "$reused" "$remaining" "$quarantined"
-  if ((command_code != 0)); then
-    printf 'run: %s status=failed\n' "$cell" >> "$log_path"
-    return "$command_code"
-  fi
-  printf 'run: %s status=execution-completed\n' "$cell" >> "$log_path"
-}
-
-compose_resume_cell() {
-  local cell=$1
-  local provider=$2
-  local output="$MODE_DIR/capsules/composed/$provider-$RESUME_ATTEMPT"
-  local validation="$MODE_DIR/validations/resume-$RESUME_ATTEMPT-$provider.json"
-  local analysis="$MODE_DIR/results/resume-analysis-$RESUME_ATTEMPT-$provider.json"
-  local execution_hash execution_family_hash
-  local part
-  execution_hash="$(jq -er '.execution_configuration_hash' "$analysis")" || \
-    die "resume analysis lacks execution configuration hash: $provider"
-  execution_family_hash="$(jq -er '.execution_configuration_family_hash' "$analysis")" || \
-    die "resume analysis lacks execution configuration family hash: $provider"
-  local -a arguments=(
-    uv run --locked oamb capsule compose --plan "$PLAN" --cell "$cell" --output "$output"
-    --execution-configuration-hash "$execution_hash"
-    --execution-configuration-family-hash "$execution_family_hash"
-  )
-  while IFS= read -r part; do
-    arguments+=(--part "$part")
-  done < <(resume_parts_for_cell "$cell")
-  printf 'run: provider=%s status=composing\n' "$provider"
-  "${arguments[@]}"
-  validate_capsule "$output" "$validation"
-  complete_resume_cell "$cell" "$output" "$VALIDATION_PATH"
-  printf 'run: provider=%s status=completed\n' "$provider"
-}
-
-run_full_resume() {
-  local cell provider analysis log_path remaining reusable quarantined progress status
-  local final_root final_validation result_map output_root capsule_root part_validation
-  local provider_cap batch_start batch_end index pid any_failed admitted_count completed
-  local worker_pid_count=0
-  local stop_count=0
-  local -a pending_cells=()
-  local -a pending_providers=()
-  local -a pending_reused=()
-  local -a pending_remaining=()
-  local -a pending_quarantined=()
-  local -a pending_statuses=()
-  local -a active_pids=()
-
-  RESUME_STATE="$MODE_DIR/results/full-resume-state.json"
-  RESUME_LOCK="$MODE_DIR/results/full-resume.lock"
-  mkdir "$RESUME_LOCK" 2>/dev/null || \
-    die "another full-test resume owns the local state: $RESUME_LOCK"
-  trap 'run_exit_code=$?; release_resume_lock; finish_logging "$run_exit_code"' EXIT
-  initialize_resume_state
-  reconcile_resume_worker_results
-  increment_resume_attempt
-  provider_cap="$(jq -er '
-    .execution.max_parallel_providers_per_dataset |
-    select(type == "number" and . >= 1 and . == floor)
-  ' "$PLAN")"
-  ((provider_cap <= ${#CELLS[@]})) || provider_cap=${#CELLS[@]}
-
-  printf 'run: resume attempt=%s status=validating-sources\n' "$RESUME_ATTEMPT"
-  for cell in "${CELLS[@]}"; do
-    provider="${cell%-lme60}"
-    final_root="$(jq -r --arg cell "$cell" \
-      '.cells[] | select(.cell_id == $cell) | .final_capsule_root // empty' "$RESUME_STATE")"
-    if [[ -n "$final_root" ]]; then
-      [[ -d "$final_root" ]] || die "completed resume capsule is missing: $final_root"
-      validate_capsule "$final_root" \
-        "$MODE_DIR/validations/resume-recheck-$RESUME_ATTEMPT-$provider.json"
-      complete_resume_cell "$cell" "$final_root" "$VALIDATION_PATH"
-    fi
-    analysis="$MODE_DIR/results/resume-analysis-$RESUME_ATTEMPT-$provider.json"
-    log_path="$MODE_DIR/results/resume-analysis-$RESUME_ATTEMPT-$provider.log"
-    [[ ! -e "$analysis" && ! -e "$log_path" ]] || \
-      die "resume analysis output already exists for attempt $RESUME_ATTEMPT: $provider"
-    run_resume_analysis "$cell" "$provider" "$analysis" "$log_path" &
-    active_pids+=("$!")
-  done
-
-  any_failed=false
-  index=0
-  for cell in "${CELLS[@]}"; do
-    pid=${active_pids[$index]}
-    if wait_for_child "$pid"; then
-      :
-    else
-      any_failed=true
-    fi
-    provider="${cell%-lme60}"
-    log_path="$MODE_DIR/results/resume-analysis-$RESUME_ATTEMPT-$provider.log"
-    sed -n '1,240p' "$log_path"
-    index=$((index + 1))
-  done
-  [[ "$any_failed" == false ]] || \
-    die "resume source validation failed; zero recovery dispatches were started"
-
-  for cell in "${CELLS[@]}"; do
-    provider="${cell%-lme60}"
-    final_root="$(jq -r --arg cell "$cell" \
-      '.cells[] | select(.cell_id == $cell) | .final_capsule_root // empty' "$RESUME_STATE")"
-    [[ -z "$final_root" ]] || continue
-    analysis="$MODE_DIR/results/resume-analysis-$RESUME_ATTEMPT-$provider.json"
-    reusable="$(jq -er '.reusable_ingestion_plan_ids | length' "$analysis")"
-    remaining="$(jq -er '.remaining_case_manifest_entry_ids | length' "$analysis")"
-    quarantined="$(jq -er '.quarantined_ingestion_plan_ids | length' "$analysis")"
-    progress=$((reusable * 100 / 60))
-    printf 'run: provider=%s status=ready, reused=%s, remaining=%s, running=0, completed=0, failed=0, quarantined=%s, question_progress=%s%% (%s/60)\n' \
-      "$provider" "$reusable" "$remaining" "$quarantined" \
-      "$progress" "$reusable"
-    if ((remaining == 0)); then
-      compose_resume_cell "$cell" "$provider"
-    else
-      pending_cells+=("$cell")
-      pending_providers+=("$provider")
-      pending_reused+=("$reusable")
-      pending_remaining+=("$remaining")
-      pending_quarantined+=("$quarantined")
-      pending_statuses+=("not_started")
-    fi
-  done
-
-  RESUME_STOP_REQUESTED=false
-  RESUME_WORKER_PIDS=()
-  forward_resume_stop() {
-    local worker_pid
-    stop_count=$((stop_count + 1))
-    RESUME_STOP_REQUESTED=true
-    if ((stop_count > 1)); then
-      printf 'run: repeated stop requested; forwarding the provider hard-stop signal\n' >&2
-    fi
-    if ((worker_pid_count > 0)); then
-      for worker_pid in "${RESUME_WORKER_PIDS[@]}"; do
-        kill -TERM "$worker_pid" 2>/dev/null || true
-      done
-    fi
-  }
-  trap forward_resume_stop INT TERM HUP
-
-  # Keep terminal-wide signals at the supervisor so each worker sees one forwarded stop.
-  resume_enabled_monitor_mode=false
-  if [[ "$-" != *m* ]]; then
-    set -m
-    resume_enabled_monitor_mode=true
-  fi
-
-  any_failed=false
-  admitted_count=0
-  batch_start=0
-  while ((batch_start < ${#pending_cells[@]})); do
-    batch_end=$((batch_start + provider_cap))
-    ((batch_end <= ${#pending_cells[@]})) || batch_end=${#pending_cells[@]}
-    RESUME_WORKER_PIDS=()
-    worker_pid_count=0
-    for ((index = batch_start; index < batch_end; index++)); do
-      if [[ "$RESUME_STOP_REQUESTED" == true ]]; then
-        break
-      fi
-      cell=${pending_cells[$index]}
-      provider=${pending_providers[$index]}
-      output_root="$MODE_DIR/capsules/resume/$RESUME_ATTEMPT/$provider"
-      result_map="$MODE_DIR/results/resume-$RESUME_ATTEMPT-$provider.json"
-      log_path="$MODE_DIR/results/resume-$RESUME_ATTEMPT-$provider.log"
-      [[ ! -e "$result_map" && ! -e "$log_path" ]] || \
-        die "resume worker output already exists for attempt $RESUME_ATTEMPT: $provider"
-      pending_statuses[$index]="running"
-      printf 'run: provider=%s status=running, reused=%s, remaining=%s, running=unavailable, completed=0, failed=unavailable, quarantined=%s, question_progress=%s%% (%s/60)\n' \
-        "$provider" "${pending_reused[$index]}" "${pending_remaining[$index]}" \
-        "${pending_quarantined[$index]}" \
-        "$((pending_reused[$index] * 100 / 60))" "${pending_reused[$index]}"
-      run_resume_worker "$cell" "$provider" "$output_root" "$result_map" "$log_path" \
-        "${pending_reused[$index]}" "${pending_remaining[$index]}" \
-        "${pending_quarantined[$index]}" &
-      pid=$!
-      RESUME_WORKER_PIDS+=("$pid")
-      worker_pid_count=$((worker_pid_count + 1))
-      admitted_count=$((index + 1))
-      if [[ "$RESUME_STOP_REQUESTED" == true ]]; then
-        kill -TERM "$pid" 2>/dev/null || true
-        break
-      fi
-    done
-    batch_end=$admitted_count
-    for ((index = batch_start; index < batch_end; index++)); do
-      pid=${RESUME_WORKER_PIDS[$((index - batch_start))]}
-      if wait_for_child "$pid"; then
-        pending_statuses[$index]="execution_completed"
-      else
-        pending_statuses[$index]="failed"
-        any_failed=true
-      fi
-    done
-    RESUME_WORKER_PIDS=()
-    worker_pid_count=0
-    batch_start=$batch_end
-    if [[ "$any_failed" == true || "$RESUME_STOP_REQUESTED" == true ]]; then
-      break
-    fi
-  done
-  if [[ "$resume_enabled_monitor_mode" == true ]]; then
-    set +m
-  fi
-
-  for ((index = 0; index < admitted_count; index++)); do
-    cell=${pending_cells[$index]}
-    provider=${pending_providers[$index]}
-    result_map="$MODE_DIR/results/resume-$RESUME_ATTEMPT-$provider.json"
-    log_path="$MODE_DIR/results/resume-$RESUME_ATTEMPT-$provider.log"
-    [[ ! -f "$log_path" ]] || sed -n '1,320p' "$log_path"
-    if [[ -f "$result_map" && ! -L "$result_map" ]]; then
-      capsule_root="$(resume_result_root "$result_map" "$cell")" || {
-        any_failed=true
-        pending_statuses[$index]="failed"
-        capsule_root=""
-      }
-      if [[ -n "$capsule_root" && -d "$capsule_root" ]]; then
-        part_validation="$MODE_DIR/validations/resume-part-$RESUME_ATTEMPT-$provider.json"
-        if validate_capsule_result "$capsule_root" "$part_validation"; then
-          append_resume_part "$cell" "$capsule_root"
-          if [[ "${pending_statuses[$index]}" == "execution_completed" ]]; then
-            pending_statuses[$index]="completed"
-          fi
-        else
-          pending_statuses[$index]="failed"
-          any_failed=true
-        fi
-      else
-        pending_statuses[$index]="failed"
-        any_failed=true
-      fi
-    else
-      pending_statuses[$index]="failed"
-      any_failed=true
-    fi
-  done
-
-  if [[ "$any_failed" == true || "$RESUME_STOP_REQUESTED" == true ]]; then
-    for index in "${!pending_cells[@]}"; do
-      cell=${pending_cells[$index]}
-      provider=${pending_providers[$index]}
-      status=${pending_statuses[$index]}
-      analysis="$MODE_DIR/results/resume-post-analysis-$RESUME_ATTEMPT-$provider.json"
-      log_path="$MODE_DIR/results/resume-post-analysis-$RESUME_ATTEMPT-$provider.log"
-      if [[ "$status" == "not_started" ]]; then
-        reusable=${pending_reused[$index]}
-        remaining=${pending_remaining[$index]}
-        quarantined=${pending_quarantined[$index]}
-        completed=0
-        progress=$((reusable * 100 / 60))
-        printf 'run: provider=%s status=not_started, reused=%s, remaining=%s, running=0, completed=0, failed=0, quarantined=%s, question_progress=%s%% (%s/60), resume_state=%s\n' \
-          "$provider" "$reusable" "$remaining" "$quarantined" \
-          "$progress" "$reusable" "$RESUME_STATE" >&2
-      elif run_resume_analysis "$cell" "$provider" "$analysis" "$log_path"; then
-        reusable="$(jq -er '.reusable_ingestion_plan_ids | length' "$analysis")"
-        remaining="$(jq -er '.remaining_case_manifest_entry_ids | length' "$analysis")"
-        quarantined="$(jq -er '.quarantined_ingestion_plan_ids | length' "$analysis")"
-        completed=$((reusable - pending_reused[$index]))
-        ((completed >= 0)) || completed=0
-        progress=$((reusable * 100 / 60))
-        if [[ "$status" == "completed" ]]; then
-          printf 'run: provider=%s status=completed, reused=%s, remaining=%s, running=0, completed=%s, failed=0, quarantined=%s, question_progress=%s%% (%s/60), resume_state=%s\n' \
-            "$provider" "$reusable" "$remaining" "$completed" "$quarantined" \
-            "$progress" "$reusable" "$RESUME_STATE" >&2
-        else
-          printf 'run: provider=%s status=failed, reused=%s, remaining=%s, running=0, completed=%s, failed=unavailable, quarantined=%s, question_progress=%s%% (%s/60), resume_state=%s\n' \
-            "$provider" "$reusable" "$remaining" "$completed" "$quarantined" \
-            "$progress" "$reusable" "$RESUME_STATE" >&2
-        fi
-      else
-        printf 'run: provider=%s status=%s, progress=unavailable, resume_state=%s\n' \
-          "$provider" "$status" "$RESUME_STATE" >&2
-      fi
-    done
-    trap - INT TERM HUP
-    die "full-test recovery stopped or failed; preserved parts will be reused by the next --resume"
-  fi
-
-  for index in "${!pending_cells[@]}"; do
-    compose_resume_cell "${pending_cells[$index]}" "${pending_providers[$index]}"
-    if [[ "$RESUME_STOP_REQUESTED" == true ]]; then
-      trap - INT TERM HUP
-      die "operator stop preserved resume state before report"
-    fi
-    printf 'run: provider=%s status=completed, reused=%s, remaining=0, running=0, completed=%s, failed=0, quarantined=0, question_progress=100%% (60/60)\n' \
-      "${pending_providers[$index]}" "${pending_reused[$index]}" \
-      "${pending_remaining[$index]}"
-  done
-
-  FULL_ROOTS=()
-  FULL_VALIDATIONS=()
-  for cell in "${CELLS[@]}"; do
-    final_root="$(jq -er --arg cell "$cell" \
-      '.cells[] | select(.cell_id == $cell) | .final_capsule_root | select(type == "string")' \
-      "$RESUME_STATE")"
-    final_validation="$(jq -er --arg cell "$cell" \
-      '.cells[] | select(.cell_id == $cell) | .final_validation | select(type == "string")' \
-      "$RESUME_STATE")"
-    [[ -d "$final_root" && -f "$final_validation" ]] || \
-      die "resume did not produce one validated final capsule for $cell"
-    FULL_ROOTS+=("$final_root")
-    FULL_VALIDATIONS+=("$final_validation")
-  done
-  trap - INT TERM HUP
-  if [[ "$RESUME_STOP_REQUESTED" == true ]]; then
-    die "operator stop preserved resume state before report"
-  fi
-}
-
 build_comparison() {
   local expected_cases=60
   local expected_results=180
   local roots=()
   local validations=()
+  local comparison="$MODE_DIR/comparison"
   if [[ "$MODE" == "smoke" ]]; then
     expected_cases=1
     expected_results=3
     roots=("${RUN_ROOTS[@]}")
     validations=("${RUN_VALIDATIONS[@]}")
-  else
-    roots=("${FULL_ROOTS[@]}")
-    validations=("${FULL_VALIDATIONS[@]}")
   fi
-  local comparison="$MODE_DIR/comparison"
   if [[ -e "$comparison" ]]; then
     comparison="$MODE_DIR/comparison-retry-$(date -u +%Y%m%d-%H%M%S)-$$"
   fi
@@ -1072,12 +445,7 @@ build_comparison() {
       --diagnostic
   else
     uv run --locked oamb compare "$PLAN" \
-      --cell-root "${CELLS[0]}=${roots[0]}" \
-      --cell-root "${CELLS[1]}=${roots[1]}" \
-      --cell-root "${CELLS[2]}=${roots[2]}" \
-      --validation "${CELLS[0]}=${validations[0]}" \
-      --validation "${CELLS[1]}=${validations[1]}" \
-      --validation "${CELLS[2]}=${validations[2]}" \
+      --full-progress-root "$MODE_DIR/results" \
       --dataset-source "$DATASET_SOURCE" \
       --output-root "$comparison"
   fi
@@ -1100,13 +468,24 @@ build_comparison() {
   printf 'report: %s\n' "$comparison/report.html"
 }
 
+run_simple_resume() {
+  local resume_label="simple-resume-$(date -u +%Y%m%d-%H%M%S)-$$"
+  local resume_output="$MODE_DIR/capsules/resume/$resume_label"
+  mkdir -p "$MODE_DIR/capsules/resume"
+  printf 'run: status=resuming-from-canonical-progress\n'
+  uv run --locked oamb run "$PLAN" \
+    --run-label "$resume_label" \
+    --output-root "$resume_output" \
+    --full-progress-root "$MODE_DIR/results" \
+    --full-resume-lock "$WORK_DIR/full-test-resume.lock"
+  printf 'run: status=resume-completed\n'
+}
+
 cd "$ROOT"
 RUN_ROOTS=()
 RUN_VALIDATIONS=()
-FULL_ROOTS=()
-FULL_VALIDATIONS=()
 if [[ "$MODE" == "full" && "$RESUME" == true ]]; then
-  run_full_resume
+  run_simple_resume
   build_comparison
   exit 0
 fi
@@ -1131,6 +510,11 @@ if [[ "$MODE" == "smoke" ]]; then
 else
   question_count=60
   run_context="full, 60 questions each"
+  run_arguments+=(
+    --full-progress-root "$MODE_DIR/results"
+    --full-resume-lock "$WORK_DIR/full-test-resume.lock"
+    --full-resume-pointer "$FULL_RESUME_POINTER"
+  )
 fi
 
 run_provider_cells_with_status "$run_output" "$run_context" "$question_count" \
@@ -1147,9 +531,6 @@ for cell in "${CELLS[@]}"; do
   if [[ "$MODE" == "smoke" ]]; then
     RUN_ROOTS+=("$capsule_root")
     RUN_VALIDATIONS+=("$VALIDATION_PATH")
-  else
-    FULL_ROOTS+=("$capsule_root")
-    FULL_VALIDATIONS+=("$VALIDATION_PATH")
   fi
 done
 

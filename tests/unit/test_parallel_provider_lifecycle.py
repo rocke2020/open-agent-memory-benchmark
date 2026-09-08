@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from oamb.runtime.resume import ProviderLifecycleBridge, ResumeRejectedError
+from oamb.runtime.provider_lifecycle import ProviderLifecycleBridge, ProviderLifecycleError
 
 
 def test_one_run_tracks_parallel_provider_attempts_independently(tmp_path: Path) -> None:
@@ -34,7 +34,7 @@ def test_one_run_tracks_parallel_provider_attempts_independently(tmp_path: Path)
         ]
         == "c" * 64
     )
-    with pytest.raises(ResumeRejectedError, match="provider attempt"):
+    with pytest.raises(ProviderLifecycleError, match="provider attempt"):
         bridge.release_run(authority)
 
     bridge.clear_attempt_after_receipt(
@@ -95,7 +95,7 @@ def test_project_mutation_gate_blocks_new_provider_domain_acquisition(tmp_path: 
     )
     (tmp_path / "provider-lifecycle.lock").mkdir()
 
-    with pytest.raises(ResumeRejectedError, match="lifecycle operation"):
+    with pytest.raises(ProviderLifecycleError, match="lifecycle operation"):
         bridge.acquire_run(
             run_id="run-hindsight",
             provider_project="oamb-providers-test-a",

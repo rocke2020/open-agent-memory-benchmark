@@ -25,7 +25,6 @@ from .ingestion_failures import (
     OPENVIKING_SETTLEMENT_BASIS,
 )
 from .specifications import (
-    INFRASTRUCTURE_RETRY_BACKOFF_SECONDS,
     MEMORY_CONFORMANCE_ROUTE_STAGES,
     BudgetScopeKindV2,
     BudgetScopeKindV3,
@@ -80,12 +79,6 @@ class AttemptReceiptKind(StrEnum):
     RESPONSE = "response"
     ERROR = "error"
     UNKNOWN_OUTCOME = "unknown_outcome"
-
-
-class RecoveryDisposition(StrEnum):
-    RESUME_SAFE = "resume_safe"
-    REPLACEMENT_RUN_REQUIRED = "replacement_run_required"
-    TERMINAL_UNKNOWN_OUTCOME = "terminal_unknown_outcome"
 
 
 class CaseEvaluationDisposition(StrEnum):
@@ -1327,33 +1320,6 @@ class CapsuleManifest(StrictContract):
         return self
 
 
-def capsule_composition_part_binding_hash(fields: Mapping[str, Any]) -> str:
-    return canonical_sha256(["oamb-capsule-composition-part-v1", fields])
-
-
-class CapsuleCompositionPartBinding(StrictContract):
-    schema_name: Literal["capsule_composition_part_binding"] = "capsule_composition_part_binding"
-    schema_version: Literal[1] = 1
-    part_binding_hash: Sha256
-    capsule_id: Sha256
-    run_id: NonEmptyStr
-    manifest_sha256: Sha256
-    partition_id: Sha256
-    embedded_root: NonEmptyStr
-    run_state: RunState
-
-    @model_validator(mode="after")
-    def binding_hash_matches_fields(self) -> Self:
-        if self.embedded_root != f"source/parts/{self.capsule_id}":
-            raise ValueError("composition part embedded root is not canonical")
-        expected = capsule_composition_part_binding_hash(
-            self.model_dump(mode="python", exclude={"part_binding_hash"})
-        )
-        if self.part_binding_hash != expected:
-            raise ValueError("composition part binding hash does not match its fields")
-        return self
-
-
 def history_attempt_id(fields: Mapping[str, Any]) -> str:
     return canonical_sha256(["oamb-history-attempt-initial-v1", fields])
 
@@ -1485,216 +1451,6 @@ class HistoryAttemptRecord(StrictContract):
         )
         if self.history_attempt_id != expected_id:
             raise ValueError("history attempt identity does not match its fields")
-        return self
-
-
-def history_retry_event_id(fields: Mapping[str, Any]) -> str:
-    return canonical_sha256(["oamb-history-retry-event-initial-v1", fields])
-
-
-class HistoryRetryEvent(StrictContract):
-    schema_name: Literal["history_retry_event"] = "history_retry_event"
-    schema_version: Literal[1] = 1
-    history_retry_event_id: Sha256
-    run_id: NonEmptyStr
-    ingestion_plan_id: Sha256
-    failed_history_attempt_id: Sha256
-    failed_history_attempt_ordinal: PositiveInt
-    retry_ordinal: PositiveInt
-    retry_scheduled: bool
-    successor_ingestion_occurrence_id: Sha256 | None
-    successor_execution_run_id: NonEmptyStr | None
-    successor_history_attempt_ordinal: PositiveInt | None
-    retry_policy_hash: Sha256
-    max_retries_per_operation: NonNegativeInt
-    backoff_seconds: PositiveInt | None
-    observed_at: UtcDateTime
-
-    @model_validator(mode="after")
-    def retry_event_is_closed(self) -> Self:
-        if self.max_retries_per_operation not in {0, 1, 2}:
-            raise ValueError("history retry event limit must be 0, 1, or 2")
-        if self.retry_ordinal != self.failed_history_attempt_ordinal:
-            raise ValueError("history retry ordinal must equal the failed attempt ordinal")
-        successor_values = (
-            self.successor_ingestion_occurrence_id,
-            self.successor_execution_run_id,
-            self.successor_history_attempt_ordinal,
-        )
-        if self.retry_scheduled:
-            if self.retry_ordinal > self.max_retries_per_operation:
-                raise ValueError("scheduled history retry exceeds its allowance")
-            if any(value is None for value in successor_values):
-                raise ValueError("scheduled history retry requires successor identity")
-            if self.successor_history_attempt_ordinal != self.failed_history_attempt_ordinal + 1:
-                raise ValueError("scheduled history retry successor ordinal is invalid")
-            expected_backoff = INFRASTRUCTURE_RETRY_BACKOFF_SECONDS[self.retry_ordinal - 1]
-            if self.backoff_seconds != expected_backoff:
-                raise ValueError("scheduled history retry backoff is invalid")
-        elif (
-            self.failed_history_attempt_ordinal != self.max_retries_per_operation + 1
-            or any(value is not None for value in successor_values)
-            or self.backoff_seconds is not None
-        ):
-            raise ValueError("exhausted history retry event must omit successor and wait")
-        expected_id = history_retry_event_id(
-            self.model_dump(mode="python", exclude={"history_retry_event_id"})
-        )
-        if self.history_retry_event_id != expected_id:
-            raise ValueError("history retry event identity does not match its fields")
-        return self
-
-
-class HistoryRetryAllowance(StrictContract):
-    schema_name: Literal["history_retry_allowance"] = "history_retry_allowance"
-    schema_version: Literal[1] = 1
-    ingestion_plan_id: Sha256
-    next_history_attempt_ordinal: PositiveInt
-    execution_run_id: NonEmptyStr
-    previous_retry_event_id: Sha256 | None
-    predecessor_history_attempt_id: Sha256 | None
-    consumed_retries: NonNegativeInt
-
-    @model_validator(mode="after")
-    def allowance_is_closed(self) -> Self:
-        if self.consumed_retries not in {0, 1, 2}:
-            raise ValueError("history retry allowance consumed count must be 0, 1, or 2")
-        if self.next_history_attempt_ordinal != self.consumed_retries + 1:
-            raise ValueError("history retry allowance next ordinal does not match consumption")
-        retry_references = (self.previous_retry_event_id, self.predecessor_history_attempt_id)
-        if self.consumed_retries == 0 and any(value is not None for value in retry_references):
-            raise ValueError("unused history retry allowance cannot name predecessor evidence")
-        if self.consumed_retries > 0 and any(value is None for value in retry_references):
-            raise ValueError("consumed history retry allowance requires predecessor evidence")
-        return self
-
-
-def history_retry_carry_id(fields: Mapping[str, Any]) -> str:
-    return canonical_sha256(["oamb-history-retry-carry-initial-v1", fields])
-
-
-class HistoryRetryCarryRecord(StrictContract):
-    schema_name: Literal["history_retry_carry_record"] = "history_retry_carry_record"
-    schema_version: Literal[1] = 1
-    carry_record_id: Sha256
-    run_id: NonEmptyStr
-    source_part_bindings: tuple[CapsuleCompositionPartBinding, ...]
-    allowances: tuple[HistoryRetryAllowance, ...]
-    retry_policy_hash: Sha256
-    max_retries_per_operation: NonNegativeInt
-    execution_configuration_family_hash: Sha256 | None = None
-
-    @model_validator(mode="after")
-    def carry_is_closed(self) -> Self:
-        if self.max_retries_per_operation not in {0, 1, 2}:
-            raise ValueError("history retry carry limit must be 0, 1, or 2")
-        capsule_ids = tuple(item.capsule_id for item in self.source_part_bindings)
-        plan_ids = tuple(item.ingestion_plan_id for item in self.allowances)
-        if not capsule_ids or capsule_ids != tuple(sorted(capsule_ids)):
-            raise ValueError("history retry carry source parts must be non-empty canonical order")
-        if len(set(capsule_ids)) != len(capsule_ids):
-            raise ValueError("history retry carry source parts must be unique")
-        if (
-            not plan_ids
-            or plan_ids != tuple(sorted(plan_ids))
-            or len(set(plan_ids)) != len(plan_ids)
-        ):
-            raise ValueError("history retry carry allowances must be unique canonical order")
-        if any(item.consumed_retries > self.max_retries_per_operation for item in self.allowances):
-            raise ValueError("history retry carry allowance exceeds policy")
-        identity_fields = self.model_dump(mode="python", exclude={"carry_record_id"})
-        if self.execution_configuration_family_hash is None:
-            identity_fields.pop("execution_configuration_family_hash")
-        expected_id = history_retry_carry_id(identity_fields)
-        if self.carry_record_id != expected_id:
-            raise ValueError("history retry carry identity does not match its fields")
-        return self
-
-
-def capsule_composition_contribution_hash(fields: Mapping[str, Any]) -> str:
-    return canonical_sha256(["oamb-capsule-composition-contribution-v1", fields])
-
-
-class CapsuleCompositionContribution(StrictContract):
-    schema_name: Literal["capsule_composition_contribution"] = "capsule_composition_contribution"
-    schema_version: Literal[1] = 1
-    contribution_hash: Sha256
-    source_capsule_id: Sha256
-    source_run_id: NonEmptyStr
-    ingestion_plan_id: Sha256
-    ingestion_occurrence_id: Sha256
-    case_manifest_entry_ids: tuple[Sha256, ...]
-    case_occurrence_ids: tuple[Sha256, ...]
-
-    @model_validator(mode="after")
-    def contribution_is_closed(self) -> Self:
-        if (
-            not self.case_manifest_entry_ids
-            or len(self.case_manifest_entry_ids) != len(self.case_occurrence_ids)
-            or len(set(self.case_manifest_entry_ids)) != len(self.case_manifest_entry_ids)
-            or len(set(self.case_occurrence_ids)) != len(self.case_occurrence_ids)
-        ):
-            raise ValueError("composition contribution requires paired unique cases")
-        expected = capsule_composition_contribution_hash(
-            self.model_dump(mode="python", exclude={"contribution_hash"})
-        )
-        if self.contribution_hash != expected:
-            raise ValueError("composition contribution hash does not match its fields")
-        return self
-
-
-def capsule_composition_id(fields: Mapping[str, Any]) -> str:
-    return canonical_sha256(["oamb-capsule-composition-v1", fields])
-
-
-class CapsuleCompositionRecord(StrictContract):
-    schema_name: Literal["capsule_composition_record"] = "capsule_composition_record"
-    schema_version: Literal[1] = 1
-    composition_id: Sha256
-    resolved_plan_hash: Sha256
-    cell_spec_hash: Sha256
-    dataset_manifest_hash: Sha256
-    target_case_manifest_hash: Sha256
-    target_case_execution_bindings_hash: Sha256
-    budget_policy_hash: Sha256
-    retry_policy_hash: Sha256
-    execution_configuration_hash: Sha256
-    target_execution_configuration_hash: Sha256 | None = None
-    target_execution_configuration_family_hash: Sha256 | None = None
-    ordered_parts: tuple[CapsuleCompositionPartBinding, ...]
-    ordered_contributions: tuple[CapsuleCompositionContribution, ...]
-    exact_union_hash: Sha256
-
-    @model_validator(mode="after")
-    def composition_identity_is_canonical(self) -> Self:
-        part_ids = tuple(part.capsule_id for part in self.ordered_parts)
-        plan_ids = tuple(item.ingestion_plan_id for item in self.ordered_contributions)
-        if (
-            not part_ids
-            or part_ids != tuple(sorted(part_ids))
-            or len(set(part_ids)) != len(part_ids)
-            or not plan_ids
-            or len(set(plan_ids)) != len(plan_ids)
-        ):
-            raise ValueError("composition parts and contributions must be unique and canonical")
-        expected_union_hash = canonical_sha256(
-            ["oamb-capsule-composition-exact-union-v1", self.ordered_contributions]
-        )
-        if self.exact_union_hash != expected_union_hash:
-            raise ValueError("composition exact-union hash does not match its contributions")
-        if (self.target_execution_configuration_hash is None) != (
-            self.target_execution_configuration_family_hash is None
-        ):
-            raise ValueError("composition target execution hashes must be paired")
-        expected_id = capsule_composition_id(
-            self.model_dump(
-                mode="python",
-                exclude={"composition_id"},
-                exclude_none=True,
-            )
-        )
-        if self.composition_id != expected_id:
-            raise ValueError("capsule composition identity does not match its fields")
         return self
 
 
@@ -1835,34 +1591,6 @@ def memory_conformance_evidence_manifest_hash(fields: Mapping[str, Any]) -> str:
     payload.setdefault("schema_version", 1)
     payload.pop("manifest_hash", None)
     return canonical_sha256(payload)
-
-
-class RecoveryDecisionRecord(StrictContract):
-    schema_name: Literal["recovery_decision_record"] = "recovery_decision_record"
-    schema_version: Literal[1] = 1
-    recovery_decision_id: Sha256
-    run_id: NonEmptyStr
-    previous_lease_record_hash: Sha256
-    new_lease_record_hash: Sha256 | None
-    previous_lease_epoch: PositiveInt
-    new_lease_epoch: PositiveInt | None
-    authorization_id: NonEmptyStr
-    archived_checkpoint_hashes: tuple[Sha256, ...]
-    disposition: RecoveryDisposition
-    decided_at: UtcDateTime
-
-    @model_validator(mode="after")
-    def replacement_epoch_shape(self) -> Self:
-        if (self.new_lease_record_hash is None) != (self.new_lease_epoch is None):
-            raise ValueError("new lease record and epoch must be present together")
-        if self.disposition == RecoveryDisposition.RESUME_SAFE:
-            if self.new_lease_epoch is None or self.new_lease_epoch <= self.previous_lease_epoch:
-                raise ValueError("resume-safe recovery requires a later lease epoch")
-        elif self.new_lease_record_hash is not None:
-            raise ValueError("terminal recovery disposition cannot create a new lease")
-        if len(set(self.archived_checkpoint_hashes)) != len(self.archived_checkpoint_hashes):
-            raise ValueError("recovery decision contains duplicate archived checkpoints")
-        return self
 
 
 class CloseErrorRecord(StrictContract):

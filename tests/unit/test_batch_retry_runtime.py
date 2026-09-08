@@ -2,24 +2,96 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Coroutine
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import oamb.runtime.native_run as native
 from oamb.artifacts.store import ArtifactStore
-from oamb.contracts.ids import canonical_json_bytes
+from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ports import (
+    IngestionDispatch,
     IngestionDispatchReceipt,
     IngestionDispatchRequest,
+    IngestionRequest,
     NativeEvidenceBatch,
     ReadinessReceipt,
     ReadinessRequest,
     RetrievalRequest,
+    ScopeAllocationRequest,
+    ScopeReceipt,
     SettledTransientIngestionFailure,
 )
-from tests.e2e.test_native_fixture_vertical_slice import _RecordedNativeMemory
-from tests.unit.test_history_rebuild_runtime import _PartialHistoryMemory, _pipeline
+from oamb.workloads.visible_evidence import LME_VISIBLE_EVIDENCE_POLICY
+from tests.e2e.test_native_fixture_vertical_slice import (
+    _NativeFixtureWorkload,
+    _RecordedNativeMemory,
+    _RecordedNativeModel,
+)
+
+
+class _PartialHistoryMemory(_RecordedNativeMemory):
+    def __init__(self, store: ArtifactStore, *, failures: int) -> None:
+        super().__init__(store)
+        self.failures = failures
+        self.scopes: list[Any] = []
+        self.retrieval_scopes: list[str] = []
+
+    async def allocate_ingestion_scope(self, request: ScopeAllocationRequest) -> ScopeReceipt:
+        scope = await super().allocate_ingestion_scope(request)
+        self.scopes.append(scope)
+        self._accepted_by_scope[scope.scope_id] = ()
+        return scope
+
+    def plan_ingestion(self, request: IngestionRequest) -> tuple[IngestionDispatch, ...]:
+        return tuple(
+            replace(
+                super(_PartialHistoryMemory, self).plan_ingestion(
+                    replace(request, ordered_source_units=(source,))
+                )[0],
+                dispatch_ordinal_1_indexed=ordinal,
+            )
+            for ordinal, source in enumerate(request.ordered_source_units, 1)
+        )
+
+
+def _pipeline(
+    tmp_path: Path,
+    memory: _PartialHistoryMemory,
+) -> tuple[native._NativeExecutionState, Coroutine[Any, Any, Any]]:
+    workload = _NativeFixtureWorkload()
+    manifest = workload.build_case_manifest(workload.resolve_sources())
+    plan = workload.iter_ingestion_plans(manifest)[1]
+    cases = tuple(
+        case
+        for case in workload.iter_case_plans(manifest)
+        if case.case_manifest_entry_id in plan.ordered_case_manifest_entry_ids
+    )
+    state = native._NativeExecutionState(
+        store=ArtifactStore(tmp_path),
+        run_id="history-runtime-test",
+        lease_record_hash="a" * 64,
+        close_timeout_seconds=1,
+    )
+    operation = native._execute_history_question_pipeline(
+        state=state,
+        workload=workload,
+        memory=memory,
+        answer_model=_RecordedNativeModel(ArtifactStore(tmp_path)),
+        judge_model=None,
+        plans=(plan,),
+        case_plans=cases,
+        memory_system_id="hindsight",
+        runtime_binding_hash=canonical_sha256(["fixture-runtime"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        answer_role_binding_id="recorded-answer-v1",
+        judge_role_binding_id=None,
+    )
+    return state, operation
 
 
 class BatchMemory(_PartialHistoryMemory):

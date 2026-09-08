@@ -30,7 +30,18 @@ class AtomicWriteBoundary(StrEnum):
 
 ATOMIC_WRITE_BOUNDARIES = tuple(AtomicWriteBoundary)
 
+
+class AtomicReplaceBoundary(StrEnum):
+    AFTER_TEMPORARY_WRITE = "after_temporary_write"
+    AFTER_FILE_FSYNC = "after_file_fsync"
+    AFTER_TARGET_REPLACE = "after_target_replace"
+    AFTER_TARGET_DIRECTORY_FSYNC = "after_target_directory_fsync"
+
+
+ATOMIC_REPLACE_BOUNDARIES = tuple(AtomicReplaceBoundary)
+
 FaultHook = Callable[[AtomicWriteBoundary, Path], None]
+ReplaceFaultHook = Callable[[AtomicReplaceBoundary, Path], None]
 
 
 @dataclass(frozen=True)
@@ -39,6 +50,62 @@ class AtomicWriteResult:
     sha256: str
     byte_count: int
     created: bool
+
+
+def atomic_replace_bytes(
+    target: Path,
+    content: bytes,
+    *,
+    fault_hook: ReplaceFaultHook | None = None,
+    trusted_root: Path | None = None,
+) -> AtomicWriteResult:
+    """Durably publish mutable ``content`` with one same-directory replacement."""
+
+    target = Path(target).absolute()
+    lexical_root = Path(trusted_root).absolute() if trusted_root is not None else target.parent
+    _require_lexical_containment(lexical_root, target.parent)
+    resolved_root = lexical_root.resolve(strict=False)
+    resolved_parent = target.parent.resolve(strict=False)
+    if not resolved_parent.is_relative_to(resolved_root):
+        raise ArtifactCollisionError("artifact path escapes its trusted root")
+    target = resolved_parent / target.name
+    _ensure_durable_directory(
+        target.parent,
+        trusted_root=resolved_root,
+        target=target,
+        fault_hook=None,
+    )
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        created = True
+    else:
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ArtifactCollisionError(f"{target} is a symbolic link or non-regular file")
+        created = False
+
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.tmp-", dir=target.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        _write_all(file_descriptor, content)
+        _notify_replace(fault_hook, AtomicReplaceBoundary.AFTER_TEMPORARY_WRITE, target)
+        os.fsync(file_descriptor)
+    finally:
+        os.close(file_descriptor)
+    _notify_replace(fault_hook, AtomicReplaceBoundary.AFTER_FILE_FSYNC, target)
+    os.replace(temporary_path, target)
+    _notify_replace(fault_hook, AtomicReplaceBoundary.AFTER_TARGET_REPLACE, target)
+    _fsync_directory(target.parent)
+    _notify_replace(fault_hook, AtomicReplaceBoundary.AFTER_TARGET_DIRECTORY_FSYNC, target)
+    return AtomicWriteResult(
+        path=target,
+        sha256=expected_sha256,
+        byte_count=len(content),
+        created=created,
+    )
 
 
 def atomic_write_bytes(
@@ -242,5 +309,14 @@ def _fsync_directory(directory: Path) -> None:
 
 
 def _notify(hook: FaultHook | None, boundary: AtomicWriteBoundary, target: Path) -> None:
+    if hook is not None:
+        hook(boundary, target)
+
+
+def _notify_replace(
+    hook: ReplaceFaultHook | None,
+    boundary: AtomicReplaceBoundary,
+    target: Path,
+) -> None:
     if hook is not None:
         hook(boundary, target)

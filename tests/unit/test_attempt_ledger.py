@@ -40,7 +40,7 @@ from oamb.runtime.budget import (
     BudgetCeiling,
     BudgetLedger,
 )
-from oamb.runtime.resume import ProviderLifecycleBridge
+from oamb.runtime.provider_lifecycle import ProviderLifecycleBridge
 
 NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 ATTEMPT_ID = "a" * 64

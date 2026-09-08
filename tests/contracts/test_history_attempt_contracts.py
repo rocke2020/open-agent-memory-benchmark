@@ -8,20 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from oamb.contracts.evidence import (
-    CapsuleCompositionPartBinding,
     HistoryAttemptRecord,
-    HistoryRetryAllowance,
-    HistoryRetryCarryRecord,
-    HistoryRetryEvent,
-    capsule_composition_part_binding_hash,
     history_attempt_id,
-    history_retry_carry_id,
-    history_retry_event_id,
 )
 from oamb.contracts.ids import canonical_sha256, ingestion_occurrence_id
 from oamb.contracts.ports import RawReferenceHandle, SettledTransientIngestionFailure
-from oamb.contracts.schema import parse_contract
-from oamb.contracts.states import RunState
+from oamb.contracts.schema import CONTRACT_REGISTRY, parse_contract
 
 NOW = datetime(2026, 9, 6, tzinfo=UTC)
 HASHES = tuple(canonical_sha256(["history-rebuild-contract", index]) for index in range(20))
@@ -29,6 +21,26 @@ HINDSIGHT_FAILURE = (
     b'{"detail":"Fact extraction failed: 1/1 chunks failed. First failures: '
     b'chunk 0: APIConnectionError: Connection error."}'
 )
+
+REMOVED_RECOVERY_SCHEMA_NAMES = frozenset(
+    {
+        "capsule_composition_contribution",
+        "capsule_composition_part_binding",
+        "capsule_composition_record",
+        "case_partition_spec",
+        "history_retry_carry_record",
+        "history_retry_event",
+        "recovery_decision_record",
+    }
+)
+
+
+def test_obsolete_recovery_schemas_are_rejected_by_the_contract_parser() -> None:
+    registered_names = {name for name, _version in CONTRACT_REGISTRY}
+    assert registered_names.isdisjoint(REMOVED_RECOVERY_SCHEMA_NAMES)
+    for schema_name in REMOVED_RECOVERY_SCHEMA_NAMES:
+        with pytest.raises(ValueError, match="unsupported contract"):
+            parse_contract({"schema_name": schema_name, "schema_version": 1})
 
 
 def _attempt_fields(*, ordinal: int = 1, status: str = "ready") -> dict[str, object]:
@@ -93,23 +105,6 @@ def _attempt(**updates: object) -> HistoryAttemptRecord:
     fields.update(updates)
     return HistoryAttemptRecord.model_validate(
         {"history_attempt_id": history_attempt_id(fields), **fields}
-    )
-
-
-def _part(index: int) -> CapsuleCompositionPartBinding:
-    capsule_id = HASHES[10 + index]
-    fields = {
-        "schema_name": "capsule_composition_part_binding",
-        "schema_version": 1,
-        "capsule_id": capsule_id,
-        "run_id": f"part-{index}",
-        "manifest_sha256": HASHES[12 + index],
-        "partition_id": HASHES[14 + index],
-        "embedded_root": f"source/parts/{capsule_id}",
-        "run_state": RunState.ABORTED,
-    }
-    return CapsuleCompositionPartBinding.model_validate(
-        {"part_binding_hash": capsule_composition_part_binding_hash(fields), **fields}
     )
 
 
@@ -259,117 +254,3 @@ def test_history_attempt_bounds_ordinals_events_uniqueness_and_time() -> None:
             HistoryAttemptRecord.model_validate(
                 {"history_attempt_id": history_attempt_id(fields), **fields}
             )
-
-
-def test_scheduled_and_exhausted_history_retry_events_are_exact() -> None:
-    scheduled_fields = {
-        "schema_name": "history_retry_event",
-        "schema_version": 1,
-        "run_id": "capsule-run",
-        "ingestion_plan_id": HASHES[0],
-        "failed_history_attempt_id": HASHES[1],
-        "failed_history_attempt_ordinal": 1,
-        "retry_ordinal": 1,
-        "retry_scheduled": True,
-        "successor_ingestion_occurrence_id": ingestion_occurrence_id(
-            "next-execution", "hindsight", HASHES[0], history_attempt_ordinal=2
-        ),
-        "successor_execution_run_id": "next-execution",
-        "successor_history_attempt_ordinal": 2,
-        "retry_policy_hash": HASHES[2],
-        "max_retries_per_operation": 2,
-        "backoff_seconds": 1,
-        "observed_at": NOW,
-    }
-    scheduled = HistoryRetryEvent.model_validate(
-        {
-            "history_retry_event_id": history_retry_event_id(scheduled_fields),
-            **scheduled_fields,
-        }
-    )
-    assert parse_contract(scheduled.model_dump(mode="json")) == scheduled
-
-    exhausted_fields = dict(scheduled_fields)
-    exhausted_fields.update(
-        failed_history_attempt_ordinal=3,
-        retry_ordinal=3,
-        retry_scheduled=False,
-        successor_ingestion_occurrence_id=None,
-        successor_execution_run_id=None,
-        successor_history_attempt_ordinal=None,
-        backoff_seconds=None,
-    )
-    exhausted = HistoryRetryEvent.model_validate(
-        {
-            "history_retry_event_id": history_retry_event_id(exhausted_fields),
-            **exhausted_fields,
-        }
-    )
-    assert exhausted.retry_scheduled is False
-
-    for update in (
-        {"backoff_seconds": 2},
-        {"successor_history_attempt_ordinal": 3},
-        {"successor_ingestion_occurrence_id": None},
-    ):
-        fields = dict(scheduled_fields)
-        fields.update(update)
-        with pytest.raises(ValidationError):
-            HistoryRetryEvent.model_validate(
-                {"history_retry_event_id": history_retry_event_id(fields), **fields}
-            )
-
-
-def test_history_retry_carry_requires_canonical_unique_sources_and_allowances() -> None:
-    parts = tuple(sorted((_part(0), _part(1)), key=lambda item: item.capsule_id))
-    allowances = (
-        HistoryRetryAllowance(
-            schema_name="history_retry_allowance",
-            schema_version=1,
-            ingestion_plan_id=HASHES[0],
-            next_history_attempt_ordinal=2,
-            execution_run_id="execution-run",
-            previous_retry_event_id=HASHES[1],
-            predecessor_history_attempt_id=HASHES[2],
-            consumed_retries=1,
-        ),
-    )
-    fields = {
-        "schema_name": "history_retry_carry_record",
-        "schema_version": 1,
-        "run_id": "carry-run",
-        "source_part_bindings": parts,
-        "allowances": allowances,
-        "retry_policy_hash": HASHES[3],
-        "max_retries_per_operation": 2,
-    }
-    carry = HistoryRetryCarryRecord.model_validate(
-        {"carry_record_id": history_retry_carry_id(fields), **fields}
-    )
-    assert parse_contract(carry.model_dump(mode="json")) == carry
-
-    for update in (
-        {"source_part_bindings": ()},
-        {"source_part_bindings": tuple(reversed(parts))},
-        {"allowances": allowances + allowances},
-    ):
-        invalid = dict(fields)
-        invalid.update(update)
-        with pytest.raises(ValidationError):
-            HistoryRetryCarryRecord.model_validate(
-                {"carry_record_id": history_retry_carry_id(invalid), **invalid}
-            )
-
-
-def test_history_retry_allowance_closes_consumed_and_next_ordinals() -> None:
-    with pytest.raises(ValidationError):
-        HistoryRetryAllowance(
-            schema_name="history_retry_allowance",
-            schema_version=1,
-            ingestion_plan_id=HASHES[0],
-            next_history_attempt_ordinal=3,
-            execution_run_id="execution-run",
-            previous_retry_event_id=HASHES[1],
-            predecessor_history_attempt_id=HASHES[2],
-            consumed_retries=1,
-        )

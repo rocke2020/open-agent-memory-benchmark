@@ -18,10 +18,7 @@ from decimal import Decimal
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
-
-if TYPE_CHECKING:
-    from oamb.artifacts.composition import CapsuleCompositionTarget
+from typing import Any, Literal
 
 from oamb.artifacts.atomic import read_regular_file
 from oamb.config.benchmark import MODEL_ROLE_IDS, ModelRoleId
@@ -37,7 +34,6 @@ from oamb.contracts.specifications import (
     BudgetScopeKindV3,
     BudgetSpecV4,
     CaseManifest,
-    CasePartitionSpec,
     DatasetManifest,
     DispatchBudgetOwnerKind,
     DispatchBudgetRoute,
@@ -58,7 +54,11 @@ from oamb.contracts.specifications import (
     provider_operation_budget_ceiling_hash,
     run_preflight_record_hash,
 )
-from oamb.runtime.native_continuation import InitializedContinuation
+from oamb.runtime.full_progress import (
+    FullProgress,
+    canonical_full_progress_path,
+    load_full_progress,
+)
 from oamb.runtime.native_run import NativeRunArtifacts, NativeRunControl
 from oamb.runtime.preflight import (
     CONTROLLED_EMBEDDING_DIMENSION,
@@ -139,9 +139,8 @@ class LiveCell:
     control: NativeRunControl
     environment: Mapping[str, str] = field(repr=False, compare=False)
     requested_case_manifest_entry_ids: tuple[str, ...] = ()
-    continuation: InitializedContinuation | None = None
-    recovery_parts: tuple[Path, ...] = ()
-    recovery_execution_configuration_family_hash: str | None = None
+    progress_path: Path | None = None
+    expected_progress: FullProgress | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +158,13 @@ class LiveCellOutcome:
     status: LiveCellStatus
     capsule_root: Path | None
     detail: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FullResumeSelection:
+    progress_by_cell: Mapping[str, FullProgress]
+    remaining_case_manifest_entry_ids: Mapping[str, tuple[str, ...]]
+    case_manifest: CaseManifest
 
 
 def load_live_environment(
@@ -591,80 +597,65 @@ def live_readiness_environment_hash(
     return _environment_hash(unique_names, resolved)
 
 
-def _resolve_live_partition(
+def _resolve_live_workload(
     cell: LiveCell,
-) -> tuple[LongMemEvalWorkload, DatasetManifest, CaseManifest, CasePartitionSpec]:
-    from oamb.contracts.specifications import INFRASTRUCTURE_RETRY_POLICY_HASH
-    from oamb.runtime.case_partition import build_case_partition_spec
-
+) -> tuple[LongMemEvalWorkload, DatasetManifest, CaseManifest]:
     source_path = cell.dataset_path
     if not source_path.is_absolute():
         source_path = Path.cwd() / source_path
     workload = LongMemEvalWorkload(build_longmemeval_bundle(source_path, cell.cell.selection))
     dataset_manifest = workload.resolve_sources()
     case_manifest = workload.build_case_manifest(dataset_manifest)
-    requested_case_ids = cell.requested_case_manifest_entry_ids or tuple(
-        case.case_manifest_entry_id for case in case_manifest.cases
-    )
-    partition = build_case_partition_spec(
-        run_id=cell.run_id,
-        resolved_plan_hash=cell.plan.resolved_plan_hash,
-        cell_spec_hash=cell.cell.cell_spec_hash,
-        dataset_manifest_hash=dataset_manifest.manifest_hash,
-        case_manifest=case_manifest,
-        case_plans=workload.iter_case_plans(case_manifest),
-        requested_case_manifest_entry_ids=requested_case_ids,
-        budget_policy_hash=cell.cell.authorization_hash,
-        retry_policy_hash=INFRASTRUCTURE_RETRY_POLICY_HASH,
-    )
-    return workload, dataset_manifest, case_manifest, partition
+    return workload, dataset_manifest, case_manifest
 
 
-def live_composition_target(cell: LiveCell) -> CapsuleCompositionTarget:
-    """Derive the full execution target before constructing any live client."""
+def load_full_resume_selection(
+    *,
+    plan: ResolvedPlan,
+    progress_root: Path,
+) -> FullResumeSelection:
+    """Load three strict snapshots and map remaining question IDs before construction."""
 
-    from oamb.artifacts.composition import (
-        CapsuleCompositionTarget,
-        build_composition_execution_configuration_family_hash,
-        build_composition_execution_configuration_hash,
-    )
-
-    _workload, dataset_manifest, case_manifest, partition = _resolve_live_partition(cell)
-    runtime_bindings = (
-        (
-            cell.control.run_spec.memory_system_id,
-            cell.cell.adapter_profile_id,
-            cell.control.run_spec.runtime_binding_hash,
-        ),
-    )
-    execution_hash = build_composition_execution_configuration_hash(
-        partition=partition,
-        case_manifest=case_manifest,
-        dataset_manifest=dataset_manifest,
-        runtime_bindings=runtime_bindings,
-        run_spec=cell.control.run_spec,
-        preflight=cell.control.preflight_record,
-        budget=cell.control.budget,
-        role_bindings=cell.control.role_bindings,
-    )
-    execution_family_hash = build_composition_execution_configuration_family_hash(
-        partition=partition,
-        case_manifest=case_manifest,
-        dataset_manifest=dataset_manifest,
-        runtime_bindings=runtime_bindings,
-        run_spec=cell.control.run_spec,
-        preflight=cell.control.preflight_record,
-        budget=cell.control.budget,
-        role_bindings=cell.control.role_bindings,
-    )
-    return CapsuleCompositionTarget(
-        resolved_plan_hash=partition.resolved_plan_hash,
-        cell_spec_hash=partition.cell_spec_hash,
-        target_case_manifest_hash=partition.target_case_manifest_hash,
-        budget_policy_hash=partition.budget_policy_hash,
-        retry_policy_hash=partition.retry_policy_hash,
-        execution_configuration_hash=execution_hash,
-        execution_configuration_family_hash=execution_family_hash,
+    if plan.dataset.selection != "lme60" or tuple(cell.provider_id for cell in plan.cells) != (
+        "hindsight",
+        "mem0",
+        "openviking",
+    ):
+        raise LiveConfigurationError("full progress resume requires the frozen LME-60 cells")
+    source_path = Path(plan.dataset.path)
+    if not source_path.is_absolute():
+        source_path = Path.cwd() / source_path
+    bundle = build_longmemeval_bundle(source_path, plan.dataset.selection)
+    manifest = bundle.case_manifest
+    if (
+        manifest.manifest_hash != plan.dataset.case_manifest_hash
+        or manifest.workload_id != plan.dataset.workload_id
+    ):
+        raise LiveConfigurationError("resume dataset differs from the resolved plan")
+    ordered_question_ids = tuple(item.raw_question_id for item in manifest.cases)
+    case_id_by_question = {
+        item.raw_question_id: item.case_manifest_entry_id for item in manifest.cases
+    }
+    progress_by_cell: dict[str, FullProgress] = {}
+    remaining_by_cell: dict[str, tuple[str, ...]] = {}
+    for cell in plan.cells:
+        progress = load_full_progress(
+            canonical_full_progress_path(progress_root, cell.provider_id),
+            expected_resolved_plan_hash=plan.resolved_plan_hash,
+            expected_cell_id=cell.cell_id,
+            expected_provider_id=cell.provider_id,
+            expected_workload_id=cell.workload_id,
+            expected_case_manifest_hash=cell.case_manifest_hash,
+            expected_ordered_question_ids=ordered_question_ids,
+        )
+        progress_by_cell[cell.cell_id] = progress
+        remaining_by_cell[cell.cell_id] = tuple(
+            case_id_by_question[question_id] for question_id in progress.remaining_question_ids
+        )
+    return FullResumeSelection(
+        progress_by_cell=progress_by_cell,
+        remaining_case_manifest_entry_ids=remaining_by_cell,
+        case_manifest=manifest,
     )
 
 
@@ -693,11 +684,6 @@ def execute_live_cell(
 ) -> NativeRunArtifacts:
     """Run one already-closed cell through the generic native vertical slice."""
 
-    if cell.recovery_parts and cell.recovery_execution_configuration_family_hash is None:
-        raise LiveConfigurationError(
-            "history recovery requires the current execution configuration family hash"
-        )
-
     from oamb.artifacts.store import ArtifactStore
     from oamb.memory_systems.hindsight.adapter import HindsightAdapter
     from oamb.memory_systems.mem0.adapter import Mem0RestAdapter
@@ -708,16 +694,7 @@ def execute_live_cell(
     from oamb.model_clients.openai_compatible import OpenAICompatibleModelClient
     from oamb.runtime.native_run import run_native_vertical_slice
 
-    workload, _dataset_manifest, case_manifest, partition = _resolve_live_partition(cell)
-    continuation = None
-    if cell.continuation is not None:
-        from oamb.runtime.native_continuation import load_openviking_continuation
-
-        continuation = load_openviking_continuation(
-            cell.continuation,
-            plans=workload.iter_ingestion_plans(case_manifest),
-            case_plans=workload.iter_case_plans(case_manifest),
-        )
+    workload, _dataset_manifest, case_manifest = _resolve_live_workload(cell)
     bindings_by_role = dict(zip(cell.role_ids, cell.control.role_bindings, strict=True))
     answer_plan = _model_plan(cell.plan, "answer")
     judge_plan = _model_plan(cell.plan, "judge")
@@ -791,6 +768,34 @@ def execute_live_cell(
             total_timeout_seconds=model_timeout_seconds,
         )
 
+    terminal_case_publisher = None
+    if cell.progress_path is not None and cell.expected_progress is not None:
+        from oamb.runtime.full_progress import ProviderProgressWriter
+        from oamb.runtime.native_progress import project_native_progress_entry
+
+        writer = ProviderProgressWriter(cell.progress_path, expected=cell.expected_progress)
+
+        def publish_terminal_case(
+            plan_record: object,
+            case_record: object,
+            attempts: object,
+            history_attempts: object,
+        ) -> None:
+            entry = project_native_progress_entry(
+                plan=cell.plan,
+                cell=cell.cell,
+                capsule_root=cell.capsule_root,
+                case_manifest=case_manifest,
+                plan_record=plan_record,  # type: ignore[arg-type]
+                case_record=case_record,  # type: ignore[arg-type]
+                attempts=attempts,  # type: ignore[arg-type]
+                history_attempts=history_attempts,  # type: ignore[arg-type]
+            )
+            if entry is not None:
+                writer.publish(entry)
+
+        terminal_case_publisher = publish_terminal_case
+
     return run_native_vertical_slice(
         output_root=cell.output_root,
         run_id=cell.run_id,
@@ -804,13 +809,9 @@ def execute_live_cell(
         judge_model_factory=judge_factory,
         judge_role_binding_id=bindings_by_role["judge"].binding_id,
         control=cell.control,
-        continuation=continuation,
-        partition=partition,
+        requested_case_manifest_entry_ids=cell.requested_case_manifest_entry_ids,
+        terminal_case_publisher=terminal_case_publisher,
         stop_event=stop_event,
-        recovery_parts=cell.recovery_parts,
-        recovery_execution_configuration_family_hash=(
-            cell.recovery_execution_configuration_family_hash
-        ),
     )
 
 
@@ -1141,12 +1142,34 @@ def build_live_cell(
     observed_at: datetime,
     code_revision: str,
     requested_case_manifest_entry_ids: tuple[str, ...] = (),
-    recovery_parts: tuple[Path, ...] = (),
+    progress_path: Path | None = None,
+    expected_progress: FullProgress | None = None,
 ) -> LiveCell:
     """Close one live cell without constructing provider or model clients."""
 
     selected = select_live_cells(plan, (cell_id,))
     cell = selected[0]
+    if (progress_path is None) != (expected_progress is None):
+        raise LiveConfigurationError(
+            "resume progress path and expected snapshot must be supplied together"
+        )
+    if expected_progress is not None:
+        if not requested_case_manifest_entry_ids:
+            raise LiveConfigurationError("resume cell requires at least one remaining case")
+        if (
+            expected_progress.resolved_plan_hash != plan.resolved_plan_hash
+            or expected_progress.cell_id != cell.cell_id
+            or expected_progress.provider_id != cell.provider_id
+            or expected_progress.workload_id != cell.workload_id
+            or expected_progress.case_manifest_hash != cell.case_manifest_hash
+        ):
+            raise LiveConfigurationError("resume progress identity differs from the live cell")
+        assert progress_path is not None
+        if progress_path != canonical_full_progress_path(
+            progress_path.parent,
+            cell.provider_id,
+        ):
+            raise LiveConfigurationError("resume progress path is not canonical")
     if not run_label or run_label.strip() != run_label:
         raise LiveConfigurationError("live run label must be non-empty canonical text")
     if not provider_project_id or provider_project_id.strip() != provider_project_id:
@@ -1305,120 +1328,8 @@ def build_live_cell(
         control=control,
         environment=resolved_environment,
         requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
-        recovery_parts=recovery_parts,
-    )
-
-
-def build_live_continuation_cell(
-    *,
-    plan: ResolvedPlan,
-    cell_id: str,
-    base_capsule_root: Path,
-    output_root: Path,
-    provider_runtime_directory: Path,
-    provider_project_id: str,
-    provider_evidence: SourceEvidenceBinding,
-    environment: Mapping[str, str],
-) -> LiveCell:
-    """Check the frozen base, then reject unsupported same-scope replay."""
-
-    from oamb.contracts.evidence import RunRecord
-
-    cell = select_live_cells(plan, (cell_id,))[0]
-    if cell.provider_id != "openviking":
-        raise LiveConfigurationError("current continuation supports only OpenViking")
-    if not provider_runtime_directory.is_absolute():
-        raise LiveConfigurationError("provider runtime directory must be absolute")
-    if (
-        provider_evidence.source_kind != SourceEvidenceKind.PROVIDER_SERVICE
-        or "provider_service_evidence_manifest@1" not in provider_evidence.source_schema_versions
-    ):
-        raise LiveConfigurationError("provider evidence is not the verified service profile")
-    roles_by_id = {role.role_id: role for role in plan.model_roles}
-    role_ids = (
-        cell.producer_role_id,
-        cell.embedding_role_id,
-        cell.answer_role_id,
-        cell.judge_role_id,
-    )
-    selected_roles = tuple(roles_by_id[role_id] for role_id in role_ids)
-    required_environment = _required_environment(cell, selected_roles)
-    resolved_environment = _resolve_environment(environment, required_environment)
-    current_bindings = _role_bindings(selected_roles, resolved_environment)
-    current_binding_by_role_id: dict[str, ModelRoleBindingV2] = {
-        role_id: binding for role_id, binding in zip(role_ids, current_bindings, strict=True)
-    }
-    base = Path(base_capsule_root).resolve(strict=True)
-    try:
-        run_spec = RunSpec.model_validate_json((base / "source/specs/run-spec.json").read_bytes())
-        preflight = RunPreflightRecord.model_validate_json(
-            (base / "source/specs/run-preflight.json").read_bytes()
-        )
-        budget = BudgetSpecV4.model_validate_json((base / "source/specs/budget.json").read_bytes())
-        old_run = RunRecord.model_validate_json(
-            (base / f"source/run/{run_spec.run_id}.json").read_bytes()
-        )
-        bindings_by_id = {
-            binding.binding_id: binding
-            for path in (base / "source/model-role-bindings").glob("*.json")
-            for binding in (ModelRoleBindingV2.model_validate_json(path.read_bytes()),)
-        }
-        bindings = tuple(
-            bindings_by_id[binding_id] for binding_id in run_spec.model_role_binding_ids
-        )
-    except (KeyError, OSError, ValueError) as exc:
-        raise LiveConfigurationError("continuation base control evidence is incomplete") from exc
-    expected_runtime_binding_hash = canonical_sha256(
-        [
-            "oamb-live-runtime-binding-initial-v1",
-            cell.cell_spec_hash,
-            provider_evidence.binding_id,
-            _endpoint_fingerprint(cell.endpoint_variable, resolved_environment),
-        ]
-    )
-    expected_budget = _budget(
-        run_id=run_spec.run_id,
-        cell=cell,
-        plan=plan,
-        binding_by_role_id=current_binding_by_role_id,
-    )
-    if (
-        old_run.state.value != "aborted"
-        or preflight.resolved_plan_hash != plan.resolved_plan_hash
-        or preflight.adapter_profile_hash != cell.cell_spec_hash
-        or preflight.run_id != run_spec.run_id
-        or preflight.run_spec_hash != canonical_sha256(run_spec)
-        or preflight.provider_project_id != provider_project_id
-        or preflight.adapter_profile_id != cell.adapter_profile_id
-        or preflight.provider_service_evidence != provider_evidence
-        or preflight.provider_profile_evidence != provider_evidence
-        or preflight.runtime_binding_hash != expected_runtime_binding_hash
-        or run_spec.runtime_binding_hash != expected_runtime_binding_hash
-        or run_spec.environment_hash
-        != _environment_hash(required_environment, resolved_environment)
-        or run_spec.dataset_manifest_hash != LME_DATASET_MANIFEST_HASH
-        or run_spec.case_manifest_hash != plan.dataset.case_manifest_hash
-        or run_spec.workload_id != cell.workload_id
-        or budget != expected_budget
-        or bindings != current_bindings
-        or tuple(binding.binding_id for binding in bindings) != run_spec.model_role_binding_ids
-    ):
-        raise LiveConfigurationError(
-            "continuation resolved plan or runtime binding differs from the frozen OpenViking cell"
-        )
-    lifecycle_domain = provider_runtime_directory / "lifecycle-domains" / cell.provider_id
-    for pointer_name in ("active-operation", "active-provider-attempt"):
-        if (lifecycle_domain / pointer_name).exists():
-            raise LiveConfigurationError(
-                f"provider lifecycle domain is active before continuation: {pointer_name}"
-            )
-    attempts_directory = lifecycle_domain / "active-provider-attempts"
-    if attempts_directory.is_dir() and any(attempts_directory.iterdir()):
-        raise LiveConfigurationError("provider lifecycle domain has active attempts")
-
-    raise LiveConfigurationError(
-        "OpenViking same-scope continuation requires task-specific no-mutation and "
-        "work-settlement proof; the pinned provider does not supply that proof"
+        progress_path=progress_path,
+        expected_progress=expected_progress,
     )
 
 

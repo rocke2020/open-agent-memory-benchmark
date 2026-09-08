@@ -21,9 +21,6 @@ from typing import Any
 
 from oamb.artifacts.atomic import read_regular_file, sha256_file
 from oamb.artifacts.capsule import publish_with_last_marker, verify_published_directory
-from oamb.artifacts.capsule_graph import read_capsule_graph
-from oamb.artifacts.composition import inspect_embedded_composition
-from oamb.artifacts.validation.composition import declares_composition
 from oamb.artifacts.validation.openviking_session_evidence import (
     reconstruct_openviking_session_indexing_usage,
 )
@@ -154,7 +151,6 @@ class _CellSnapshot:
     retrieval_runtime_proof_state: str
     raw_payloads: Mapping[str, bytes]
     infrastructure_retries: tuple[dict[str, Any], ...] = ()
-    composition_part_states: tuple[str, ...] = ()
     code_revisions: tuple[str, ...] = ()
 
 
@@ -235,11 +231,40 @@ def build_comparison_project(
             "observed time is local run evidence and is not an environment-independent latency score",
         ]
     )
-    accuracy_decision = _report_accuracy_decision(
-        plan,
-        cell_documents,
-        comparison_documents,
+    retrieval_documents = tuple(
+        _retrieval_document(plan, snapshot.cell, snapshot.retrieval_runtime_proof_state)
+        for snapshot in snapshots
     )
+    return _publish_comparison_documents(
+        plan,
+        cell_documents=cell_documents,
+        question_documents=question_documents,
+        comparison_documents=comparison_documents,
+        dataset_details=dataset_details,
+        retrieval_documents=retrieval_documents,
+        limitations=limitations,
+        unique_case_count=len(snapshots[0].cases),
+        provider_specific_result_count=sum(len(item.cases) for item in snapshots),
+        output_root=output_root,
+        diagnostic=diagnostic,
+    )
+
+
+def _publish_comparison_documents(
+    plan: ResolvedPlan,
+    *,
+    cell_documents: tuple[dict[str, Any], ...],
+    question_documents: tuple[dict[str, object], ...],
+    comparison_documents: tuple[dict[str, Any], ...],
+    dataset_details: dict[str, object],
+    retrieval_documents: tuple[dict[str, object], ...],
+    limitations: tuple[str, ...],
+    unique_case_count: int,
+    provider_specific_result_count: int,
+    output_root: Path,
+    diagnostic: bool,
+) -> ComparisonProjectBuildResult:
+    accuracy_decision = _report_accuracy_decision(plan, cell_documents, comparison_documents)
     export_body: dict[str, Any] = {
         "schema_name": "comparison_project_report",
         "schema_version": 1,
@@ -256,8 +281,8 @@ def build_comparison_project(
         "dataset_details": dataset_details,
         "coverage": {
             "cell_count": len(cell_documents),
-            "unique_case_count": len(snapshots[0].cases),
-            "provider_specific_result_count": sum(len(item.cases) for item in snapshots),
+            "unique_case_count": unique_case_count,
+            "provider_specific_result_count": provider_specific_result_count,
         },
         "cells": cell_documents,
         "questions": question_documents,
@@ -273,10 +298,7 @@ def build_comparison_project(
         "accuracy_decision": accuracy_decision,
         "models": tuple(_model_document(item) for item in plan.model_roles),
         "retrieval_generation": plan.retrieval.generation,
-        "retrieval": tuple(
-            _retrieval_document(plan, snapshot.cell, snapshot.retrieval_runtime_proof_state)
-            for snapshot in snapshots
-        ),
+        "retrieval": retrieval_documents,
         "limitations": limitations,
         "controlled_comparison_warning": CONTROLLED_COMPARISON_WARNING,
     }
@@ -336,6 +358,90 @@ def build_comparison_project(
     )
 
 
+def build_full_progress_comparison_project(
+    plan: ResolvedPlan,
+    progresses: Mapping[str, Any],
+    *,
+    case_manifest: Any,
+    output_root: Path,
+    dataset_source: Path | None = None,
+) -> ComparisonProjectBuildResult:
+    """Build the final comparison from three closed flat progress snapshots."""
+
+    from oamb.reporting.full_progress import adapt_full_progress
+
+    expected_cell_ids = tuple(cell.cell_id for cell in plan.cells)
+    if set(progresses) != set(expected_cell_ids) or len(progresses) != len(expected_cell_ids):
+        raise ComparisonProjectError(
+            "full progress inputs do not close the resolved cell inventory"
+        )
+    adapted = tuple(
+        adapt_full_progress(
+            plan=plan,
+            cell=cell,
+            case_manifest=case_manifest,
+            progress=progresses[cell.cell_id],
+        )
+        for cell in plan.cells
+    )
+    cell_documents = tuple(_progress_cell_document(plan, item) for item in adapted)
+    local_question_content = (
+        _load_local_question_content(
+            plan,
+            Path(dataset_source),
+            canonical_json_bytes(case_manifest),
+        )
+        if dataset_source is not None
+        else ()
+    )
+    question_documents = _progress_question_documents(
+        adapted,
+        local_question_content=local_question_content,
+    )
+    comparison_documents = tuple(
+        _pair_document(plan, left, right) for left, right in combinations(cell_documents, 2)
+    )
+    if len(comparison_documents) != math.comb(len(plan.cells), 2):
+        raise ComparisonProjectError("full progress pairwise inventory is incomplete")
+    proof_states = tuple(_progress_retrieval_proof_state(item) for item in adapted)
+    limitations = tuple(
+        [
+            f"runtime retrieval proof unavailable for {item.cell.cell_id}; configured "
+            "generation-free retrieval is not reported as a runtime-verified claim"
+            for item, state in zip(adapted, proof_states, strict=True)
+            if state != "runtime_verified"
+        ]
+        + [
+            "terminal results may come from separate fresh invocations under the same frozen "
+            "plan and workload",
+            "model and thinking-effort bindings are resolved-plan values; runtime proof remains "
+            "bounded by each role's declared proof source",
+            "observed time is local operation evidence and is not an environment-independent "
+            "latency score",
+        ]
+    )
+    retrieval_documents = tuple(
+        _retrieval_document(plan, item.cell, state)
+        for item, state in zip(adapted, proof_states, strict=True)
+    )
+    return _publish_comparison_documents(
+        plan,
+        cell_documents=cell_documents,
+        question_documents=question_documents,
+        comparison_documents=comparison_documents,
+        dataset_details=_dataset_details_document(
+            plan,
+            included=bool(local_question_content),
+        ),
+        retrieval_documents=retrieval_documents,
+        limitations=limitations,
+        unique_case_count=len(adapted[0].cases),
+        provider_specific_result_count=sum(len(item.cases) for item in adapted),
+        output_root=output_root,
+        diagnostic=False,
+    )
+
+
 def _load_cell_snapshot(
     plan: ResolvedPlan,
     cell: CellSpec,
@@ -366,23 +472,8 @@ def _load_cell_snapshot(
             f"cell {cell.cell_id} validation target does not bind the root"
         )
 
-    if declares_composition(root):
-        return _load_composed_cell_snapshot(
-            plan,
-            cell,
-            root,
-            manifest,
-            supplied_validation,
-        )
-
-    document_graph = _read_part_document_graph(root, cell.cell_id, {})
-    documents, raw_payloads = document_graph[0]
-    operational_documents = tuple(part_documents for part_documents, _raw in document_graph)
-    for _documents, nested_raw in document_graph[1:]:
-        for raw_id, payload in nested_raw.items():
-            previous = raw_payloads.setdefault(raw_id, payload)
-            if previous != payload:
-                raise ComparisonProjectError(f"cell {cell.cell_id} embedded raw identity collides")
+    documents, raw_payloads = _read_source_documents(root, manifest, cell.cell_id)
+    operational_documents = (documents,)
 
     run_spec = _exact_document(documents, "run_spec", cell.cell_id)
     preflight = _exact_document(documents, "run_preflight_record", cell.cell_id)
@@ -504,243 +595,6 @@ def _load_cell_snapshot(
     )
 
 
-def _load_composed_cell_snapshot(
-    plan: ResolvedPlan,
-    cell: CellSpec,
-    root: Path,
-    manifest: CapsuleManifest,
-    validation: ValidationResult,
-) -> _CellSnapshot:
-    composition, embedded_roots = inspect_embedded_composition(root)
-    if (
-        composition.resolved_plan_hash != plan.resolved_plan_hash
-        or composition.cell_spec_hash != cell.cell_spec_hash
-        or composition.target_case_manifest_hash != cell.case_manifest_hash
-        or composition.budget_policy_hash != cell.authorization_hash
-    ):
-        raise ComparisonProjectError(f"cell {cell.cell_id} composition binding does not close")
-
-    part_documents: dict[str, dict[str, list[tuple[bytes, dict[str, Any]]]]] = {}
-    merged_raw_payloads: dict[str, bytes] = {}
-    case_manifest_bytes: bytes | None = None
-    case_manifest: dict[str, Any] | None = None
-    starts: list[str] = []
-    ends: list[str] = []
-    part_states: list[str] = []
-    code_revisions: list[str] = []
-    operational_documents: list[dict[str, list[tuple[bytes, dict[str, Any]]]]] = []
-    seen_operational_parts: dict[str, str] = {}
-    for binding, embedded_root in zip(composition.ordered_parts, embedded_roots, strict=True):
-        embedded_manifest = CapsuleManifest.model_validate_json(
-            read_regular_file(embedded_root / "capsule-manifest.json")
-        )
-        if embedded_manifest.capsule_id != binding.capsule_id:
-            raise ComparisonProjectError(
-                f"cell {cell.cell_id} embedded part identity does not close"
-            )
-        documents, raw_payloads = _read_source_documents(
-            embedded_root,
-            embedded_manifest,
-            cell.cell_id,
-        )
-        for nested_documents, nested_raw in _read_part_document_graph(
-            embedded_root, cell.cell_id, seen_operational_parts
-        ):
-            operational_documents.append(nested_documents)
-            nested_run_spec = _exact_document(
-                nested_documents,
-                "run_spec",
-                cell.cell_id,
-            )
-            code_revisions.append(_required_text(nested_run_spec, "code_revision"))
-            nested_run_record = _exact_document(
-                nested_documents,
-                "run_record",
-                cell.cell_id,
-            )
-            part_states.append(_required_text(nested_run_record, "state"))
-            if isinstance(nested_run_record.get("started_at"), str):
-                starts.append(nested_run_record["started_at"])
-            if isinstance(nested_run_record.get("ended_at"), str):
-                ends.append(nested_run_record["ended_at"])
-            for raw_id, payload in nested_raw.items():
-                previous = merged_raw_payloads.setdefault(raw_id, payload)
-                if previous != payload:
-                    raise ComparisonProjectError(
-                        f"cell {cell.cell_id} embedded raw identity collides"
-                    )
-        part_documents[binding.capsule_id] = documents
-        for raw_id, payload in raw_payloads.items():
-            previous = merged_raw_payloads.setdefault(raw_id, payload)
-            if previous != payload:
-                raise ComparisonProjectError(f"cell {cell.cell_id} embedded raw identity collides")
-        current_manifest_bytes, current_manifest = _exact_record(
-            documents, "case_manifest", cell.cell_id
-        )
-        if case_manifest_bytes is None:
-            case_manifest_bytes = current_manifest_bytes
-            case_manifest = current_manifest
-        elif current_manifest_bytes != case_manifest_bytes:
-            raise ComparisonProjectError(f"cell {cell.cell_id} embedded case manifests differ")
-        run_spec = _exact_document(documents, "run_spec", cell.cell_id)
-        preflight = _exact_document(documents, "run_preflight_record", cell.cell_id)
-        dataset = _exact_document(documents, "dataset_manifest", cell.cell_id)
-        if (
-            run_spec.get("run_id") != binding.run_id
-            or run_spec.get("memory_system_id") != cell.provider_id
-            or run_spec.get("workload_id") != cell.workload_id
-            or run_spec.get("case_manifest_hash") != cell.case_manifest_hash
-            or preflight.get("run_id") != binding.run_id
-            or preflight.get("resolved_plan_hash") != plan.resolved_plan_hash
-            or preflight.get("adapter_profile_id") != cell.adapter_profile_id
-            or dataset.get("dataset_id") != cell.dataset_id
-            or dataset.get("revision") != plan.dataset.revision
-        ):
-            raise ComparisonProjectError(
-                f"cell {cell.cell_id} embedded part does not close the resolved cell"
-            )
-        source_files = dataset.get("source_files")
-        if not isinstance(source_files, list) or tuple(
-            item.get("sha256") for item in source_files if isinstance(item, dict)
-        ) != (cell.source_sha256,):
-            raise ComparisonProjectError(
-                f"cell {cell.cell_id} embedded dataset source does not close"
-            )
-
-    if case_manifest_bytes is None or case_manifest is None:
-        raise ComparisonProjectError(f"cell {cell.cell_id} composition has no case manifest")
-    manifest_cases = case_manifest.get("cases")
-    if not isinstance(manifest_cases, list):
-        raise ComparisonProjectError(f"cell {cell.cell_id} case manifest inventory is invalid")
-    expected_case_ids = tuple(
-        _required_text(item, "case_manifest_entry_id") for item in manifest_cases
-    )
-    expected_count = _expected_case_count(plan.dataset.selection)
-    if expected_count is not None and len(expected_case_ids) != expected_count:
-        raise ComparisonProjectError(
-            f"cell {cell.cell_id} case manifest requires {expected_count} cases"
-        )
-
-    selected_ingestion_plans: list[dict[str, Any]] = []
-    selected_case_records: list[dict[str, Any]] = []
-    ingestion_occurrence_ids: list[str] = []
-    case_occurrence_ids: list[str] = []
-    for contribution in composition.ordered_contributions:
-        documents = part_documents[contribution.source_capsule_id]
-        ingestion_plans_by_occurrence = _unique_by(
-            tuple(item[1] for item in documents.get("ingestion_plan_record", ())),
-            "ingestion_occurrence_id",
-            "ingestion occurrence",
-        )
-        ingestion_plan = ingestion_plans_by_occurrence[contribution.ingestion_occurrence_id]
-        cases_by_occurrence = _unique_by(
-            tuple(item[1] for item in documents.get("case_record", ())),
-            "case_occurrence_id",
-            "case record",
-        )
-        contributed_cases = tuple(
-            cases_by_occurrence[occurrence_id] for occurrence_id in contribution.case_occurrence_ids
-        )
-        if (
-            ingestion_plan.get("ingestion_plan_id") != contribution.ingestion_plan_id
-            or ingestion_plan.get("run_id") != contribution.source_run_id
-            or tuple(ingestion_plan.get("ordered_case_occurrence_ids", ()))
-            != contribution.case_occurrence_ids
-        ):
-            raise ComparisonProjectError(
-                f"cell {cell.cell_id} composition ingestion provenance does not close"
-            )
-        if (
-            tuple(_required_text(item, "case_manifest_entry_id") for item in contributed_cases)
-            != contribution.case_manifest_entry_ids
-        ):
-            raise ComparisonProjectError(
-                f"cell {cell.cell_id} composition case provenance does not close"
-            )
-        selected_ingestion_plans.append(ingestion_plan)
-        selected_case_records.extend(contributed_cases)
-        ingestion_occurrence_ids.append(contribution.ingestion_occurrence_id)
-        case_occurrence_ids.extend(contribution.case_occurrence_ids)
-
-    operational_parts = tuple(operational_documents)
-    all_attempts = _operational_records(operational_parts, "attempt_record")
-    all_history_attempts = _operational_records(operational_parts, "history_attempt_record")
-    all_usage = _operational_records(operational_parts, "token_usage_record")
-    all_resources = _operational_records(operational_parts, "resource_usage_record")
-    all_costs = _operational_records(operational_parts, "cost_record")
-    all_infrastructure_retries = _operational_records(
-        operational_parts, "infrastructure_retry_event"
-    )
-    for values, identity, label in (
-        (all_attempts, "attempt_id", "composed attempt"),
-        (all_history_attempts, "history_attempt_id", "composed history attempt"),
-        (all_usage, "usage_record_id", "composed token usage"),
-        (all_resources, "resource_record_id", "composed resource usage"),
-        (all_costs, "cost_record_id", "composed cost"),
-        (all_infrastructure_retries, "retry_event_id", "composed retry event"),
-        (
-            tuple(selected_ingestion_plans),
-            "ingestion_occurrence_id",
-            "composed ingestion occurrence",
-        ),
-    ):
-        _unique_by(values, identity, label)
-
-    cases_by_manifest_id = _unique_by(
-        tuple(selected_case_records),
-        "case_manifest_entry_id",
-        "composed case record",
-    )
-    try:
-        ordered_cases = tuple(cases_by_manifest_id[case_id] for case_id in expected_case_ids)
-    except KeyError as exc:
-        raise ComparisonProjectError(
-            f"cell {cell.cell_id} composed cases do not close the target manifest"
-        ) from exc
-    if len(cases_by_manifest_id) != len(expected_case_ids) or any(
-        case_record.get("adapter_profile_id") != cell.adapter_profile_id
-        for case_record in ordered_cases
-    ):
-        raise ComparisonProjectError(f"cell {cell.cell_id} composed case record binding drifted")
-    run_record: dict[str, Any] = {
-        "schema_name": "run_record",
-        "schema_version": 1,
-        "run_id": composition.composition_id,
-        "state": "finalized",
-        "started_at": min(starts) if starts else None,
-        "ended_at": max(ends) if ends else None,
-        "ingestion_occurrence_ids": ingestion_occurrence_ids,
-        "case_occurrence_ids": case_occurrence_ids,
-    }
-    retrieval_proof_state = _retrieval_runtime_proof(
-        cell,
-        ordered_cases,
-        merged_raw_payloads,
-    )
-    return _CellSnapshot(
-        cell=cell,
-        root=root,
-        source_root_hash=manifest.source_manifest_hash,
-        validation_hash=canonical_sha256(validation),
-        run_id=composition.composition_id,
-        case_manifest_bytes=case_manifest_bytes,
-        case_manifest=case_manifest,
-        cases=ordered_cases,
-        ingestion_plans=tuple(selected_ingestion_plans),
-        attempts=all_attempts,
-        history_attempts=all_history_attempts,
-        token_usage=all_usage,
-        resources=all_resources,
-        costs=all_costs,
-        run_record=run_record,
-        retrieval_runtime_proof_state=retrieval_proof_state,
-        raw_payloads=merged_raw_payloads,
-        infrastructure_retries=all_infrastructure_retries,
-        composition_part_states=tuple(part_states),
-        code_revisions=tuple(sorted(set(code_revisions))),
-    )
-
-
 def _read_source_documents(
     root: Path,
     manifest: CapsuleManifest,
@@ -780,21 +634,6 @@ def _read_source_documents(
             raise ComparisonProjectError(f"cell {cell_id} source record kind drifted")
         documents.setdefault(entry.record_kind, []).append((content, document))
     return documents, raw_payloads
-
-
-def _read_part_document_graph(
-    root: Path,
-    cell_id: str,
-    seen: dict[str, str],
-) -> tuple[tuple[dict[str, list[tuple[bytes, dict[str, Any]]]], dict[str, bytes]], ...]:
-    try:
-        graph = read_capsule_graph(root, seen)
-    except (OSError, ValueError) as exc:
-        raise ComparisonProjectError(f"cell {cell_id} embedded capsule graph is invalid") from exc
-    return tuple(
-        _read_source_documents(part_root, part_manifest, cell_id)
-        for part_root, part_manifest in graph
-    )
 
 
 def _operational_records(
@@ -872,26 +711,6 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
             f"{len(snapshot.cases) - len(judged)} of {len(snapshot.cases)} cases are outside the "
             "judged accuracy denominator"
         )
-    if snapshot.composition_part_states:
-        limitations.append(
-            f"composed from {len(snapshot.composition_part_states)} immutable part capsules"
-        )
-        limitations.append(
-            "accounting includes all recovery-part work; cell elapsed spans inter-part gaps"
-        )
-        nonfinal = tuple(
-            state for state in snapshot.composition_part_states if state != "finalized"
-        )
-        if nonfinal:
-            limitations.append(
-                "resume source part states "
-                f"{','.join(nonfinal)}; only terminal-success whole-plan groups contributed"
-            )
-    if len(snapshot.code_revisions) > 1:
-        limitations.append(
-            "composed from mixed code revisions; descriptive evidence only and excluded from "
-            "strict pair comparison"
-        )
     document: dict[str, Any] = {
         "cell_id": snapshot.cell.cell_id,
         "cell_spec_hash": snapshot.cell.cell_spec_hash,
@@ -937,6 +756,255 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
     if plan.dataset.selection == "lme60" and len(snapshot.cases) == 60:
         document["accuracy"] = _accuracy_document(plan, snapshot)
     return document
+
+
+def _progress_cell_document(plan: ResolvedPlan, adapted: Any) -> dict[str, Any]:
+    """Reduce normalized progress facts without reconstructing capsule identities."""
+
+    cases = tuple(_progress_case_document(item) for item in adapted.cases)
+    judged = tuple(item for item in cases if item["evaluation_disposition"] == "judged")
+    metric_ids = tuple(dict.fromkeys(str(item["metric_id"]) for item in judged))
+    if len(metric_ids) > 1:
+        raise ComparisonProjectError(f"cell {adapted.cell.cell_id} mixes progress metric policies")
+    skipped_source_count = sum(item.entry.ingestion.skipped_source_count for item in adapted.cases)
+    partial_history_count = sum(item.entry.ingestion.partial for item in adapted.cases)
+    limitations: list[str] = []
+    if skipped_source_count:
+        limitations.append(
+            "Partial ingestion: "
+            f"{skipped_source_count} source(s) across {partial_history_count} history scope(s) "
+            "were skipped; terminal results retain that provenance"
+        )
+    if len(judged) != len(cases):
+        limitations.append(
+            f"{len(cases) - len(judged)} of {len(cases)} cases are outside the judged "
+            "accuracy denominator"
+        )
+    limitations.append(
+        "progress retains result, context, indexing-token, latency, and attempt-count facts; "
+        "other accounting dimensions are unavailable"
+    )
+    document: dict[str, Any] = {
+        "result_source": "full_progress",
+        "cell_id": adapted.cell.cell_id,
+        "cell_spec_hash": adapted.cell.cell_spec_hash,
+        "provider_id": adapted.cell.provider_id,
+        "adapter_profile_id": adapted.cell.adapter_profile_id,
+        "run_id": "unavailable",
+        "source_root_hash": "unavailable",
+        "validation_result_hash": "unavailable",
+        "case_count": len(cases),
+        "metric_id": metric_ids[0] if metric_ids else "unavailable",
+        "completed_case_count": len(cases),
+        "judged_case_count": len(judged),
+        "judged_numerator": sum(int(item["metric_numerator"]) for item in judged),
+        "judged_denominator": sum(int(item["metric_denominator"]) for item in judged),
+        "code_revisions": (),
+        "results": cases,
+        "model_role_ids": {
+            "producer": adapted.cell.producer_role_id,
+            "embedding": adapted.cell.embedding_role_id,
+            "answer": adapted.cell.answer_role_id,
+            "judge": adapted.cell.judge_role_id,
+        },
+        "retrieval_binding_id": adapted.cell.retrieval_binding_id,
+        "observed_time": _progress_observed_time(adapted),
+        "ingestion": {
+            "partial_history_count": partial_history_count,
+            "skipped_source_count": skipped_source_count,
+        },
+        "accounting": _progress_accounting_document(adapted),
+        "limitations": limitations,
+    }
+    if plan.dataset.selection == "lme60" and len(cases) == 60:
+        manifest = {
+            "cases": [
+                {
+                    "case_manifest_entry_id": item.case_manifest_entry_id,
+                    "raw_question_id": item.question_id,
+                }
+                for item in adapted.cases
+            ]
+        }
+        view = type("_ProgressAccuracyView", (), {})()
+        view.cases = cases
+        view.case_manifest = manifest
+        document["accuracy"] = _accuracy_document(plan, view)
+    return document
+
+
+def _progress_case_document(item: Any) -> dict[str, Any]:
+    entry = item.entry
+    judged = entry.terminal_status == "judged"
+    return {
+        "case_manifest_entry_id": item.case_manifest_entry_id,
+        "question_id": item.question_id,
+        "state": "completed" if judged else "error",
+        "terminal_status": entry.terminal_status,
+        "evaluation_disposition": entry.evaluation.disposition,
+        "metric_id": entry.evaluation.metric_id if judged else None,
+        "metric_numerator": entry.evaluation.numerator if judged else None,
+        "metric_denominator": entry.evaluation.denominator if judged else None,
+        "judge_decision": entry.evaluation.judge_decision if judged else None,
+        "model_answer": (
+            entry.answer.parsed_answer.value if entry.answer.status == "parsed" else None
+        ),
+        "answer_unavailable_reason": (
+            None if entry.answer.status == "parsed" else entry.answer.parsed_answer.reason
+        ),
+        "injected_context": entry.retrieval.visible_context.value,
+        "visible_evidence_token_count": entry.retrieval.visible_context_token_count.value,
+        "error_stage": getattr(entry, "failure_stage", None),
+        "failure_kind": getattr(entry, "failure_kind", None),
+        "failure_reason": getattr(entry, "failure_reason", None),
+    }
+
+
+def _progress_accounting_document(adapted: Any) -> dict[str, object]:
+    entries = tuple(item.entry for item in adapted.cases)
+    indexing = _progress_indexing_token_stage(entries)
+    unavailable_stages = {
+        stage: _progress_unavailable_token_stage(stage, len(entries))
+        for stage in ("retrieval", "answer", "judge")
+    }
+    context_total = sum(item.retrieval.visible_context_token_count.value for item in entries)
+    attempts = sum(
+        item.attempts.ingestion
+        + item.attempts.retrieval
+        + item.attempts.answer
+        + item.attempts.judge
+        for item in entries
+    )
+    resources = _resource_document(())
+    cost = _cost_document(())
+    return {
+        "attempts": {
+            "attempt_count": attempts,
+            "succeeded_count": "unavailable",
+            "failed_count": "unavailable",
+            "cancelled_count": "unavailable",
+            "budget_exceeded_count": "unavailable",
+            "unknown_outcome_count": "unavailable",
+            "retry_count": "unavailable",
+            "measurement_coverage": "unavailable",
+        },
+        "infrastructure_retries": {
+            "rejection_count": "unavailable",
+            "internal_retry_count": "unavailable",
+            "scheduled_retry_count": "unavailable",
+            "total_retry_count": "unavailable",
+            "backoff_seconds": "unavailable",
+            "measurement_coverage": "unavailable",
+        },
+        "answer_visible_context_tokens": {
+            "status": "measured_complete",
+            "case_count": len(entries),
+            "measured_case_count": len(entries),
+            "total": context_total,
+            "mean": _mean_text(context_total, len(entries)),
+        },
+        "tokens": {"indexing": indexing, **unavailable_stages},
+        "resources": resources,
+        "cost": cost,
+        "measurement_coverage": {
+            "attempts": "unavailable",
+            "tokens": {
+                "indexing": indexing["supplier_usage_coverage"]["status"],
+                **{stage: "unavailable" for stage in unavailable_stages},
+            },
+            "resources": _resource_coverage(resources),
+            "cost": cost["billing_coverage"]["status"],
+        },
+    }
+
+
+def _progress_indexing_token_stage(entries: tuple[Any, ...]) -> dict[str, Any]:
+    measured = tuple(
+        item for item in entries if item.ingestion.indexing_tokens.status == "measured"
+    )
+    unavailable_count = len(entries) - len(measured)
+    partial = any(item.ingestion.indexing_token_coverage == "measured_partial" for item in measured)
+    if not measured:
+        coverage = "unavailable"
+    elif unavailable_count or partial:
+        coverage = "measured_partial"
+    else:
+        coverage = "measured_complete"
+    unavailable_dimension = {
+        "status": "unavailable",
+        "value": "unavailable",
+        "measured_record_count": 0,
+        "unavailable_record_count": len(entries),
+    }
+    totals = {dimension: dict(unavailable_dimension) for dimension in TOKEN_DIMENSIONS}
+    totals["supplier_reported_total_tokens"] = {
+        "status": coverage,
+        "value": (
+            sum(item.ingestion.indexing_tokens.value for item in measured)
+            if measured
+            else "unavailable"
+        ),
+        "measured_record_count": len(measured),
+        "unavailable_record_count": unavailable_count,
+    }
+    return {
+        "stage": "memory_ingest",
+        "supplier_usage_coverage": {
+            "status": coverage,
+            "record_count": len(entries),
+            "measured_record_count": len(measured),
+            "unavailable_record_count": unavailable_count,
+            "billing_complete_record_count": 0,
+        },
+        "totals": totals,
+        "by_budget_owner": (),
+    }
+
+
+def _progress_unavailable_token_stage(stage: str, count: int) -> dict[str, Any]:
+    unavailable = {
+        "status": "unavailable",
+        "value": "unavailable",
+        "measured_record_count": 0,
+        "unavailable_record_count": count,
+    }
+    return {
+        "stage": "memory_query" if stage == "retrieval" else stage,
+        "supplier_usage_coverage": {
+            "status": "unavailable",
+            "record_count": count,
+            "measured_record_count": 0,
+            "unavailable_record_count": count,
+            "billing_complete_record_count": 0,
+        },
+        "totals": {dimension: dict(unavailable) for dimension in TOKEN_DIMENSIONS},
+        "by_budget_owner": (),
+    }
+
+
+def _progress_observed_time(adapted: Any) -> dict[str, object]:
+    indexing = tuple(
+        item.entry.ingestion.indexing_ready_latency_microseconds.value for item in adapted.cases
+    )
+    retrieval = tuple(
+        item.entry.retrieval.request_latency_microseconds.value for item in adapted.cases
+    )
+    return {
+        "run_wall_microseconds": "unavailable",
+        "indexing_ready": _duration_summary(indexing),
+        "provider_request": _duration_summary(retrieval),
+        "cases": tuple(
+            {
+                "case_manifest_entry_id": item.case_manifest_entry_id,
+                "case_wall_microseconds": "unavailable",
+                "provider_request_wall_microseconds": (
+                    item.entry.retrieval.request_latency_microseconds.value,
+                ),
+            }
+            for item in adapted.cases
+        ),
+        "comparability": "observed_only",
+    }
 
 
 def _accuracy_document(
@@ -1575,6 +1643,96 @@ def _question_documents(
     return tuple(questions)
 
 
+def _progress_question_documents(
+    adapted: tuple[Any, ...],
+    *,
+    local_question_content: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    if not adapted:
+        raise ComparisonProjectError("progress question report has no cells")
+    case_ids = tuple(item.case_manifest_entry_id for item in adapted[0].cases)
+    if any(
+        tuple(item.case_manifest_entry_id for item in cell.cases) != case_ids
+        for cell in adapted[1:]
+    ):
+        raise ComparisonProjectError("progress question identities are not aligned")
+    content_by_id: dict[str, dict[str, object]] = {}
+    if local_question_content:
+        content_by_id = {
+            str(item["case_manifest_entry_id"]): item for item in local_question_content
+        }
+        if tuple(content_by_id) != case_ids:
+            raise ComparisonProjectError(
+                "progress question content order differs from the manifest"
+            )
+
+    questions: list[dict[str, object]] = []
+    for index, case_id in enumerate(case_ids):
+        document: dict[str, object] = {
+            "case_manifest_entry_id": case_id,
+            "ordinal_1_indexed": index + 1,
+            "provider_results": tuple(
+                _progress_question_provider_result(
+                    cell.cell.provider_id,
+                    cell.cases[index].entry,
+                    include_content=bool(local_question_content),
+                )
+                for cell in adapted
+            ),
+        }
+        if local_question_content:
+            document.update(content_by_id[case_id])
+        questions.append(document)
+    return tuple(questions)
+
+
+def _progress_question_provider_result(
+    provider_id: str,
+    entry: Any,
+    *,
+    include_content: bool,
+) -> dict[str, object]:
+    if entry.terminal_status == "judged":
+        display_state = "correct" if entry.evaluation.numerator == 1 else "incorrect"
+        numerator: int | str = entry.evaluation.numerator
+        denominator: int | str = entry.evaluation.denominator
+    elif entry.terminal_status == "unjudged":
+        display_state = "unjudged"
+        numerator = denominator = "unavailable"
+    else:
+        display_state = "failed"
+        numerator = denominator = "unavailable"
+    result: dict[str, object] = {
+        "provider_id": provider_id,
+        "display_state": display_state,
+        "evaluation_disposition": entry.evaluation.disposition,
+        "metric_numerator": numerator,
+        "metric_denominator": denominator,
+        "context_tokens": entry.retrieval.visible_context_token_count.value,
+    }
+    if not include_content:
+        return result
+    result["injected_context"] = entry.retrieval.visible_context.value
+    if entry.answer.status == "parsed":
+        result["model_answer"] = entry.answer.parsed_answer.value
+        result["judge_decision"] = (
+            entry.evaluation.judge_decision if entry.terminal_status == "judged" else "unavailable"
+        )
+    else:
+        result["model_answer"] = "unavailable"
+        result["judge_decision"] = "unavailable"
+        result["answer_unavailable_reason"] = entry.answer.parsed_answer.reason
+    return result
+
+
+def _progress_retrieval_proof_state(adapted: Any) -> str:
+    states = tuple(item.entry.retrieval.generation_proof_disposition for item in adapted.cases)
+    for state in ("unsupported", "unattested", "build_provenance_verified"):
+        if state in states:
+            return state
+    return "runtime_verified"
+
+
 def _question_provider_result(
     snapshot: _CellSnapshot,
     case: dict[str, Any],
@@ -1717,7 +1875,7 @@ def _visible_context_text(snapshot: _CellSnapshot, case: Mapping[str, Any]) -> s
         raise ComparisonProjectError("answer-visible context hash, token, or fingerprint drifted")
     try:
         text = payload.decode("utf-8", errors="strict")
-        lines = text.splitlines()
+        lines = () if text == "" else text.split("\n")
         for line in lines:
             item = json.loads(line, object_pairs_hook=_unique_json_object)
             if not isinstance(item, dict) or set(item) != VISIBLE_EVIDENCE_KEYS:
@@ -1754,11 +1912,20 @@ def _pair_document(
 ) -> dict[str, Any]:
     limitations: list[str] = []
     comparable = True
-    left_revisions = tuple(left.get("code_revisions", ()))
-    right_revisions = tuple(right.get("code_revisions", ()))
-    if len(left_revisions) != 1 or len(right_revisions) != 1 or left_revisions != right_revisions:
-        comparable = False
-        limitations.append("pair does not share one identical singleton code revision")
+    progress_pair = (
+        left.get("result_source") == "full_progress"
+        and right.get("result_source") == "full_progress"
+    )
+    if not progress_pair:
+        left_revisions = tuple(left.get("code_revisions", ()))
+        right_revisions = tuple(right.get("code_revisions", ()))
+        if (
+            len(left_revisions) != 1
+            or len(right_revisions) != 1
+            or left_revisions != right_revisions
+        ):
+            comparable = False
+            limitations.append("pair does not share one identical singleton code revision")
     if left["metric_id"] == "unavailable" or left["metric_id"] != right["metric_id"]:
         comparable = False
         limitations.append("metric policy or judged evidence is unavailable")

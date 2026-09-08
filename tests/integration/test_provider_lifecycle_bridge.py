@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from oamb.artifacts.store import ArtifactStore
-from oamb.contracts.evidence import RunLeaseRecord
-from oamb.contracts.ids import canonical_sha256
-from oamb.contracts.ports import ArtifactSealReceipt, ArtifactWriteRequest
-from oamb.runtime.resume import LeaseJournal, ProviderLifecycleBridge, ResumeRejectedError
+from oamb.runtime.provider_lifecycle import ProviderLifecycleBridge, ProviderLifecycleError
 
 ROOT = Path(__file__).resolve().parents[2]
 LIFECYCLE = ROOT / "provider-services" / "lib" / "lifecycle.sh"
@@ -108,7 +103,7 @@ def test_provider_domains_overlap_but_same_domain_cannot_reenter(
 
     mem0_runtime = runtime / "lifecycle-domains" / "mem0-rest-v1"
     competing_mem0 = ProviderLifecycleBridge(mem0_runtime, coordination_directory=runtime)
-    with pytest.raises(ResumeRejectedError, match="active provider operation"):
+    with pytest.raises(ProviderLifecycleError, match="active provider operation"):
         competing_mem0.acquire_run(
             run_id="run-mem0-duplicate",
             provider_project="oamb-providers-test-a",
@@ -136,7 +131,7 @@ def test_root_stack_mutation_lock_blocks_domain_acquisition(tmp_path: Path) -> N
     domain = runtime / "lifecycle-domains" / "mem0-rest-v1"
     bridge = ProviderLifecycleBridge(domain, coordination_directory=runtime)
 
-    with pytest.raises(ResumeRejectedError, match="provider lifecycle operation"):
+    with pytest.raises(ProviderLifecycleError, match="provider lifecycle operation"):
         bridge.acquire_run(
             run_id="run-mem0",
             provider_project="oamb-providers-test-a",
@@ -213,7 +208,7 @@ def test_symbolic_lifecycle_path_rejects_before_pointer_creation(
         domain.symlink_to(external, target_is_directory=True)
     bridge = ProviderLifecycleBridge(domain, coordination_directory=coordination)
 
-    with pytest.raises(ResumeRejectedError, match="unsafe|symbolic"):
+    with pytest.raises(ProviderLifecycleError, match="unsafe|symbolic"):
         bridge.acquire_run(
             run_id="run-mem0",
             provider_project="oamb-providers-test-a",
@@ -232,37 +227,27 @@ def test_lifecycle_lock_covers_durable_lease_seal_and_pointer_creation(
     seal_started = threading.Event()
     allow_seal = threading.Event()
 
-    class BlockingStore(ArtifactStore):
-        def seal_source_record(self, request: ArtifactWriteRequest) -> ArtifactSealReceipt:
-            seal_started.set()
-            assert allow_seal.wait(timeout=2)
-            return super().seal_source_record(request)
-
-    candidate = RunLeaseRecord(
-        lease_record_hash="0" * 64,
-        run_id="run-a",
-        provider_project_id="oamb-providers-test-a",
-        provider_profile_id="mem0-rest-v1",
-        lease_epoch=1,
-        owner_id="runner-1",
-        host_fingerprint="d" * 64,
-        process_id=123,
-        predecessor_lease_record_hash=None,
-        acquired_at=datetime(2026, 8, 27, 12, 0, tzinfo=UTC),
-    )
-    lease = candidate.model_copy(
-        update={
-            "lease_record_hash": canonical_sha256(
-                candidate.model_dump(mode="python", exclude={"lease_record_hash"})
-            )
-        }
-    )
     runtime = tmp_path / "provider-runtime"
-    journal = LeaseJournal(
-        BlockingStore(tmp_path / "capsule"),
-        ProviderLifecycleBridge(runtime),
-    )
-    thread = threading.Thread(target=journal.acquire, args=(lease,))
+    bridge = ProviderLifecycleBridge(runtime)
+    authority = []
+
+    def seal_lease() -> None:
+        seal_started.set()
+        assert allow_seal.wait(timeout=2)
+
+    def acquire() -> None:
+        authority.append(
+            bridge.acquire_run(
+                run_id="run-a",
+                provider_project="oamb-providers-test-a",
+                profile_id="mem0-rest-v1",
+                lease_epoch=1,
+                lease_record_hash="a" * 64,
+                durable_lease=seal_lease,
+            )
+        )
+
+    thread = threading.Thread(target=acquire)
     thread.start()
     assert seal_started.wait(timeout=2)
 
@@ -274,3 +259,4 @@ def test_lifecycle_lock_covers_durable_lease_seal_and_pointer_creation(
     assert racing_lifecycle.returncode != 0
     assert "another provider lifecycle operation" in racing_lifecycle.stderr
     assert (runtime / "active-operation").is_file()
+    bridge.release_run(authority[0])
