@@ -1186,9 +1186,11 @@ def test_selected_cell_build_rejects_active_lifecycle_ownership(
         )
 
 
-def test_parallel_live_cells_drain_after_root_sigterm(
+@pytest.mark.parametrize("stop_signal", (signal.SIGTERM, signal.SIGHUP))
+def test_parallel_live_cells_drain_after_root_stop_signal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stop_signal: signal.Signals,
 ) -> None:
     from oamb import live
 
@@ -1229,6 +1231,7 @@ def test_parallel_live_cells_drain_after_root_sigterm(
     monkeypatch.setattr(live, "execute_live_cell", execute)
 
     def supervise() -> None:
+        os.setsid()
         completed = live.execute_live_cells(cells)
         assert len(completed) == len(cells)
 
@@ -1236,7 +1239,7 @@ def test_parallel_live_cells_drain_after_root_sigterm(
     supervisor.start()
     assert all_started.wait(timeout=2), "parallel cells did not reach the planted barrier"
     assert supervisor.pid is not None
-    os.kill(supervisor.pid, signal.SIGTERM)
+    os.killpg(supervisor.pid, stop_signal)
     supervisor.join(timeout=5)
     if supervisor.is_alive():
         supervisor.terminate()

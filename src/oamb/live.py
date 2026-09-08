@@ -59,7 +59,11 @@ from oamb.runtime.full_progress import (
     canonical_full_progress_path,
     load_full_progress,
 )
-from oamb.runtime.native_run import NativeRunArtifacts, NativeRunControl
+from oamb.runtime.native_run import (
+    COOPERATIVE_STOP_SIGNALS,
+    NativeRunArtifacts,
+    NativeRunControl,
+)
 from oamb.runtime.preflight import (
     CONTROLLED_EMBEDDING_DIMENSION,
     CONTROLLED_EMBEDDING_MODEL,
@@ -1055,7 +1059,7 @@ def _install_live_stop_handlers(
             stop_event.set()
 
     previous: dict[signal.Signals, Any] = {}
-    for signum in (signal.SIGINT, signal.SIGTERM):
+    for signum in COOPERATIVE_STOP_SIGNALS:
         previous[signum] = signal.getsignal(signum)
         signal.signal(signum, request_stop)
     return previous

@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import queue
 import shutil
+import signal
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -2716,6 +2717,81 @@ def test_supervised_child_crash_releases_lifecycle_for_a_fresh_run(tmp_path: Pat
         )
 
     run_record = json.loads((root / "source" / "run" / f"{run_id}.json").read_bytes())
+    assert run_record["state"] == "aborted"
+    assert not (provider_runtime / "active-operation").exists()
+    attempts = provider_runtime / "active-provider-attempts"
+    assert not attempts.exists() or not tuple(attempts.iterdir())
+
+
+def test_supervised_process_group_hangup_drains_and_releases_lifecycle(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    ingest_started = context.Event()
+
+    class SlowIngestMemory(_RecordedNativeMemory):
+        async def ingest(
+            self,
+            request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            ingest_started.set()
+            await asyncio.sleep(0.25)
+            return await super().ingest(request)
+
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    first_plan = manifest.ingestion_plans[0]
+    provider_runtime = (tmp_path / "provider-runtime").resolve()
+    run_id = "native-fixture-process-group-hangup"
+    control = _control(
+        run_id=run_id,
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> SlowIngestMemory:
+        return SlowIngestMemory(store)
+
+    def supervise() -> None:
+        os.setsid()
+        with pytest.raises(NativeRunInterrupted):
+            run_native_vertical_slice(
+                output_root=tmp_path / "capsules",
+                run_id=run_id,
+                adapter_profile_id="recorded-native-fixture-v1",
+                workload=workload,
+                visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+                artifact_store_factory=ArtifactStore,
+                memory_factory=memory_factory,
+                model_factory=_RecordedNativeModel,
+                answer_role_binding_id="answer-binding",
+                control=control,
+                requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
+            )
+
+    supervisor = context.Process(target=supervise)
+    supervisor.start()
+    assert ingest_started.wait(timeout=2), "native ingest did not reach the planted barrier"
+    assert supervisor.pid is not None
+    os.killpg(supervisor.pid, signal.SIGHUP)
+    supervisor.join(timeout=10)
+    if supervisor.is_alive():
+        os.killpg(supervisor.pid, signal.SIGKILL)
+        supervisor.join(timeout=1)
+
+    assert supervisor.exitcode == 0
+    root = tmp_path / "capsules" / run_id
+    run_record = json.loads((root / "source/run" / f"{run_id}.json").read_bytes())
     assert run_record["state"] == "aborted"
     assert not (provider_runtime / "active-operation").exists()
     attempts = provider_runtime / "active-provider-attempts"

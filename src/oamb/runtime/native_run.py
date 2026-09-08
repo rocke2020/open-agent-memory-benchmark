@@ -170,6 +170,7 @@ NATIVE_PROCESS_POLL_SECONDS = 0.01
 NATIVE_PROCESS_TERMINATION_SECONDS = 0.10
 NATIVE_OWNER_NAME = "native-run-owner.json"
 NATIVE_OWNER_ID = "native-fixture-owner-v1"
+COOPERATIVE_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 NativeIngestionPlanRecord: TypeAlias = IngestionPlanRecordV2 | IngestionPlanRecordV3
 TerminalCasePublisher: TypeAlias = Callable[
@@ -1197,7 +1198,7 @@ def _install_native_stop_handlers(
         stop_event.set()
 
     previous: dict[signal.Signals, Any] = {}
-    for signum in (signal.SIGINT, signal.SIGTERM):
+    for signum in COOPERATIVE_STOP_SIGNALS:
         previous[signum] = signal.getsignal(signum)
         signal.signal(signum, request_stop)
     return previous
@@ -1209,8 +1210,8 @@ def _restore_native_stop_handlers(previous: dict[signal.Signals, Any]) -> None:
 
 
 def _native_process_entry(request: _NativeRunRequest, sender: Connection) -> None:
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    for signum in COOPERATIVE_STOP_SIGNALS:
+        signal.signal(signum, signal.SIG_IGN)
     try:
         ready = asyncio.run(_run_native_with_cell_deadline(request, sender))
     except BaseException as exc:
