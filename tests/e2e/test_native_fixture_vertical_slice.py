@@ -2869,6 +2869,7 @@ def test_supervised_process_group_stop_cancels_and_releases_lifecycle(
                 raise MemorySystemCallCancelledUnknownOutcome(
                     "planted cancellation with unknown provider acceptance"
                 ) from error
+            raise AssertionError("blocking ingest unexpectedly completed")
 
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
@@ -2954,6 +2955,7 @@ def test_native_child_stops_after_its_supervisor_unexpectedly_dies(
                 raise MemorySystemCallCancelledUnknownOutcome(
                     "supervisor died after provider dispatch"
                 ) from error
+            raise AssertionError("blocking ingest unexpectedly completed")
 
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
@@ -3062,6 +3064,7 @@ def test_native_child_hard_stops_when_close_hangs_after_supervisor_death(
                 raise MemorySystemCallCancelledUnknownOutcome(
                     "supervisor died after provider dispatch"
                 ) from error
+            raise AssertionError("blocking ingest unexpectedly completed")
 
         async def close(self) -> None:
             close_started.set()
@@ -3165,6 +3168,7 @@ def test_lost_run_sh_owner_stops_tree_and_releases_lifecycle(
                 raise MemorySystemCallCancelledUnknownOutcome(
                     "run.sh owner died after provider dispatch"
                 ) from error
+            raise AssertionError("blocking ingest unexpectedly completed")
 
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
