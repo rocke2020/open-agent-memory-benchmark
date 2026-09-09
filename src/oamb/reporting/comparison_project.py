@@ -18,7 +18,7 @@ from fractions import Fraction
 from html.parser import HTMLParser
 from itertools import combinations
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from oamb.artifacts.atomic import read_regular_file, sha256_file
 from oamb.artifacts.capsule import publish_with_last_marker, verify_published_directory
@@ -38,6 +38,13 @@ from oamb.reporting.report_analysis import (
     REPORT_ANALYSIS_METRICS,
     REPORT_ANALYSIS_NAME,
     parse_report_analysis,
+)
+from oamb.runtime.question_results import (
+    JudgedQuestionResult,
+    QuestionResult,
+    QuestionResultsError,
+    ResultMeasurement,
+    require_complete_question_results,
 )
 
 REPORT_EXPORT_NAME = "report.json"
@@ -397,34 +404,51 @@ def _publish_comparison_documents(
     )
 
 
-def build_full_progress_comparison_project(
+def build_question_results_comparison_project(
     plan: ResolvedPlan,
-    progresses: Mapping[str, Any],
+    results_by_cell: Mapping[str, Mapping[str, QuestionResult]],
     *,
     case_manifest: Any,
     output_root: Path,
     dataset_source: Path | None = None,
     analysis_generator: AnalysisGenerator | None = None,
 ) -> ComparisonProjectBuildResult:
-    """Build the final comparison from three closed flat progress snapshots."""
-
-    from oamb.reporting.full_progress import adapt_full_progress
+    """Build the final comparison directly from ordinary provider result files."""
 
     expected_cell_ids = tuple(cell.cell_id for cell in plan.cells)
-    if set(progresses) != set(expected_cell_ids) or len(progresses) != len(expected_cell_ids):
+    if set(results_by_cell) != set(expected_cell_ids) or len(results_by_cell) != len(
+        expected_cell_ids
+    ):
         raise ComparisonProjectError(
-            "full progress inputs do not close the resolved cell inventory"
+            "question-result inputs do not close the resolved cell inventory"
         )
-    adapted = tuple(
-        adapt_full_progress(
-            plan=plan,
-            cell=cell,
-            case_manifest=case_manifest,
-            progress=progresses[cell.cell_id],
+    manifest_question_ids = tuple(item.raw_question_id for item in case_manifest.cases)
+    manifest_case_ids = tuple(item.case_manifest_entry_id for item in case_manifest.cases)
+    if (
+        case_manifest.manifest_hash != plan.dataset.case_manifest_hash
+        or case_manifest.workload_id != plan.dataset.workload_id
+        or len(manifest_question_ids) != 60
+        or len(set(manifest_question_ids)) != 60
+        or len(set(manifest_case_ids)) != 60
+    ):
+        raise ComparisonProjectError("question-result manifest differs from the resolved plan")
+    try:
+        for cell in plan.cells:
+            require_complete_question_results(
+                results_by_cell[cell.cell_id],
+                manifest_question_ids,
+            )
+    except QuestionResultsError as exc:
+        raise ComparisonProjectError(str(exc)) from exc
+    cell_documents = tuple(
+        _question_result_cell_document(
+            plan,
+            cell,
+            case_manifest,
+            results_by_cell[cell.cell_id],
         )
         for cell in plan.cells
     )
-    cell_documents = tuple(_progress_cell_document(plan, item) for item in adapted)
     local_question_content = (
         _load_local_question_content(
             plan,
@@ -434,21 +458,25 @@ def build_full_progress_comparison_project(
         if dataset_source is not None
         else ()
     )
-    question_documents = _progress_question_documents(
-        adapted,
+    question_documents = _question_result_question_documents(
+        plan.cells,
+        case_manifest,
+        results_by_cell,
         local_question_content=local_question_content,
     )
     comparison_documents = tuple(
         _pair_document(plan, left, right) for left, right in combinations(cell_documents, 2)
     )
     if len(comparison_documents) != math.comb(len(plan.cells), 2):
-        raise ComparisonProjectError("full progress pairwise inventory is incomplete")
-    proof_states = tuple(_progress_retrieval_proof_state(item) for item in adapted)
+        raise ComparisonProjectError("question-result pairwise inventory is incomplete")
+    proof_states = tuple(
+        _question_result_retrieval_proof_state(results_by_cell[cell.cell_id]) for cell in plan.cells
+    )
     limitations = tuple(
         [
-            f"runtime retrieval proof unavailable for {item.cell.cell_id}; configured "
+            f"runtime retrieval proof unavailable for {item.cell_id}; configured "
             "generation-free retrieval is not reported as a runtime-verified claim"
-            for item, state in zip(adapted, proof_states, strict=True)
+            for item, state in zip(plan.cells, proof_states, strict=True)
             if state != "runtime_verified"
         ]
         + [
@@ -461,8 +489,8 @@ def build_full_progress_comparison_project(
         ]
     )
     retrieval_documents = tuple(
-        _retrieval_document(plan, item.cell, state)
-        for item, state in zip(adapted, proof_states, strict=True)
+        _retrieval_document(plan, item, state)
+        for item, state in zip(plan.cells, proof_states, strict=True)
     )
     return _publish_comparison_documents(
         plan,
@@ -475,8 +503,8 @@ def build_full_progress_comparison_project(
         ),
         retrieval_documents=retrieval_documents,
         limitations=limitations,
-        unique_case_count=len(adapted[0].cases),
-        provider_specific_result_count=sum(len(item.cases) for item in adapted),
+        unique_case_count=len(manifest_question_ids),
+        provider_specific_result_count=sum(len(item) for item in results_by_cell.values()),
         output_root=output_root,
         diagnostic=False,
         analysis_generator=analysis_generator,
@@ -799,16 +827,29 @@ def _cell_document(plan: ResolvedPlan, snapshot: _CellSnapshot) -> dict[str, Any
     return document
 
 
-def _progress_cell_document(plan: ResolvedPlan, adapted: Any) -> dict[str, Any]:
-    """Reduce normalized progress facts without reconstructing capsule identities."""
+def _question_result_cell_document(
+    plan: ResolvedPlan,
+    cell: CellSpec,
+    case_manifest: Any,
+    results: Mapping[str, QuestionResult],
+) -> dict[str, Any]:
+    """Reduce ordinary question results without reconstructing capsule identities."""
 
-    cases = tuple(_progress_case_document(item) for item in adapted.cases)
+    cases = tuple(
+        _question_result_case_document(
+            item.case_manifest_entry_id,
+            item.raw_question_id,
+            results[item.raw_question_id],
+        )
+        for item in case_manifest.cases
+    )
     judged = tuple(item for item in cases if item["evaluation_disposition"] == "judged")
     metric_ids = tuple(dict.fromkeys(str(item["metric_id"]) for item in judged))
     if len(metric_ids) > 1:
-        raise ComparisonProjectError(f"cell {adapted.cell.cell_id} mixes progress metric policies")
-    skipped_source_count = sum(item.entry.ingestion.skipped_source_count for item in adapted.cases)
-    partial_history_count = sum(item.entry.ingestion.partial for item in adapted.cases)
+        raise ComparisonProjectError(f"cell {cell.cell_id} mixes question-result metric policies")
+    entries = tuple(results.values())
+    skipped_source_count = sum(item.ingestion.skipped_source_count for item in entries)
+    partial_history_count = sum(item.ingestion.partial for item in entries)
     limitations: list[str] = []
     if skipped_source_count:
         limitations.append(
@@ -822,15 +863,15 @@ def _progress_cell_document(plan: ResolvedPlan, adapted: Any) -> dict[str, Any]:
             "accuracy denominator"
         )
     limitations.append(
-        "progress retains result, context, indexing-token, latency, and attempt-count facts; "
+        "question results retain context, indexing-token, latency, and attempt-count facts; "
         "other accounting dimensions are unavailable"
     )
     document: dict[str, Any] = {
-        "result_source": "full_progress",
-        "cell_id": adapted.cell.cell_id,
-        "cell_spec_hash": adapted.cell.cell_spec_hash,
-        "provider_id": adapted.cell.provider_id,
-        "adapter_profile_id": adapted.cell.adapter_profile_id,
+        "result_source": "question_results",
+        "cell_id": cell.cell_id,
+        "cell_spec_hash": cell.cell_spec_hash,
+        "provider_id": cell.provider_id,
+        "adapter_profile_id": cell.adapter_profile_id,
         "run_id": "unavailable",
         "source_root_hash": "unavailable",
         "validation_result_hash": "unavailable",
@@ -843,18 +884,18 @@ def _progress_cell_document(plan: ResolvedPlan, adapted: Any) -> dict[str, Any]:
         "code_revisions": (),
         "results": cases,
         "model_role_ids": {
-            "producer": adapted.cell.producer_role_id,
-            "embedding": adapted.cell.embedding_role_id,
-            "answer": adapted.cell.answer_role_id,
-            "judge": adapted.cell.judge_role_id,
+            "producer": cell.producer_role_id,
+            "embedding": cell.embedding_role_id,
+            "answer": cell.answer_role_id,
+            "judge": cell.judge_role_id,
         },
-        "retrieval_binding_id": adapted.cell.retrieval_binding_id,
-        "observed_time": _progress_observed_time(adapted),
+        "retrieval_binding_id": cell.retrieval_binding_id,
+        "observed_time": _question_result_observed_time(case_manifest, results),
         "ingestion": {
             "partial_history_count": partial_history_count,
             "skipped_source_count": skipped_source_count,
         },
-        "accounting": _progress_accounting_document(adapted),
+        "accounting": _question_result_accounting_document(entries),
         "limitations": limitations,
     }
     if plan.dataset.selection == "lme60" and len(cases) == 60:
@@ -862,31 +903,41 @@ def _progress_cell_document(plan: ResolvedPlan, adapted: Any) -> dict[str, Any]:
             "cases": [
                 {
                     "case_manifest_entry_id": item.case_manifest_entry_id,
-                    "raw_question_id": item.question_id,
+                    "raw_question_id": item.raw_question_id,
                 }
-                for item in adapted.cases
+                for item in case_manifest.cases
             ]
         }
-        view = type("_ProgressAccuracyView", (), {})()
+        view = type("_QuestionResultAccuracyView", (), {})()
         view.cases = cases
         view.case_manifest = manifest
         document["accuracy"] = _accuracy_document(plan, view)
     return document
 
 
-def _progress_case_document(item: Any) -> dict[str, Any]:
-    entry = item.entry
-    judged = entry.terminal_status == "judged"
+def _question_result_case_document(
+    case_manifest_entry_id: str,
+    question_id: str,
+    entry: QuestionResult,
+) -> dict[str, Any]:
+    judged = isinstance(entry, JudgedQuestionResult)
+    judged_entry = cast(JudgedQuestionResult, entry) if judged else None
     return {
-        "case_manifest_entry_id": item.case_manifest_entry_id,
-        "question_id": item.question_id,
+        "case_manifest_entry_id": case_manifest_entry_id,
+        "question_id": question_id,
         "state": "completed" if judged else "error",
         "terminal_status": entry.terminal_status,
         "evaluation_disposition": entry.evaluation.disposition,
-        "metric_id": entry.evaluation.metric_id if judged else None,
-        "metric_numerator": entry.evaluation.numerator if judged else None,
-        "metric_denominator": entry.evaluation.denominator if judged else None,
-        "judge_decision": entry.evaluation.judge_decision if judged else None,
+        "metric_id": judged_entry.evaluation.metric_id if judged_entry is not None else None,
+        "metric_numerator": (
+            judged_entry.evaluation.numerator if judged_entry is not None else None
+        ),
+        "metric_denominator": (
+            judged_entry.evaluation.denominator if judged_entry is not None else None
+        ),
+        "judge_decision": (
+            judged_entry.evaluation.judge_decision if judged_entry is not None else None
+        ),
         "model_answer": (
             entry.answer.parsed_answer.value if entry.answer.status == "parsed" else None
         ),
@@ -901,11 +952,12 @@ def _progress_case_document(item: Any) -> dict[str, Any]:
     }
 
 
-def _progress_accounting_document(adapted: Any) -> dict[str, object]:
-    entries = tuple(item.entry for item in adapted.cases)
-    indexing = _progress_indexing_token_stage(entries)
+def _question_result_accounting_document(
+    entries: tuple[QuestionResult, ...],
+) -> dict[str, object]:
+    indexing = _question_result_indexing_token_stage(entries)
     unavailable_stages = {
-        stage: _progress_unavailable_token_stage(stage, len(entries))
+        stage: _question_result_unavailable_token_stage(stage, len(entries))
         for stage in ("retrieval", "answer", "judge")
     }
     context_total = sum(item.retrieval.visible_context_token_count.value for item in entries)
@@ -959,12 +1011,16 @@ def _progress_accounting_document(adapted: Any) -> dict[str, object]:
     }
 
 
-def _progress_indexing_token_stage(entries: tuple[Any, ...]) -> dict[str, Any]:
+def _question_result_indexing_token_stage(
+    entries: tuple[QuestionResult, ...],
+) -> dict[str, Any]:
     measured = tuple(
-        item for item in entries if item.ingestion.indexing_tokens.status == "measured"
+        item.ingestion.indexing_tokens
+        for item in entries
+        if isinstance(item.ingestion.indexing_tokens, ResultMeasurement)
     )
     unavailable_count = len(entries) - len(measured)
-    partial = any(item.ingestion.indexing_token_coverage == "measured_partial" for item in measured)
+    partial = any(item.ingestion.indexing_token_coverage == "measured_partial" for item in entries)
     if not measured:
         coverage = "unavailable"
     elif unavailable_count or partial:
@@ -980,11 +1036,7 @@ def _progress_indexing_token_stage(entries: tuple[Any, ...]) -> dict[str, Any]:
     totals = {dimension: dict(unavailable_dimension) for dimension in TOKEN_DIMENSIONS}
     totals["supplier_reported_total_tokens"] = {
         "status": coverage,
-        "value": (
-            sum(item.ingestion.indexing_tokens.value for item in measured)
-            if measured
-            else "unavailable"
-        ),
+        "value": (sum(item.value for item in measured) if measured else "unavailable"),
         "measured_record_count": len(measured),
         "unavailable_record_count": unavailable_count,
     }
@@ -1002,7 +1054,7 @@ def _progress_indexing_token_stage(entries: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
-def _progress_unavailable_token_stage(stage: str, count: int) -> dict[str, Any]:
+def _question_result_unavailable_token_stage(stage: str, count: int) -> dict[str, Any]:
     unavailable = {
         "status": "unavailable",
         "value": "unavailable",
@@ -1023,26 +1075,26 @@ def _progress_unavailable_token_stage(stage: str, count: int) -> dict[str, Any]:
     }
 
 
-def _progress_observed_time(adapted: Any) -> dict[str, object]:
-    indexing = tuple(
-        item.entry.ingestion.indexing_ready_latency_microseconds.value for item in adapted.cases
-    )
-    retrieval = tuple(
-        item.entry.retrieval.request_latency_microseconds.value for item in adapted.cases
-    )
+def _question_result_observed_time(
+    case_manifest: Any,
+    results: Mapping[str, QuestionResult],
+) -> dict[str, object]:
+    entries = tuple(results.values())
+    indexing = tuple(item.ingestion.indexing_ready_latency_microseconds.value for item in entries)
+    retrieval = tuple(item.retrieval.request_latency_microseconds.value for item in entries)
     return {
         "run_wall_microseconds": "unavailable",
         "indexing_ready": _duration_summary(indexing),
         "provider_request": _duration_summary(retrieval),
         "cases": tuple(
             {
-                "case_manifest_entry_id": item.case_manifest_entry_id,
+                "case_manifest_entry_id": manifest_case.case_manifest_entry_id,
                 "case_wall_microseconds": "unavailable",
                 "provider_request_wall_microseconds": (
-                    item.entry.retrieval.request_latency_microseconds.value,
+                    result.retrieval.request_latency_microseconds.value,
                 ),
             }
-            for item in adapted.cases
+            for manifest_case, result in zip(case_manifest.cases, entries, strict=True)
         ),
         "comparability": "observed_only",
     }
@@ -1684,28 +1736,24 @@ def _question_documents(
     return tuple(questions)
 
 
-def _progress_question_documents(
-    adapted: tuple[Any, ...],
+def _question_result_question_documents(
+    cells: tuple[CellSpec, ...],
+    case_manifest: Any,
+    results_by_cell: Mapping[str, Mapping[str, QuestionResult]],
     *,
     local_question_content: tuple[dict[str, object], ...],
 ) -> tuple[dict[str, object], ...]:
-    if not adapted:
-        raise ComparisonProjectError("progress question report has no cells")
-    case_ids = tuple(item.case_manifest_entry_id for item in adapted[0].cases)
-    if any(
-        tuple(item.case_manifest_entry_id for item in cell.cases) != case_ids
-        for cell in adapted[1:]
-    ):
-        raise ComparisonProjectError("progress question identities are not aligned")
+    if not cells:
+        raise ComparisonProjectError("question-result report has no cells")
+    case_ids = tuple(item.case_manifest_entry_id for item in case_manifest.cases)
+    question_ids = tuple(item.raw_question_id for item in case_manifest.cases)
     content_by_id: dict[str, dict[str, object]] = {}
     if local_question_content:
         content_by_id = {
             str(item["case_manifest_entry_id"]): item for item in local_question_content
         }
         if tuple(content_by_id) != case_ids:
-            raise ComparisonProjectError(
-                "progress question content order differs from the manifest"
-            )
+            raise ComparisonProjectError("question-result content order differs from the manifest")
 
     questions: list[dict[str, object]] = []
     for index, case_id in enumerate(case_ids):
@@ -1713,12 +1761,12 @@ def _progress_question_documents(
             "case_manifest_entry_id": case_id,
             "ordinal_1_indexed": index + 1,
             "provider_results": tuple(
-                _progress_question_provider_result(
-                    cell.cell.provider_id,
-                    cell.cases[index].entry,
+                _question_result_provider_result(
+                    cell.provider_id,
+                    results_by_cell[cell.cell_id][question_ids[index]],
                     include_content=bool(local_question_content),
                 )
-                for cell in adapted
+                for cell in cells
             ),
         }
         if local_question_content:
@@ -1727,7 +1775,7 @@ def _progress_question_documents(
     return tuple(questions)
 
 
-def _progress_question_provider_result(
+def _question_result_provider_result(
     provider_id: str,
     entry: Any,
     *,
@@ -1766,8 +1814,10 @@ def _progress_question_provider_result(
     return result
 
 
-def _progress_retrieval_proof_state(adapted: Any) -> str:
-    states = tuple(item.entry.retrieval.generation_proof_disposition for item in adapted.cases)
+def _question_result_retrieval_proof_state(
+    results: Mapping[str, QuestionResult],
+) -> str:
+    states = tuple(item.retrieval.generation_proof_disposition for item in results.values())
     for state in ("unsupported", "unattested", "build_provenance_verified"):
         if state in states:
             return state
@@ -1953,11 +2003,11 @@ def _pair_document(
 ) -> dict[str, Any]:
     limitations: list[str] = []
     comparable = True
-    progress_pair = (
-        left.get("result_source") == "full_progress"
-        and right.get("result_source") == "full_progress"
+    question_result_pair = (
+        left.get("result_source") == "question_results"
+        and right.get("result_source") == "question_results"
     )
-    if not progress_pair:
+    if not question_result_pair:
         left_revisions = tuple(left.get("code_revisions", ()))
         right_revisions = tuple(right.get("code_revisions", ()))
         if (

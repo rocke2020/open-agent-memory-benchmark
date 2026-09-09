@@ -8,8 +8,7 @@ from typing import Any, cast
 
 import pytest
 
-from oamb.reporting.full_progress import FullProgressAdapterError, adapt_full_progress
-from oamb.runtime import full_progress as progress_contract
+from oamb.runtime import question_results as result_contract
 from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
 
 
@@ -23,16 +22,9 @@ PLAN_HASH = _sha("plan")
 MANIFEST_HASH = _sha("manifest")
 
 
-def _progress(
-    *,
-    resolved_plan_hash: str = PLAN_HASH,
-    cell_id: str = "hindsight-lme60",
-    provider_id: str = "hindsight",
-    workload_id: str = "longmemeval-v1",
-    case_manifest_hash: str = MANIFEST_HASH,
-) -> progress_contract.FullProgress:
-    measured = progress_contract.ProgressMeasurement(status="measured", value=1)
-    ingestion = progress_contract.ProgressIngestion(
+def _results() -> dict[str, result_contract.QuestionResult]:
+    measured = result_contract.ResultMeasurement(status="measured", value=1)
+    ingestion = result_contract.ResultIngestion(
         status="sealed",
         intended_source_count=1,
         accepted_source_count=1,
@@ -42,31 +34,31 @@ def _progress(
         indexing_token_coverage="measured_complete",
         indexing_ready_latency_microseconds=measured,
     )
-    retrieval = progress_contract.ProgressRetrieval(
+    retrieval = result_contract.ResultRetrieval(
         status="succeeded",
-        visible_context=progress_contract.ProgressText(status="available", value="x"),
+        visible_context=result_contract.ResultText(status="available", value="x"),
         visible_context_byte_count=measured,
         visible_context_token_count=measured,
         native_candidate_count=measured,
         visible_kept_count=measured,
-        visible_dropped_count=progress_contract.ProgressMeasurement(status="measured", value=0),
-        visible_truncated_count=progress_contract.ProgressMeasurement(status="measured", value=0),
+        visible_dropped_count=result_contract.ResultMeasurement(status="measured", value=0),
+        visible_truncated_count=result_contract.ResultMeasurement(status="measured", value=0),
         request_latency_microseconds=measured,
         generation_proof_disposition="runtime_verified",
     )
-    answer = progress_contract.ProgressAnswer(
+    answer = result_contract.ResultAnswer(
         status="parsed",
-        parsed_answer=progress_contract.ProgressText(status="available", value="answer"),
+        parsed_answer=result_contract.ResultText(status="available", value="answer"),
         protocol_disposition="normal_stop",
     )
-    evaluation = progress_contract.JudgedProgressEvaluation(
+    evaluation = result_contract.JudgedResultEvaluation(
         disposition="judged",
         metric_id="lme-judged-accuracy-v1",
         numerator=1,
         denominator=1,
         judge_decision="yes",
     )
-    attempts = progress_contract.ProgressAttemptCounts(
+    attempts = result_contract.ResultAttemptCounts(
         ingestion=1,
         retrieval=1,
         answer=1,
@@ -74,7 +66,7 @@ def _progress(
         final_failure_class="none",
     )
     entries = tuple(
-        progress_contract.JudgedFullProgressEntry(
+        result_contract.JudgedQuestionResult(
             terminal_status="judged",
             question_id=question_id,
             ingestion=ingestion,
@@ -85,31 +77,23 @@ def _progress(
         )
         for question_id in QUESTION_IDS
     )
-    return progress_contract.FullProgress(
-        resolved_plan_hash=resolved_plan_hash,
-        cell_id=cell_id,
-        provider_id=provider_id,
-        workload_id=workload_id,
-        case_manifest_hash=case_manifest_hash,
-        ordered_question_ids=QUESTION_IDS,
-        results=entries,
-    )
+    return dict(zip(QUESTION_IDS, entries, strict=True))
 
 
-def _progress_with_model_exhaustion() -> progress_contract.FullProgress:
-    progress = _progress()
-    judged = cast(progress_contract.JudgedFullProgressEntry, progress.results[0])
-    unjudged = progress_contract.UnjudgedFullProgressEntry(
+def _results_with_model_exhaustion() -> dict[str, result_contract.QuestionResult]:
+    results = _results()
+    judged = cast(result_contract.JudgedQuestionResult, results[QUESTION_IDS[0]])
+    unjudged = result_contract.UnjudgedQuestionResult(
         terminal_status="unjudged",
         question_id=QUESTION_IDS[-2],
         ingestion=judged.ingestion,
         retrieval=judged.retrieval,
         answer=judged.answer,
-        evaluation=progress_contract.UnjudgedProgressEvaluation(
+        evaluation=result_contract.UnjudgedResultEvaluation(
             disposition="unjudged",
             reason="judge output remained malformed after correction",
         ),
-        attempts=progress_contract.ProgressAttemptCounts(
+        attempts=result_contract.ResultAttemptCounts(
             ingestion=1,
             retrieval=1,
             answer=1,
@@ -120,24 +104,24 @@ def _progress_with_model_exhaustion() -> progress_contract.FullProgress:
         failure_kind="output_contract_error",
         failure_reason="judge output remained malformed after correction",
     )
-    provider_failed = progress_contract.ProviderFailedFullProgressEntry(
-        terminal_status="provider_failed",
+    answer_failed = result_contract.AnswerFailedQuestionResult(
+        terminal_status="answer_failed",
         question_id=QUESTION_IDS[-1],
         ingestion=judged.ingestion,
         retrieval=judged.retrieval,
-        answer=progress_contract.FailedProgressAnswer(
+        answer=result_contract.FailedResultAnswer(
             status="failed",
-            parsed_answer=progress_contract.UnavailableProgressText(
+            parsed_answer=result_contract.UnavailableResultText(
                 status="unavailable",
                 reason="answer output remained malformed after correction",
             ),
             protocol_disposition="output_contract_error",
         ),
-        evaluation=progress_contract.NotRunProgressEvaluation(
+        evaluation=result_contract.NotRunResultEvaluation(
             disposition="not_run",
             reason="answer did not satisfy its output contract",
         ),
-        attempts=progress_contract.ProgressAttemptCounts(
+        attempts=result_contract.ResultAttemptCounts(
             ingestion=1,
             retrieval=1,
             answer=6,
@@ -148,15 +132,7 @@ def _progress_with_model_exhaustion() -> progress_contract.FullProgress:
         failure_kind="output_contract_error",
         failure_reason="answer output remained malformed after correction",
     )
-    return progress_contract.FullProgress(
-        resolved_plan_hash=progress.resolved_plan_hash,
-        cell_id=progress.cell_id,
-        provider_id=progress.provider_id,
-        workload_id=progress.workload_id,
-        case_manifest_hash=progress.case_manifest_hash,
-        ordered_question_ids=progress.ordered_question_ids,
-        results=(*progress.results[:-2], unjudged, provider_failed),
-    )
+    return {**results, QUESTION_IDS[-2]: unjudged, QUESTION_IDS[-1]: answer_failed}
 
 
 def _inputs() -> tuple[Any, Any, Any]:
@@ -196,85 +172,12 @@ def _inputs() -> tuple[Any, Any, Any]:
     return plan, cell, manifest
 
 
-def test_progress_adapter_maps_dataset_question_ids_through_the_frozen_manifest() -> None:
-    plan, cell, manifest = _inputs()
-
-    adapted = adapt_full_progress(
-        plan=plan,
-        cell=cell,
-        case_manifest=manifest,
-        progress=_progress(),
-    )
-
-    assert tuple(item.question_id for item in adapted.cases) == QUESTION_IDS
-    assert tuple(item.case_manifest_entry_id for item in adapted.cases) == CASE_IDS
-    assert all(item.entry.terminal_status == "judged" for item in adapted.cases)
-
-
-def test_progress_adapter_rejects_manifest_question_order_drift() -> None:
-    plan, cell, manifest = _inputs()
-    manifest.cases = tuple(reversed(manifest.cases))
-
-    with pytest.raises(FullProgressAdapterError, match="question order"):
-        adapt_full_progress(
-            plan=plan,
-            cell=cell,
-            case_manifest=manifest,
-            progress=_progress(),
-        )
-
-
-def test_progress_adapter_requires_all_sixty_terminal_results() -> None:
-    plan, cell, manifest = _inputs()
-    progress = _progress().model_copy(update={"results": _progress().results[:-1]})
-
-    with pytest.raises(FullProgressAdapterError, match="60 terminal results"):
-        adapt_full_progress(
-            plan=plan,
-            cell=cell,
-            case_manifest=manifest,
-            progress=progress,
-        )
-
-
-@pytest.mark.parametrize(
-    ("owner", "field", "changed"),
-    (
-        ("plan", "resolved_plan_hash", _sha("other-plan")),
-        ("cell", "provider_id", "mem0"),
-        ("manifest", "manifest_hash", _sha("other-manifest")),
-    ),
-)
-def test_progress_adapter_rejects_identity_drift(
-    owner: str,
-    field: str,
-    changed: str,
-) -> None:
-    plan, cell, manifest = _inputs()
-    target = {"plan": plan, "cell": cell, "manifest": manifest}[owner]
-    setattr(target, field, changed)
-
-    with pytest.raises(FullProgressAdapterError, match="identity"):
-        adapt_full_progress(
-            plan=plan,
-            cell=cell,
-            case_manifest=manifest,
-            progress=_progress(),
-        )
-
-
-def test_progress_cell_reuses_accuracy_context_indexing_and_latency_reducers() -> None:
-    from oamb.reporting.comparison_project import _progress_cell_document
+def test_results_cell_reuses_accuracy_context_indexing_and_latency_reducers() -> None:
+    from oamb.reporting.comparison_project import _question_result_cell_document
 
     plan, cell, manifest = _inputs()
-    adapted = adapt_full_progress(
-        plan=plan,
-        cell=cell,
-        case_manifest=manifest,
-        progress=_progress(),
-    )
 
-    document = _progress_cell_document(plan, adapted)
+    document = _question_result_cell_document(plan, cell, manifest, _results())
 
     assert document["case_count"] == 60
     assert document["completed_case_count"] == 60
@@ -295,28 +198,15 @@ def test_progress_cell_reuses_accuracy_context_indexing_and_latency_reducers() -
     assert document["observed_time"]["provider_request"]["count"] == 60
 
 
-def test_nonjudged_progress_is_terminal_but_disables_pairwise_accuracy() -> None:
-    from oamb.reporting.comparison_project import _pair_document, _progress_cell_document
+def test_nonjudged_results_is_terminal_but_disables_pairwise_accuracy() -> None:
+    from oamb.reporting.comparison_project import (
+        _pair_document,
+        _question_result_cell_document,
+    )
 
     plan, cell, manifest = _inputs()
-    mixed = _progress_cell_document(
-        plan,
-        adapt_full_progress(
-            plan=plan,
-            cell=cell,
-            case_manifest=manifest,
-            progress=_progress_with_model_exhaustion(),
-        ),
-    )
-    judged = _progress_cell_document(
-        plan,
-        adapt_full_progress(
-            plan=plan,
-            cell=cell,
-            case_manifest=manifest,
-            progress=_progress(),
-        ),
-    )
+    mixed = _question_result_cell_document(plan, cell, manifest, _results_with_model_exhaustion())
+    judged = _question_result_cell_document(plan, cell, manifest, _results())
 
     assert mixed["completed_case_count"] == 60
     assert mixed["judged_case_count"] == 58
@@ -331,10 +221,10 @@ def test_nonjudged_progress_is_terminal_but_disables_pairwise_accuracy() -> None
     assert not any("code revision" in item for item in pair["limitations"])
 
 
-def test_three_closed_progress_files_build_one_deterministic_180_result_report(
+def test_three_closed_results_files_build_one_deterministic_180_result_report(
     tmp_path: Path,
 ) -> None:
-    from oamb.reporting.comparison_project import build_full_progress_comparison_project
+    from oamb.reporting.comparison_project import build_question_results_comparison_project
     from tests.reporting.test_comparison_project import _lme60_plan
 
     plan = _lme60_plan()
@@ -346,26 +236,17 @@ def test_three_closed_progress_files_build_one_deterministic_180_result_report(
             for question_id, case_id in zip(QUESTION_IDS, CASE_IDS, strict=True)
         ),
     )
-    progresses = {
-        cell.cell_id: _progress(
-            resolved_plan_hash=plan.resolved_plan_hash,
-            cell_id=cell.cell_id,
-            provider_id=cell.provider_id,
-            workload_id=cell.workload_id,
-            case_manifest_hash=cell.case_manifest_hash,
-        )
-        for cell in plan.cells
-    }
+    results_by_cell = {cell.cell_id: _results() for cell in plan.cells}
 
-    first = build_full_progress_comparison_project(
+    first = build_question_results_comparison_project(
         plan,
-        progresses,
+        results_by_cell,
         case_manifest=manifest,
         output_root=tmp_path / "first",
     )
-    second = build_full_progress_comparison_project(
+    second = build_question_results_comparison_project(
         plan,
-        progresses,
+        results_by_cell,
         case_manifest=manifest,
         output_root=tmp_path / "second",
     )
@@ -380,3 +261,34 @@ def test_three_closed_progress_files_build_one_deterministic_180_result_report(
     assert len(report["comparisons"]) == 3
     assert first.export_path.read_bytes() == second.export_path.read_bytes()
     assert first.html_path.read_bytes() == second.html_path.read_bytes()
+
+
+def test_missing_provider_question_prevents_final_report_publication(tmp_path: Path) -> None:
+    from oamb.reporting.comparison_project import (
+        ComparisonProjectError,
+        build_question_results_comparison_project,
+    )
+    from tests.reporting.test_comparison_project import _lme60_plan
+
+    plan = _lme60_plan()
+    manifest = SimpleNamespace(
+        manifest_hash=plan.dataset.case_manifest_hash,
+        workload_id=plan.dataset.workload_id,
+        cases=tuple(
+            SimpleNamespace(raw_question_id=question_id, case_manifest_entry_id=case_id)
+            for question_id, case_id in zip(QUESTION_IDS, CASE_IDS, strict=True)
+        ),
+    )
+    results_by_cell = {cell.cell_id: _results() for cell in plan.cells}
+    results_by_cell[plan.cells[0].cell_id].pop(QUESTION_IDS[-1])
+    output_root = tmp_path / "report"
+
+    with pytest.raises(ComparisonProjectError, match="requires all manifest questions"):
+        build_question_results_comparison_project(
+            plan,
+            results_by_cell,
+            case_manifest=manifest,
+            output_root=output_root,
+        )
+
+    assert not output_root.exists()

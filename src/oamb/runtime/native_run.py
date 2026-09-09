@@ -2179,7 +2179,15 @@ async def _execute_history_question_pipeline(
             )
             if len(records) != 1:
                 raise AssertionError("admitted question did not produce exactly one result")
-            return records[0]
+            result = records[0]
+            if terminal_case_publisher is not None:
+                terminal_case_publisher(
+                    plan_record,
+                    result,
+                    dict(state.operation_records),
+                    tuple(state.history_records),
+                )
+            return result
 
         was_admitted, result = await admitted(question_permits, operation)
         if not was_admitted:
@@ -2187,13 +2195,6 @@ async def _execute_history_question_pipeline(
         if result is None:
             raise AssertionError("admitted question did not produce a result")
         case_records[case_index] = result
-        if terminal_case_publisher is not None:
-            terminal_case_publisher(
-                plan_record,
-                result,
-                dict(state.operation_records),
-                tuple(state.history_records),
-            )
 
     async def execute_history(plan_index: int, plan: IngestionPlan) -> None:
         async def operation() -> tuple[NativeIngestionPlanRecord, ScopeReceipt]:

@@ -131,7 +131,7 @@ Run the complete balanced LME-60 comparison with:
 
 Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. All three use up to 10 native extraction retries and three ingestion submissions per batch. After a settled batch exhausts its submissions, OAMB records the skipped sources, preserves any partial memory, and continues the question’s remaining history in the same scope. Answer and judge calls have independent limits of six outer attempts and two transport retries per attempt; invalid output is fed back with its validation error. The report identifies partial ingestion and unjudged results, and retains physical attempts and available usage evidence. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
 
-Press `Ctrl-C` once to stop a full run. OAMB immediately force-stops the benchmark process tree and this repository's provider-service containers, while preserving atomically saved progress, provider volumes, and result data. Native workers also stop themselves if their `run.sh` owner or immediate supervisor disappears.
+Press `Ctrl-C` once to stop a full run. OAMB immediately force-stops the benchmark process tree and this repository's provider-service containers, while preserving atomically saved question results, provider volumes, and result data. Native workers also stop themselves if their `run.sh` owner or immediate supervisor disappears.
 
 After deterministic comparison data closes, report generation starts two bounded branches: base HTML preparation and one concise five-metric analysis using the frozen judge model and the configured `LLM_BASE_URL`/`LLM_API_KEY`. Analysis permits at most six total attempts, stores received responses in a content-addressed private cache, and publishes `report-analysis.json` only after strict schema and report-hash validation. Final HTML waits for both branches and embeds a valid analysis directly; if analysis remains unavailable, the numeric report still opens with an explicit unavailable notice. A matching cache prevents another billable call, and the final HTML remains self-contained and network-free. Analysis-call usage is recorded in the sidecar but remains outside the five benchmark metrics.
 
@@ -154,7 +154,7 @@ it with:
 ./run.sh --full_test --resume
 ```
 
-Resume strictly loads `results/progress-hindsight.json`, `results/progress-mem0.json`, and `results/progress-openviking.json` before any provider or model construction. Missing, malformed, duplicate-key, non-finite, or identity-drifted progress fails closed without retrying the parse or treating it as empty. Each provider reuses completed question results unchanged, runs only unfinished questions in a fresh isolated scope, and atomically publishes each new terminal result. Once all 180 provider-question results are terminal, comparison is rebuilt directly from the three progress files. Resume never applies to smoke mode and never falls back to a fresh full run.
+OAMB atomically saves every completed question; `--resume` skips existing question IDs and reruns only missing questions in fresh scopes.
 
 Smoke reports are written under `outputs/smoke-test/<run-label>/`; full-study
 reports are written under `outputs/full-test/<run-label>/`. Set
@@ -170,8 +170,6 @@ and all provider state. Do not delete or overwrite them. Inspect the printed
 result-map paths first; they retain canonical outcomes and every completed
 capsule root. `outputs/tmp` contains shared preparation state and reproducible
 scratch outputs, not successful-run evidence.
-
-Preserve the three canonical progress files and all diagnostic capsule roots. A later `--resume` reloads progress under one process lock, reports the exact reused and remaining question counts, and dispatches only providers with unfinished questions. If progress is missing, malformed, modified, or incompatible with the current plan and frozen case manifest, resume stops before external dispatch.
 
 A readiness failure whose runtime is already bound to a provider project needs
 a separate fresh clone and provider project. Stop the old project without

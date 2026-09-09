@@ -54,11 +54,6 @@ from oamb.contracts.specifications import (
     provider_operation_budget_ceiling_hash,
     run_preflight_record_hash,
 )
-from oamb.runtime.full_progress import (
-    FullProgress,
-    canonical_full_progress_path,
-    load_full_progress,
-)
 from oamb.runtime.native_run import (
     COOPERATIVE_STOP_SIGNALS,
     NativeRunArtifacts,
@@ -70,6 +65,12 @@ from oamb.runtime.preflight import (
     ControlledEmbeddingDescriptor,
 )
 from oamb.runtime.provider_env import load_t10_provider_environment
+from oamb.runtime.question_results import (
+    QuestionResult,
+    load_question_results,
+    provider_result_path,
+    remaining_question_ids,
+)
 from oamb.workloads.longmemeval import (
     LME6_EXPECTED_QUESTION_IDS,
     LME6_EXPECTED_SESSION_COUNT,
@@ -144,8 +145,8 @@ class LiveCell:
     control: NativeRunControl
     environment: Mapping[str, str] = field(repr=False, compare=False)
     requested_case_manifest_entry_ids: tuple[str, ...] = ()
-    progress_path: Path | None = None
-    expected_progress: FullProgress | None = None
+    results_path: Path | None = None
+    ordered_question_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,10 +167,11 @@ class LiveCellOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class FullResumeSelection:
-    progress_by_cell: Mapping[str, FullProgress]
+class LiveQuestionSelection:
+    results_by_cell: Mapping[str, Mapping[str, QuestionResult]]
     remaining_case_manifest_entry_ids: Mapping[str, tuple[str, ...]]
     case_manifest: CaseManifest
+    ordered_question_ids: tuple[str, ...]
 
 
 def load_live_environment(
@@ -614,19 +616,19 @@ def _resolve_live_workload(
     return workload, dataset_manifest, case_manifest
 
 
-def load_full_resume_selection(
+def load_live_question_results(
     *,
     plan: ResolvedPlan,
-    progress_root: Path,
-) -> FullResumeSelection:
-    """Load three strict snapshots and map remaining question IDs before construction."""
+    results_root: Path,
+) -> LiveQuestionSelection:
+    """Load provider results and map missing question IDs before construction."""
 
     if plan.dataset.selection != "lme60" or tuple(cell.provider_id for cell in plan.cells) != (
         "hindsight",
         "mem0",
         "openviking",
     ):
-        raise LiveConfigurationError("full progress resume requires the frozen LME-60 cells")
+        raise LiveConfigurationError("provider results require the frozen LME-60 cells")
     source_path = Path(plan.dataset.path)
     if not source_path.is_absolute():
         source_path = Path.cwd() / source_path
@@ -636,31 +638,28 @@ def load_full_resume_selection(
         manifest.manifest_hash != plan.dataset.case_manifest_hash
         or manifest.workload_id != plan.dataset.workload_id
     ):
-        raise LiveConfigurationError("resume dataset differs from the resolved plan")
+        raise LiveConfigurationError("stored result manifest differs from the resolved plan")
     ordered_question_ids = tuple(item.raw_question_id for item in manifest.cases)
     case_id_by_question = {
         item.raw_question_id: item.case_manifest_entry_id for item in manifest.cases
     }
-    progress_by_cell: dict[str, FullProgress] = {}
+    results_by_cell: dict[str, Mapping[str, QuestionResult]] = {}
     remaining_by_cell: dict[str, tuple[str, ...]] = {}
     for cell in plan.cells:
-        progress = load_full_progress(
-            canonical_full_progress_path(progress_root, cell.provider_id),
-            expected_resolved_plan_hash=plan.resolved_plan_hash,
-            expected_cell_id=cell.cell_id,
-            expected_provider_id=cell.provider_id,
-            expected_workload_id=cell.workload_id,
-            expected_case_manifest_hash=cell.case_manifest_hash,
-            expected_ordered_question_ids=ordered_question_ids,
+        results = load_question_results(
+            provider_result_path(results_root, cell.provider_id),
+            ordered_question_ids=ordered_question_ids,
         )
-        progress_by_cell[cell.cell_id] = progress
+        results_by_cell[cell.cell_id] = results
         remaining_by_cell[cell.cell_id] = tuple(
-            case_id_by_question[question_id] for question_id in progress.remaining_question_ids
+            case_id_by_question[question_id]
+            for question_id in remaining_question_ids(results, ordered_question_ids)
         )
-    return FullResumeSelection(
-        progress_by_cell=progress_by_cell,
+    return LiveQuestionSelection(
+        results_by_cell=results_by_cell,
         remaining_case_manifest_entry_ids=remaining_by_cell,
         case_manifest=manifest,
+        ordered_question_ids=ordered_question_ids,
     )
 
 
@@ -774,11 +773,14 @@ def execute_live_cell(
         )
 
     terminal_case_publisher = None
-    if cell.progress_path is not None and cell.expected_progress is not None:
-        from oamb.runtime.full_progress import ProviderProgressWriter
-        from oamb.runtime.native_progress import project_native_progress_entry
+    if cell.results_path is not None:
+        from oamb.runtime.native_results import (
+            NativeResultProjectionError,
+            project_native_question_result,
+        )
+        from oamb.runtime.question_results import add_question_result
 
-        writer = ProviderProgressWriter(cell.progress_path, expected=cell.expected_progress)
+        results_path = cell.results_path
 
         def publish_terminal_case(
             plan_record: object,
@@ -786,7 +788,7 @@ def execute_live_cell(
             attempts: object,
             history_attempts: object,
         ) -> None:
-            entry = project_native_progress_entry(
+            result = project_native_question_result(
                 plan=cell.plan,
                 cell=cell.cell,
                 capsule_root=cell.capsule_root,
@@ -796,8 +798,15 @@ def execute_live_cell(
                 attempts=attempts,  # type: ignore[arg-type]
                 history_attempts=history_attempts,  # type: ignore[arg-type]
             )
-            if entry is not None:
-                writer.publish(entry)
+            if result is None:
+                raise NativeResultProjectionError(
+                    "terminal case is not a reportable question result"
+                )
+            add_question_result(
+                results_path,
+                result,
+                ordered_question_ids=cell.ordered_question_ids,
+            )
 
         terminal_case_publisher = publish_terminal_case
 
@@ -1149,34 +1158,25 @@ def build_live_cell(
     observed_at: datetime,
     code_revision: str,
     requested_case_manifest_entry_ids: tuple[str, ...] = (),
-    progress_path: Path | None = None,
-    expected_progress: FullProgress | None = None,
+    results_path: Path | None = None,
+    ordered_question_ids: tuple[str, ...] = (),
 ) -> LiveCell:
     """Close one live cell without constructing provider or model clients."""
 
     selected = select_live_cells(plan, (cell_id,))
     cell = selected[0]
-    if (progress_path is None) != (expected_progress is None):
-        raise LiveConfigurationError(
-            "resume progress path and expected snapshot must be supplied together"
-        )
-    if expected_progress is not None:
+    if results_path is not None:
         if not requested_case_manifest_entry_ids:
-            raise LiveConfigurationError("resume cell requires at least one remaining case")
-        if (
-            expected_progress.resolved_plan_hash != plan.resolved_plan_hash
-            or expected_progress.cell_id != cell.cell_id
-            or expected_progress.provider_id != cell.provider_id
-            or expected_progress.workload_id != cell.workload_id
-            or expected_progress.case_manifest_hash != cell.case_manifest_hash
-        ):
-            raise LiveConfigurationError("resume progress identity differs from the live cell")
-        assert progress_path is not None
-        if progress_path != canonical_full_progress_path(
-            progress_path.parent,
+            raise LiveConfigurationError("result-writing cell requires at least one missing case")
+        if results_path != provider_result_path(
+            results_path.parent,
             cell.provider_id,
         ):
-            raise LiveConfigurationError("resume progress path is not canonical")
+            raise LiveConfigurationError("provider result path is not canonical")
+        if len(ordered_question_ids) != 60 or len(set(ordered_question_ids)) != 60:
+            raise LiveConfigurationError("provider result writer requires the stored manifest")
+    elif ordered_question_ids:
+        raise LiveConfigurationError("stored manifest is only valid with a provider result path")
     if not run_label or run_label.strip() != run_label:
         raise LiveConfigurationError("live run label must be non-empty canonical text")
     if not provider_project_id or provider_project_id.strip() != provider_project_id:
@@ -1336,8 +1336,8 @@ def build_live_cell(
         control=control,
         environment=resolved_environment,
         requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
-        progress_path=progress_path,
-        expected_progress=expected_progress,
+        results_path=results_path,
+        ordered_question_ids=ordered_question_ids,
     )
 
 

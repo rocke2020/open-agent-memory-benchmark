@@ -33,7 +33,7 @@ Usage: ./run.sh [--smoke_test | --full_test] [--resume] [--dry-run]
 
 --smoke_test  Run one LME-60 question on every provider (default).
 --full_test   Run all 60 questions on every provider in parallel.
---resume      Resume only unfinished --full_test questions from canonical progress.
+--resume      Skip saved --full_test question IDs and run only missing questions.
 --dry-run     Validate configuration and readiness with zero model/provider calls.
 EOF
 }
@@ -307,19 +307,42 @@ command -v uv >/dev/null 2>&1 || die "required command not found: uv"
 
 RUN_LABEL="$(jq -er '.run_label | select(type == "string" and length > 0)' "$STATE_FILE")"
 WORK_DIR="$(jq -er '.work_dir | select(type == "string" and length > 0)' "$STATE_FILE")"
-PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
-DATASET_SOURCE="$(jq -er '.dataset_source | select(type == "string" and length > 0)' "$STATE_FILE")"
+PRECHECK_PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
 QUESTION_ID="$(jq -er '.question_id | select(type == "string" and length > 0)' "$STATE_FILE")"
 case "$RUN_LABEL" in
   ""|"."|".."|*[!A-Za-z0-9._-]*) die "precheck state has invalid run label" ;;
 esac
 [[ "$WORK_DIR" == "$PRECHECK_ROOT/$RUN_LABEL" ]] || \
   die "precheck state work directory is outside outputs/tmp/precheck"
-[[ "$PLAN" == "$WORK_DIR/plan/resolved-plan.json" ]] || \
+[[ "$PRECHECK_PLAN" == "$WORK_DIR/plan/resolved-plan.json" ]] || \
   die "precheck state resolved plan is outside its work directory"
-[[ -f "$PLAN" ]] || die "resolved plan is missing; rerun ./precheck.sh"
-[[ -f "$DATASET_SOURCE" ]] || die "dataset is missing; rerun ./precheck.sh"
-PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
+if [[ "$MODE" == "smoke" ]]; then
+  MODE_ROOT="$OUTPUTS_ROOT/smoke-test"
+else
+  MODE_ROOT="$OUTPUTS_ROOT/full-test"
+fi
+FULL_RUN_SELECTOR="$OUTPUTS_ROOT/tmp/full-test-current"
+if [[ "$RESUME" == true ]]; then
+  [[ -f "$FULL_RUN_SELECTOR" && ! -L "$FULL_RUN_SELECTOR" ]] || \
+    die "no resumable full run; start one with ./run.sh --full_test"
+  EXECUTION_LABEL="$(<"$FULL_RUN_SELECTOR")"
+  case "$EXECUTION_LABEL" in
+    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run selector is invalid" ;;
+  esac
+  MODE_DIR="$MODE_ROOT/$EXECUTION_LABEL"
+  [[ -d "$MODE_DIR" && ! -L "$MODE_DIR" ]] || \
+    die "resumable full-run output is missing: $MODE_DIR"
+  PLAN="$MODE_DIR/resolved-plan.json"
+else
+  PLAN="$PRECHECK_PLAN"
+fi
+[[ -f "$PLAN" && ! -L "$PLAN" ]] || die "resolved plan is missing"
+DATASET_PATH="$(jq -er '.dataset.path | select(type == "string" and length > 0)' "$PLAN")"
+case "$DATASET_PATH" in
+  /*) DATASET_SOURCE="$DATASET_PATH" ;;
+  *) DATASET_SOURCE="$ROOT/$DATASET_PATH" ;;
+esac
+[[ -f "$DATASET_SOURCE" && ! -L "$DATASET_SOURCE" ]] || die "stored-plan dataset is missing"
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
 
 "$ROOT/provider-services/bin/provider-services" doctor
@@ -390,23 +413,7 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-if [[ "$MODE" == "smoke" ]]; then
-  MODE_ROOT="$OUTPUTS_ROOT/smoke-test"
-else
-  MODE_ROOT="$OUTPUTS_ROOT/full-test"
-fi
-FULL_RESUME_POINTER="$WORK_DIR/full-test-current"
-if [[ "$RESUME" == true ]]; then
-  [[ -f "$FULL_RESUME_POINTER" && ! -L "$FULL_RESUME_POINTER" ]] || \
-    die "no resumable full run; start one with ./run.sh --full_test"
-  EXECUTION_LABEL="$(<"$FULL_RESUME_POINTER")"
-  case "$EXECUTION_LABEL" in
-    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run resume pointer is invalid" ;;
-  esac
-  MODE_DIR="$MODE_ROOT/$EXECUTION_LABEL"
-  [[ -d "$MODE_DIR" && ! -L "$MODE_DIR" ]] || \
-    die "resumable full-run output is missing: $MODE_DIR"
-else
+if [[ "$RESUME" == false ]]; then
   EXECUTION_LABEL="$RUN_LABEL"
   if [[ -e "$MODE_ROOT/$EXECUTION_LABEL" ]]; then
     EXECUTION_LABEL="$RUN_LABEL-$(date -u +%Y%m%d-%H%M%S)-$$"
@@ -417,20 +424,21 @@ else
 fi
 mkdir -p "$MODE_DIR/results" "$MODE_DIR/validations" "$MODE_DIR/capsules"
 if [[ "$MODE" == "full" && "$RESUME" == false ]]; then
+  cp "$PLAN" "$MODE_DIR/resolved-plan.json" || die "cannot save the resolved plan"
+  PLAN="$MODE_DIR/resolved-plan.json"
   uv run --locked python - "$PLAN" "$MODE_DIR/results" <<'PY'
 import sys
 from pathlib import Path
 
 from oamb.config.doctor import load_resolved_plan_for_run
-from oamb.runtime.full_progress import (
-    canonical_full_progress_path,
-    empty_full_progress,
-    initialize_full_progress,
+from oamb.runtime.question_results import (
+    initialize_question_results,
+    provider_result_path,
 )
 from oamb.workloads.longmemeval import build_longmemeval_bundle
 
 plan = load_resolved_plan_for_run(Path(sys.argv[1]))
-progress_root = Path(sys.argv[2])
+results_root = Path(sys.argv[2])
 dataset_path = Path(plan.dataset.path)
 if not dataset_path.is_absolute():
     dataset_path = Path.cwd() / dataset_path
@@ -441,26 +449,20 @@ if (
     or len(ordered_question_ids) != 60
     or manifest.manifest_hash != plan.dataset.case_manifest_hash
 ):
-    raise SystemExit("fresh full progress does not match the frozen LME-60 manifest")
+    raise SystemExit("fresh full results do not match the frozen LME-60 manifest")
 paths = tuple(
-    canonical_full_progress_path(progress_root, cell.provider_id) for cell in plan.cells
+    provider_result_path(results_root, cell.provider_id) for cell in plan.cells
 )
 if any(path.exists() or path.is_symlink() for path in paths):
-    raise SystemExit("fresh full progress target already exists")
+    raise SystemExit("fresh full result target already exists")
 for cell, path in zip(plan.cells, paths, strict=True):
-    initialize_full_progress(
-        path,
-        empty_full_progress(
-            resolved_plan_hash=plan.resolved_plan_hash,
-            cell_id=cell.cell_id,
-            provider_id=cell.provider_id,
-            workload_id=cell.workload_id,
-            case_manifest_hash=cell.case_manifest_hash,
-            ordered_question_ids=ordered_question_ids,
-        ),
-    )
-    print(f"full progress: initialized cell={cell.cell_id} reused=0 remaining=60")
+    initialize_question_results(path)
+    print(f"question results: initialized cell={cell.cell_id} reused=0 remaining=60")
 PY
+  selector_tmp="$OUTPUTS_ROOT/tmp/.full-test-current.$$"
+  (umask 077; printf '%s\n' "$EXECUTION_LABEL" > "$selector_tmp") || \
+    die "cannot write full-run selector"
+  mv "$selector_tmp" "$FULL_RUN_SELECTOR" || die "cannot publish full-run selector"
 fi
 
 VALIDATION_PATH=""
@@ -530,7 +532,7 @@ build_comparison() {
       --diagnostic
   else
     run_owned_command uv run --locked oamb compare "$PLAN" \
-      --full-progress-root "$MODE_DIR/results" \
+      --results-root "$MODE_DIR/results" \
       --dataset-source "$DATASET_SOURCE" \
       --analysis-model-env "$ROOT/.env" \
       --analysis-cache-root "$MODE_DIR/report-analysis-cache" \
@@ -559,12 +561,11 @@ run_simple_resume() {
   local resume_label="simple-resume-$(date -u +%Y%m%d-%H%M%S)-$$"
   local resume_output="$MODE_DIR/capsules/resume/$resume_label"
   mkdir -p "$MODE_DIR/capsules/resume"
-  printf 'run: status=resuming-from-canonical-progress\n'
+  printf 'run: status=resuming-from-saved-question-results\n'
   run_owned_command uv run --locked oamb run "$PLAN" \
     --run-label "$resume_label" \
     --output-root "$resume_output" \
-    --full-progress-root "$MODE_DIR/results" \
-    --full-resume-lock "$WORK_DIR/full-test-resume.lock"
+    --results-root "$MODE_DIR/results"
   printf 'run: status=resume-completed\n'
 }
 
@@ -598,9 +599,7 @@ else
   question_count=60
   run_context="full, 60 questions each"
   run_arguments+=(
-    --full-progress-root "$MODE_DIR/results"
-    --full-resume-lock "$WORK_DIR/full-test-resume.lock"
-    --full-resume-pointer "$FULL_RESUME_POINTER"
+    --results-root "$MODE_DIR/results"
   )
 fi
 

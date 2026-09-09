@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from typer.testing import CliRunner
@@ -26,15 +25,6 @@ def _plan() -> ResolvedPlan:
 
 def _lme6_plan() -> ResolvedPlan:
     return build_resolved_plan(load_lme6_configuration())
-
-
-def _hold_full_resume_lock(path: str, ready: object, release: object) -> None:
-    from oamb.runtime.full_progress import acquire_full_resume_lock
-
-    with acquire_full_resume_lock(Path(path)):
-        cast(Any, ready).set()
-        if not cast(Any, release).wait(timeout=5):
-            raise RuntimeError("test did not release the full resume lock")
 
 
 def test_run_help_excludes_deleted_recovery_options() -> None:
@@ -146,7 +136,7 @@ def test_live_question_run_writes_machine_readable_result_map(
     }
 
 
-def test_full_lme60_requires_canonical_progress_before_dispatch(
+def test_full_lme60_requires_provider_result_files_before_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -202,7 +192,7 @@ def test_full_lme60_requires_canonical_progress_before_dispatch(
     )
 
     assert result.exit_code == 2
-    assert "full LME-60 requires canonical progress" in result.output
+    assert "full LME-60 requires one result file per provider" in result.output
     assert selected_cell_ids == ()
 
 
@@ -493,12 +483,12 @@ def test_live_run_rejects_existing_result_map_before_runtime_loading(
     assert runtime_loaded is False
 
 
-def test_full_progress_failure_stops_before_environment_or_provider_preparation(
+def test_question_result_failure_stops_before_environment_or_provider_preparation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from oamb.config import doctor
-    from oamb.runtime.full_progress import FullProgressError
+    from oamb.runtime.question_results import QuestionResultsError
 
     plan = _plan()
     resolved_plan = tmp_path / "resolved-plan.json"
@@ -508,16 +498,16 @@ def test_full_progress_failure_stops_before_environment_or_provider_preparation(
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
     monkeypatch.setattr(
         live,
-        "load_full_resume_selection",
+        "load_live_question_results",
         lambda **_kwargs: (_ for _ in ()).throw(
-            FullProgressError("progress cannot parse or validate")
+            QuestionResultsError("question results cannot parse or validate")
         ),
     )
 
     def forbidden_environment(**_kwargs: object) -> dict[str, str]:
         nonlocal runtime_loaded
         runtime_loaded = True
-        raise AssertionError("invalid progress reached environment loading")
+        raise AssertionError("invalid question results reached environment loading")
 
     monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
     result = CliRunner().invoke(
@@ -529,78 +519,17 @@ def test_full_progress_failure_stops_before_environment_or_provider_preparation(
             str(tmp_path / "capsules"),
             "--run-label",
             "simple-resume",
-            "--full-progress-root",
+            "--results-root",
             str(tmp_path / "results"),
-            "--full-resume-lock",
-            str(tmp_path / "full-test-resume.lock"),
         ],
     )
 
     assert result.exit_code != 0
-    assert "progress cannot parse" in result.output
+    assert "question results cannot parse" in result.output
     assert runtime_loaded is False
 
 
-def test_full_resume_lock_contention_cannot_replace_the_current_run_pointer(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from oamb.config import doctor
-
-    plan = _plan()
-    resolved_plan = tmp_path / "resolved-plan.json"
-    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
-    lock_path = tmp_path / "full-test-resume.lock"
-    pointer = tmp_path / "full-test-current"
-    pointer.write_text("active-run\n", encoding="utf-8")
-    context = multiprocessing.get_context("fork")
-    ready = context.Event()
-    release = context.Event()
-    holder = context.Process(
-        target=_hold_full_resume_lock,
-        args=(str(lock_path), ready, release),
-    )
-    holder.start()
-    assert ready.wait(timeout=2)
-    runtime_loaded = False
-
-    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
-        nonlocal runtime_loaded
-        runtime_loaded = True
-        raise AssertionError("lock contention reached runtime loading")
-
-    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
-    try:
-        result = CliRunner().invoke(
-            app,
-            [
-                "run",
-                str(resolved_plan),
-                "--output-root",
-                str(tmp_path / "capsules"),
-                "--run-label",
-                "contending-fresh-run",
-                "--full-progress-root",
-                str(tmp_path / "contending-run" / "results"),
-                "--full-resume-lock",
-                str(lock_path),
-                "--full-resume-pointer",
-                str(pointer),
-            ],
-        )
-    finally:
-        release.set()
-        holder.join(timeout=2)
-
-    assert holder.exitcode == 0
-    assert result.exit_code != 0
-    assert "another full resume command holds the lock" in result.output
-    assert pointer.read_bytes() == b"active-run\n"
-    assert runtime_loaded is False
-
-
-def test_full_progress_builds_only_cells_with_remaining_questions(
+def test_question_results_build_only_cells_with_remaining_questions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -614,16 +543,14 @@ def test_full_progress_builds_only_cells_with_remaining_questions(
         plan.cells[1].cell_id: (),
         plan.cells[2].cell_id: (canonical_sha256(["remaining-openviking"]),),
     }
-    progress_by_cell = {
-        cell.cell_id: SimpleNamespace(
-            results=tuple(range(60 - len(remaining[cell.cell_id]))),
-            remaining_question_ids=remaining[cell.cell_id],
-        )
+    results_by_cell = {
+        cell.cell_id: {str(index): object() for index in range(60 - len(remaining[cell.cell_id]))}
         for cell in plan.cells
     }
     selection = SimpleNamespace(
-        progress_by_cell=progress_by_cell,
+        results_by_cell=results_by_cell,
         remaining_case_manifest_entry_ids=remaining,
+        ordered_question_ids=tuple(canonical_sha256(["question", index]) for index in range(60)),
     )
     built: list[dict[str, object]] = []
     capsule_roots = {cell.cell_id: tmp_path / "capsules" / cell.cell_id for cell in plan.cells}
@@ -631,12 +558,10 @@ def test_full_progress_builds_only_cells_with_remaining_questions(
         root.mkdir(parents=True)
 
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
+    monkeypatch.setattr(live, "load_live_question_results", lambda **_kwargs: selection)
     monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
-    pointer = tmp_path / "full-test-current"
 
     def load_environment(**_kwargs: object) -> dict[str, str]:
-        assert pointer.read_bytes() == b"fresh-run\n"
         return {}
 
     monkeypatch.setattr(live, "load_live_environment", load_environment)
@@ -661,8 +586,8 @@ def test_full_progress_builds_only_cells_with_remaining_questions(
             live.LiveCellCompletion(cell.cell_id, capsule_roots[cell.cell_id]) for cell in cells
         ),
     )
-    progress_root = tmp_path / "fresh-run" / "results"
-    progress_root.mkdir(parents=True)
+    results_root = tmp_path / "fresh-run" / "results"
+    results_root.mkdir(parents=True)
 
     result = CliRunner().invoke(
         app,
@@ -673,12 +598,8 @@ def test_full_progress_builds_only_cells_with_remaining_questions(
             str(tmp_path / "capsules"),
             "--run-label",
             "simple-resume",
-            "--full-progress-root",
-            str(progress_root),
-            "--full-resume-lock",
-            str(tmp_path / "full-test-resume.lock"),
-            "--full-resume-pointer",
-            str(pointer),
+            "--results-root",
+            str(results_root),
         ],
     )
 
@@ -687,16 +608,58 @@ def test_full_progress_builds_only_cells_with_remaining_questions(
         plan.cells[0].cell_id,
         plan.cells[2].cell_id,
     )
-    assert pointer.read_bytes() == b"fresh-run\n"
     for item in built:
         cell_id = str(item["cell_id"])
         provider_id = next(cell.provider_id for cell in plan.cells if cell.cell_id == cell_id)
         assert item["requested_case_manifest_entry_ids"] == remaining[cell_id]
-        assert item["expected_progress"] is progress_by_cell[cell_id]
-        assert item["progress_path"] == progress_root / f"progress-{provider_id}.json"
+        assert item["ordered_question_ids"] is selection.ordered_question_ids
+        assert item["results_path"] == results_root / f"{provider_id}.json"
 
 
-def test_compare_accepts_only_the_three_canonical_full_progress_files(
+def test_complete_question_results_return_before_runtime_or_provider_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.config import doctor
+
+    plan = _plan()
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    selection = SimpleNamespace(
+        results_by_cell={
+            cell.cell_id: {str(index): object() for index in range(60)} for cell in plan.cells
+        },
+        remaining_case_manifest_entry_ids={cell.cell_id: () for cell in plan.cells},
+        ordered_question_ids=tuple(canonical_sha256(["question", index]) for index in range(60)),
+    )
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "load_live_question_results", lambda **_kwargs: selection)
+
+    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
+        raise AssertionError("complete question results reached runtime loading")
+
+    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            str(resolved_plan),
+            "--output-root",
+            str(tmp_path / "capsules"),
+            "--run-label",
+            "complete-results",
+            "--results-root",
+            str(tmp_path / "results"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "question results: PASS complete=180 zero_dispatch=true" in result.output
+
+
+def test_compare_accepts_only_the_three_provider_result_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -706,15 +669,15 @@ def test_compare_accepts_only_the_three_canonical_full_progress_files(
     plan = _plan()
     resolved_plan = tmp_path / "resolved-plan.json"
     resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
-    progresses = {cell.cell_id: object() for cell in plan.cells}
-    selection = SimpleNamespace(progress_by_cell=progresses, case_manifest=object())
+    results_by_cell = {cell.cell_id: object() for cell in plan.cells}
+    selection = SimpleNamespace(results_by_cell=results_by_cell, case_manifest=object())
     captured: dict[str, object] = {}
     report_root = tmp_path / "report"
 
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
+    monkeypatch.setattr(live, "load_live_question_results", lambda **_kwargs: selection)
 
-    def build_progress_report(*args: object, **kwargs: object) -> SimpleNamespace:
+    def build_results_report(*args: object, **kwargs: object) -> SimpleNamespace:
         captured["args"] = args
         captured["kwargs"] = kwargs
         return SimpleNamespace(
@@ -725,8 +688,8 @@ def test_compare_accepts_only_the_three_canonical_full_progress_files(
 
     monkeypatch.setattr(
         comparison_project,
-        "build_full_progress_comparison_project",
-        build_progress_report,
+        "build_question_results_comparison_project",
+        build_results_report,
     )
 
     result = CliRunner().invoke(
@@ -734,7 +697,7 @@ def test_compare_accepts_only_the_three_canonical_full_progress_files(
         [
             "compare",
             str(resolved_plan),
-            "--full-progress-root",
+            "--results-root",
             str(tmp_path / "results"),
             "--output-root",
             str(report_root),
@@ -742,7 +705,7 @@ def test_compare_accepts_only_the_three_canonical_full_progress_files(
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["args"] == (plan, progresses)
+    assert captured["args"] == (plan, results_by_cell)
     assert cast(dict[str, object], captured["kwargs"])["case_manifest"] is selection.case_manifest
 
 
@@ -765,14 +728,14 @@ def test_compare_builds_the_report_analysis_generator_from_explicit_model_enviro
         "LLM_URL_TYPE=openai_chat\nLLM_BASE_URL=https://models.example/v1\nLLM_API_KEY=test-key\n",
         encoding="utf-8",
     )
-    progresses = {cell.cell_id: object() for cell in plan.cells}
-    selection = SimpleNamespace(progress_by_cell=progresses, case_manifest=object())
+    results_by_cell = {cell.cell_id: object() for cell in plan.cells}
+    selection = SimpleNamespace(results_by_cell=results_by_cell, case_manifest=object())
     report_root = tmp_path / "report"
     cache_root = tmp_path / "analysis-cache"
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
+    monkeypatch.setattr(live, "load_live_question_results", lambda **_kwargs: selection)
 
     def sentinel_generator(_export: object) -> None:
         return None
@@ -783,7 +746,7 @@ def test_compare_builds_the_report_analysis_generator_from_explicit_model_enviro
 
     monkeypatch.setattr(report_analysis, "build_report_analysis_generator", build_generator)
 
-    def build_progress_report(*_args: object, **kwargs: object) -> SimpleNamespace:
+    def build_results_report(*_args: object, **kwargs: object) -> SimpleNamespace:
         captured["builder"] = kwargs
         return SimpleNamespace(
             comparison_paths=(),
@@ -794,8 +757,8 @@ def test_compare_builds_the_report_analysis_generator_from_explicit_model_enviro
 
     monkeypatch.setattr(
         comparison_project,
-        "build_full_progress_comparison_project",
-        build_progress_report,
+        "build_question_results_comparison_project",
+        build_results_report,
     )
 
     result = CliRunner().invoke(
@@ -803,7 +766,7 @@ def test_compare_builds_the_report_analysis_generator_from_explicit_model_enviro
         [
             "compare",
             str(resolved_plan),
-            "--full-progress-root",
+            "--results-root",
             str(tmp_path / "results"),
             "--output-root",
             str(report_root),
