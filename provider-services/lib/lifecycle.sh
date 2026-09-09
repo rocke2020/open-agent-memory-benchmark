@@ -89,3 +89,41 @@ acquire_lifecycle_lock() {
     fi
     reject_active_provider_domains
 }
+
+acquire_lifecycle_stop_lock() {
+    [ ! -L "$RUNTIME_DIR" ] || die "provider runtime path is unsafe"
+    mkdir -p "$RUNTIME_DIR"
+    mkdir "$LIFECYCLE_LOCK" 2>/dev/null || die "another provider lifecycle operation is active"
+    LIFECYCLE_LOCK_HELD=true
+    trap 'release_lifecycle_lock' 0
+    trap 'exit 130' 1 2 15
+}
+
+clear_stopped_provider_lifecycle() {
+    lifecycle_domains_directory="$RUNTIME_DIR/lifecycle-domains"
+    [ ! -L "$lifecycle_domains_directory" ] || die "lifecycle domains path is unsafe"
+    if [ -e "$lifecycle_domains_directory" ]; then
+        [ -d "$lifecycle_domains_directory" ] || die "lifecycle domains path is unsafe"
+    fi
+    for provider_operation_directory in \
+        "$RUNTIME_DIR" \
+        "$RUNTIME_DIR/lifecycle-domains/hindsight" \
+        "$RUNTIME_DIR/lifecycle-domains/mem0" \
+        "$RUNTIME_DIR/lifecycle-domains/openviking"
+    do
+        [ ! -L "$provider_operation_directory" ] || \
+            die "provider lifecycle domain path is unsafe"
+        [ -d "$provider_operation_directory" ] || continue
+        rm -f \
+            "$provider_operation_directory/active-run-lease" \
+            "$provider_operation_directory/active-operation" \
+            "$provider_operation_directory/active-provider-attempt"
+        if [ "$provider_operation_directory" != "$RUNTIME_DIR" ]; then
+            rmdir "$provider_operation_directory/provider-lifecycle.lock" 2>/dev/null || true
+        fi
+        attempts_directory="$provider_operation_directory/active-provider-attempts"
+        [ ! -L "$attempts_directory" ] || die "active provider attempts path is unsafe"
+        [ -d "$attempts_directory" ] || continue
+        rm -f "$attempts_directory"/*.json
+    done
+}

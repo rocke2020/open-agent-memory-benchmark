@@ -234,13 +234,6 @@ def run_command(
             help="Publish this progress root for shell resume after acquiring its lock.",
         ),
     ] = None,
-    full_resume_rehearsal: Annotated[
-        bool,
-        typer.Option(
-            "--full-resume-rehearsal",
-            help="Validate progress and remaining selection, then stop before runtime loading.",
-        ),
-    ] = False,
     provider_runtime: Annotated[
         Path,
         typer.Option("--provider-runtime", help="Verified provider runtime directory."),
@@ -264,14 +257,8 @@ def run_command(
         raise typer.BadParameter(
             "--full-progress-root and --full-resume-lock must be supplied together"
         )
-    if full_resume_rehearsal and full_progress_root is None:
-        raise typer.BadParameter(
-            "--full-resume-rehearsal requires --full-progress-root and --full-resume-lock"
-        )
     if full_resume_pointer is not None and full_progress_root is None:
         raise typer.BadParameter("--full-resume-pointer requires full progress and its lock")
-    if full_resume_pointer is not None and full_resume_rehearsal:
-        raise typer.BadParameter("rehearsal cannot publish the full resume pointer")
     if full_progress_root is not None and any((cell, case, question)):
         raise typer.BadParameter(
             "full progress resume cannot be combined with case, cell, or question selection"
@@ -284,7 +271,6 @@ def run_command(
             or result_map
             or full_progress_root is not None
             or full_resume_pointer is not None
-            or full_resume_rehearsal
         ):
             raise typer.BadParameter(
                 "live selection, result-map, and progress options require a live resolved plan"
@@ -359,9 +345,6 @@ def run_command(
                     trusted_root=full_resume_pointer.parent,
                 )
                 typer.echo(f"full resume pointer: PASS label={execution_label}")
-            if full_resume_rehearsal:
-                typer.echo("full progress rehearsal: PASS zero_dispatch=true")
-                return
         if case and question:
             raise LiveConfigurationError("--case and --question are mutually exclusive")
         selected_case_ids = tuple(case or ())

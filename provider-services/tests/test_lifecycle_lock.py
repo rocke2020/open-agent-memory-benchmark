@@ -26,6 +26,65 @@ printf 'acquired\\n'
             text=True,
         )
 
+    def run_stopped_cleanup(self, runtime: Path) -> subprocess.CompletedProcess[str]:
+        program = """
+set -eu
+die() { printf '%s\n' "$*" >&2; exit 1; }
+RUNTIME_DIR=$1
+LIFECYCLE_LOCK="$RUNTIME_DIR/provider-lifecycle.lock"
+LIFECYCLE_LOCK_HELD=false
+. "$2"
+acquire_lifecycle_stop_lock
+clear_stopped_provider_lifecycle
+printf 'stopped-clean\n'
+"""
+        return subprocess.run(
+            ["sh", "-c", program, "sh", str(runtime), str(ROOT / "lib" / "lifecycle.sh")],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_stop_lock_clears_only_ephemeral_lifecycle_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            domain = runtime / "lifecycle-domains" / "mem0"
+            attempts = domain / "active-provider-attempts"
+            attempts.mkdir(parents=True)
+            (domain / "active-operation").write_text("{}\n", encoding="utf-8")
+            (attempts / f"{'a' * 64}.json").write_text("{}\n", encoding="utf-8")
+            preserved = domain / "preserved-diagnostic.json"
+            preserved.write_text("{}\n", encoding="utf-8")
+
+            result = self.run_stopped_cleanup(runtime)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "stopped-clean\n")
+            self.assertFalse((domain / "active-operation").exists())
+            self.assertFalse(tuple(attempts.glob("*.json")))
+            self.assertTrue(preserved.is_file())
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
+    def test_stopped_cleanup_rejects_lifecycle_domains_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            external = root / "external" / "mem0"
+            external.mkdir(parents=True)
+            marker = external / "active-operation"
+            marker.write_text("{}\n", encoding="utf-8")
+            (runtime / "lifecycle-domains").symlink_to(
+                external.parent,
+                target_is_directory=True,
+            )
+
+            result = self.run_stopped_cleanup(runtime)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("lifecycle domains path is unsafe", result.stderr)
+            self.assertTrue(marker.is_file())
+            self.assertFalse((runtime / "provider-lifecycle.lock").exists())
+
     def test_successful_lock_is_released_on_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)

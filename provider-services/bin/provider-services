@@ -710,10 +710,11 @@ stop_services() {
     check_tools
     check_env_file
     check_project_name
-    acquire_lifecycle_lock
+    acquire_lifecycle_stop_lock
     verify_project_attestation
-    compose stop
-    printf 'stop: PASS (containers and all persistent state preserved)\n'
+    compose stop --timeout 0
+    clear_stopped_provider_lifecycle
+    printf 'stop: PASS (containers stopped; data and benchmark results preserved)\n'
 }
 
 usage() {

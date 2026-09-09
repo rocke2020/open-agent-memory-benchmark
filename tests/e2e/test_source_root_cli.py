@@ -130,6 +130,7 @@ def test_installed_run_exposes_simple_resume_without_capsule_composition() -> No
     assert "--case" in run_output
     assert "--full-progress-root" in run_output
     assert "--full-resume-lock" in run_output
+    assert "--full-resume-rehearsal" not in run_output
     assert "--recover-from" not in run_output
     assert "--continue-from" not in run_output
     assert compose_help.returncode != 0

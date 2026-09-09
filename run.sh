@@ -10,6 +10,13 @@ readonly STATE_FILE="$OUTPUTS_ROOT/tmp/quick-start-current.json"
 readonly CELLS=("hindsight-lme60" "mem0-lme60" "openviking-lme60")
 readonly STATUS_INTERVAL_SECONDS=30
 readonly EMBEDDING_STARTUP_ATTEMPTS="${OAMB_EMBEDDING_STARTUP_ATTEMPTS:-180}"
+readonly OAMB_RUN_SH_PROCESS_ID=$$
+export OAMB_RUN_SH_PROCESS_ID
+ACTIVE_COMMAND_PID=""
+ACTIVE_COMMAND_WATCHER_PID=""
+ACTIVE_HEARTBEAT_PID=""
+STOP_REQUESTED=false
+STOP_EXIT_CODE=0
 
 . "$ROOT/provider-services/lib/env.sh"
 . "$ROOT/provider-services/lib/host_embedding.sh"
@@ -47,6 +54,61 @@ finish_logging() {
     ((run_exit_code != 0)) || run_exit_code=$log_exit_code
   fi
   exit "$run_exit_code"
+}
+
+stop_owned_process() {
+  local process_id=$1
+  kill -KILL -- "-$process_id" 2>/dev/null || true
+}
+
+request_stop() {
+  local exit_code=$1
+  STOP_REQUESTED=true
+  STOP_EXIT_CODE=$exit_code
+  if [[ -n "$ACTIVE_HEARTBEAT_PID" ]]; then
+    kill -TERM "$ACTIVE_HEARTBEAT_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$ACTIVE_COMMAND_PID" ]]; then
+    stop_owned_process "$ACTIVE_COMMAND_PID"
+    return
+  fi
+  "$ROOT/provider-services/bin/provider-services" stop || true
+  exit "$exit_code"
+}
+
+run_owned_command() {
+  local command_pid watcher_pid command_code=0
+  set -m
+  (trap - INT TERM HUP; exec "$@") &
+  command_pid=$!
+  set +m
+  ACTIVE_COMMAND_PID=$command_pid
+  (
+    trap 'exit 0' INT TERM HUP
+    while kill -0 "$OAMB_RUN_SH_PROCESS_ID" 2>/dev/null && \
+      kill -0 "$command_pid" 2>/dev/null; do
+      sleep 1
+    done
+    if ! kill -0 "$OAMB_RUN_SH_PROCESS_ID" 2>/dev/null; then
+      stop_owned_process "$command_pid"
+      "$ROOT/provider-services/bin/provider-services" stop || true
+    fi
+  ) &
+  watcher_pid=$!
+  ACTIVE_COMMAND_WATCHER_PID=$watcher_pid
+  wait "$command_pid" || command_code=$?
+  if [[ "$STOP_REQUESTED" == true ]]; then
+    wait "$command_pid" 2>/dev/null || true
+    if ! "$ROOT/provider-services/bin/provider-services" stop; then
+      printf 'run: provider services could not be stopped\n' >&2
+    fi
+    command_code=$STOP_EXIT_CODE
+  fi
+  ACTIVE_COMMAND_PID=""
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  ACTIVE_COMMAND_WATCHER_PID=""
+  return "$command_code"
 }
 
 report_provider_progress() {
@@ -121,12 +183,21 @@ PY
 provider_status_heartbeat() {
   local output_root=$1
   local total_questions=$2
+  local owner_pid=$3
   local started_seconds=$SECONDS
   local timer_pid=""
   trap '[ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true; exit 0' TERM INT HUP
   while :; do
     sleep "$STATUS_INTERVAL_SECONDS" &
     timer_pid=$!
+    while kill -0 "$timer_pid" 2>/dev/null; do
+      sleep 1
+      if ! kill -0 "$owner_pid" 2>/dev/null; then
+        kill "$timer_pid" 2>/dev/null || true
+        wait "$timer_pid" 2>/dev/null || true
+        exit 0
+      fi
+    done
     wait "$timer_pid" || exit 0
     report_provider_progress "$output_root" "$total_questions" \
       "$((SECONDS - started_seconds))" true
@@ -145,12 +216,14 @@ run_provider_cells_with_status() {
     printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s)\n' \
       "$provider" "$total_questions"
   done
-  provider_status_heartbeat "$output_root" "$total_questions" &
+  provider_status_heartbeat "$output_root" "$total_questions" "$OAMB_RUN_SH_PROCESS_ID" &
   heartbeat_pid=$!
+  ACTIVE_HEARTBEAT_PID=$heartbeat_pid
   command_code=0
-  "$@" || command_code=$?
+  run_owned_command "$@" || command_code=$?
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
+  ACTIVE_HEARTBEAT_PID=""
   report_provider_progress "$output_root" "$total_questions" \
     "$((SECONDS - started_seconds))" false
   if ((command_code != 0)); then
@@ -214,6 +287,9 @@ LOG_STDOUT_PID=$!
 LOG_STDERR_PID=$!
 exec > "$LOG_PIPE_DIR/stdout" 2> "$LOG_PIPE_DIR/stderr"
 trap 'finish_logging "$?"' EXIT
+trap 'request_stop 130' INT
+trap 'request_stop 143' TERM
+trap 'request_stop 129' HUP
 rm "$LOG_PIPE_DIR/stdout" "$LOG_PIPE_DIR/stderr"
 rmdir "$LOG_PIPE_DIR"
 printf 'run: log=%s\n' "$LOG_FILE"
@@ -245,19 +321,6 @@ esac
 [[ -f "$DATASET_SOURCE" ]] || die "dataset is missing; rerun ./precheck.sh"
 PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
-
-if [[ "$RESUME" == true ]]; then
-  early_resume_pointer="$WORK_DIR/full-test-current"
-  [[ -f "$early_resume_pointer" && ! -L "$early_resume_pointer" ]] || \
-    die "no resumable full run; start one with ./run.sh --full_test"
-  early_execution_label="$(<"$early_resume_pointer")"
-  case "$early_execution_label" in
-    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run resume pointer is invalid" ;;
-  esac
-  early_mode_dir="$OUTPUTS_ROOT/full-test/$early_execution_label"
-  [[ -d "$early_mode_dir" && ! -L "$early_mode_dir" ]] || \
-    die "resumable full-run output is missing: $early_mode_dir"
-fi
 
 "$ROOT/provider-services/bin/provider-services" doctor
 uv run --locked python - "$PLAN" "$ENV_FILE" "$ROOT/provider-services/.runtime" \
@@ -319,12 +382,6 @@ if [[ "$RESUME" == true ]]; then
   esac
   "$ROOT/provider-services/bin/provider-services" up
   "$ROOT/provider-services/bin/provider-services" verify --services
-  uv run --locked oamb run "$PLAN" \
-    --run-label "simple-resume-rehearsal" \
-    --output-root "$early_mode_dir/capsules/simple-resume-rehearsal" \
-    --full-progress-root "$early_mode_dir/results" \
-    --full-resume-lock "$WORK_DIR/full-test-resume.lock" \
-    --full-resume-rehearsal
 fi
 if [[ "$DRY_RUN" == true ]]; then
   [[ "$MODE" == smoke ]] && QUESTION_COUNT=1 || QUESTION_COUNT=60
@@ -424,7 +481,8 @@ validate_capsule_result() {
     printf 'run: capsule validation output already exists: %s\n' "$validation_path" >&2
     return 1
   fi
-  if ! uv run --locked oamb capsule validate "$capsule_root" --output "$validation_path"; then
+  if ! run_owned_command uv run --locked oamb capsule validate \
+    "$capsule_root" --output "$validation_path"; then
     return 1
   fi
   if ! jq -e '.disposition == "validated"' "$validation_path" >/dev/null; then
@@ -458,7 +516,7 @@ build_comparison() {
   fi
   printf 'run: status=building-comparison\n'
   if [[ "$MODE" == "smoke" ]]; then
-    uv run --locked oamb compare "$PLAN" \
+    run_owned_command uv run --locked oamb compare "$PLAN" \
       --cell-root "${CELLS[0]}=${roots[0]}" \
       --cell-root "${CELLS[1]}=${roots[1]}" \
       --cell-root "${CELLS[2]}=${roots[2]}" \
@@ -471,7 +529,7 @@ build_comparison() {
       --output-root "$comparison" \
       --diagnostic
   else
-    uv run --locked oamb compare "$PLAN" \
+    run_owned_command uv run --locked oamb compare "$PLAN" \
       --full-progress-root "$MODE_DIR/results" \
       --dataset-source "$DATASET_SOURCE" \
       --analysis-model-env "$ROOT/.env" \
@@ -502,7 +560,7 @@ run_simple_resume() {
   local resume_output="$MODE_DIR/capsules/resume/$resume_label"
   mkdir -p "$MODE_DIR/capsules/resume"
   printf 'run: status=resuming-from-canonical-progress\n'
-  uv run --locked oamb run "$PLAN" \
+  run_owned_command uv run --locked oamb run "$PLAN" \
     --run-label "$resume_label" \
     --output-root "$resume_output" \
     --full-progress-root "$MODE_DIR/results" \

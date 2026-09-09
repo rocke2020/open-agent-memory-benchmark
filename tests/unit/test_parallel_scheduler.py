@@ -352,6 +352,72 @@ def test_fatal_history_logs_original_reason_before_active_sibling_settles(
     asyncio.run(scenario())
 
 
+def test_operator_stop_cancels_every_active_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.runtime import native_run
+
+    both_started = asyncio.Event()
+    started: list[str] = []
+    cancelled: list[str] = []
+
+    async def ingest_one(**kwargs: Any) -> tuple[tuple[str], dict[str, object]]:
+        plan_id = kwargs["plan"].ingestion_plan_id
+        started.append(plan_id)
+        if len(started) == 2:
+            both_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(plan_id)
+            raise
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(native_run, "_execute_history", ingest_one)
+
+    async def scenario() -> None:
+        stop_event = asyncio.Event()
+        plans = tuple(
+            SimpleNamespace(
+                ingestion_plan_id=f"plan-{suffix}",
+                ordered_case_manifest_entry_ids=(),
+            )
+            for suffix in ("a", "b")
+        )
+        state = SimpleNamespace(
+            control=SimpleNamespace(
+                max_parallel_history_ingestions=2,
+                max_parallel_questions=1,
+            ),
+            stop_event=stop_event,
+        )
+        run = asyncio.create_task(
+            native_run._execute_history_question_pipeline(
+                state=cast(Any, state),
+                workload=cast(Any, object()),
+                memory=cast(Any, object()),
+                answer_model=cast(Any, object()),
+                judge_model=None,
+                plans=cast(Any, plans),
+                case_plans=(),
+                memory_system_id="memory",
+                runtime_binding_hash="runtime",
+                adapter_profile_id="adapter",
+                visible_evidence_policy=cast(Any, object()),
+                answer_role_binding_id="answer",
+                judge_role_binding_id=None,
+            )
+        )
+
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        stop_event.set()
+        with pytest.raises(native_run.NativeRunInterrupted, match="cancelled accepted"):
+            await asyncio.wait_for(run, timeout=1)
+        assert set(cancelled) == {"plan-a", "plan-b"}
+
+    asyncio.run(scenario())
+
+
 def test_malformed_history_result_stops_queued_admission_before_releasing_the_permit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -838,7 +904,11 @@ def test_native_stop_handlers_are_installed_before_child_start(
         def Process(self, **_kwargs: Any) -> FakeProcess:
             return FakeProcess()
 
-    def install(_event: object, _count: object) -> dict[object, object]:
+    def install(
+        _stop_event: object,
+        _interrupt_event: object,
+        _count: object,
+    ) -> dict[object, object]:
         call_order.append("install")
         return {}
 

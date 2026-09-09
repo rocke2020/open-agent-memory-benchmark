@@ -110,6 +110,7 @@ _EXTRA_ENVIRONMENT_BY_PROVIDER = {
 _SERVICE_RECEIPT_POINTER = "service-verification-current.sha256"
 _LLM_URL_TYPE_VARIABLE = "LLM_URL_TYPE"
 _SUPPORTED_LLM_URL_TYPE = "openai_chat"
+_RUN_SH_PROCESS_ID_VARIABLE = "OAMB_RUN_SH_PROCESS_ID"
 
 
 class LiveConfigurationError(ValueError):
@@ -1322,6 +1323,7 @@ def build_live_cell(
         model_max_attempts=plan.execution.model_max_attempts,
         model_transport_max_retries=plan.execution.model_transport_max_retries,
         provider_lifecycle_coordination_directory=provider_runtime_directory,
+        shutdown_owner_process_ids=_shutdown_owner_process_ids(environment),
     )
     return LiveCell(
         plan=plan,
@@ -1371,6 +1373,19 @@ def _resolve_environment(
             raise LiveConfigurationError(f"missing live environment reference: {name}")
         resolved[name] = value
     return resolved
+
+
+def _shutdown_owner_process_ids(environment: Mapping[str, str]) -> tuple[int, ...]:
+    process_ids: list[int] = []
+    run_sh_process_id = environment.get(_RUN_SH_PROCESS_ID_VARIABLE)
+    if run_sh_process_id is not None:
+        if not run_sh_process_id.isascii() or not run_sh_process_id.isdecimal():
+            raise LiveConfigurationError("run.sh process ID must be a positive integer")
+        process_ids.append(int(run_sh_process_id))
+    process_ids.append(os.getpid())
+    if any(process_id <= 0 for process_id in process_ids):
+        raise LiveConfigurationError("shutdown owner process IDs must be positive")
+    return tuple(dict.fromkeys(process_ids))
 
 
 def _endpoint_fingerprint(name: str, environment: Mapping[str, str]) -> str:

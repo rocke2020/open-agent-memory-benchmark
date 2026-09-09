@@ -36,11 +36,7 @@ The Mem0 image includes a small [extraction-response normalization and retry pat
 
 ## State and safety boundary
 
-Each `OAMB_PROVIDER_PROJECT` owns new Compose volumes. The project never mounts
-an existing `~/.openviking`, Mem0 history directory, provider checkout, or
-database. Only four HTTP API ports bind to `127.0.0.1`; PostgreSQL remains
-private. `stop` preserves containers, volumes, and data and refuses to
-run or memory-conformance lifecycle while `.runtime/active-operation` exists.
+Each `OAMB_PROVIDER_PROJECT` owns new Compose volumes. The project never mounts an existing `~/.openviking`, Mem0 history directory, provider checkout, or database. Only four HTTP API ports bind to `127.0.0.1`; PostgreSQL remains private. `stop` force-stops this attested project's containers, preserves volumes and data, then clears only ephemeral lifecycle markers after provider execution has ended.
 
 The commands in this directory do not run benchmark memory ingestion,
 retrieval, LongMemEval, or deferred MAB research workloads. `verify --services`
@@ -119,13 +115,7 @@ A failure cannot reuse the project; the operator preserves the attempt ledger
 and starts a new project. The final receipt keeps `billing_complete=false` and
 `cost_usd=null`.
 
-The runner and lifecycle commands share one atomic local protocol. Before
-creating `.runtime/active-operation`, a runner or conformance owner must acquire
-`.runtime/provider-lifecycle.lock`, verify no lifecycle operation owns it,
-create its lease, and release the lifecycle lock. `up`, `stop`, and both
-`verify` modes hold the same lifecycle lock and refuse an active run. The
-project attestation binds its name plus Compose/version hashes before any
-mutation.
+The runner and lifecycle commands share one atomic local protocol. Before creating `.runtime/active-operation`, a runner or conformance owner must acquire `.runtime/provider-lifecycle.lock`, verify no lifecycle operation owns it, create its lease, and release the lifecycle lock. `up` and both `verify` modes hold the same lifecycle lock and refuse an active run. `stop` takes the same exclusive gate, stops the attested provider project even when a benchmark is being terminated, and preserves its volumes. The project attestation binds its name plus Compose/version hashes before any mutation.
 
 Service attestation, model readiness, and lifecycle ownership do not prove the
 LongMemEval adapter or zero retrieval-generation dispatch; those require the

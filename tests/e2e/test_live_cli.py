@@ -696,62 +696,6 @@ def test_full_progress_builds_only_cells_with_remaining_questions(
         assert item["progress_path"] == progress_root / f"progress-{provider_id}.json"
 
 
-def test_full_progress_rehearsal_stops_before_runtime_loading(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from oamb.config import doctor
-
-    plan = _plan()
-    resolved_plan = tmp_path / "resolved-plan.json"
-    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
-    counts = (19, 20, 14)
-    selection = SimpleNamespace(
-        progress_by_cell={
-            cell.cell_id: SimpleNamespace(
-                results=tuple(range(count)),
-                remaining_question_ids=tuple(range(60 - count)),
-            )
-            for cell, count in zip(plan.cells, counts, strict=True)
-        },
-        remaining_case_manifest_entry_ids={cell.cell_id: ("case",) for cell in plan.cells},
-    )
-    runtime_loaded = False
-
-    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
-    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
-
-    def forbidden_environment(**_kwargs: object) -> dict[str, str]:
-        nonlocal runtime_loaded
-        runtime_loaded = True
-        raise AssertionError("rehearsal reached runtime loading")
-
-    monkeypatch.setattr(live, "load_live_environment", forbidden_environment)
-    result = CliRunner().invoke(
-        app,
-        [
-            "run",
-            str(resolved_plan),
-            "--output-root",
-            str(tmp_path / "capsules"),
-            "--run-label",
-            "simple-resume",
-            "--full-progress-root",
-            str(tmp_path / "results"),
-            "--full-resume-lock",
-            str(tmp_path / "resume.lock"),
-            "--full-resume-rehearsal",
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "reused=19 remaining=41" in result.output
-    assert "reused=20 remaining=40" in result.output
-    assert "reused=14 remaining=46" in result.output
-    assert "zero_dispatch=true" in result.output
-    assert runtime_loaded is False
-
-
 def test_compare_accepts_only_the_three_canonical_full_progress_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
