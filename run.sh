@@ -3,12 +3,16 @@
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly ENV_FILE="$ROOT/.env"
 readonly OUTPUTS_ROOT="$ROOT/outputs"
 readonly PRECHECK_ROOT="$OUTPUTS_ROOT/tmp/precheck"
 readonly STATE_FILE="$OUTPUTS_ROOT/tmp/quick-start-current.json"
 readonly CELLS=("hindsight-lme60" "mem0-lme60" "openviking-lme60")
 readonly STATUS_INTERVAL_SECONDS=30
+readonly EMBEDDING_STARTUP_ATTEMPTS="${OAMB_EMBEDDING_STARTUP_ATTEMPTS:-180}"
 
+. "$ROOT/provider-services/lib/env.sh"
+. "$ROOT/provider-services/lib/host_embedding.sh"
 . "$ROOT/provider-services/lib/plan_environment.sh"
 
 MODE="smoke"
@@ -253,16 +257,10 @@ if [[ "$RESUME" == true ]]; then
   early_mode_dir="$OUTPUTS_ROOT/full-test/$early_execution_label"
   [[ -d "$early_mode_dir" && ! -L "$early_mode_dir" ]] || \
     die "resumable full-run output is missing: $early_mode_dir"
-  uv run --locked oamb run "$PLAN" \
-    --run-label "simple-resume-rehearsal" \
-    --output-root "$early_mode_dir/capsules/simple-resume-rehearsal" \
-    --full-progress-root "$early_mode_dir/results" \
-    --full-resume-lock "$WORK_DIR/full-test-resume.lock" \
-    --full-resume-rehearsal
 fi
 
 "$ROOT/provider-services/bin/provider-services" doctor
-uv run --locked python - "$PLAN" "$ROOT/.env" "$ROOT/provider-services/.runtime" \
+uv run --locked python - "$PLAN" "$ENV_FILE" "$ROOT/provider-services/.runtime" \
   "$DATASET_SOURCE" "${CELLS[@]}" <<'PY'
 import os
 import sys
@@ -301,6 +299,33 @@ validate_live_readiness_receipt(
     environment=environment,
 )
 PY
+if [[ "$RESUME" == true ]]; then
+  embedding_url="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)" || \
+    die "cannot load the prechecked embedding endpoint"
+  case "$embedding_url" in
+    http://host.docker.internal:*)
+      embedding_stamp="$(date -u +%Y%m%d-%H%M%S)-$$"
+      start_local_embedding "$embedding_url" \
+        "$WORK_DIR/embedding-resume-$embedding_stamp.log" \
+        "$WORK_DIR/embedding-resume-$embedding_stamp.pid"
+      ;;
+    *)
+      host_embedding_url="$(resolve_host_embedding_base "$embedding_url")" || \
+        die "cannot resolve the prechecked embedding endpoint"
+      probe_embedding "$host_embedding_url" >/dev/null 2>&1 || \
+        die "prechecked external embedding endpoint is unavailable"
+      printf 'embedding: PASS (prechecked external endpoint reachable)\n'
+      ;;
+  esac
+  "$ROOT/provider-services/bin/provider-services" up
+  "$ROOT/provider-services/bin/provider-services" verify --services
+  uv run --locked oamb run "$PLAN" \
+    --run-label "simple-resume-rehearsal" \
+    --output-root "$early_mode_dir/capsules/simple-resume-rehearsal" \
+    --full-progress-root "$early_mode_dir/results" \
+    --full-resume-lock "$WORK_DIR/full-test-resume.lock" \
+    --full-resume-rehearsal
+fi
 if [[ "$DRY_RUN" == true ]]; then
   [[ "$MODE" == smoke ]] && QUESTION_COUNT=1 || QUESTION_COUNT=60
   printf 'run: PASS (dry-run, %s, %s questions, 3 providers, zero model/provider calls)\n' \

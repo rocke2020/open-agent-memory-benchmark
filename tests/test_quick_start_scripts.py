@@ -57,10 +57,17 @@ def _copy_quick_start_script(source: Path, root: Path) -> Path:
     assert source.is_file(), f"quick-start script is missing: {source.name}"
     destination = root / source.name
     shutil.copy2(source, destination)
-    if "plan_environment.sh" in source.read_text(encoding="utf-8"):
-        helper = root / "provider-services" / "lib" / "plan_environment.sh"
+    source_text = source.read_text(encoding="utf-8")
+    for helper_source in (
+        HOST_EMBEDDING_SCRIPT,
+        PLAN_ENVIRONMENT_SCRIPT,
+        PROVIDER_ENVIRONMENT_SCRIPT,
+    ):
+        if helper_source.name not in source_text:
+            continue
+        helper = root / "provider-services" / "lib" / helper_source.name
         helper.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(PLAN_ENVIRONMENT_SCRIPT, helper)
+        shutil.copy2(helper_source, helper)
     return destination
 
 
@@ -860,6 +867,15 @@ def _run_fixture(
     _write_fake_oamb(fake_bin)
     _write_executable(fake_bin / "uname", f"printf '%s\\n' {system_name}")
     _write_executable(
+        fake_bin / "curl",
+        """
+python3 - <<'PY'
+import json
+print(json.dumps({"data": [{"embedding": [0.0] * 1024}]}))
+PY
+""".strip(),
+    )
+    _write_executable(
         fake_bin / ("open" if system_name == "Darwin" else "xdg-open"),
         'printf \'open %s\\n\' "$*" >> "$OAMB_TEST_TRACE"',
     )
@@ -881,7 +897,10 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
     )
     (root / "provider-services" / ".runtime").mkdir()
     (root / ".env").write_text(
-        "LLM_URL_TYPE=openai_chat\nLLM_BASE_URL=test\nLLM_API_KEY=test\n",
+        "LLM_URL_TYPE=openai_chat\n"
+        "LLM_BASE_URL=test\n"
+        "LLM_API_KEY=test\n"
+        "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1\n",
         encoding="utf-8",
     )
     (root / ".env").chmod(0o600)
@@ -1736,11 +1755,17 @@ def test_run_full_resume_rehearses_then_runs_once_and_compares_progress(
     resume_calls = [line for line in run_calls if "--full-resume-rehearsal" not in line]
     compare_calls = [line for line in calls if "oamb compare" in line]
     doctor_calls = [line for line in calls if line == "provider-services doctor"]
+    provider_up_calls = [line for line in calls if line == "provider-services up"]
+    provider_verify_calls = [
+        line for line in calls if line == "provider-services verify --services"
+    ]
 
     assert len(rehearsal_calls) == 1
     assert len(resume_calls) == 1
     assert len(compare_calls) == 1
     assert len(doctor_calls) == 1
+    assert len(provider_up_calls) == 1
+    assert len(provider_verify_calls) == 1
     progress_root = full_root / "results"
     resume_lock = root / "outputs" / "tmp" / "precheck" / "lme60-test" / "full-test-resume.lock"
     assert all(
@@ -1755,8 +1780,10 @@ def test_run_full_resume_rehearses_then_runs_once_and_compares_progress(
     assert f"--full-progress-root {progress_root}" in compare_calls[0]
     assert "--cell-root" not in compare_calls[0]
     assert "--validation" not in compare_calls[0]
-    assert calls.index(rehearsal_calls[0]) < calls.index(doctor_calls[0])
-    assert calls.index(doctor_calls[0]) < calls.index(resume_calls[0])
+    assert calls.index(doctor_calls[0]) < calls.index(provider_up_calls[0])
+    assert calls.index(provider_up_calls[0]) < calls.index(provider_verify_calls[0])
+    assert calls.index(provider_verify_calls[0]) < calls.index(rehearsal_calls[0])
+    assert calls.index(rehearsal_calls[0]) < calls.index(resume_calls[0])
     assert calls.index(resume_calls[0]) < calls.index(compare_calls[0])
     trace_text = "\n".join(calls)
     assert all(
@@ -1772,7 +1799,87 @@ def test_run_full_resume_rehearses_then_runs_once_and_compares_progress(
     assert "run: PASS (full, 60 questions, 180 provider results)" in result.stdout
 
 
-def test_run_full_resume_rehearsal_failure_stops_before_provider_doctor(
+def test_run_full_resume_restores_local_runtime_before_dispatch(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    _write_canonical_full_progress(root)
+    _write_executable(
+        Path(env["PATH"].split(":", 1)[0]) / "curl",
+        """
+printf 'embedding-probe\n' >> "$OAMB_TEST_TRACE"
+[ -f "$OAMB_TEST_EMBED_READY" ] || exit 22
+python3 - <<'PY'
+import json
+print(json.dumps({"data": [{"embedding": [0.0] * 1024}]}))
+PY
+""".strip(),
+    )
+    _write_executable(
+        root / "scripts" / "start_local_embedding" / "start_vllm_metal.sh",
+        """
+printf 'embedding-start\n' >> "$OAMB_TEST_TRACE"
+touch "$OAMB_TEST_EMBED_READY"
+""".strip(),
+    )
+    provider_ready = tmp_path / "provider-ready"
+    _write_executable(
+        root / "provider-services" / "bin" / "provider-services",
+        """
+printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
+if [ "$1" = "up" ]; then
+  [ -f "$OAMB_TEST_EMBED_READY" ] || exit 71
+  touch "$OAMB_TEST_PROVIDER_READY"
+fi
+if [ "$1" = "verify" ] && [ "$2" = "--services" ]; then
+  [ -f "$OAMB_TEST_EMBED_READY" ] || exit 72
+  [ -f "$OAMB_TEST_PROVIDER_READY" ] || exit 73
+fi
+""".strip(),
+    )
+    env.update(
+        {
+            "OAMB_TEST_EMBED_READY": str(tmp_path / "embedding-ready"),
+            "OAMB_TEST_PROVIDER_READY": str(provider_ready),
+            "OAMB_EMBEDDING_STARTUP_ATTEMPTS": "3",
+        }
+    )
+
+    result = subprocess.run(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    rehearsal_index = next(
+        index
+        for index, line in enumerate(calls)
+        if "oamb run" in line and "--full-resume-rehearsal" in line
+    )
+    embedding_start_index = calls.index("embedding-start")
+    provider_up_index = calls.index("provider-services up")
+    provider_verify_index = calls.index("provider-services verify --services")
+    dispatch_index = next(
+        index
+        for index, line in enumerate(calls)
+        if "oamb run" in line and "--full-resume-rehearsal" not in line
+    )
+    assert (
+        embedding_start_index
+        < provider_up_index
+        < provider_verify_index
+        < rehearsal_index
+        < dispatch_index
+    )
+    assert provider_ready.is_file()
+
+
+def test_run_full_resume_rehearsal_failure_stops_after_runtime_verification(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
@@ -1795,5 +1902,9 @@ def test_run_full_resume_rehearsal_failure_stops_before_provider_doctor(
     run_calls = [line for line in calls if "oamb run" in line]
     assert len(run_calls) == 1
     assert "--full-resume-rehearsal" in run_calls[0]
-    assert not any(line == "provider-services doctor" for line in calls)
+    doctor_index = calls.index("provider-services doctor")
+    provider_up_index = calls.index("provider-services up")
+    provider_verify_index = calls.index("provider-services verify --services")
+    rehearsal_index = calls.index(run_calls[0])
+    assert doctor_index < provider_up_index < provider_verify_index < rehearsal_index
     assert not any("oamb compare" in line for line in calls)
