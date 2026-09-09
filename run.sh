@@ -309,6 +309,13 @@ RUN_LABEL="$(jq -er '.run_label | select(type == "string" and length > 0)' "$STA
 WORK_DIR="$(jq -er '.work_dir | select(type == "string" and length > 0)' "$STATE_FILE")"
 PRECHECK_PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
 QUESTION_ID="$(jq -er '.question_id | select(type == "string" and length > 0)' "$STATE_FILE")"
+EMBEDDING_LOCAL_FALLBACK="$(jq -er '
+  if (has("embedding_local_fallback") | not) then "legacy"
+  elif .embedding_local_fallback == true then "true"
+  elif .embedding_local_fallback == false then "false"
+  else error("not boolean") end
+' "$STATE_FILE")" || \
+  die "precheck state has invalid embedding ownership"
 case "$RUN_LABEL" in
   ""|"."|".."|*[!A-Za-z0-9._-]*) die "precheck state has invalid run label" ;;
 esac
@@ -388,21 +395,26 @@ PY
 if [[ "$RESUME" == true ]]; then
   embedding_url="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)" || \
     die "cannot load the prechecked embedding endpoint"
-  case "$embedding_url" in
-    http://host.docker.internal:*)
-      embedding_stamp="$(date -u +%Y%m%d-%H%M%S)-$$"
-      start_local_embedding "$embedding_url" \
-        "$WORK_DIR/embedding-resume-$embedding_stamp.log" \
-        "$WORK_DIR/embedding.pid"
-      ;;
-    *)
-      host_embedding_url="$(resolve_host_embedding_base "$embedding_url")" || \
-        die "cannot resolve the prechecked embedding endpoint"
-      probe_embedding "$host_embedding_url" >/dev/null 2>&1 || \
-        die "prechecked external embedding endpoint is unavailable"
-      printf 'embedding: PASS (prechecked external endpoint reachable)\n'
-      ;;
-  esac
+  embedding_api_key="$(read_optional_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY)" || \
+    die "cannot load the prechecked embedding API key"
+  if [[ "$EMBEDDING_LOCAL_FALLBACK" == legacy ]]; then
+    case "$embedding_url" in
+      http://host.docker.internal:*) EMBEDDING_LOCAL_FALLBACK=true ;;
+      *) EMBEDDING_LOCAL_FALLBACK=false ;;
+    esac
+  fi
+  if [[ "$EMBEDDING_LOCAL_FALLBACK" == true ]]; then
+    embedding_stamp="$(date -u +%Y%m%d-%H%M%S)-$$"
+    start_local_embedding "$embedding_url" "$embedding_api_key" \
+      "$WORK_DIR/embedding-resume-$embedding_stamp.log" \
+      "$WORK_DIR/embedding.pid"
+  else
+    host_embedding_url="$(resolve_host_embedding_base "$embedding_url")" || \
+      die "cannot resolve the prechecked embedding endpoint"
+    probe_embedding "$host_embedding_url" "$embedding_api_key" >/dev/null 2>&1 || \
+      die "prechecked external embedding endpoint is unavailable"
+    printf 'embedding: PASS (prechecked external endpoint reachable)\n'
+  fi
   "$ROOT/provider-services/bin/provider-services" up
   "$ROOT/provider-services/bin/provider-services" verify --services
 fi

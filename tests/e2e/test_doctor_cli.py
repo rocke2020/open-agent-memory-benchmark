@@ -250,7 +250,7 @@ def test_doctor_omits_thinking_effort_from_embedding_summary(tmp_path: Path) -> 
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
 
     assert result.exit_code == 0, result.output
-    assert f"model embedding: {embedding_model}; recipient=local-vllm-metal" in result.output
+    assert f"model embedding: {embedding_model}; recipient=embedding-api" in result.output
     assert f"model embedding: {embedding_model} /" not in result.output
 
 

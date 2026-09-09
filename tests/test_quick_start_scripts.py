@@ -88,6 +88,12 @@ def test_root_env_template_owns_one_generic_llm_connection() -> None:
     assert "LLM_URL_TYPE=openai_chat" in (REPOSITORY_ROOT / ".env.example").read_text(
         encoding="utf-8"
     )
+    example = (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8")
+    example_values = dict(
+        line.split("=", 1) for line in example.splitlines() if line and not line.startswith("#")
+    )
+    assert example_values["OAMB_EMBEDDING_BASE_URL"] == "change-me"
+    assert example_values["OAMB_EMBEDDING_API_KEY"] == ""
 
 
 def test_provider_shell_derives_model_connections_from_generic_llm_pair(tmp_path: Path) -> None:
@@ -126,6 +132,97 @@ def test_provider_shell_derives_model_connections_from_generic_llm_pair(tmp_path
     ]
 
 
+def test_provider_shell_defaults_missing_embedding_api_key_for_containers(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:18000/v1\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            '. "$1"; '
+            'resolve_container_embedding_base "$(read_env_value "$2" OAMB_EMBEDDING_BASE_URL)"; '
+            'effective_embedding_api_key "$2"',
+            "sh",
+            str(PROVIDER_ENVIRONMENT_SCRIPT),
+            str(env_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines() == [
+        "http://host.docker.internal:18000/v1",
+        "oamb-no-auth",
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://127.0.0.1.embedding.example/v1",
+        "http://localhost.embedding.example/v1",
+    ),
+)
+def test_provider_shell_does_not_rewrite_host_name_lookalikes(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            '. "$1"; resolve_container_embedding_base "$2"',
+            "sh",
+            str(PROVIDER_ENVIRONMENT_SCRIPT),
+            url,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == f"{url}\n"
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://127.0.0.1:18000/v1",
+        "https://localhost:18000/v1",
+        "http://[::1]:18000/v1",
+    ),
+)
+def test_provider_shell_rejects_unsupported_loopback_embedding_urls(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            '. "$1"; resolve_container_embedding_base "$2"',
+            "sh",
+            str(PROVIDER_ENVIRONMENT_SCRIPT),
+            url,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
 def test_live_environment_derives_provider_connections_from_generic_llm_pair(
     tmp_path: Path,
 ) -> None:
@@ -152,6 +249,37 @@ def test_live_environment_derives_provider_connections_from_generic_llm_pair(
     for name in PROVIDER_MODEL_CONNECTION_ALIASES:
         expected = "https://models.example/v1" if name.endswith("BASE_URL") else "test-model-key"
         assert environment[name] == expected
+
+
+@pytest.mark.parametrize(
+    "embedding_key_assignment",
+    ("", "OAMB_EMBEDDING_API_KEY=\n"),
+    ids=("missing", "empty"),
+)
+def test_live_environment_treats_missing_and_empty_embedding_keys_as_keyless(
+    tmp_path: Path,
+    embedding_key_assignment: str,
+) -> None:
+    from oamb.live import load_live_environment
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LLM_URL_TYPE=openai_chat\n"
+        "LLM_BASE_URL=https://models.example/v1\n"
+        "LLM_API_KEY=test-model-key\n"
+        "OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:18000/v1\n"
+        f"{embedding_key_assignment}",
+        encoding="utf-8",
+    )
+
+    environment = load_live_environment(
+        provider_env_path=env_file,
+        model_env_path=env_file,
+        provider_runtime_directory=tmp_path / "runtime",
+        base_environment={"OAMB_EMBEDDING_API_KEY": "inherited-process-key"},
+    )
+
+    assert environment["OAMB_EMBEDDING_API_KEY"] == ""
 
 
 def test_live_environment_rejects_unsupported_llm_url_type(tmp_path: Path) -> None:
@@ -309,6 +437,7 @@ def test_precheck_stops_before_provider_start_when_full_input_encoding_fails(
     assert not any(line.startswith("provider-services ") for line in calls)
     assert not any(line.startswith("embedding ") for line in calls)
     assert not any(line.startswith("curl ") for line in calls)
+    assert "OAMB_EMBEDDING_BASE_URL=change-me" in (root / ".env").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -336,6 +465,9 @@ def test_precheck_routes_default_local_embedding_by_operating_system(
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8")
     assert f"embedding {expected_helper}" in calls
+    root_env = (root / ".env").read_text(encoding="utf-8")
+    assert "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1" in root_env
+    assert "OAMB_EMBEDDING_API_KEY=" in root_env
     assert "uv sync --locked --all-groups" in calls
     assert "provider-services verify --services" in calls
     assert "provider-services verify --model-readiness" in calls
@@ -344,6 +476,7 @@ def test_precheck_routes_default_local_embedding_by_operating_system(
     state = json.loads((root / "outputs" / "tmp" / "quick-start-current.json").read_bytes())
     assert Path(state["resolved_plan"]).is_file()
     assert state["question_id"] == "72e3ee87"
+    assert state["embedding_local_fallback"] is True
 
 
 def test_precheck_publishes_state_and_plan_below_outputs_root(tmp_path: Path) -> None:
@@ -371,12 +504,29 @@ def test_precheck_publishes_state_and_plan_below_outputs_root(tmp_path: Path) ->
     assert not (root / ".local-demo").exists()
 
 
-def test_precheck_online_embedding_url_skips_local_server(tmp_path: Path) -> None:
+def test_precheck_configured_embedding_service_pair_skips_local_server(tmp_path: Path) -> None:
     root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
     script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8")
+        .replace(
+            "OAMB_EMBEDDING_BASE_URL=change-me",
+            "OAMB_EMBEDDING_BASE_URL=https://embedding.example/v1",
+        )
+        .replace(
+            "OAMB_EMBEDDING_API_KEY=change-me",
+            "OAMB_EMBEDDING_API_KEY=paid-embedding-key",
+        )
+        .replace(
+            "OAMB_EMBEDDING_API_KEY=\n",
+            "OAMB_EMBEDDING_API_KEY=paid-embedding-key\n",
+        ),
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
-        [str(script), "--embedding-api-url", "https://embedding.example/v1"],
+        [str(script)],
         cwd=root,
         env=env,
         capture_output=True,
@@ -386,11 +536,208 @@ def test_precheck_online_embedding_url_skips_local_server(tmp_path: Path) -> Non
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "embedding: local startup skipped; configured API will be verified directly"
+        in result.stdout
+    )
     calls = trace.read_text(encoding="utf-8")
     assert "embedding start_" not in calls
     root_env = (root / ".env").read_text(encoding="utf-8")
     assert "OAMB_EMBEDDING_BASE_URL=https://embedding.example/v1" in root_env
+    assert "OAMB_EMBEDDING_API_KEY=paid-embedding-key" in root_env
     assert not (root / "provider-services" / ".env").exists()
+
+
+def test_precheck_keyless_embedding_service_skips_local_server(tmp_path: Path) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8")
+        .replace(
+            "OAMB_EMBEDDING_BASE_URL=change-me",
+            "OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:18000/v1",
+        )
+        .replace("OAMB_EMBEDDING_API_KEY=\n", ""),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "embedding: local startup skipped; configured API will be verified directly"
+        in result.stdout
+    )
+    assert "embedding start_" not in trace.read_text(encoding="utf-8")
+    assert "OAMB_EMBEDDING_API_KEY" not in env_path.read_text(encoding="utf-8")
+    state = json.loads((root / "outputs" / "tmp" / "quick-start-current.json").read_bytes())
+    assert state["embedding_local_fallback"] is False
+
+
+def test_precheck_explicit_fallback_address_does_not_take_startup_ownership(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "OAMB_EMBEDDING_BASE_URL=change-me",
+            "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1",
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "embedding start_" not in trace.read_text(encoding="utf-8")
+    state = json.loads((root / "outputs" / "tmp" / "quick-start-current.json").read_bytes())
+    assert state["embedding_local_fallback"] is False
+
+
+def test_precheck_preserves_owned_local_fallback_across_reruns(tmp_path: Path) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+
+    first = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    assert json.loads(state_path.read_bytes())["embedding_local_fallback"] is True
+
+    second = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert json.loads(state_path.read_bytes())["embedding_local_fallback"] is True
+
+
+def test_precheck_preserves_fallback_ownership_when_provider_preparation_fails(
+    tmp_path: Path,
+) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    _write_executable(
+        root / "provider-services" / "bin" / "provider-services",
+        "exit 73",
+    )
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 73
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    assert not state_path.exists()
+    assert (root / "outputs" / "tmp" / "embedding-ownership").read_text(
+        encoding="utf-8"
+    ) == "local-fallback\n"
+    assert "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1" in (
+        root / ".env"
+    ).read_text(encoding="utf-8")
+
+
+def test_failed_reprecheck_preserves_previous_quick_start_selection(tmp_path: Path) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    first = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    original_state = state_path.read_bytes()
+    _write_executable(
+        root / "provider-services" / "bin" / "provider-services",
+        "exit 73",
+    )
+
+    second = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert second.returncode == 73
+    assert state_path.read_bytes() == original_state
+    assert (root / "outputs" / "tmp" / "embedding-ownership").read_text(
+        encoding="utf-8"
+    ) == "local-fallback\n"
+
+
+def test_precheck_rejects_embedding_api_key_without_service_url(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8")
+        .replace("OAMB_EMBEDDING_API_KEY=change-me", "OAMB_EMBEDDING_API_KEY=orphaned-key")
+        .replace("OAMB_EMBEDDING_API_KEY=\n", "OAMB_EMBEDDING_API_KEY=orphaned-key\n"),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "OAMB_EMBEDDING_API_KEY requires OAMB_EMBEDDING_BASE_URL" in result.stderr
+    assert "embedding start_" not in trace.read_text(encoding="utf-8")
 
 
 def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path) -> None:
@@ -930,7 +1277,8 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         "LLM_URL_TYPE=openai_chat\n"
         "LLM_BASE_URL=test\n"
         "LLM_API_KEY=test\n"
-        "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1\n",
+        "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1\n"
+        "OAMB_EMBEDDING_API_KEY=\n",
         encoding="utf-8",
     )
     (root / ".env").chmod(0o600)
@@ -982,6 +1330,7 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         "resolved_plan": str(plan),
         "dataset_source": str(dataset),
         "question_id": "72e3ee87",
+        "embedding_local_fallback": True,
     }
     state_path = root / "outputs" / "tmp" / "quick-start-current.json"
     state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -1859,10 +2208,50 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
     assert "run: PASS (full, 60 questions, 180 provider results)" in result.stdout
 
 
-def test_run_full_resume_restores_local_runtime_before_dispatch(tmp_path: Path) -> None:
+def test_run_full_resume_probes_configured_docker_host_embedding_without_starting_local(
+    tmp_path: Path,
+) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
     _write_provider_result_run(root)
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["embedding_local_fallback"] = False
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8")
+        .replace(
+            "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1",
+            "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:19000/v1",
+        )
+        .replace("OAMB_EMBEDDING_API_KEY=\n", ""),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "embedding: PASS (prechecked external endpoint reachable)" in result.stdout
+    assert "provider-services up" in trace.read_text(encoding="utf-8")
+
+
+def test_run_full_resume_restores_legacy_local_runtime_before_dispatch(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    _write_provider_result_run(root)
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("embedding_local_fallback")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     _write_executable(
         Path(env["PATH"].split(":", 1)[0]) / "curl",
         """
@@ -1993,7 +2382,7 @@ die() {{ printf '%s\n' "$*" >&2; exit 1; }}
 uname() {{ printf 'Darwin\n'; }}
 resolve_host_embedding_base() {{ printf 'http://127.0.0.1:18000/v1\n'; }}
 probe_embedding() {{ return 1; }}
-start_local_embedding 'http://host.docker.internal:18000/v1' '{log_file}' '{pid_file}'
+start_local_embedding 'http://host.docker.internal:18000/v1' 'local-key' '{log_file}' '{pid_file}'
 """
 
     result = subprocess.run(

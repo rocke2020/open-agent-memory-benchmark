@@ -69,13 +69,7 @@ Install Git, Python 3.11 or newer, `uv`, Docker Engine with Compose, `curl`,
 `jq`, and `shasum`. You also need an OpenAI-compatible endpoint that serves
 `deepseek-v4-flash` and `deepseek-v4-pro`.
 
-For local embeddings, macOS uses the checked-in vLLM-Metal helper and Linux uses
-the checked-in Ollama helper. The embedding model must be
-`qwen3-embedding:0.6b`, return 1,024 dimensions, and accept at least 8,192 input
-tokens. The macOS helper expects a sibling `vllm-metal` checkout and the cached
-model paths described by its error messages; the Linux helper requires Ollama
-and may download the 639 MB model on first use. On Linux, Ollama binds only to
-the Docker bridge gateway needed by the provider containers, not to LAN interfaces.
+OAMB can reuse any local or paid OpenAI-compatible embedding service. The configured service must serve `qwen3-embedding:0.6b`, return 1,024 dimensions, and accept at least 8,192 input tokens. The API key is optional for an unauthenticated local service. If no embedding service URL is configured, macOS starts the checked-in vLLM-Metal helper and Linux starts the checked-in Ollama helper. The macOS fallback expects a sibling `vllm-metal` checkout and the cached model paths described by its error messages; the Linux fallback requires Ollama and may download the 639 MB model on first use. On Linux, the fallback binds only to the Docker bridge gateway needed by the provider containers, not to LAN interfaces.
 
 ### 1. Precheck
 
@@ -86,36 +80,26 @@ git clone https://github.com/rocke2020/open-agent-memory-benchmark.git && \
   cd open-agent-memory-benchmark
 ```
 
-Prepare the ignored root `.env` from `./.env.example`, keep
-`LLM_URL_TYPE=openai_chat`, set `LLM_BASE_URL` and `LLM_API_KEY`, and keep the
-file mode `0600`. Then run:
+Prepare the ignored root `.env` from `./.env.example`, keep `LLM_URL_TYPE=openai_chat`, set `LLM_BASE_URL` and `LLM_API_KEY`, and keep the file mode `0600`. To reuse a local or paid embedding API, set `OAMB_EMBEDDING_BASE_URL`; set `OAMB_EMBEDDING_API_KEY` only when that service requires authentication. You may omit `OAMB_EMBEDDING_API_KEY` or leave it empty for an unauthenticated service; both forms have the same behavior. For example, an already-running host-local vLLM-Metal service uses:
+
+```dotenv
+OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:18000/v1
+OAMB_EMBEDDING_API_KEY=
+```
+
+OAMB keeps this host-side URL unchanged for probing and derives `http://host.docker.internal:18000/v1` only for the provider containers. HTTPS or IPv6 loopback URLs are rejected because rewriting them would either break TLS hostname verification or leave containers pointing at themselves; use the HTTP IPv4 loopback form above or a hostname reachable from Docker. A paid service uses the same fields with its HTTPS base URL and API key.
+
+Then run:
 
 ```bash
 ./precheck.sh
 ```
 
-`configs/benchmark.yml` is the only source for model names, roles, and thinking
-effort; those values are never copied into `.env`. `precheck.sh` completes the
-private endpoint, credential, and host-runtime inputs in `.env`, freezes the
-benchmark plan, and exports its model settings to the provider processes. It
-then installs locked dependencies, downloads and verifies LongMemEval, clones
-and verifies the pinned Mem0 source, starts the OS-specific embedding server
-when needed, starts all three memory providers, and verifies every runtime role.
-Existing configured values and provider data are reused, not overwritten.
+`configs/benchmark.yml` is the only source for model names, roles, thinking effort, and the environment-variable names that own model connections; endpoint and credential values remain private in `.env`. `precheck.sh` completes private runtime inputs, freezes the benchmark plan, and exports its model settings to the provider processes. When the embedding URL is configured, it reuses that service and does not start vLLM-Metal or Ollama; a missing or empty API key selects keyless access. When the URL is not configured, it fills the local URL default and starts the OS-specific fallback. An API key without a URL fails closed. It then installs locked dependencies, downloads and verifies LongMemEval, clones and verifies the pinned Mem0 source, starts all three memory providers, and verifies every runtime role. Existing configured values and provider data are reused, not overwritten.
 
 Provider applications derive their `NO_PROXY` list from the host in the root `LLM_BASE_URL`, together with the required local service hosts, so requests to that model endpoint bypass proxy routing.
 
-To use an OpenAI-compatible online embedding endpoint directly, pass its base
-URL. The endpoint must accept the profile's `oamb-local-embedding` bearer value:
-
-```bash
-./precheck.sh --embedding-api-url https://embedding.example/v1
-```
-
-To keep an already configured embedding endpoint without starting a local
-server, use `./precheck.sh --no-start-embedding`. In both cases the all-role
-readiness gate still sends a real embedding request and validates the returned
-model and dimensions. Do not continue unless precheck prints `precheck: PASS`.
+The all-role readiness gate sends a real embedding request and validates the returned model and dimensions for either an external service or the local fallback. Its direct host-side probe sends no `Authorization` header when `OAMB_EMBEDDING_API_KEY` is missing or empty. For keyless endpoints, provider-owned OpenAI clients receive the non-secret `oamb-no-auth` compatibility value because some clients require a non-empty constructor argument. `--embedding-api-url URL` remains available as a one-run URL override and does not require a key. Use `./precheck.sh --no-start-embedding` only when the configured fallback endpoint is already managed separately. Do not continue unless precheck prints `precheck: PASS`.
 
 ### 2. Run
 

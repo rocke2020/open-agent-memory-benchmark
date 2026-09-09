@@ -112,6 +112,8 @@ _SERVICE_RECEIPT_POINTER = "service-verification-current.sha256"
 _LLM_URL_TYPE_VARIABLE = "LLM_URL_TYPE"
 _SUPPORTED_LLM_URL_TYPE = "openai_chat"
 _RUN_SH_PROCESS_ID_VARIABLE = "OAMB_RUN_SH_PROCESS_ID"
+_SUPPORTED_EMBEDDING_URL_TYPE = "openai_embeddings"
+_OPTIONAL_EMPTY_ENVIRONMENT_REFERENCES = frozenset({"OAMB_EMBEDDING_API_KEY"})
 
 
 class LiveConfigurationError(ValueError):
@@ -184,7 +186,10 @@ def load_live_environment(
     """Load local runtime values as inert data and derive loopback service URLs."""
 
     environment = dict(base_environment)
-    environment.update(load_t10_provider_environment(provider_env_path))
+    provider_environment = load_t10_provider_environment(provider_env_path)
+    for name in _OPTIONAL_EMPTY_ENVIRONMENT_REFERENCES:
+        provider_environment.setdefault(name, "")
+    environment.update(provider_environment)
     environment.update(
         load_t10_provider_environment(
             model_env_path,
@@ -1368,8 +1373,14 @@ def _resolve_environment(
 ) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for name in required_names:
-        value = environment.get(name)
-        if not isinstance(value, str) or not value:
+        value: str | None
+        if name not in environment and name in _OPTIONAL_EMPTY_ENVIRONMENT_REFERENCES:
+            value = ""
+        else:
+            value = environment.get(name)
+        if not isinstance(value, str) or (
+            not value and name not in _OPTIONAL_EMPTY_ENVIRONMENT_REFERENCES
+        ):
             raise LiveConfigurationError(f"missing live environment reference: {name}")
         resolved[name] = value
     return resolved
@@ -1443,7 +1454,11 @@ def _role_bindings(
                     if role.execution_owner == "harness"
                     else BindingKind.NATIVE
                 ),
-                provider=("vllm-metal" if role.role_id == "embedding" else _SUPPORTED_LLM_URL_TYPE),
+                provider=(
+                    _SUPPORTED_EMBEDDING_URL_TYPE
+                    if role.role_id == "embedding"
+                    else _SUPPORTED_LLM_URL_TYPE
+                ),
                 endpoint_reference=role.endpoint_variable,
                 credential_variable_name=(
                     None

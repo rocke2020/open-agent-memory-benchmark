@@ -11,6 +11,15 @@ oamb_compose() {
         printf 'invalid LLM_BASE_URL for producer proxy bypass\n' >&2
         return 1
     }
+    oamb_embedding_base=$(resolve_container_embedding_base \
+        "$(read_env_value "$oamb_compose_env_file" OAMB_EMBEDDING_BASE_URL)") || {
+        printf 'unsupported loopback OAMB_EMBEDDING_BASE_URL for provider containers\n' >&2
+        return 1
+    }
+    oamb_embedding_api_key=$(effective_embedding_api_key "$oamb_compose_env_file") || {
+        printf 'cannot load optional OAMB_EMBEDDING_API_KEY assignment\n' >&2
+        return 1
+    }
 
     env \
         OAMB_LLM_NO_PROXY="$oamb_llm_no_proxy" \
@@ -19,7 +28,8 @@ oamb_compose() {
         OAMB_MEM0_PORT="$(read_env_value "$oamb_compose_env_file" OAMB_MEM0_PORT)" \
         OAMB_MEM0_INSPECTOR_PORT="$(read_env_value "$oamb_compose_env_file" OAMB_MEM0_INSPECTOR_PORT)" \
         OAMB_OPENVIKING_PORT="$(read_env_value "$oamb_compose_env_file" OAMB_OPENVIKING_PORT)" \
-        OAMB_EMBEDDING_BASE_URL="$(read_env_value "$oamb_compose_env_file" OAMB_EMBEDDING_BASE_URL)" \
+        OAMB_EMBEDDING_BASE_URL="$oamb_embedding_base" \
+        OAMB_EMBEDDING_API_KEY="$oamb_embedding_api_key" \
         OAMB_EMBEDDING_MODEL="$(read_runtime_env_value "$oamb_compose_env_file" OAMB_EMBEDDING_MODEL)" \
         OAMB_HINDSIGHT_LLM_PROVIDER=openai \
         OAMB_HINDSIGHT_LLM_MODEL="$(read_runtime_env_value "$oamb_compose_env_file" OAMB_HINDSIGHT_LLM_MODEL)" \
@@ -44,6 +54,6 @@ oamb_compose() {
         -p "$(read_env_value "$oamb_compose_env_file" OAMB_PROVIDER_PROJECT)" \
         --env-file "$oamb_compose_env_file" -f "$oamb_compose_root/compose.yaml" "$@"
     oamb_compose_status=$?
-    unset oamb_llm_no_proxy
+    unset oamb_llm_no_proxy oamb_embedding_base oamb_embedding_api_key
     return "$oamb_compose_status"
 }
