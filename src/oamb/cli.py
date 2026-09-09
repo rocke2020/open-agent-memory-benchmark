@@ -679,6 +679,20 @@ def compare_command(
             help="Exact frozen dataset file used to add local-only question and answer details.",
         ),
     ] = None,
+    analysis_model_env: Annotated[
+        Path | None,
+        typer.Option(
+            "--analysis-model-env",
+            help="Explicit dotenv file for one cached five-metric report analysis call.",
+        ),
+    ] = None,
+    analysis_cache_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--analysis-cache-root",
+            help="Content-addressed cache for sealed report-analysis responses.",
+        ),
+    ] = None,
     full_progress_root: Annotated[
         Path | None,
         typer.Option(
@@ -704,9 +718,25 @@ def compare_command(
         build_comparison_project,
         build_full_progress_comparison_project,
     )
+    from .reporting.report_analysis import build_report_analysis_generator
 
     try:
         plan = load_resolved_plan_for_run(resolved_plan)
+        if analysis_model_env is None and analysis_cache_root is not None:
+            raise typer.BadParameter("--analysis-cache-root requires --analysis-model-env")
+        analysis_generator = (
+            build_report_analysis_generator(
+                plan=plan,
+                model_env_path=analysis_model_env,
+                cache_root=(
+                    analysis_cache_root
+                    if analysis_cache_root is not None
+                    else output_root.parent / "report-analysis-cache"
+                ),
+            )
+            if analysis_model_env is not None
+            else None
+        )
         if full_progress_root is not None:
             if cell_root or validation or diagnostic:
                 raise typer.BadParameter(
@@ -722,6 +752,7 @@ def compare_command(
                 case_manifest=selection.case_manifest,
                 output_root=output_root,
                 dataset_source=dataset_source,
+                analysis_generator=analysis_generator,
             )
         else:
             roots = _named_paths(cell_root or [], label="cell root")
@@ -744,6 +775,7 @@ def compare_command(
                 output_root=output_root,
                 dataset_source=dataset_source,
                 diagnostic=diagnostic,
+                analysis_generator=analysis_generator,
             )
     except (OSError, ComparisonProjectError, ResolvedPlanError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -751,6 +783,12 @@ def compare_command(
         typer.echo(f"comparison: {comparison_path}")
     typer.echo(f"report export: {built.export_path}")
     typer.echo(f"offline report: {built.html_path}")
+    analysis_path = getattr(built, "analysis_path", None)
+    typer.echo(
+        f"report analysis: {analysis_path}"
+        if analysis_path is not None
+        else "report analysis: unavailable"
+    )
 
 
 def _named_paths(values: list[str], *, label: str) -> dict[str, Path]:

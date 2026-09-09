@@ -7,16 +7,13 @@ compare agent-memory systems under one shared evaluation protocol. Agent memory
 is the layer that turns an agent's past interactions into searchable memory and
 retrieves useful information for later tasks.
 
-The v0.1.0 profile runs Hindsight, Mem0, and OpenViking on the same balanced
-selection of 60 LongMemEval questions: ten questions from each of six question
-types. It reports four main metrics separately:
+The v0.1.0 profile runs Hindsight, Mem0, and OpenViking on the same balanced selection of 60 LongMemEval questions: ten questions from each of six question types. It reports five main metrics separately, in decision-priority order:
 
-- **Answer accuracy** — how often the agent answers correctly using retrieved
-  memory.
+- **Answer accuracy** — how often the agent answers correctly using retrieved memory.
 - **Context tokens** — how much retrieved memory is shown to the answer model.
-- **Indexing tokens** — the measured token usage required to turn the test
-  history into searchable memory.
-- **Latency** — how long indexing readiness and memory retrieval take.
+- **Indexing tokens** — the measured token usage required to turn the test history into searchable memory.
+- **Retrieval latency** — how long the provider memory-query request takes.
+- **Indexing time** — how long the complete ingestion path takes from the first provider write through terminal readiness.
 
 Retries, failures, resource usage, cost, and measurement coverage remain visible
 supporting evidence. OAMB does not hide the trade-offs inside one universal
@@ -133,6 +130,8 @@ Run the complete balanced LME-60 comparison with:
 ```
 
 Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. All three use up to 10 native extraction retries and three ingestion submissions per batch. After a settled batch exhausts its submissions, OAMB records the skipped sources, preserves any partial memory, and continues the question’s remaining history in the same scope. Answer and judge calls have independent limits of six outer attempts and two transport retries per attempt; invalid output is fed back with its validation error. The report identifies partial ingestion and unjudged results, and retains physical attempts and available usage evidence. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
+
+After deterministic comparison data closes, report generation starts two bounded branches: base HTML preparation and one concise five-metric analysis using the frozen judge model and the configured `LLM_BASE_URL`/`LLM_API_KEY`. Analysis permits at most six total attempts, stores received responses in a content-addressed private cache, and publishes `report-analysis.json` only after strict schema and report-hash validation. Final HTML waits for both branches and embeds a valid analysis directly; if analysis remains unavailable, the numeric report still opens with an explicit unavailable notice. A matching cache prevents another billable call, and the final HTML remains self-contained and network-free. Analysis-call usage is recorded in the sidecar but remains outside the five benchmark metrics.
 
 For optional debugging, run the frozen question `72e3ee87` once on all three
 providers in parallel. `--smoke_test` is the default, so these are identical:

@@ -441,12 +441,16 @@ build_comparison() {
       --validation "${CELLS[1]}=${validations[1]}" \
       --validation "${CELLS[2]}=${validations[2]}" \
       --dataset-source "$DATASET_SOURCE" \
+      --analysis-model-env "$ROOT/.env" \
+      --analysis-cache-root "$MODE_DIR/report-analysis-cache" \
       --output-root "$comparison" \
       --diagnostic
   else
     uv run --locked oamb compare "$PLAN" \
       --full-progress-root "$MODE_DIR/results" \
       --dataset-source "$DATASET_SOURCE" \
+      --analysis-model-env "$ROOT/.env" \
+      --analysis-cache-root "$MODE_DIR/report-analysis-cache" \
       --output-root "$comparison"
   fi
 

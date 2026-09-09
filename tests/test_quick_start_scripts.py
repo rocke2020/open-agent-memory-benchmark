@@ -1566,6 +1566,8 @@ def test_run_full_test_runs_directly_and_validates_sixty_case_report(
     comparison_call = next(line for line in calls.splitlines() if "oamb compare" in line)
     assert "--diagnostic" not in comparison_call
     assert "--full-progress-root" in comparison_call
+    assert "--analysis-model-env" in comparison_call
+    assert "--analysis-cache-root" in comparison_call
     assert "--cell-root" not in comparison_call
     assert "--validation" not in comparison_call
     report = json.loads(

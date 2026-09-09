@@ -800,3 +800,79 @@ def test_compare_accepts_only_the_three_canonical_full_progress_files(
     assert result.exit_code == 0, result.output
     assert captured["args"] == (plan, progresses)
     assert cast(dict[str, object], captured["kwargs"])["case_manifest"] is selection.case_manifest
+
+
+def test_compare_builds_the_report_analysis_generator_from_explicit_model_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the normal compare CLI silently omitting requested LLM analysis."""
+
+    from oamb.config import doctor
+    from oamb.reporting import comparison_project, report_analysis
+
+    factory = getattr(report_analysis, "build_report_analysis_generator", None)
+    assert factory is not None, "report analysis generator factory is not implemented"
+    plan = _plan()
+    resolved_plan = tmp_path / "resolved-plan.json"
+    resolved_plan.write_text('{"schema_name":"resolved_plan"}', encoding="utf-8")
+    model_env = tmp_path / ".env"
+    model_env.write_text(
+        "LLM_URL_TYPE=openai_chat\nLLM_BASE_URL=https://models.example/v1\nLLM_API_KEY=test-key\n",
+        encoding="utf-8",
+    )
+    progresses = {cell.cell_id: object() for cell in plan.cells}
+    selection = SimpleNamespace(progress_by_cell=progresses, case_manifest=object())
+    report_root = tmp_path / "report"
+    cache_root = tmp_path / "analysis-cache"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(doctor, "load_resolved_plan_for_run", lambda _path: plan)
+    monkeypatch.setattr(live, "load_full_resume_selection", lambda **_kwargs: selection)
+
+    def sentinel_generator(_export: object) -> None:
+        return None
+
+    def build_generator(**kwargs: object) -> object:
+        captured["factory"] = kwargs
+        return sentinel_generator
+
+    monkeypatch.setattr(report_analysis, "build_report_analysis_generator", build_generator)
+
+    def build_progress_report(*_args: object, **kwargs: object) -> SimpleNamespace:
+        captured["builder"] = kwargs
+        return SimpleNamespace(
+            comparison_paths=(),
+            export_path=report_root / "report.json",
+            html_path=report_root / "report.html",
+            analysis_path=None,
+        )
+
+    monkeypatch.setattr(
+        comparison_project,
+        "build_full_progress_comparison_project",
+        build_progress_report,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "compare",
+            str(resolved_plan),
+            "--full-progress-root",
+            str(tmp_path / "results"),
+            "--output-root",
+            str(report_root),
+            "--analysis-model-env",
+            str(model_env),
+            "--analysis-cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert cast(dict[str, object], captured["factory"])["plan"] is plan
+    assert cast(dict[str, object], captured["factory"])["model_env_path"] == model_env
+    assert cast(dict[str, object], captured["factory"])["cache_root"] == cache_root
+    assert cast(dict[str, object], captured["builder"])["analysis_generator"] is sentinel_generator
+    assert "report analysis: unavailable" in result.output

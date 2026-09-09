@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import json
 import re
+import threading
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -12,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from oamb.config.benchmark import load_benchmark_configuration
@@ -1238,13 +1241,13 @@ def test_project_reports_separated_accounting_and_preserves_unavailable_measurem
         "total": 312,
     }
     rendered = built.html_path.read_text(encoding="utf-8")
-    assert "<th>Judged accuracy</th>" in rendered
-    assert "<th>Ctx tokens</th>" in rendered
-    assert "Four decision metrics" in rendered
+    assert "<th>Answer accuracy</th>" in rendered
+    assert "<th>Context tokens</th>" in rendered
+    assert "Five decision metrics" in rendered
     assert "312 total / 52 mean" in rendered
     assert "<th>Indexing tokens</th>" in rendered
-    assert "<th>Index-ready latency (s)</th>" in rendered
-    assert "<th>Recall latency (s)</th>" in rendered
+    assert "<th>Retrieval latency (s)</th>" in rendered
+    assert "<th>Indexing time (s)</th>" in rendered
     assert "/ coverage</th>" not in rendered
     assert "<th>Configured</th>" not in rendered
     assert "<th>Runtime</th>" in rendered
@@ -1545,6 +1548,14 @@ def test_project_revalidates_roots_rejects_manifest_drift_and_builds_offline_det
     assert re.search(r"\b\d+(?:\.\d+)? ms\b", html) is None
     assert '<a href="report.json" download>Download report.json</a>' in html
     assert "<pre>{" not in html
+    assert "Five decision metrics:" in html
+    assert (
+        "Answer accuracy · Context tokens · Indexing tokens · Retrieval latency · Indexing time"
+        in html
+    )
+    assert html.index("<th>Retrieval latency (s)</th>") < html.index("<th>Indexing time (s)</th>")
+    assert "Concise metric comparison" in html
+    assert "Analysis unavailable" in html
 
     stale_root = next(iter(supplied_by_root))
     stale_validation = supplied_by_root[stale_root]
@@ -1590,6 +1601,130 @@ def test_project_revalidates_roots_rejects_manifest_drift_and_builds_offline_det
             cross_dataset_sources,
             output_root=tmp_path / "report-cross-dataset",
         )
+
+
+def test_project_seals_and_embeds_analysis_bound_to_the_exact_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an analysis sidecar omitted from the manifest or blindly embedded."""
+
+    from oamb.reporting import comparison_project
+    from oamb.reporting.report_analysis import generate_report_analysis
+
+    plan = _plan(tmp_path)
+    sources = _sources(tmp_path, plan)
+    supplied_by_root = {source.root: source.validation_result for source in sources.values()}
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: supplied_by_root[root],
+    )
+    metric_ids = (
+        "answer_accuracy",
+        "context_tokens",
+        "indexing_tokens",
+        "retrieval_latency",
+        "indexing_time",
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        content = json.dumps(
+            {
+                "overall": "The observed providers trade quality, tokens, and time.",
+                "metrics": {
+                    metric_id: f"Evidence-bounded comparison for {metric_id}."
+                    for metric_id in metric_ids
+                },
+            }
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            },
+        )
+
+    def generate(export: dict[str, object]) -> bytes | None:
+        generated = generate_report_analysis(
+            export,
+            model="deepseek-v4-flash",
+            thinking_effort="high",
+            base_url="https://models.example/v1",
+            api_key="secret-test-key",
+            cache_root=tmp_path / "analysis-cache",
+            timeout_seconds=30,
+            transport=httpx.MockTransport(handler),
+            sleep=lambda _seconds: None,
+        )
+        assert generated is not None
+        return generated.analysis_path.read_bytes()
+
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / "report",
+        analysis_generator=generate,
+    )
+
+    assert built.analysis_path == built.output_root / "report-analysis.json"
+    analysis_bytes = built.analysis_path.read_bytes()
+    analysis = json.loads(analysis_bytes)
+    assert (
+        analysis["report_export_sha256"]
+        == hashlib.sha256(built.export_path.read_bytes()).hexdigest()
+    )
+    html = built.html_path.read_text(encoding="utf-8")
+    assert analysis["overall"] in html
+    for item in analysis["metrics"]:
+        assert item["analysis"] in html
+    manifest = json.loads(built.manifest_path.read_bytes())
+    assert manifest["analysis_sha256"] == hashlib.sha256(analysis_bytes).hexdigest()
+
+
+def test_report_analysis_and_base_html_preparation_overlap_before_final_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches serial analysis/render preparation or publication before their join."""
+
+    from oamb.reporting import comparison_project
+
+    base_renderer = getattr(comparison_project, "_render_base_html", None)
+    assert base_renderer is not None, "base HTML preparation is not independently runnable"
+    base_renderer = cast(Callable[[dict[str, object]], bytes], base_renderer)
+    plan = _plan(tmp_path)
+    sources = _sources(tmp_path, plan)
+    supplied_by_root = {source.root: source.validation_result for source in sources.values()}
+    monkeypatch.setattr(
+        comparison_project,
+        "validate_source_root",
+        lambda root: supplied_by_root[root],
+    )
+    analysis_started = threading.Event()
+    base_started = threading.Event()
+
+    def blocked_base_renderer(export: dict[str, object]) -> bytes:
+        base_started.set()
+        assert analysis_started.wait(2), "analysis generation did not overlap base rendering"
+        return base_renderer(export)
+
+    def blocked_analysis(_export: dict[str, object]) -> None:
+        analysis_started.set()
+        assert base_started.wait(2), "base rendering did not overlap analysis generation"
+        return None
+
+    monkeypatch.setattr(comparison_project, "_render_base_html", blocked_base_renderer)
+    built = comparison_project.build_comparison_project(
+        plan,
+        sources,
+        output_root=tmp_path / "report",
+        analysis_generator=blocked_analysis,
+    )
+
+    assert base_started.is_set()
+    assert analysis_started.is_set()
+    assert built.analysis_path is None
+    assert "Analysis unavailable" in built.html_path.read_text(encoding="utf-8")
 
 
 def test_report_without_dataset_source_has_closed_absent_detail_state(
@@ -1776,8 +1911,8 @@ def test_export_validation_rejects_unsafe_html_before_publication_marker(
     )
     monkeypatch.setattr(
         comparison_project,
-        "_render_html",
-        lambda export: b"<html><script>alert(1)</script></html>",
+        "_embed_report_analysis",
+        lambda _base, _analysis: b"<html><script>alert(1)</script></html>",
     )
     output_root = tmp_path / "unsafe-report"
 

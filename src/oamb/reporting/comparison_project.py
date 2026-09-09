@@ -9,7 +9,8 @@ import html
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
@@ -33,14 +34,20 @@ from oamb.contracts.evidence import CapsuleManifest, ValidationResult
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
+from oamb.reporting.report_analysis import (
+    REPORT_ANALYSIS_METRICS,
+    REPORT_ANALYSIS_NAME,
+    parse_report_analysis,
+)
 
 REPORT_EXPORT_NAME = "report.json"
 REPORT_HTML_NAME = "report.html"
 REPORT_MANIFEST_NAME = "report-manifest.json"
 PAIR_DIRECTORY = "comparisons"
+_REPORT_ANALYSIS_SLOT = b"<!--oamb-report-analysis-slot-->"
 CONTROLLED_COMPARISON_WARNING = (
-    "This is a controlled quality and token-efficiency comparison, not a deployment or "
-    "provider-default-configuration comparison."
+    "This is a controlled quality, token-efficiency, and observed-time comparison, not a "
+    "deployment or provider-default-configuration comparison."
 )
 TOKEN_DIMENSIONS = (
     "input_tokens",
@@ -129,6 +136,10 @@ class ComparisonProjectBuildResult:
     comparison_paths: tuple[Path, ...]
     manifest_path: Path
     report_id: str
+    analysis_path: Path | None = None
+
+
+AnalysisGenerator = Callable[[dict[str, object]], bytes | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +172,7 @@ def build_comparison_project(
     output_root: Path,
     dataset_source: Path | None = None,
     diagnostic: bool = False,
+    analysis_generator: AnalysisGenerator | None = None,
 ) -> ComparisonProjectBuildResult:
     """Revalidate all cells, derive every canonical pair, and publish one offline report."""
 
@@ -247,6 +259,7 @@ def build_comparison_project(
         provider_specific_result_count=sum(len(item.cases) for item in snapshots),
         output_root=output_root,
         diagnostic=diagnostic,
+        analysis_generator=analysis_generator,
     )
 
 
@@ -263,6 +276,7 @@ def _publish_comparison_documents(
     provider_specific_result_count: int,
     output_root: Path,
     diagnostic: bool,
+    analysis_generator: AnalysisGenerator | None,
 ) -> ComparisonProjectBuildResult:
     accuracy_decision = _report_accuracy_decision(plan, cell_documents, comparison_documents)
     export_body: dict[str, Any] = {
@@ -307,11 +321,25 @@ def _publish_comparison_documents(
     report_id = canonical_sha256(["oamb-comparison-project-initial-v1", export_body])
     export = {**export_body, "report_id": report_id}
     export_bytes = canonical_json_bytes(export)
-    html_bytes = _render_html(export)
+    analysis_bytes: bytes | None = None
+    if analysis_generator is None:
+        base_html = _render_base_html(export)
+    else:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="oamb-report") as executor:
+            base_future = executor.submit(_render_base_html, export)
+            analysis_future = executor.submit(analysis_generator, export)
+            base_html = base_future.result()
+            analysis_bytes = analysis_future.result()
+    analysis_document = (
+        parse_report_analysis(analysis_bytes, export) if analysis_bytes is not None else None
+    )
+    html_bytes = _embed_report_analysis(base_html, analysis_document)
     payloads: dict[str, bytes] = {
         REPORT_EXPORT_NAME: export_bytes,
         REPORT_HTML_NAME: html_bytes,
     }
+    if analysis_bytes is not None:
+        payloads[REPORT_ANALYSIS_NAME] = analysis_bytes
     pair_relative_paths: list[str] = []
     pair_entries: list[dict[str, object]] = []
     for ordinal, comparison in enumerate(comparison_documents, start=1):
@@ -328,7 +356,12 @@ def _publish_comparison_documents(
                 "sha256": hashlib.sha256(content).hexdigest(),
             }
         )
-    _validate_comparison_export(export, payloads, tuple(pair_relative_paths))
+    _validate_comparison_export(
+        export,
+        payloads,
+        tuple(pair_relative_paths),
+        analysis_document=analysis_document,
+    )
     marker = canonical_json_bytes(
         {
             "schema_name": "comparison_project_manifest",
@@ -337,6 +370,11 @@ def _publish_comparison_documents(
             "resolved_plan_hash": plan.resolved_plan_hash,
             "export_sha256": hashlib.sha256(export_bytes).hexdigest(),
             "html_sha256": hashlib.sha256(html_bytes).hexdigest(),
+            "analysis_sha256": (
+                hashlib.sha256(analysis_bytes).hexdigest()
+                if analysis_bytes is not None
+                else "unavailable"
+            ),
             "comparisons": pair_entries,
         }
     )
@@ -355,6 +393,7 @@ def _publish_comparison_documents(
         comparison_paths=tuple(root / item for item in pair_relative_paths),
         manifest_path=publication.marker_path,
         report_id=report_id,
+        analysis_path=(root / REPORT_ANALYSIS_NAME if analysis_bytes is not None else None),
     )
 
 
@@ -365,6 +404,7 @@ def build_full_progress_comparison_project(
     case_manifest: Any,
     output_root: Path,
     dataset_source: Path | None = None,
+    analysis_generator: AnalysisGenerator | None = None,
 ) -> ComparisonProjectBuildResult:
     """Build the final comparison from three closed flat progress snapshots."""
 
@@ -439,6 +479,7 @@ def build_full_progress_comparison_project(
         provider_specific_result_count=sum(len(item.cases) for item in adapted),
         output_root=output_root,
         diagnostic=False,
+        analysis_generator=analysis_generator,
     )
 
 
@@ -2490,12 +2531,19 @@ def _validate_comparison_export(
     export: Mapping[str, Any],
     payloads: Mapping[str, bytes],
     pair_relative_paths: tuple[str, ...],
+    *,
+    analysis_document: Mapping[str, object] | None,
 ) -> None:
     body = dict(export)
     report_id = body.pop("report_id", None)
     if report_id != canonical_sha256(["oamb-comparison-project-initial-v1", body]):
         raise ComparisonProjectError("comparison export report identity drifted")
-    expected_paths = {REPORT_EXPORT_NAME, REPORT_HTML_NAME, *pair_relative_paths}
+    expected_paths = {
+        REPORT_EXPORT_NAME,
+        REPORT_HTML_NAME,
+        *pair_relative_paths,
+        *(() if analysis_document is None else (REPORT_ANALYSIS_NAME,)),
+    }
     if set(payloads) != expected_paths:
         raise ComparisonProjectError("comparison export payload inventory is incomplete")
     if payloads[REPORT_EXPORT_NAME] != canonical_json_bytes(export):
@@ -2578,7 +2626,12 @@ def _validate_comparison_export(
         rendered = html_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ComparisonProjectError("comparison export does not contain safe HTML") from exc
-    if html_bytes != _render_html(export):
+    expected_html = (
+        _render_html(export)
+        if analysis_document is None
+        else _render_html(export, analysis_document)
+    )
+    if html_bytes != expected_html:
         raise ComparisonProjectError("comparison export HTML re-render differs")
     lowered = rendered.lower()
     inspector = _OfflineHtmlInspector()
@@ -2714,7 +2767,14 @@ def _validate_accuracy_export(export: Mapping[str, Any]) -> None:
         raise ComparisonProjectError("comparison export accuracy evidence leader decision drifted")
 
 
-def _render_html(export: Mapping[str, Any]) -> bytes:
+def _render_html(
+    export: Mapping[str, Any],
+    analysis: Mapping[str, object] | None = None,
+) -> bytes:
+    return _embed_report_analysis(_render_base_html(export), analysis)
+
+
+def _render_base_html(export: Mapping[str, Any]) -> bytes:
     cells = export["cells"]
     comparisons = export["comparisons"]
     models = export["models"]
@@ -2842,11 +2902,12 @@ a { color:inherit; }
 <p><strong>{_escape(export["controlled_comparison_warning"])}</strong></p>
 {dataset_notice}
 <p class="muted">Report ID: <code>{_escape(export["report_id"])}</code></p>
-<section><h2>Provider decision summary</h2><p class="metric-key"><strong>Four decision metrics:</strong> Accuracy · Ctx tokens · Indexing tokens · Index / recall latency</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Ctx tokens are the exact retrieval context shown to the answer model.</p>
+<section><h2>Provider decision summary</h2><p class="metric-key"><strong>Five decision metrics:</strong> Answer accuracy · Context tokens · Indexing tokens · Retrieval latency · Indexing time</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Context tokens are the exact retrieval context shown to the answer model.</p>
 <p><strong>{_escape(accuracy_decision_text)}</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Judged accuracy</th><th>Ctx tokens</th><th>Indexing tokens</th><th>Index-ready latency (s)</th><th>Recall latency (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Answer accuracy</th><th>Context tokens</th><th>Indexing tokens</th><th>Retrieval latency (s)</th><th>Indexing time (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
 {partial_ingestion_note}
-{_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Ctx tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Index-ready latency spans first ingest through readiness per isolated context; recall latency is the provider memory-query request. Both show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
+{_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Context tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Retrieval latency is the provider memory-query request. Indexing time spans first provider write through terminal readiness per isolated context. Both show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
+{_REPORT_ANALYSIS_SLOT.decode("ascii")}
 {accuracy_by_type}
 <section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points. Exact McNemar p uses the matched discordant outcomes.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th><th>Discordant A/B</th><th>Exact McNemar p</th><th>Decision</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
 <section><h2>Question results</h2><p>Each row shows one frozen question across all providers; expand the evidence-backed details below when available.</p><div class="table-wrap"><table><thead><tr><th>Question</th><th>Type</th>{provider_headings}</tr></thead><tbody>{question_rows}</tbody></table></div>{question_details}</section>
@@ -2867,10 +2928,51 @@ def _provider_summary_row(item: Mapping[str, Any]) -> str:
         f"<td>{_escape(_accuracy_text(item))}</td>"
         f"<td>{_escape(_context_text(item))}</td>"
         f"<td>{_escape(_supplier_tokens_text(item['accounting']['tokens']['indexing']))}</td>"
-        f"<td>{_escape(_request_time_text(item['observed_time']['indexing_ready']))}</td>"
         f"<td>{_escape(_request_time_text(item['observed_time']['provider_request']))}</td>"
+        f"<td>{_escape(_request_time_text(item['observed_time']['indexing_ready']))}</td>"
         "</tr>"
     )
+
+
+def _embed_report_analysis(
+    base_html: bytes,
+    analysis: Mapping[str, object] | None,
+) -> bytes:
+    if base_html.count(_REPORT_ANALYSIS_SLOT) != 1:
+        raise ComparisonProjectError("comparison report analysis slot is invalid")
+    if analysis is None:
+        fragment = (
+            '<section><h2>Concise metric comparison</h2><p class="muted">'
+            "Analysis unavailable.</p></section>"
+        )
+    else:
+        metrics = analysis.get("metrics")
+        if (
+            not isinstance(metrics, list)
+            or tuple(item.get("metric_id") for item in metrics if isinstance(item, Mapping))
+            != REPORT_ANALYSIS_METRICS
+        ):
+            raise ComparisonProjectError("comparison report analysis metric inventory drifted")
+        labels = {
+            "answer_accuracy": "Answer accuracy",
+            "context_tokens": "Context tokens",
+            "indexing_tokens": "Indexing tokens",
+            "retrieval_latency": "Retrieval latency",
+            "indexing_time": "Indexing time",
+        }
+        items = "".join(
+            "<li><strong>"
+            f"{_escape(labels[str(item['metric_id'])])}:</strong> "
+            f"{_escape(item['analysis'])}</li>"
+            for item in metrics
+            if isinstance(item, Mapping)
+        )
+        fragment = (
+            "<section><h2>Concise metric comparison</h2>"
+            f"<p>{_escape(analysis.get('overall', 'unavailable'))}</p>"
+            f"<ol>{items}</ol></section>"
+        )
+    return base_html.replace(_REPORT_ANALYSIS_SLOT, fragment.encode("utf-8"), 1)
 
 
 def _accuracy_text(item: Mapping[str, Any]) -> str:
@@ -3053,7 +3155,7 @@ def _secondary_accounting_html(cells: tuple[Mapping[str, Any], ...]) -> str:
     )
     return (
         "<details><summary>Secondary accounting</summary>"
-        f'<ul>{items}</ul><p class="muted">Lower Ctx tokens usually reduce Answer input, '
+        f'<ul>{items}</ul><p class="muted">Lower context tokens usually reduce Answer input, '
         "but this report does not infer a provider's internal retrieval strategy from that "
         "correlation.</p></details>"
     )
@@ -3240,7 +3342,7 @@ def _provider_detail_html(result: Mapping[str, Any]) -> str:
         return f"{heading}<p>{_escape(reason)}</p></details>"
     return (
         f"{heading}<p>Judge decision: <strong>{_escape(result['judge_decision'])}</strong>; "
-        f"Ctx tokens: {_escape(result['context_tokens'])}</p>"
+        f"Context tokens: {_escape(result['context_tokens'])}</p>"
         f"<h4>Model answer</h4><pre>{_escape(result['model_answer'])}</pre>"
         "<details><summary>Injected context</summary>"
         f"<pre>{_escape(result['injected_context'])}</pre></details></details>"
