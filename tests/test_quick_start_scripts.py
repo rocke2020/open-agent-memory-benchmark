@@ -2207,22 +2207,35 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
     assert "run: PASS (full, 60 questions, 180 provider results)" in result.stdout
 
 
-def test_run_full_resume_probes_configured_docker_host_embedding_without_starting_local(
+@pytest.mark.parametrize(
+    ("embedding_ownership", "embedding_url"),
+    (
+        (False, "http://host.docker.internal:19000/v1"),
+        (None, "http://127.0.0.1:19000/v1"),
+    ),
+    ids=("explicit_external", "legacy_missing"),
+)
+def test_run_full_resume_probes_configured_embedding_without_starting_local(
     tmp_path: Path,
+    embedding_ownership: bool | None,
+    embedding_url: str,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
     _write_provider_result_run(root)
     state_path = root / "outputs" / "tmp" / "quick-start-current.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    state["embedding_local_fallback"] = False
+    if embedding_ownership is None:
+        state.pop("embedding_local_fallback")
+    else:
+        state["embedding_local_fallback"] = embedding_ownership
     state_path.write_text(json.dumps(state), encoding="utf-8")
     env_path = root / ".env"
     env_path.write_text(
         env_path.read_text(encoding="utf-8")
         .replace(
             "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1",
-            "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:19000/v1",
+            f"OAMB_EMBEDDING_BASE_URL={embedding_url}",
         )
         .replace("OAMB_EMBEDDING_API_KEY=\n", ""),
         encoding="utf-8",
@@ -2243,10 +2256,48 @@ def test_run_full_resume_probes_configured_docker_host_embedding_without_startin
     assert "provider-services up" in trace.read_text(encoding="utf-8")
 
 
-def test_run_full_resume_restores_local_runtime_before_dispatch(tmp_path: Path) -> None:
+def test_run_rejects_malformed_explicit_embedding_ownership_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["embedding_local_fallback"] = "false"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = subprocess.run(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "precheck state has invalid embedding ownership" in result.stderr
+    assert not trace.exists()
+
+
+@pytest.mark.parametrize(
+    "embedding_ownership",
+    (True, None),
+    ids=("explicit_local", "legacy_missing"),
+)
+def test_run_full_resume_restores_local_runtime_before_dispatch(
+    tmp_path: Path,
+    embedding_ownership: bool | None,
+) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
     _write_provider_result_run(root)
+    if embedding_ownership is None:
+        state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.pop("embedding_local_fallback")
+        state_path.write_text(json.dumps(state), encoding="utf-8")
     _write_executable(
         Path(env["PATH"].split(":", 1)[0]) / "curl",
         """

@@ -310,10 +310,14 @@ WORK_DIR="$(jq -er '.work_dir | select(type == "string" and length > 0)' "$STATE
 PRECHECK_PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
 QUESTION_ID="$(jq -er '.question_id | select(type == "string" and length > 0)' "$STATE_FILE")"
 EMBEDDING_LOCAL_FALLBACK="$(jq -er '
-  .embedding_local_fallback |
-  if . == true then "true" elif . == false then "false" else error("not boolean") end
+  if has("embedding_local_fallback") then
+    .embedding_local_fallback |
+    if . == true then "true" elif . == false then "false" else error("not boolean") end
+  else
+    "legacy-url-inference"
+  end
 ' "$STATE_FILE")" || \
-  die "precheck state has no embedding ownership; rerun ./precheck.sh"
+  die "precheck state has invalid embedding ownership"
 case "$RUN_LABEL" in
   ""|"."|".."|*[!A-Za-z0-9._-]*) die "precheck state has invalid run label" ;;
 esac
@@ -395,6 +399,12 @@ if [[ "$RESUME" == true ]]; then
     die "cannot load the prechecked embedding endpoint"
   embedding_api_key="$(read_optional_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY)" || \
     die "cannot load the prechecked embedding API key"
+  if [[ "$EMBEDDING_LOCAL_FALLBACK" == legacy-url-inference ]]; then
+    case "$embedding_url" in
+      http://host.docker.internal:*) EMBEDDING_LOCAL_FALLBACK=true ;;
+      *) EMBEDDING_LOCAL_FALLBACK=false ;;
+    esac
+  fi
   if [[ "$EMBEDDING_LOCAL_FALLBACK" == true ]]; then
     embedding_stamp="$(date -u +%Y%m%d-%H%M%S)-$$"
     start_local_embedding "$embedding_url" "$embedding_api_key" \
