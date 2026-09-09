@@ -1879,6 +1879,91 @@ fi
     assert provider_ready.is_file()
 
 
+def test_run_full_resume_waits_for_recorded_embedding_startup(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    _write_canonical_full_progress(root)
+    state = json.loads(
+        (root / "outputs" / "tmp" / "quick-start-current.json").read_text(encoding="utf-8")
+    )
+    (Path(state["work_dir"]) / "embedding.pid").write_text(
+        f"{os.getpid()}\n",
+        encoding="utf-8",
+    )
+    _write_executable(
+        Path(env["PATH"].split(":", 1)[0]) / "curl",
+        """
+count=0
+if [ -f "$OAMB_TEST_EMBED_PROBE_COUNT" ]; then
+  count=$(cat "$OAMB_TEST_EMBED_PROBE_COUNT")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$OAMB_TEST_EMBED_PROBE_COUNT"
+printf 'embedding-probe %s\n' "$count" >> "$OAMB_TEST_TRACE"
+[ "$count" -ge 2 ] || exit 22
+python3 -c 'import json; print(json.dumps({"data": [{"embedding": [0.0] * 1024}]}))'
+""".strip(),
+    )
+    _write_executable(
+        root / "scripts" / "start_local_embedding" / "start_vllm_metal.sh",
+        "printf 'embedding-start\n' >> \"$OAMB_TEST_TRACE\"; exit 81",
+    )
+    env.update(
+        {
+            "OAMB_TEST_EMBED_PROBE_COUNT": str(tmp_path / "embedding-probe-count"),
+            "OAMB_EMBEDDING_STARTUP_ATTEMPTS": "3",
+        }
+    )
+
+    result = subprocess.run(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    assert "embedding-start" not in calls
+    assert calls.count("embedding-probe 1") == 1
+    assert calls.count("embedding-probe 2") == 1
+    assert "embedding: PASS (existing startup, pid " in result.stdout
+
+
+def test_recorded_embedding_timeout_names_pid_without_claiming_a_new_log(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "embedding.pid"
+    pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    log_file = tmp_path / "new-attempt.log"
+    program = f"""
+ROOT={REPOSITORY_ROOT}
+WORK_DIR={tmp_path}
+EMBEDDING_STARTUP_ATTEMPTS=1
+. "{HOST_EMBEDDING_SCRIPT}"
+die() {{ printf '%s\n' "$*" >&2; exit 1; }}
+uname() {{ printf 'Darwin\n'; }}
+resolve_host_embedding_base() {{ printf 'http://127.0.0.1:18000/v1\n'; }}
+probe_embedding() {{ return 1; }}
+start_local_embedding 'http://host.docker.internal:18000/v1' '{log_file}' '{pid_file}'
+"""
+
+    result = subprocess.run(
+        ["sh", "-c", program],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert f"recorded embedding helper did not become ready: {os.getpid()}" in result.stderr
+    assert str(log_file) not in result.stderr
+
+
 def test_run_full_resume_rehearsal_failure_stops_after_runtime_verification(
     tmp_path: Path,
 ) -> None:

@@ -307,7 +307,7 @@ if [[ "$RESUME" == true ]]; then
       embedding_stamp="$(date -u +%Y%m%d-%H%M%S)-$$"
       start_local_embedding "$embedding_url" \
         "$WORK_DIR/embedding-resume-$embedding_stamp.log" \
-        "$WORK_DIR/embedding-resume-$embedding_stamp.pid"
+        "$WORK_DIR/embedding.pid"
       ;;
     *)
       host_embedding_url="$(resolve_host_embedding_base "$embedding_url")" || \

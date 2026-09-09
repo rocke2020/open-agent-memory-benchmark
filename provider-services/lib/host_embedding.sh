@@ -86,31 +86,60 @@ start_local_embedding() {
         return
     fi
 
+    [ ! -L "$pid_file" ] || die "embedding PID path is unsafe: $pid_file"
+    local embedding_pid=""
+    local started_here=false
+    if [ -f "$pid_file" ]; then
+        embedding_pid=$(cat "$pid_file") || die "cannot read embedding PID: $pid_file"
+        case "$embedding_pid" in
+            ""|*[!0-9]*) embedding_pid="" ;;
+        esac
+        if [ -n "$embedding_pid" ] && [ "$embedding_pid" -gt 0 ] 2>/dev/null && \
+            kill -0 "$embedding_pid" 2>/dev/null; then
+            printf 'embedding: waiting for existing startup (pid %s)\n' "$embedding_pid"
+        else
+            embedding_pid=""
+        fi
+    fi
+
     local helper
     case "$(uname -s)" in
         Darwin) helper="$ROOT/scripts/start_local_embedding/start_vllm_metal.sh" ;;
         Linux) helper="$ROOT/scripts/start_local_embedding/start_ollama_embedding.sh" ;;
     esac
-    if [ -n "$helper_bind_host" ]; then
-        OAMB_OLLAMA_BIND_HOST="$helper_bind_host" "$helper" >"$log_file" 2>&1 &
-    else
-        "$helper" >"$log_file" 2>&1 &
+    if [ -z "$embedding_pid" ]; then
+        if [ -n "$helper_bind_host" ]; then
+            OAMB_OLLAMA_BIND_HOST="$helper_bind_host" "$helper" >"$log_file" 2>&1 &
+        else
+            "$helper" >"$log_file" 2>&1 &
+        fi
+        embedding_pid=$!
+        printf '%s\n' "$embedding_pid" > "$pid_file"
+        started_here=true
     fi
-    local embedding_pid=$!
-    printf '%s\n' "$embedding_pid" > "$pid_file"
 
     local attempt=1
     while [ "$attempt" -le "$EMBEDDING_STARTUP_ATTEMPTS" ]; do
         if probe_embedding "$host_url" >/dev/null 2>&1; then
-            printf 'embedding: PASS (%s, pid %s)\n' "$(basename "$helper")" "$embedding_pid"
+            if [ "$started_here" = true ]; then
+                printf 'embedding: PASS (%s, pid %s)\n' "$(basename "$helper")" "$embedding_pid"
+            else
+                printf 'embedding: PASS (existing startup, pid %s)\n' "$embedding_pid"
+            fi
             return
         fi
         if ! kill -0 "$embedding_pid" 2>/dev/null; then
-            wait "$embedding_pid" || true
-            die "embedding helper exited before readiness; inspect $log_file"
+            if [ "$started_here" = true ]; then
+                wait "$embedding_pid" || true
+                die "embedding helper exited before readiness; inspect $log_file"
+            fi
+            die "recorded embedding helper exited before readiness: $embedding_pid"
         fi
         sleep 1
         attempt=$((attempt + 1))
     done
-    die "embedding did not become ready; inspect $log_file"
+    if [ "$started_here" = true ]; then
+        die "embedding did not become ready; inspect $log_file"
+    fi
+    die "recorded embedding helper did not become ready: $embedding_pid"
 }
