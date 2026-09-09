@@ -613,11 +613,23 @@ def test_precheck_explicit_fallback_address_does_not_take_startup_ownership(
     assert state["embedding_local_fallback"] is False
 
 
-def test_precheck_preserves_owned_local_fallback_across_reruns(tmp_path: Path) -> None:
-    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+def test_precheck_explicit_fallback_address_ignores_stale_local_ownership(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
     script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "OAMB_EMBEDDING_BASE_URL=change-me",
+            "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1",
+        ),
+        encoding="utf-8",
+    )
+    ownership_path = root / "outputs" / "tmp" / "embedding-ownership"
+    ownership_path.write_text("local-fallback\n", encoding="utf-8")
 
-    first = subprocess.run(
+    result = subprocess.run(
         [str(script)],
         cwd=root,
         env=env,
@@ -626,25 +638,18 @@ def test_precheck_preserves_owned_local_fallback_across_reruns(tmp_path: Path) -
         check=False,
         timeout=20,
     )
-    assert first.returncode == 0, first.stdout + first.stderr
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "embedding: local startup skipped; configured API will be verified directly"
+        in result.stdout
+    )
+    assert "embedding start_" not in trace.read_text(encoding="utf-8")
     state_path = root / "outputs" / "tmp" / "quick-start-current.json"
-    assert json.loads(state_path.read_bytes())["embedding_local_fallback"] is True
-
-    second = subprocess.run(
-        [str(script)],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=20,
-    )
-
-    assert second.returncode == 0, second.stdout + second.stderr
-    assert json.loads(state_path.read_bytes())["embedding_local_fallback"] is True
+    assert json.loads(state_path.read_bytes())["embedding_local_fallback"] is False
 
 
-def test_precheck_preserves_fallback_ownership_when_provider_preparation_fails(
+def test_precheck_does_not_publish_state_when_provider_preparation_fails(
     tmp_path: Path,
 ) -> None:
     root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
@@ -667,9 +672,6 @@ def test_precheck_preserves_fallback_ownership_when_provider_preparation_fails(
     assert result.returncode == 73
     state_path = root / "outputs" / "tmp" / "quick-start-current.json"
     assert not state_path.exists()
-    assert (root / "outputs" / "tmp" / "embedding-ownership").read_text(
-        encoding="utf-8"
-    ) == "local-fallback\n"
     assert "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1" in (
         root / ".env"
     ).read_text(encoding="utf-8")
@@ -707,9 +709,6 @@ def test_failed_reprecheck_preserves_previous_quick_start_selection(tmp_path: Pa
 
     assert second.returncode == 73
     assert state_path.read_bytes() == original_state
-    assert (root / "outputs" / "tmp" / "embedding-ownership").read_text(
-        encoding="utf-8"
-    ) == "local-fallback\n"
 
 
 def test_precheck_rejects_embedding_api_key_without_service_url(
@@ -2213,7 +2212,7 @@ def test_run_full_resume_probes_configured_docker_host_embedding_without_startin
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
-    _write_canonical_full_progress(root)
+    _write_provider_result_run(root)
     state_path = root / "outputs" / "tmp" / "quick-start-current.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["embedding_local_fallback"] = False

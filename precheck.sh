@@ -8,7 +8,6 @@ readonly RUNTIME_DIR="$ROOT/provider-services/.runtime"
 readonly OUTPUTS_ROOT="$ROOT/outputs"
 readonly TMP_ROOT="$OUTPUTS_ROOT/tmp"
 readonly STATE_FILE="$TMP_ROOT/quick-start-current.json"
-readonly EMBEDDING_OWNERSHIP_FILE="$TMP_ROOT/embedding-ownership"
 readonly QUESTION_ID="72e3ee87"
 readonly DEFAULT_EMBEDDING_URL="http://host.docker.internal:18000/v1"
 readonly DEFAULT_HINDSIGHT_PORT="18888"
@@ -105,13 +104,6 @@ temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
 temporary.chmod(0o600)
 temporary.replace(path)
 PY
-}
-
-write_embedding_ownership() {
-  local ownership=$1
-  local temporary="$EMBEDDING_OWNERSHIP_FILE.tmp-$$"
-  printf '%s\n' "$ownership" > "$temporary"
-  mv "$temporary" "$EMBEDDING_OWNERSHIP_FILE"
 }
 
 random_secret() {
@@ -279,7 +271,7 @@ ensure_provider_environment() {
     set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$EMBEDDING_API_URL"
   fi
 
-  local embedding_url embedding_api_key previous_local_fallback
+  local embedding_url embedding_api_key
   embedding_url="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL 2>/dev/null || true)"
   embedding_api_key="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY 2>/dev/null || true)"
   if [[ "$embedding_url" == change-me* ]]; then embedding_url=""; fi
@@ -297,21 +289,7 @@ ensure_provider_environment() {
       set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
     fi
   else
-    previous_local_fallback=""
-    if [[ "$START_LOCAL_EMBEDDING" == true && \
-          "$embedding_url" == "$DEFAULT_EMBEDDING_URL" && \
-          -z "$embedding_api_key" && -f "$EMBEDDING_OWNERSHIP_FILE" && \
-          ! -L "$EMBEDDING_OWNERSHIP_FILE" ]]; then
-      previous_local_fallback="$(sed -n '1p' "$EMBEDDING_OWNERSHIP_FILE")"
-    fi
-    if [[ "$previous_local_fallback" != local-fallback ]]; then
-      START_LOCAL_EMBEDDING=false
-    fi
-  fi
-  if [[ "$START_LOCAL_EMBEDDING" == true ]]; then
-    write_embedding_ownership local-fallback
-  else
-    write_embedding_ownership configured-service
+    START_LOCAL_EMBEDDING=false
   fi
 }
 
