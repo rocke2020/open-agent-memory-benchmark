@@ -698,10 +698,6 @@ def _require_environment_reference(value: object, label: str) -> str:
 
 
 def _require_credential_reference(value: object, *, role_id: ModelRoleId) -> str:
-    if role_id == "embedding":
-        if value != "not_applicable":
-            raise BenchmarkConfigurationError("embedding credential must be not_applicable")
-        return "not_applicable"
     return _require_environment_reference(value, f"model role {role_id} credential")
 
 

@@ -72,6 +72,7 @@ def _environment() -> dict[str, str]:
         "LLM_BASE_URL": "https://model.example/v1",
         "LLM_API_KEY": "model-key",
         "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
+        "OAMB_EMBEDDING_API_KEY": "",
         "OAMB_EMBEDDING_MODEL": models.embedding.model,
     }
 
@@ -146,7 +147,7 @@ def test_builds_one_closed_live_cell_without_approval_or_client_construction(
             for binding in built.control.role_bindings
             if binding.role.value == "embedding"
         )
-        == "vllm-metal"
+        == "openai_embeddings"
     )
     assert built.role_ids == role_ids
     assert isinstance(built.control.preflight_record, RunPreflightRecord)
@@ -187,6 +188,28 @@ def test_missing_runtime_value_or_existing_capsule_fails_before_factory(
     first.capsule_root.mkdir(parents=True)
     with pytest.raises(LiveConfigurationError, match="already exists"):
         build(_environment())
+
+
+def test_missing_embedding_api_key_is_resolved_as_empty(tmp_path: Path) -> None:
+    from oamb.live import build_live_cell
+
+    environment = _environment()
+    environment.pop("OAMB_EMBEDDING_API_KEY")
+
+    built = build_live_cell(
+        plan=_plan(),
+        cell_id="hindsight-lme6",
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+        provider_project_id="oamb-providers-test-live",
+        provider_evidence=_provider_evidence(),
+        environment=environment,
+        run_label="missing-embedding-key",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+    )
+
+    assert built.environment["OAMB_EMBEDDING_API_KEY"] == ""
 
 
 @pytest.mark.parametrize(

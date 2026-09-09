@@ -66,6 +66,49 @@ read_env_value() {
         "$env_file"
 }
 
+# Read zero or one assignment as inert text. A missing optional assignment and
+# an explicitly empty assignment both produce an empty string.
+read_optional_env_value() {
+    env_file=$1
+    wanted_name=$2
+    awk -F= -v wanted="$wanted_name" \
+        '$1 == wanted {sub(/^[^=]*=/, ""); value=$0; count+=1}
+         END {if (count > 1) exit 1; print value}' \
+        "$env_file"
+}
+
+# Provider containers reach a host-local embedding server through Docker's
+# host gateway, while host-side probes keep using the user-configured URL.
+resolve_container_embedding_base() {
+    embedding_endpoint=$1
+    case "$embedding_endpoint" in
+        https://127.0.0.1|https://127.0.0.1:*|https://127.0.0.1/*|https://localhost|https://localhost:*|https://localhost/*|http://\[::1\]|http://\[::1\]:*|http://\[::1\]/*|https://\[::1\]|https://\[::1\]:*|https://\[::1\]/*)
+            return 1
+            ;;
+        http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*)
+            printf 'http://host.docker.internal%s\n' "${embedding_endpoint#http://127.0.0.1}"
+            ;;
+        http://localhost|http://localhost:*|http://localhost/*)
+            printf 'http://host.docker.internal%s\n' "${embedding_endpoint#http://localhost}"
+            ;;
+        *) printf '%s\n' "$embedding_endpoint" ;;
+    esac
+    unset embedding_endpoint
+}
+
+# OpenAI client libraries used inside the provider containers require a
+# non-empty string even when the target embedding service does not authenticate.
+effective_embedding_api_key() {
+    embedding_env_file=$1
+    embedding_api_key=$(read_optional_env_value "$embedding_env_file" OAMB_EMBEDDING_API_KEY) || return 1
+    if [ -n "$embedding_api_key" ]; then
+        printf '%s\n' "$embedding_api_key"
+    else
+        printf 'oamb-no-auth\n'
+    fi
+    unset embedding_env_file embedding_api_key
+}
+
 # Derive the producer-only application proxy bypass from the canonical LLM endpoint.
 derive_llm_no_proxy() {
     llm_endpoint=$1

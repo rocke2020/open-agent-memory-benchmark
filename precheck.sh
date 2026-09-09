@@ -8,6 +8,7 @@ readonly RUNTIME_DIR="$ROOT/provider-services/.runtime"
 readonly OUTPUTS_ROOT="$ROOT/outputs"
 readonly TMP_ROOT="$OUTPUTS_ROOT/tmp"
 readonly STATE_FILE="$TMP_ROOT/quick-start-current.json"
+readonly EMBEDDING_OWNERSHIP_FILE="$TMP_ROOT/embedding-ownership"
 readonly QUESTION_ID="72e3ee87"
 readonly DEFAULT_EMBEDDING_URL="http://host.docker.internal:18000/v1"
 readonly DEFAULT_HINDSIGHT_PORT="18888"
@@ -29,7 +30,8 @@ usage() {
 Usage: ./precheck.sh [--embedding-api-url URL | --no-start-embedding]
 
 Prepare inputs, configure local files, start and verify providers, and freeze
-the exact LME-60 plan. Local embedding startup is enabled by default.
+the exact LME-60 plan. A configured embedding URL is reused with an optional
+API key; otherwise the OS-specific local embedding fallback starts by default.
 EOF
 }
 
@@ -103,6 +105,13 @@ temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
 temporary.chmod(0o600)
 temporary.replace(path)
 PY
+}
+
+write_embedding_ownership() {
+  local ownership=$1
+  local temporary="$EMBEDDING_OWNERSHIP_FILE.tmp-$$"
+  printf '%s\n' "$ownership" > "$temporary"
+  mv "$temporary" "$EMBEDDING_OWNERSHIP_FILE"
 }
 
 random_secret() {
@@ -263,10 +272,47 @@ ensure_provider_environment() {
       set_env_value "$ENV_FILE" "$key" "$(random_secret)"
     fi
   done
+  for key in OAMB_EMBEDDING_BASE_URL OAMB_EMBEDDING_API_KEY; do
+    reject_duplicate_env_assignment "$key"
+  done
   if [[ -n "$EMBEDDING_API_URL" ]]; then
     set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$EMBEDDING_API_URL"
   fi
-  ensure_env_default OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
+
+  local embedding_url embedding_api_key previous_local_fallback
+  embedding_url="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL 2>/dev/null || true)"
+  embedding_api_key="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY 2>/dev/null || true)"
+  if [[ "$embedding_url" == change-me* ]]; then embedding_url=""; fi
+  if [[ "$embedding_api_key" == change-me* ]]; then
+    embedding_api_key=""
+    set_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY ""
+  fi
+
+  if [[ -z "$embedding_url" && -n "$embedding_api_key" ]]; then
+    die "OAMB_EMBEDDING_API_KEY requires OAMB_EMBEDDING_BASE_URL"
+  fi
+  if [[ -z "$embedding_url" ]]; then
+    embedding_url=$DEFAULT_EMBEDDING_URL
+    if [[ "$START_LOCAL_EMBEDDING" == false ]]; then
+      set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
+    fi
+  else
+    previous_local_fallback=""
+    if [[ "$START_LOCAL_EMBEDDING" == true && \
+          "$embedding_url" == "$DEFAULT_EMBEDDING_URL" && \
+          -z "$embedding_api_key" && -f "$EMBEDDING_OWNERSHIP_FILE" && \
+          ! -L "$EMBEDDING_OWNERSHIP_FILE" ]]; then
+      previous_local_fallback="$(sed -n '1p' "$EMBEDDING_OWNERSHIP_FILE")"
+    fi
+    if [[ "$previous_local_fallback" != local-fallback ]]; then
+      START_LOCAL_EMBEDDING=false
+    fi
+  fi
+  if [[ "$START_LOCAL_EMBEDDING" == true ]]; then
+    write_embedding_ownership local-fallback
+  else
+    write_embedding_ownership configured-service
+  fi
 }
 
 validate_existing_readiness() {
@@ -360,7 +406,10 @@ print(
 PY
 
 if [[ "$START_LOCAL_EMBEDDING" == true ]]; then
-  start_local_embedding "$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)"
+  start_local_embedding \
+    "$DEFAULT_EMBEDDING_URL" \
+    "$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY)"
+  set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
 else
   printf 'embedding: local startup skipped; configured API will be verified directly\n'
 fi
@@ -385,8 +434,10 @@ jq -n \
   --arg plan "$PLAN" \
   --arg dataset "$DATASET_SOURCE" \
   --arg question "$QUESTION_ID" \
+  --argjson embedding_local_fallback "$START_LOCAL_EMBEDDING" \
   '{run_label: $run_label, work_dir: $work_dir,
-    resolved_plan: $plan, dataset_source: $dataset, question_id: $question}' \
+    resolved_plan: $plan, dataset_source: $dataset, question_id: $question,
+    embedding_local_fallback: $embedding_local_fallback}' \
   > "$state_temporary"
 mv "$state_temporary" "$STATE_FILE"
 

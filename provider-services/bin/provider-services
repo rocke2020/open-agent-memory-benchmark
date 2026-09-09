@@ -41,6 +41,9 @@ env_value() {
         OAMB_EMBEDDING_MODEL|OAMB_HINDSIGHT_LLM_MODEL|OAMB_HINDSIGHT_LLM_REASONING_EFFORT|OAMB_MEM0_LLM_MODEL|OAMB_MEM0_LLM_REASONING_EFFORT|OAMB_OPENVIKING_VLM_MODEL|OAMB_OPENVIKING_VLM_REASONING_EFFORT)
             read_runtime_env_value "$ENV_FILE" "$1"
             ;;
+        OAMB_EMBEDDING_API_KEY)
+            read_optional_env_value "$ENV_FILE" "$1"
+            ;;
         *)
             read_env_value "$ENV_FILE" "$1"
             ;;
@@ -645,13 +648,11 @@ verify_model_readiness() {
     jq -n --arg model "$(env_value OAMB_EMBEDDING_MODEL)" \
         '{model: $model, input: ["OAMB readiness probe"], dimensions: 1024}' > "$embedding_request"
     embedding_base=$(env_value OAMB_EMBEDDING_BASE_URL)
+    embedding_api_key=$(env_value OAMB_EMBEDDING_API_KEY)
     embedding_base=$(resolve_host_embedding_base "$embedding_base") || \
         die "cannot resolve the host embedding URL"
     record_model_dispatch embedding
-    curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 \
-        --max-time "$READINESS_OPERATION_TIMEOUT_SECONDS" \
-        -H 'Authorization: Bearer oamb-local-embedding' -H 'Content-Type: application/json' \
-        --data-binary "@$embedding_request" "${embedding_base%/}/embeddings" > "$embedding_response"
+    request_embedding "$embedding_base" "$embedding_api_key" "@$embedding_request" 3 "$READINESS_OPERATION_TIMEOUT_SECONDS" > "$embedding_response"
     python3 "$ROOT/lib/readiness_response.py" embedding "$embedding_response" \
         "$(env_value OAMB_EMBEDDING_MODEL)" 1024 || \
         die "embedding model probe returned an invalid response"

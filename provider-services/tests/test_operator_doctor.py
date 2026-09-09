@@ -61,6 +61,8 @@ class OperatorDoctorTests(unittest.TestCase):
                 value = "file-postgres-password"
             elif name == "LLM_BASE_URL":
                 value = "https://api.deepseek.com"
+            elif name == "OAMB_EMBEDDING_API_KEY":
+                value = "embedding-secret-sentinel"
             elif value.startswith("change-me"):
                 value = f"file-value-{name.lower()}"
             values.append(f"{name}={value}")
@@ -71,6 +73,7 @@ class OperatorDoctorTests(unittest.TestCase):
         fake_bin = directory / "bin"
         fake_bin.mkdir()
         trace = directory / "docker-trace"
+        jq_stdin = directory / "jq-stdin"
         _write_executable(
             fake_bin / "docker",
             "#!/bin/sh\n"
@@ -81,8 +84,17 @@ class OperatorDoctorTests(unittest.TestCase):
             "  *' alembic current'*) printf '006 \\n' ;;\n"
             "esac\n",
         )
-        for command_name in ("jq", "curl"):
-            _write_executable(fake_bin / command_name, "#!/bin/sh\nprintf '{}\\n'\n")
+        _write_executable(
+            fake_bin / "jq",
+            "#!/bin/sh\n"
+            'printf \'jq %s\\n\' "$*" >> "$OAMB_TEST_TRACE"\n'
+            'case " $* " in\n'
+            '  *" -Rs "*) cat > "$OAMB_TEST_JQ_STDIN" ;;\n'
+            "  *) cat >/dev/null || true ;;\n"
+            "esac\n"
+            "printf '{}\\n'\n",
+        )
+        _write_executable(fake_bin / "curl", "#!/bin/sh\nprintf '{}\n'\n")
         _write_executable(fake_bin / "cmp", "#!/bin/sh\nexit 0\n")
 
         result = subprocess.run(
@@ -94,6 +106,7 @@ class OperatorDoctorTests(unittest.TestCase):
                 **os.environ,
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "OAMB_TEST_TRACE": str(trace),
+                "OAMB_TEST_JQ_STDIN": str(jq_stdin),
                 "OAMB_PROVIDER_PROJECT": "process-project",
                 "OAMB_MEM0_POSTGRES_PASSWORD": "process-postgres-password",
                 "OAMB_MEM0_LLM_MODEL": "plan-mem0",
@@ -108,11 +121,14 @@ class OperatorDoctorTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = trace.read_text(encoding="utf-8").splitlines()
-        self.assertTrue(any(" exec " in call for call in calls), calls)
-        self.assertTrue(any(" restart mem0" in call for call in calls), calls)
-        for call in calls:
+        docker_calls = [call for call in calls if call.startswith("file-project|")]
+        self.assertTrue(any(" exec " in call for call in docker_calls), docker_calls)
+        self.assertTrue(any(" restart mem0" in call for call in docker_calls), docker_calls)
+        for call in docker_calls:
             self.assertTrue(call.startswith("file-project|file-postgres-password|"), call)
             self.assertIn("compose -p file-project ", call)
+        self.assertNotIn("embedding-secret-sentinel", trace.read_text(encoding="utf-8"))
+        self.assertEqual(jq_stdin.read_text(encoding="utf-8"), "embedding-secret-sentinel")
 
     def _run_operator(
         self,
@@ -120,6 +136,7 @@ class OperatorDoctorTests(unittest.TestCase):
         model_overrides: dict[str, str] | None = None,
         process_overrides: dict[str, str] | None = None,
         dotenv_overrides: dict[str, str] | None = None,
+        omitted_dotenv_names: frozenset[str] = frozenset(),
         env_extra: str = "",
     ) -> subprocess.CompletedProcess[str]:
         temporary = tempfile.TemporaryDirectory()
@@ -159,6 +176,8 @@ class OperatorDoctorTests(unittest.TestCase):
                 continue
             name, value = line.split("=", 1)
             if name in PROVIDER_MODEL_VARIABLES:
+                continue
+            if name in omitted_dotenv_names:
                 continue
             if name in file_overrides:
                 value = file_overrides[name]
@@ -200,7 +219,7 @@ class OperatorDoctorTests(unittest.TestCase):
                             "model": "plan-embedding",
                             "thinking_effort": "not_applicable",
                         },
-                    ]
+                    ],
                 }
             )
             + "\n",
@@ -276,6 +295,22 @@ class OperatorDoctorTests(unittest.TestCase):
             result.stdout,
         )
         self.assertNotIn("PROCESS_OVERRIDE_SENTINEL", result.stdout)
+
+    def test_doctor_accepts_missing_embedding_api_key_as_keyless(self) -> None:
+        result = self._run_operator(
+            model_overrides={
+                "OAMB_HINDSIGHT_LLM_MODEL": "plan-hindsight",
+                "OAMB_HINDSIGHT_LLM_REASONING_EFFORT": "low",
+                "OAMB_MEM0_LLM_MODEL": "plan-mem0",
+                "OAMB_MEM0_LLM_REASONING_EFFORT": "high",
+                "OAMB_OPENVIKING_VLM_MODEL": "plan-openviking",
+                "OAMB_OPENVIKING_VLM_REASONING_EFFORT": "max",
+                "OAMB_EMBEDDING_MODEL": "plan-embedding",
+            },
+            omitted_dotenv_names=frozenset({"OAMB_EMBEDDING_API_KEY"}),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_fresh_shell_loads_current_plan_for_doctor_status_and_stop(self) -> None:
         for command in ("doctor", "status", "stop"):

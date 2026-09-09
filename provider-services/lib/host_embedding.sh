@@ -38,16 +38,30 @@ resolve_host_embedding_base() {
     printf 'http://%s:%s\n' "$_oamb_host" "${_oamb_url#http://host.docker.internal:}"
 }
 
+request_embedding() {
+    local base_url=$1
+    local api_key=$2
+    local request=$3
+    local connect_timeout=${4:-2}
+    local maximum_time=${5:-10}
+    set -- --noproxy '*' --fail --silent --show-error \
+        --connect-timeout "$connect_timeout" --max-time "$maximum_time" \
+        -H 'Content-Type: application/json'
+    if [ -n "$api_key" ]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$api_key" | \
+            curl "$@" --config - --data-binary "$request" "${base_url%/}/embeddings"
+        return
+    fi
+    curl "$@" --data-binary "$request" "${base_url%/}/embeddings"
+}
+
 probe_embedding() {
     local base_url=$1
+    local api_key=$2
     local request
     request="$(jq -cn --arg model "$OAMB_EMBEDDING_MODEL" \
         '{model: $model, input: "OAMB startup probe", dimensions: 1024}')"
-    curl --noproxy '*' --fail --silent --show-error \
-        --connect-timeout 2 --max-time 10 \
-        -H 'Authorization: Bearer oamb-local-embedding' \
-        -H 'Content-Type: application/json' \
-        --data-binary "$request" "${base_url%/}/embeddings" | \
+    request_embedding "$base_url" "$api_key" "$request" | \
         python3 -c '
 import json
 import math
@@ -67,8 +81,9 @@ if any(isinstance(item, bool) or not isinstance(item, (int, float)) or not math.
 
 start_local_embedding() {
     local configured_url=$1
-    local log_file=${2:-$WORK_DIR/embedding.log}
-    local pid_file=${3:-$WORK_DIR/embedding.pid}
+    local api_key=$2
+    local log_file=${3:-$WORK_DIR/embedding.log}
+    local pid_file=${4:-$WORK_DIR/embedding.pid}
     local host_url=$configured_url
     local helper_bind_host=""
     case "$(uname -s)" in
@@ -81,7 +96,7 @@ start_local_embedding() {
     esac
     host_url="$(resolve_host_embedding_base "$configured_url" "$helper_bind_host")" || \
         die "cannot resolve the host embedding URL"
-    if probe_embedding "$host_url" >/dev/null 2>&1; then
+    if probe_embedding "$host_url" "$api_key" >/dev/null 2>&1; then
         printf 'embedding: PASS (reusing %s)\n' "$host_url"
         return
     fi
@@ -120,7 +135,7 @@ start_local_embedding() {
 
     local attempt=1
     while [ "$attempt" -le "$EMBEDDING_STARTUP_ATTEMPTS" ]; do
-        if probe_embedding "$host_url" >/dev/null 2>&1; then
+        if probe_embedding "$host_url" "$api_key" >/dev/null 2>&1; then
             if [ "$started_here" = true ]; then
                 printf 'embedding: PASS (%s, pid %s)\n' "$(basename "$helper")" "$embedding_pid"
             else

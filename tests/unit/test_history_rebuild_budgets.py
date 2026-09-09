@@ -68,6 +68,7 @@ def _environment() -> dict[str, str]:
         "LLM_BASE_URL": "https://model.example/v1",
         "LLM_API_KEY": "model-key",
         "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
+        "OAMB_EMBEDDING_API_KEY": "",
         "OAMB_EMBEDDING_MODEL": models.embedding.model,
     }
 

@@ -131,6 +131,7 @@ class ServiceBundleContractTests(unittest.TestCase):
 
     def test_operator_surface_preserves_state(self) -> None:
         command = self.read("bin/provider-services")
+        embedding_transport = self.read("lib/host_embedding.sh")
         lifecycle = self.read("lib/lifecycle.sh")
         self.assertIn("doctor", command)
         self.assertIn("build", command)
@@ -153,7 +154,7 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn("--build-arg MEM0_BUILD_INPUT_SHA256=", command)
         self.assertIn("/v1/projection?run_id=", command)
         self.assertIn("/chat/completions", command)
-        self.assertIn("/embeddings", command)
+        self.assertIn("/embeddings", embedding_transport)
         self.assertIn("dimensions: 1024", command)
         self.assertIn("/ready", command)
         self.assertIn('.version == "v0.4.16"', command)
@@ -210,6 +211,10 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertTrue(resolver.is_file())
         self.assertIn('. "$ROOT/lib/host_embedding.sh"', command)
         self.assertIn("resolve_host_embedding_base", command)
+        self.assertIn(
+            'request_embedding "$embedding_base" "$embedding_api_key" "@$embedding_request" 3 "$READINESS_OPERATION_TIMEOUT_SECONDS"',
+            command,
+        )
         self.assertNotIn(
             'embedding_base="http://127.0.0.1:${embedding_base#http://host.docker.internal:}"',
             command,

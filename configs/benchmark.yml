@@ -105,13 +105,14 @@ models:
     proof_kind: sealed_outbound_request_and_response
     proof_reference: reasoning_effort=high
     usage_coverage: classified
-  # Embedding is non-generative; thinking and credentials do not apply.
+  # Embedding is non-generative. The OpenAI-compatible service connection comes
+  # from root .env; a missing or empty API key is keyless, and an absent URL selects local fallback.
   embedding:
     model: qwen3-embedding:0.6b
     thinking_effort: not_applicable
     endpoint_variable: OAMB_EMBEDDING_BASE_URL
-    credential_variable: not_applicable
-    recipient: local-vllm-metal
+    credential_variable: OAMB_EMBEDDING_API_KEY
+    recipient: embedding-api
     execution_owner: provider_internal
     proof_kind: model_dimension_probe
     proof_reference: not_applicable

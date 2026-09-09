@@ -66,7 +66,7 @@ def test_default_profile_loads_selected_answer_and_judge_gateway_references(
     }
 
 
-def test_default_profile_selects_vllm_metal_endpoint_and_ignores_legacy_name(
+def test_default_profile_loads_embedding_service_connection_and_ignores_legacy_name(
     tmp_path: Path,
 ) -> None:
     from oamb.runtime.provider_env import load_t10_provider_environment
@@ -74,12 +74,14 @@ def test_default_profile_selects_vllm_metal_endpoint_and_ignores_legacy_name(
     env_file = tmp_path / ".env"
     env_file.write_text(
         "OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:18000/v1\n"
+        "OAMB_EMBEDDING_API_KEY=embedding-service-key\n"
         "OAMB_OLLAMA_BASE_URL=http://127.0.0.1:11434/v1\n",
         encoding="utf-8",
     )
 
     assert load_t10_provider_environment(env_file) == {
         "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
+        "OAMB_EMBEDDING_API_KEY": "embedding-service-key",
     }
 
 

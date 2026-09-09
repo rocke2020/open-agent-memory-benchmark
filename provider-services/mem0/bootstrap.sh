@@ -25,7 +25,8 @@ OAMB_MEM0_LLM_MODEL=$(required_env_value OAMB_MEM0_LLM_MODEL)
 OAMB_MEM0_LLM_REASONING_EFFORT=$(required_env_value OAMB_MEM0_LLM_REASONING_EFFORT)
 OAMB_MEM0_LLM_BASE_URL=$(required_env_value OAMB_MEM0_LLM_BASE_URL)
 OAMB_EMBEDDING_MODEL=$(required_env_value OAMB_EMBEDDING_MODEL)
-OAMB_EMBEDDING_BASE_URL=$(env_value OAMB_EMBEDDING_BASE_URL || printf 'http://host.docker.internal:18000/v1')
+OAMB_EMBEDDING_BASE_URL=$(resolve_container_embedding_base "$(required_env_value OAMB_EMBEDDING_BASE_URL)")
+OAMB_EMBEDDING_API_KEY=$(effective_embedding_api_key "$ENV_FILE")
 OAMB_MEM0_POSTGRES_PASSWORD=$(required_env_value OAMB_MEM0_POSTGRES_PASSWORD)
 OAMB_MEM0_ADMIN_API_KEY=$(required_env_value OAMB_MEM0_ADMIN_API_KEY)
 
@@ -44,7 +45,7 @@ umask 077
 printf 'X-API-Key: %s\n' "$OAMB_MEM0_ADMIN_API_KEY" > "$ADMIN_HEADER_FILE"
 chmod 600 "$ADMIN_HEADER_FILE"
 
-jq -n \
+printf '%s' "$OAMB_EMBEDDING_API_KEY" | jq -Rs \
   --arg llm_key "$OAMB_MEM0_LLM_API_KEY" \
   --arg llm_model "$OAMB_MEM0_LLM_MODEL" \
   --arg llm_effort "$OAMB_MEM0_LLM_REASONING_EFFORT" \
@@ -52,7 +53,7 @@ jq -n \
   --arg embed_model "$OAMB_EMBEDDING_MODEL" \
   --arg embed_base "$OAMB_EMBEDDING_BASE_URL" \
   --arg postgres_password "$OAMB_MEM0_POSTGRES_PASSWORD" \
-  '{
+  '. as $embed_key | {
     version: "v1.1",
     vector_store: {provider: "pgvector", config: {
       host: "mem0-postgres", port: 5432, dbname: "postgres",
@@ -66,7 +67,7 @@ jq -n \
       reasoning_effort: $llm_effort, is_reasoning_model: true
     }},
     embedder: {provider: "openai", config: {
-      api_key: "oamb-local-embedding", model: $embed_model,
+      api_key: $embed_key, model: $embed_model,
       openai_base_url: $embed_base, embedding_dims: 1024
     }},
     history_db_path: "/app/history/history.db",
