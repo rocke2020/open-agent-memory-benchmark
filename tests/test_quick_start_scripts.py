@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import time
@@ -1038,6 +1039,9 @@ def _write_fake_oamb(fake_bin: Path) -> None:
 	while ! mkdir "$trace_lock" 2>/dev/null; do /bin/sleep 0.01; done
 	trace_lock_owned=true
 	printf 'uv %s\n' "$*" >> "$OAMB_TEST_TRACE"
+	if [[ " $* " == *" oamb run "* ]]; then
+	  printf 'run-owner-pid %s\n' "${OAMB_RUN_SH_PROCESS_ID:-missing}" >> "$OAMB_TEST_TRACE"
+	fi
 	rmdir "$trace_lock"
 	trace_lock_owned=false
 	trap - EXIT TERM INT HUP
@@ -1046,33 +1050,47 @@ def _write_fake_oamb(fake_bin: Path) -> None:
 	  printf 'planted full-input encoding failure\n' >&2
 	  exit 46
 	fi
+	if [ "$#" -eq 6 ] && [ "$3" = "python" ] && [ "$4" = "-" ]; then
+	  case "$6" in
+	    */results)
+	      mkdir -p "$6"
+	      for provider in hindsight mem0 openviking; do
+	        printf '{}' > "$6/$provider.json"
+	      done
+	      exit 0
+	      ;;
+	  esac
+	fi
 	case " $* " in
 	  *" oamb run "*)
 	    cells=()
 	    result_map=""
 	    output_root=""
-	    full_progress_root=""
-	    full_resume_lock=""
-	    full_resume_rehearsal=false
+	    results_root=""
 	    while [ "$#" -gt 0 ]; do
 	      case "$1" in
 	        --cell) cells+=("$2"); shift 2 ;;
 	        --result-map) result_map=$2; shift 2 ;;
 	        --output-root) output_root=$2; shift 2 ;;
-	        --full-progress-root) full_progress_root=$2; shift 2 ;;
-	        --full-resume-lock) full_resume_lock=$2; shift 2 ;;
-	        --full-resume-rehearsal) full_resume_rehearsal=true; shift ;;
+	        --results-root) results_root=$2; shift 2 ;;
 	        *) shift ;;
 	      esac
 	    done
-	    if [ -n "$full_progress_root" ]; then
-	      [ -n "$full_resume_lock" ] || exit 42
-	      if [ "$full_resume_rehearsal" = true ] && \
-	        [ "${OAMB_TEST_RESUME_REHEARSAL_FAIL:-0}" = "1" ]; then
-	        printf 'planted simple resume rehearsal failure\n' >&2
-	        exit 43
+	    if [ "${OAMB_TEST_RUN_SIGNAL_BLOCK:-0}" = "1" ]; then
+	      printf '%s\n' "$$" > "$OAMB_TEST_RUN_SIGNAL_PID"
+	      touch "$OAMB_TEST_RUN_SIGNAL_STARTED"
+	      trap 'printf "INT\n" >> "$OAMB_TEST_RUN_SIGNALS"' INT
+	      trap 'printf "TERM\n" >> "$OAMB_TEST_RUN_SIGNALS"; exit 143' TERM
+	      trap 'printf "HUP\n" >> "$OAMB_TEST_RUN_SIGNALS"; exit 129' HUP
+	      while :; do /bin/sleep 0.1 || true; done
+	    fi
+	    if [ -n "$results_root" ]; then
+	      if [ -z "$result_map" ] && \
+	        [ "${OAMB_TEST_RESUME_FAIL:-0}" = "1" ]; then
+	        printf 'planted simple resume failure\n' >&2
+	        exit 44
 	      fi
-	      if [ "$full_resume_rehearsal" = true ] || [ -z "$result_map" ]; then
+	      if [ -z "$result_map" ]; then
 	        exit 0
 	      fi
 	    fi
@@ -1191,6 +1209,18 @@ PY
         *) shift ;;
       esac
     done
+    if [ "${OAMB_TEST_COMPARE_BLOCK:-0}" = "1" ]; then
+      printf '%s\n' "$$" > "$OAMB_TEST_COMPARE_PID"
+      touch "$OAMB_TEST_COMPARE_STARTED"
+      trap 'touch "$OAMB_TEST_COMPARE_STOPPED"; exit 143' TERM INT HUP
+      while :; do
+        if [ "${OAMB_TEST_COMPARE_EXIT_WITH_OWNER:-0}" = "1" ] && \
+          ! kill -0 "$OAMB_RUN_SH_PROCESS_ID" 2>/dev/null; then
+          exit 0
+        fi
+        /bin/sleep 0.01
+      done
+    fi
     [ ! -e "$output_root" ] || exit 92
     mkdir -p "$output_root"
     if [ "$diagnostic" = true ]; then cases=1; results=3; else cases=60; results=180; fi
@@ -1259,6 +1289,7 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         json.dumps(
             {
                 "resolved_plan_hash": RESOLVED_PLAN_HASH,
+                "dataset": {"path": "datasets/longmemeval-cleaned/longmemeval_s_cleaned.json"},
                 "execution": {
                     "max_parallel_providers_per_dataset": 3,
                     "extraction_max_retries": 10,
@@ -1921,10 +1952,11 @@ def test_run_full_test_runs_directly_and_validates_sixty_case_report(
     assert "--bounded-capsule" not in calls
     assert "--bounded-validation" not in calls
     full_run_call = next(
-        line for line in calls.splitlines() if "oamb run" in line and "--full-progress-root" in line
+        line for line in calls.splitlines() if "oamb run" in line and "--results-root" in line
     )
-    assert "--full-resume-lock" in full_run_call
-    assert "--full-resume-pointer" in full_run_call
+    assert "--full-progress-root" not in full_run_call
+    assert "--full-resume-lock" not in full_run_call
+    assert "--full-resume-pointer" not in full_run_call
     assert "python -" in calls and "/results" in calls
     assert calls.count("oamb capsule validate") == 3
     assert (
@@ -1933,7 +1965,7 @@ def test_run_full_test_runs_directly_and_validates_sixty_case_report(
     )
     comparison_call = next(line for line in calls.splitlines() if "oamb compare" in line)
     assert "--diagnostic" not in comparison_call
-    assert "--full-progress-root" in comparison_call
+    assert "--results-root" in comparison_call
     assert "--analysis-model-env" in comparison_call
     assert "--analysis-cache-root" in comparison_call
     assert "--cell-root" not in comparison_call
@@ -1946,6 +1978,18 @@ def test_run_full_test_runs_directly_and_validates_sixty_case_report(
         "unique_case_count": 60,
         "provider_specific_result_count": 180,
     }
+    full_root = root / "outputs" / "full-test" / "lme60-test"
+    source_plan = (
+        root / "outputs" / "tmp" / "precheck" / "lme60-test" / "plan" / "resolved-plan.json"
+    )
+    assert (full_root / "resolved-plan.json").read_bytes() == source_plan.read_bytes()
+    assert tuple(
+        (full_root / "results" / f"{provider}.json").read_bytes()
+        for provider in ("hindsight", "mem0", "openviking")
+    ) == (b"{}", b"{}", b"{}")
+    assert (root / "outputs" / "tmp" / "full-test-current").read_text(
+        encoding="utf-8"
+    ) == "lme60-test\n"
 
 
 def test_run_full_test_ignores_completed_old_capsules_and_preserves_validation(
@@ -2037,23 +2081,33 @@ def test_run_full_test_starts_fresh_instead_of_reusing_failed_result_map(
         if "oamb run" in line and "--cell" not in line
     ]
     assert len(full_run_calls) == 3
+    full_run_directories = tuple(sorted((root / "outputs" / "full-test").glob("lme60-test*")))
+    assert len(full_run_directories) == 3
+    assert all((directory / "resolved-plan.json").is_file() for directory in full_run_directories)
+    selected_label = (
+        (root / "outputs" / "tmp" / "full-test-current").read_text(encoding="utf-8").strip()
+    )
+    assert root / "outputs" / "full-test" / selected_label in full_run_directories
     assert json.loads(full_result.read_bytes())["status"] == "failed"
     assert not tuple(full_result.parent.glob("full-retry-*.json"))
 
 
-def _write_canonical_full_progress(root: Path) -> tuple[Path, tuple[Path, ...]]:
+def _write_provider_result_run(root: Path) -> tuple[Path, tuple[Path, ...]]:
     full_root = root / "outputs" / "full-test" / "lme60-test"
-    progress_root = full_root / "results"
-    progress_root.mkdir(parents=True)
-    progress_paths = tuple(
-        progress_root / f"progress-{provider_id}.json"
-        for provider_id in ("hindsight", "mem0", "openviking")
+    results_root = full_root / "results"
+    results_root.mkdir(parents=True)
+    result_paths = tuple(
+        results_root / f"{provider_id}.json" for provider_id in ("hindsight", "mem0", "openviking")
     )
-    for path in progress_paths:
-        path.write_text("{}\n", encoding="utf-8")
-    resume_pointer = root / "outputs" / "tmp" / "precheck" / "lme60-test" / "full-test-current"
-    resume_pointer.write_text("lme60-test\n", encoding="utf-8")
-    return full_root, progress_paths
+    for path in result_paths:
+        path.write_text("{}", encoding="utf-8")
+    source_plan = (
+        root / "outputs" / "tmp" / "precheck" / "lme60-test" / "plan" / "resolved-plan.json"
+    )
+    shutil.copyfile(source_plan, full_root / "resolved-plan.json")
+    selector = root / "outputs" / "tmp" / "full-test-current"
+    selector.write_text("lme60-test\n", encoding="utf-8")
+    return full_root, result_paths
 
 
 @pytest.mark.parametrize("arguments", (["--resume"], ["--smoke_test", "--resume"]))
@@ -2079,13 +2133,21 @@ def test_run_rejects_resume_without_full_before_dispatch(
     assert not trace.exists() or "oamb run" not in trace.read_text(encoding="utf-8")
 
 
-def test_run_full_resume_rehearses_then_runs_once_and_compares_progress(
+def test_run_full_resume_runs_once_and_compares_provider_results(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
-    full_root, progress_paths = _write_canonical_full_progress(root)
-    original_progress = tuple(path.read_bytes() for path in progress_paths)
+    full_root, result_paths = _write_provider_result_run(root)
+    original_results = tuple(path.read_bytes() for path in result_paths)
+    current_plan_path = (
+        root / "outputs" / "tmp" / "precheck" / "lme60-test" / "plan" / "resolved-plan.json"
+    )
+    current_plan = json.loads(current_plan_path.read_bytes())
+    for role in current_plan["model_roles"]:
+        if role["role_id"] != "embedding":
+            role["model"] = f"current-{role['role_id']}"
+    current_plan_path.write_text(json.dumps(current_plan) + "\n", encoding="utf-8")
 
     result = subprocess.run(
         [str(script), "--full_test", "--resume"],
@@ -2100,8 +2162,6 @@ def test_run_full_resume_rehearses_then_runs_once_and_compares_progress(
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8").splitlines()
     run_calls = [line for line in calls if "oamb run" in line]
-    rehearsal_calls = [line for line in run_calls if "--full-resume-rehearsal" in line]
-    resume_calls = [line for line in run_calls if "--full-resume-rehearsal" not in line]
     compare_calls = [line for line in calls if "oamb compare" in line]
     doctor_calls = [line for line in calls if line == "provider-services doctor"]
     provider_up_calls = [line for line in calls if line == "provider-services up"]
@@ -2109,31 +2169,27 @@ def test_run_full_resume_rehearses_then_runs_once_and_compares_progress(
         line for line in calls if line == "provider-services verify --services"
     ]
 
-    assert len(rehearsal_calls) == 1
-    assert len(resume_calls) == 1
+    assert len(run_calls) == 1
+    assert f"oamb run {full_root}/resolved-plan.json" in run_calls[0]
+    owner_lines = [line for line in calls if line.startswith("run-owner-pid ")]
+    assert len(owner_lines) == 1
+    assert owner_lines[0].removeprefix("run-owner-pid ").isdigit()
     assert len(compare_calls) == 1
     assert len(doctor_calls) == 1
     assert len(provider_up_calls) == 1
     assert len(provider_verify_calls) == 1
-    progress_root = full_root / "results"
-    resume_lock = root / "outputs" / "tmp" / "precheck" / "lme60-test" / "full-test-resume.lock"
-    assert all(
-        f"--full-progress-root {progress_root}" in line
-        and f"--full-resume-lock {resume_lock}" in line
-        and line.count("--full-progress-root") == 1
-        and line.count("--full-resume-lock") == 1
-        for line in run_calls
-    )
-    assert f"--output-root {full_root}/capsules/simple-resume-rehearsal" in rehearsal_calls[0]
-    assert f"--output-root {full_root}/capsules/resume/simple-resume-" in resume_calls[0]
-    assert f"--full-progress-root {progress_root}" in compare_calls[0]
+    results_root = full_root / "results"
+    assert all(f"--results-root {results_root}" in line for line in run_calls)
+    assert all("--full-progress-root" not in line for line in run_calls)
+    assert all("--full-resume-lock" not in line for line in run_calls)
+    assert f"--output-root {full_root}/capsules/resume/simple-resume-" in run_calls[0]
+    assert f"--results-root {results_root}" in compare_calls[0]
     assert "--cell-root" not in compare_calls[0]
     assert "--validation" not in compare_calls[0]
     assert calls.index(doctor_calls[0]) < calls.index(provider_up_calls[0])
     assert calls.index(provider_up_calls[0]) < calls.index(provider_verify_calls[0])
-    assert calls.index(provider_verify_calls[0]) < calls.index(rehearsal_calls[0])
-    assert calls.index(rehearsal_calls[0]) < calls.index(resume_calls[0])
-    assert calls.index(resume_calls[0]) < calls.index(compare_calls[0])
+    assert calls.index(provider_verify_calls[0]) < calls.index(run_calls[0])
+    assert calls.index(run_calls[0]) < calls.index(compare_calls[0])
     trace_text = "\n".join(calls)
     assert all(
         obsolete not in trace_text
@@ -2144,7 +2200,11 @@ def test_run_full_resume_rehearses_then_runs_once_and_compares_progress(
             "oamb capsule compose",
         )
     )
-    assert tuple(path.read_bytes() for path in progress_paths) == original_progress
+    assert tuple(path.read_bytes() for path in result_paths) == original_results
+    provider_config = next(line for line in calls if line.startswith("provider-config "))
+    assert provider_config.startswith(
+        "provider-config plan-hindsight|plan-mem0|plan-openviking|plan-embedding|"
+    )
     assert "run: PASS (full, 60 questions, 180 provider results)" in result.stdout
 
 
@@ -2187,7 +2247,7 @@ def test_run_full_resume_probes_configured_docker_host_embedding_without_startin
 def test_run_full_resume_restores_local_runtime_before_dispatch(tmp_path: Path) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
-    _write_canonical_full_progress(root)
+    _write_provider_result_run(root)
     _write_executable(
         Path(env["PATH"].split(":", 1)[0]) / "curl",
         """
@@ -2241,33 +2301,18 @@ fi
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8").splitlines()
-    rehearsal_index = next(
-        index
-        for index, line in enumerate(calls)
-        if "oamb run" in line and "--full-resume-rehearsal" in line
-    )
     embedding_start_index = calls.index("embedding-start")
     provider_up_index = calls.index("provider-services up")
     provider_verify_index = calls.index("provider-services verify --services")
-    dispatch_index = next(
-        index
-        for index, line in enumerate(calls)
-        if "oamb run" in line and "--full-resume-rehearsal" not in line
-    )
-    assert (
-        embedding_start_index
-        < provider_up_index
-        < provider_verify_index
-        < rehearsal_index
-        < dispatch_index
-    )
+    dispatch_index = next(index for index, line in enumerate(calls) if "oamb run" in line)
+    assert embedding_start_index < provider_up_index < provider_verify_index < dispatch_index
     assert provider_ready.is_file()
 
 
 def test_run_full_resume_waits_for_recorded_embedding_startup(tmp_path: Path) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
-    _write_canonical_full_progress(root)
+    _write_provider_result_run(root)
     state = json.loads(
         (root / "outputs" / "tmp" / "quick-start-current.json").read_text(encoding="utf-8")
     )
@@ -2349,13 +2394,13 @@ start_local_embedding 'http://host.docker.internal:18000/v1' 'local-key' '{log_f
     assert str(log_file) not in result.stderr
 
 
-def test_run_full_resume_rehearsal_failure_stops_after_runtime_verification(
+def test_run_full_resume_failure_stops_before_comparison(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
-    _write_canonical_full_progress(root)
-    env["OAMB_TEST_RESUME_REHEARSAL_FAIL"] = "1"
+    _write_provider_result_run(root)
+    env["OAMB_TEST_RESUME_FAIL"] = "1"
 
     result = subprocess.run(
         [str(script), "--full_test", "--resume"],
@@ -2371,10 +2416,137 @@ def test_run_full_resume_rehearsal_failure_stops_after_runtime_verification(
     calls = trace.read_text(encoding="utf-8").splitlines()
     run_calls = [line for line in calls if "oamb run" in line]
     assert len(run_calls) == 1
-    assert "--full-resume-rehearsal" in run_calls[0]
+    assert "--full-resume-rehearsal" not in run_calls[0]
     doctor_index = calls.index("provider-services doctor")
     provider_up_index = calls.index("provider-services up")
     provider_verify_index = calls.index("provider-services verify --services")
-    rehearsal_index = calls.index(run_calls[0])
-    assert doctor_index < provider_up_index < provider_verify_index < rehearsal_index
+    resume_index = calls.index(run_calls[0])
+    assert doctor_index < provider_up_index < provider_verify_index < resume_index
     assert not any("oamb compare" in line for line in calls)
+
+
+def test_run_sh_owner_death_stops_in_flight_comparison(tmp_path: Path) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    _write_provider_result_run(root)
+    compare_pid_path = tmp_path / "compare.pid"
+    compare_started = tmp_path / "compare-started"
+    compare_stopped = tmp_path / "compare-stopped"
+    env.update(
+        {
+            "OAMB_TEST_COMPARE_BLOCK": "1",
+            "OAMB_TEST_COMPARE_PID": str(compare_pid_path),
+            "OAMB_TEST_COMPARE_STARTED": str(compare_started),
+            "OAMB_TEST_COMPARE_STOPPED": str(compare_stopped),
+            "OAMB_TEST_COMPARE_EXIT_WITH_OWNER": "1",
+        }
+    )
+
+    process = subprocess.Popen(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    compare_pid = 0
+    try:
+        deadline = time.monotonic() + 10
+        while not compare_started.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert compare_started.is_file(), "comparison did not reach the planted barrier"
+        compare_pid = int(compare_pid_path.read_text(encoding="utf-8"))
+
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(compare_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("comparison process did not exit after its stop handler")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if "provider-services stop" in trace.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("owner-death watchdog did not stop provider services")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=1)
+        if compare_pid:
+            try:
+                os.kill(compare_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize(
+    ("stop_signal", "send_to_group"),
+    ((signal.SIGINT, True), (signal.SIGTERM, False)),
+)
+def test_one_signal_stops_owned_full_run_tree_once(
+    tmp_path: Path,
+    stop_signal: signal.Signals,
+    send_to_group: bool,
+) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    owned_pid_path = tmp_path / "owned-run.pid"
+    run_started = tmp_path / "owned-run-started"
+    received_signals = tmp_path / "owned-run-signals"
+    env.update(
+        {
+            "OAMB_TEST_RUN_SIGNAL_BLOCK": "1",
+            "OAMB_TEST_RUN_SIGNAL_PID": str(owned_pid_path),
+            "OAMB_TEST_RUN_SIGNAL_STARTED": str(run_started),
+            "OAMB_TEST_RUN_SIGNALS": str(received_signals),
+        }
+    )
+
+    process = subprocess.Popen(
+        [str(script), "--full_test"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    owned_pid = 0
+    try:
+        deadline = time.monotonic() + 10
+        while not run_started.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert run_started.is_file(), "full run did not reach the planted barrier"
+        owned_pid = int(owned_pid_path.read_text(encoding="utf-8"))
+        if send_to_group:
+            os.killpg(process.pid, stop_signal)
+        else:
+            os.kill(process.pid, stop_signal)
+        process.wait(timeout=10)
+
+        assert not received_signals.exists()
+        assert "provider-services stop" in trace.read_text(encoding="utf-8")
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(owned_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("owned full-run command remained alive")
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=1)
+        if owned_pid:
+            try:
+                os.kill(owned_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

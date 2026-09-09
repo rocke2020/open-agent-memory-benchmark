@@ -138,6 +138,21 @@ class ProviderLifecycleBridge:
             _fsync_directory(self._runtime_directory)
         self._active_authority = None
 
+    def release_current_supervised_aborted_run(
+        self,
+        *,
+        verify_terminal_abort: Callable[[tuple[dict[str, object], ...]], None],
+    ) -> None:
+        """Release a verified abort from the forked run process after supervisor loss."""
+
+        authority = self._active_authority
+        if authority is None:
+            raise ProviderLifecycleError("aborted run release requires active authority")
+        self.release_supervised_aborted_run(
+            authority,
+            verify_terminal_abort=verify_terminal_abort,
+        )
+
     def mark_attempt_dispatched(self, *, attempt_id: str, intent_record_hash: str) -> None:
         _require_sha256(attempt_id)
         _require_sha256(intent_record_hash)

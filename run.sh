@@ -10,6 +10,13 @@ readonly STATE_FILE="$OUTPUTS_ROOT/tmp/quick-start-current.json"
 readonly CELLS=("hindsight-lme60" "mem0-lme60" "openviking-lme60")
 readonly STATUS_INTERVAL_SECONDS=30
 readonly EMBEDDING_STARTUP_ATTEMPTS="${OAMB_EMBEDDING_STARTUP_ATTEMPTS:-180}"
+readonly OAMB_RUN_SH_PROCESS_ID=$$
+export OAMB_RUN_SH_PROCESS_ID
+ACTIVE_COMMAND_PID=""
+ACTIVE_COMMAND_WATCHER_PID=""
+ACTIVE_HEARTBEAT_PID=""
+STOP_REQUESTED=false
+STOP_EXIT_CODE=0
 
 . "$ROOT/provider-services/lib/env.sh"
 . "$ROOT/provider-services/lib/host_embedding.sh"
@@ -26,7 +33,7 @@ Usage: ./run.sh [--smoke_test | --full_test] [--resume] [--dry-run]
 
 --smoke_test  Run one LME-60 question on every provider (default).
 --full_test   Run all 60 questions on every provider in parallel.
---resume      Resume only unfinished --full_test questions from canonical progress.
+--resume      Skip saved --full_test question IDs and run only missing questions.
 --dry-run     Validate configuration and readiness with zero model/provider calls.
 EOF
 }
@@ -47,6 +54,61 @@ finish_logging() {
     ((run_exit_code != 0)) || run_exit_code=$log_exit_code
   fi
   exit "$run_exit_code"
+}
+
+stop_owned_process() {
+  local process_id=$1
+  kill -KILL -- "-$process_id" 2>/dev/null || true
+}
+
+request_stop() {
+  local exit_code=$1
+  STOP_REQUESTED=true
+  STOP_EXIT_CODE=$exit_code
+  if [[ -n "$ACTIVE_HEARTBEAT_PID" ]]; then
+    kill -TERM "$ACTIVE_HEARTBEAT_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$ACTIVE_COMMAND_PID" ]]; then
+    stop_owned_process "$ACTIVE_COMMAND_PID"
+    return
+  fi
+  "$ROOT/provider-services/bin/provider-services" stop || true
+  exit "$exit_code"
+}
+
+run_owned_command() {
+  local command_pid watcher_pid command_code=0
+  set -m
+  (trap - INT TERM HUP; exec "$@") &
+  command_pid=$!
+  set +m
+  ACTIVE_COMMAND_PID=$command_pid
+  (
+    trap 'exit 0' INT TERM HUP
+    while kill -0 "$OAMB_RUN_SH_PROCESS_ID" 2>/dev/null && \
+      kill -0 "$command_pid" 2>/dev/null; do
+      sleep 1
+    done
+    if ! kill -0 "$OAMB_RUN_SH_PROCESS_ID" 2>/dev/null; then
+      stop_owned_process "$command_pid"
+      "$ROOT/provider-services/bin/provider-services" stop || true
+    fi
+  ) &
+  watcher_pid=$!
+  ACTIVE_COMMAND_WATCHER_PID=$watcher_pid
+  wait "$command_pid" || command_code=$?
+  if [[ "$STOP_REQUESTED" == true ]]; then
+    wait "$command_pid" 2>/dev/null || true
+    if ! "$ROOT/provider-services/bin/provider-services" stop; then
+      printf 'run: provider services could not be stopped\n' >&2
+    fi
+    command_code=$STOP_EXIT_CODE
+  fi
+  ACTIVE_COMMAND_PID=""
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  ACTIVE_COMMAND_WATCHER_PID=""
+  return "$command_code"
 }
 
 report_provider_progress() {
@@ -121,12 +183,21 @@ PY
 provider_status_heartbeat() {
   local output_root=$1
   local total_questions=$2
+  local owner_pid=$3
   local started_seconds=$SECONDS
   local timer_pid=""
   trap '[ -z "$timer_pid" ] || kill "$timer_pid" 2>/dev/null || true; exit 0' TERM INT HUP
   while :; do
     sleep "$STATUS_INTERVAL_SECONDS" &
     timer_pid=$!
+    while kill -0 "$timer_pid" 2>/dev/null; do
+      sleep 1
+      if ! kill -0 "$owner_pid" 2>/dev/null; then
+        kill "$timer_pid" 2>/dev/null || true
+        wait "$timer_pid" 2>/dev/null || true
+        exit 0
+      fi
+    done
     wait "$timer_pid" || exit 0
     report_provider_progress "$output_root" "$total_questions" \
       "$((SECONDS - started_seconds))" true
@@ -145,12 +216,14 @@ run_provider_cells_with_status() {
     printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s)\n' \
       "$provider" "$total_questions"
   done
-  provider_status_heartbeat "$output_root" "$total_questions" &
+  provider_status_heartbeat "$output_root" "$total_questions" "$OAMB_RUN_SH_PROCESS_ID" &
   heartbeat_pid=$!
+  ACTIVE_HEARTBEAT_PID=$heartbeat_pid
   command_code=0
-  "$@" || command_code=$?
+  run_owned_command "$@" || command_code=$?
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
+  ACTIVE_HEARTBEAT_PID=""
   report_provider_progress "$output_root" "$total_questions" \
     "$((SECONDS - started_seconds))" false
   if ((command_code != 0)); then
@@ -214,6 +287,9 @@ LOG_STDOUT_PID=$!
 LOG_STDERR_PID=$!
 exec > "$LOG_PIPE_DIR/stdout" 2> "$LOG_PIPE_DIR/stderr"
 trap 'finish_logging "$?"' EXIT
+trap 'request_stop 130' INT
+trap 'request_stop 143' TERM
+trap 'request_stop 129' HUP
 rm "$LOG_PIPE_DIR/stdout" "$LOG_PIPE_DIR/stderr"
 rmdir "$LOG_PIPE_DIR"
 printf 'run: log=%s\n' "$LOG_FILE"
@@ -231,8 +307,7 @@ command -v uv >/dev/null 2>&1 || die "required command not found: uv"
 
 RUN_LABEL="$(jq -er '.run_label | select(type == "string" and length > 0)' "$STATE_FILE")"
 WORK_DIR="$(jq -er '.work_dir | select(type == "string" and length > 0)' "$STATE_FILE")"
-PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
-DATASET_SOURCE="$(jq -er '.dataset_source | select(type == "string" and length > 0)' "$STATE_FILE")"
+PRECHECK_PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
 QUESTION_ID="$(jq -er '.question_id | select(type == "string" and length > 0)' "$STATE_FILE")"
 EMBEDDING_LOCAL_FALLBACK="$(jq -er '
   .embedding_local_fallback |
@@ -244,25 +319,36 @@ case "$RUN_LABEL" in
 esac
 [[ "$WORK_DIR" == "$PRECHECK_ROOT/$RUN_LABEL" ]] || \
   die "precheck state work directory is outside outputs/tmp/precheck"
-[[ "$PLAN" == "$WORK_DIR/plan/resolved-plan.json" ]] || \
+[[ "$PRECHECK_PLAN" == "$WORK_DIR/plan/resolved-plan.json" ]] || \
   die "precheck state resolved plan is outside its work directory"
-[[ -f "$PLAN" ]] || die "resolved plan is missing; rerun ./precheck.sh"
-[[ -f "$DATASET_SOURCE" ]] || die "dataset is missing; rerun ./precheck.sh"
-PLAN_HASH="$(jq -er '.resolved_plan_hash | select(type == "string" and test("^[0-9a-f]{64}$"))' "$PLAN")"
-load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
-
-if [[ "$RESUME" == true ]]; then
-  early_resume_pointer="$WORK_DIR/full-test-current"
-  [[ -f "$early_resume_pointer" && ! -L "$early_resume_pointer" ]] || \
-    die "no resumable full run; start one with ./run.sh --full_test"
-  early_execution_label="$(<"$early_resume_pointer")"
-  case "$early_execution_label" in
-    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run resume pointer is invalid" ;;
-  esac
-  early_mode_dir="$OUTPUTS_ROOT/full-test/$early_execution_label"
-  [[ -d "$early_mode_dir" && ! -L "$early_mode_dir" ]] || \
-    die "resumable full-run output is missing: $early_mode_dir"
+if [[ "$MODE" == "smoke" ]]; then
+  MODE_ROOT="$OUTPUTS_ROOT/smoke-test"
+else
+  MODE_ROOT="$OUTPUTS_ROOT/full-test"
 fi
+FULL_RUN_SELECTOR="$OUTPUTS_ROOT/tmp/full-test-current"
+if [[ "$RESUME" == true ]]; then
+  [[ -f "$FULL_RUN_SELECTOR" && ! -L "$FULL_RUN_SELECTOR" ]] || \
+    die "no resumable full run; start one with ./run.sh --full_test"
+  EXECUTION_LABEL="$(<"$FULL_RUN_SELECTOR")"
+  case "$EXECUTION_LABEL" in
+    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run selector is invalid" ;;
+  esac
+  MODE_DIR="$MODE_ROOT/$EXECUTION_LABEL"
+  [[ -d "$MODE_DIR" && ! -L "$MODE_DIR" ]] || \
+    die "resumable full-run output is missing: $MODE_DIR"
+  PLAN="$MODE_DIR/resolved-plan.json"
+else
+  PLAN="$PRECHECK_PLAN"
+fi
+[[ -f "$PLAN" && ! -L "$PLAN" ]] || die "resolved plan is missing"
+DATASET_PATH="$(jq -er '.dataset.path | select(type == "string" and length > 0)' "$PLAN")"
+case "$DATASET_PATH" in
+  /*) DATASET_SOURCE="$DATASET_PATH" ;;
+  *) DATASET_SOURCE="$ROOT/$DATASET_PATH" ;;
+esac
+[[ -f "$DATASET_SOURCE" && ! -L "$DATASET_SOURCE" ]] || die "stored-plan dataset is missing"
+load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
 
 "$ROOT/provider-services/bin/provider-services" doctor
 uv run --locked python - "$PLAN" "$ENV_FILE" "$ROOT/provider-services/.runtime" \
@@ -323,12 +409,6 @@ if [[ "$RESUME" == true ]]; then
   fi
   "$ROOT/provider-services/bin/provider-services" up
   "$ROOT/provider-services/bin/provider-services" verify --services
-  uv run --locked oamb run "$PLAN" \
-    --run-label "simple-resume-rehearsal" \
-    --output-root "$early_mode_dir/capsules/simple-resume-rehearsal" \
-    --full-progress-root "$early_mode_dir/results" \
-    --full-resume-lock "$WORK_DIR/full-test-resume.lock" \
-    --full-resume-rehearsal
 fi
 if [[ "$DRY_RUN" == true ]]; then
   [[ "$MODE" == smoke ]] && QUESTION_COUNT=1 || QUESTION_COUNT=60
@@ -337,23 +417,7 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-if [[ "$MODE" == "smoke" ]]; then
-  MODE_ROOT="$OUTPUTS_ROOT/smoke-test"
-else
-  MODE_ROOT="$OUTPUTS_ROOT/full-test"
-fi
-FULL_RESUME_POINTER="$WORK_DIR/full-test-current"
-if [[ "$RESUME" == true ]]; then
-  [[ -f "$FULL_RESUME_POINTER" && ! -L "$FULL_RESUME_POINTER" ]] || \
-    die "no resumable full run; start one with ./run.sh --full_test"
-  EXECUTION_LABEL="$(<"$FULL_RESUME_POINTER")"
-  case "$EXECUTION_LABEL" in
-    ""|"."|".."|*[!A-Za-z0-9._-]*) die "full-run resume pointer is invalid" ;;
-  esac
-  MODE_DIR="$MODE_ROOT/$EXECUTION_LABEL"
-  [[ -d "$MODE_DIR" && ! -L "$MODE_DIR" ]] || \
-    die "resumable full-run output is missing: $MODE_DIR"
-else
+if [[ "$RESUME" == false ]]; then
   EXECUTION_LABEL="$RUN_LABEL"
   if [[ -e "$MODE_ROOT/$EXECUTION_LABEL" ]]; then
     EXECUTION_LABEL="$RUN_LABEL-$(date -u +%Y%m%d-%H%M%S)-$$"
@@ -364,20 +428,21 @@ else
 fi
 mkdir -p "$MODE_DIR/results" "$MODE_DIR/validations" "$MODE_DIR/capsules"
 if [[ "$MODE" == "full" && "$RESUME" == false ]]; then
+  cp "$PLAN" "$MODE_DIR/resolved-plan.json" || die "cannot save the resolved plan"
+  PLAN="$MODE_DIR/resolved-plan.json"
   uv run --locked python - "$PLAN" "$MODE_DIR/results" <<'PY'
 import sys
 from pathlib import Path
 
 from oamb.config.doctor import load_resolved_plan_for_run
-from oamb.runtime.full_progress import (
-    canonical_full_progress_path,
-    empty_full_progress,
-    initialize_full_progress,
+from oamb.runtime.question_results import (
+    initialize_question_results,
+    provider_result_path,
 )
 from oamb.workloads.longmemeval import build_longmemeval_bundle
 
 plan = load_resolved_plan_for_run(Path(sys.argv[1]))
-progress_root = Path(sys.argv[2])
+results_root = Path(sys.argv[2])
 dataset_path = Path(plan.dataset.path)
 if not dataset_path.is_absolute():
     dataset_path = Path.cwd() / dataset_path
@@ -388,26 +453,20 @@ if (
     or len(ordered_question_ids) != 60
     or manifest.manifest_hash != plan.dataset.case_manifest_hash
 ):
-    raise SystemExit("fresh full progress does not match the frozen LME-60 manifest")
+    raise SystemExit("fresh full results do not match the frozen LME-60 manifest")
 paths = tuple(
-    canonical_full_progress_path(progress_root, cell.provider_id) for cell in plan.cells
+    provider_result_path(results_root, cell.provider_id) for cell in plan.cells
 )
 if any(path.exists() or path.is_symlink() for path in paths):
-    raise SystemExit("fresh full progress target already exists")
+    raise SystemExit("fresh full result target already exists")
 for cell, path in zip(plan.cells, paths, strict=True):
-    initialize_full_progress(
-        path,
-        empty_full_progress(
-            resolved_plan_hash=plan.resolved_plan_hash,
-            cell_id=cell.cell_id,
-            provider_id=cell.provider_id,
-            workload_id=cell.workload_id,
-            case_manifest_hash=cell.case_manifest_hash,
-            ordered_question_ids=ordered_question_ids,
-        ),
-    )
-    print(f"full progress: initialized cell={cell.cell_id} reused=0 remaining=60")
+    initialize_question_results(path)
+    print(f"question results: initialized cell={cell.cell_id} reused=0 remaining=60")
 PY
+  selector_tmp="$OUTPUTS_ROOT/tmp/.full-test-current.$$"
+  (umask 077; printf '%s\n' "$EXECUTION_LABEL" > "$selector_tmp") || \
+    die "cannot write full-run selector"
+  mv "$selector_tmp" "$FULL_RUN_SELECTOR" || die "cannot publish full-run selector"
 fi
 
 VALIDATION_PATH=""
@@ -428,7 +487,8 @@ validate_capsule_result() {
     printf 'run: capsule validation output already exists: %s\n' "$validation_path" >&2
     return 1
   fi
-  if ! uv run --locked oamb capsule validate "$capsule_root" --output "$validation_path"; then
+  if ! run_owned_command uv run --locked oamb capsule validate \
+    "$capsule_root" --output "$validation_path"; then
     return 1
   fi
   if ! jq -e '.disposition == "validated"' "$validation_path" >/dev/null; then
@@ -462,7 +522,7 @@ build_comparison() {
   fi
   printf 'run: status=building-comparison\n'
   if [[ "$MODE" == "smoke" ]]; then
-    uv run --locked oamb compare "$PLAN" \
+    run_owned_command uv run --locked oamb compare "$PLAN" \
       --cell-root "${CELLS[0]}=${roots[0]}" \
       --cell-root "${CELLS[1]}=${roots[1]}" \
       --cell-root "${CELLS[2]}=${roots[2]}" \
@@ -475,8 +535,8 @@ build_comparison() {
       --output-root "$comparison" \
       --diagnostic
   else
-    uv run --locked oamb compare "$PLAN" \
-      --full-progress-root "$MODE_DIR/results" \
+    run_owned_command uv run --locked oamb compare "$PLAN" \
+      --results-root "$MODE_DIR/results" \
       --dataset-source "$DATASET_SOURCE" \
       --analysis-model-env "$ROOT/.env" \
       --analysis-cache-root "$MODE_DIR/report-analysis-cache" \
@@ -505,12 +565,11 @@ run_simple_resume() {
   local resume_label="simple-resume-$(date -u +%Y%m%d-%H%M%S)-$$"
   local resume_output="$MODE_DIR/capsules/resume/$resume_label"
   mkdir -p "$MODE_DIR/capsules/resume"
-  printf 'run: status=resuming-from-canonical-progress\n'
-  uv run --locked oamb run "$PLAN" \
+  printf 'run: status=resuming-from-saved-question-results\n'
+  run_owned_command uv run --locked oamb run "$PLAN" \
     --run-label "$resume_label" \
     --output-root "$resume_output" \
-    --full-progress-root "$MODE_DIR/results" \
-    --full-resume-lock "$WORK_DIR/full-test-resume.lock"
+    --results-root "$MODE_DIR/results"
   printf 'run: status=resume-completed\n'
 }
 
@@ -544,9 +603,7 @@ else
   question_count=60
   run_context="full, 60 questions each"
   run_arguments+=(
-    --full-progress-root "$MODE_DIR/results"
-    --full-resume-lock "$WORK_DIR/full-test-resume.lock"
-    --full-resume-pointer "$FULL_RESUME_POINTER"
+    --results-root "$MODE_DIR/results"
   )
 fi
 

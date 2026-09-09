@@ -116,7 +116,7 @@ def test_builds_one_closed_live_cell_without_approval_or_client_construction(
         provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
         provider_project_id="oamb-providers-test-live",
         provider_evidence=_provider_evidence(),
-        environment=_environment(),
+        environment={**_environment(), "OAMB_RUN_SH_PROCESS_ID": "4242"},
         run_label="fresh-rerun-1",
         observed_at=NOW,
         code_revision="source-tree-test",
@@ -127,6 +127,7 @@ def test_builds_one_closed_live_cell_without_approval_or_client_construction(
     assert built.control.preflight_record.adapter_profile_id == profile_id
     assert built.control.run_spec.case_manifest_hash == _plan().dataset.case_manifest_hash
     assert built.capsule_root == tmp_path / "capsules" / built.run_id
+    assert built.control.shutdown_owner_process_ids == (4242, os.getpid())
     assert (
         built.control.provider_runtime_directory
         == (tmp_path / "provider-runtime" / "lifecycle-domains" / memory_system_id).resolve()

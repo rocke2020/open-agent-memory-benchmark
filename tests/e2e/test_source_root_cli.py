@@ -121,15 +121,18 @@ def test_installed_source_root_commands_have_no_fake_only_or_review_surface() ->
         assert all(term not in output for term in FORBIDDEN_PUBLIC_TERMS)
 
 
-def test_installed_run_exposes_simple_resume_without_capsule_composition() -> None:
+def test_installed_run_exposes_plain_results_without_resume_protocol_options() -> None:
     run_help = _installed_oamb("run", "--help")
     compose_help = _installed_oamb("capsule", "compose", "--help")
 
     assert run_help.returncode == 0, run_help.stdout + run_help.stderr
     run_output = run_help.stdout + run_help.stderr
     assert "--case" in run_output
-    assert "--full-progress-root" in run_output
-    assert "--full-resume-lock" in run_output
+    assert "--results-root" in run_output
+    assert "--full-progress-root" not in run_output
+    assert "--full-resume-lock" not in run_output
+    assert "--full-resume-pointer" not in run_output
+    assert "--full-resume-rehearsal" not in run_output
     assert "--recover-from" not in run_output
     assert "--continue-from" not in run_output
     assert compose_help.returncode != 0

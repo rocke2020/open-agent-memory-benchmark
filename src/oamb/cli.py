@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import typer
 
-from .artifacts.atomic import atomic_replace_bytes, atomic_write_bytes
+from .artifacts.atomic import atomic_write_bytes
 from .contracts.evidence import ValidationResult
 from .contracts.ids import canonical_json_bytes, canonical_sha256
 from .contracts.specifications import RunSpec
@@ -213,34 +213,13 @@ def run_command(
         str | None,
         typer.Option("--run-label", help="Fresh operator-chosen run label."),
     ] = None,
-    full_progress_root: Annotated[
+    results_root: Annotated[
         Path | None,
         typer.Option(
-            "--full-progress-root",
-            help="Directory containing the three canonical LME-60 progress files.",
+            "--results-root",
+            help="Directory containing one ordinary result file per LME-60 provider.",
         ),
     ] = None,
-    full_resume_lock: Annotated[
-        Path | None,
-        typer.Option(
-            "--full-resume-lock",
-            help="Process-owned nonblocking lock file outside the full-run output.",
-        ),
-    ] = None,
-    full_resume_pointer: Annotated[
-        Path | None,
-        typer.Option(
-            "--full-resume-pointer",
-            help="Publish this progress root for shell resume after acquiring its lock.",
-        ),
-    ] = None,
-    full_resume_rehearsal: Annotated[
-        bool,
-        typer.Option(
-            "--full-resume-rehearsal",
-            help="Validate progress and remaining selection, then stop before runtime loading.",
-        ),
-    ] = False,
     provider_runtime: Annotated[
         Path,
         typer.Option("--provider-runtime", help="Verified provider runtime directory."),
@@ -260,34 +239,15 @@ def run_command(
 ) -> None:
     """Execute frozen cells and seal source capsules."""
 
-    if (full_progress_root is None) != (full_resume_lock is None):
+    if results_root is not None and any((cell, case, question)):
         raise typer.BadParameter(
-            "--full-progress-root and --full-resume-lock must be supplied together"
-        )
-    if full_resume_rehearsal and full_progress_root is None:
-        raise typer.BadParameter(
-            "--full-resume-rehearsal requires --full-progress-root and --full-resume-lock"
-        )
-    if full_resume_pointer is not None and full_progress_root is None:
-        raise typer.BadParameter("--full-resume-pointer requires full progress and its lock")
-    if full_resume_pointer is not None and full_resume_rehearsal:
-        raise typer.BadParameter("rehearsal cannot publish the full resume pointer")
-    if full_progress_root is not None and any((cell, case, question)):
-        raise typer.BadParameter(
-            "full progress resume cannot be combined with case, cell, or question selection"
+            "provider results cannot be combined with case, cell, or question selection"
         )
     document = _load_object(resolved_plan)
     if document.get("schema_name") == "fake_resolved_plan":
-        if (
-            case
-            or question
-            or result_map
-            or full_progress_root is not None
-            or full_resume_pointer is not None
-            or full_resume_rehearsal
-        ):
+        if case or question or result_map or results_root is not None:
             raise typer.BadParameter(
-                "live selection, result-map, and progress options require a live resolved plan"
+                "live selection, result-map, and result options require a live resolved plan"
             )
         _run_fake_resolved_plan(resolved_plan, scenario=scenario)
         return
@@ -299,17 +259,14 @@ def run_command(
         LiveConfigurationError,
         build_live_cell,
         execute_live_cells,
-        load_full_resume_selection,
         load_live_environment,
         load_live_provider_evidence,
+        load_live_question_results,
         resolve_live_question_case_ids,
         select_live_cells,
         validate_live_readiness_receipt,
     )
-    from .runtime.full_progress import (
-        acquire_full_resume_lock,
-        canonical_full_progress_path,
-    )
+    from .runtime.question_results import provider_result_path
     from .workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
 
     if output_root is None:
@@ -318,50 +275,23 @@ def run_command(
         raise typer.BadParameter("fresh live run requires --run-label")
     if result_map is not None and (result_map.exists() or result_map.is_symlink()):
         raise typer.BadParameter("result map already exists")
-    resume_lock_context = None
     try:
         plan = load_resolved_plan_for_run(resolved_plan)
         selected_cells = select_live_cells(plan, tuple(cell or ()))
-        resume_selection = None
-        if full_progress_root is not None:
-            assert full_resume_lock is not None
-            candidate_lock = acquire_full_resume_lock(full_resume_lock)
-            candidate_lock.__enter__()
-            resume_lock_context = candidate_lock
+        result_selection = None
+        if results_root is not None:
             selected_cells = plan.cells
-            resume_selection = load_full_resume_selection(
+            result_selection = load_live_question_results(
                 plan=plan,
-                progress_root=full_progress_root,
+                results_root=results_root,
             )
             for frozen_cell in selected_cells:
-                progress = resume_selection.progress_by_cell[frozen_cell.cell_id]
+                results = result_selection.results_by_cell[frozen_cell.cell_id]
+                remaining = result_selection.remaining_case_manifest_entry_ids[frozen_cell.cell_id]
                 typer.echo(
-                    f"full progress: PASS cell={frozen_cell.cell_id} "
-                    f"reused={len(progress.results)} "
-                    f"remaining={len(progress.remaining_question_ids)}"
+                    f"question results: PASS cell={frozen_cell.cell_id} "
+                    f"reused={len(results)} remaining={len(remaining)}"
                 )
-            if full_resume_pointer is not None:
-                execution_label = full_progress_root.parent.name
-                if (
-                    full_progress_root.name != "results"
-                    or not execution_label
-                    or any(
-                        not (character.isascii() and (character.isalnum() or character in "._-"))
-                        for character in execution_label
-                    )
-                ):
-                    raise LiveConfigurationError(
-                        "full progress root does not identify a canonical execution label"
-                    )
-                atomic_replace_bytes(
-                    full_resume_pointer,
-                    f"{execution_label}\n".encode(),
-                    trusted_root=full_resume_pointer.parent,
-                )
-                typer.echo(f"full resume pointer: PASS label={execution_label}")
-            if full_resume_rehearsal:
-                typer.echo("full progress rehearsal: PASS zero_dispatch=true")
-                return
         if case and question:
             raise LiveConfigurationError("--case and --question are mutually exclusive")
         selected_case_ids = tuple(case or ())
@@ -384,18 +314,18 @@ def run_command(
             if full_lme60:
                 if selected_cells != plan.cells:
                     raise LiveConfigurationError("full LME-60 requires all three frozen cells")
-                if full_progress_root is None:
+                if results_root is None:
                     raise LiveConfigurationError(
-                        "full LME-60 requires canonical progress and its resume lock"
+                        "full LME-60 requires one result file per provider"
                     )
-        if resume_selection is not None:
+        if result_selection is not None:
             selected_cells = tuple(
                 frozen_cell
                 for frozen_cell in selected_cells
-                if resume_selection.remaining_case_manifest_entry_ids[frozen_cell.cell_id]
+                if result_selection.remaining_case_manifest_entry_ids[frozen_cell.cell_id]
             )
             if not selected_cells:
-                typer.echo("full progress: PASS complete=180 zero_dispatch=true")
+                typer.echo("question results: PASS complete=180 zero_dispatch=true")
                 return
         environment = load_live_environment(
             provider_env_path=provider_env,
@@ -422,18 +352,18 @@ def run_command(
         assert run_label is not None
         for frozen_cell in selected_cells:
             requested_case_ids = selected_case_ids
-            progress_path = None
-            expected_progress = None
-            if resume_selection is not None:
-                assert full_progress_root is not None
-                requested_case_ids = resume_selection.remaining_case_manifest_entry_ids[
+            results_path = None
+            ordered_question_ids: tuple[str, ...] = ()
+            if result_selection is not None:
+                assert results_root is not None
+                requested_case_ids = result_selection.remaining_case_manifest_entry_ids[
                     frozen_cell.cell_id
                 ]
-                progress_path = canonical_full_progress_path(
-                    full_progress_root,
+                results_path = provider_result_path(
+                    results_root,
                     frozen_cell.provider_id,
                 )
-                expected_progress = resume_selection.progress_by_cell[frozen_cell.cell_id]
+                ordered_question_ids = result_selection.ordered_question_ids
             built_cells.append(
                 build_live_cell(
                     plan=plan,
@@ -447,8 +377,8 @@ def run_command(
                     observed_at=observed_at,
                     code_revision=code_revision,
                     requested_case_manifest_entry_ids=requested_case_ids,
-                    progress_path=progress_path,
-                    expected_progress=expected_progress,
+                    results_path=results_path,
+                    ordered_question_ids=ordered_question_ids,
                 )
             )
 
@@ -549,9 +479,6 @@ def run_command(
         raise typer.BadParameter(str(exc)) from exc
     except BaseExceptionGroup as exc:
         raise typer.BadParameter(str(exc)) from exc
-    finally:
-        if resume_lock_context is not None:
-            resume_lock_context.__exit__(None, None, None)
 
 
 def _run_fake_resolved_plan(resolved_plan: Path, *, scenario: str) -> None:
@@ -693,11 +620,11 @@ def compare_command(
             help="Content-addressed cache for sealed report-analysis responses.",
         ),
     ] = None,
-    full_progress_root: Annotated[
+    results_root: Annotated[
         Path | None,
         typer.Option(
-            "--full-progress-root",
-            help="Directory containing the three canonical complete progress files.",
+            "--results-root",
+            help="Directory containing one complete ordinary result file per provider.",
         ),
     ] = None,
     diagnostic: Annotated[
@@ -711,12 +638,12 @@ def compare_command(
     """Freshly validate frozen cells and build every pair plus offline report."""
 
     from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
-    from .live import load_full_resume_selection
+    from .live import load_live_question_results
     from .reporting.comparison_project import (
         ComparisonProjectError,
         ValidatedCellRoot,
         build_comparison_project,
-        build_full_progress_comparison_project,
+        build_question_results_comparison_project,
     )
     from .reporting.report_analysis import build_report_analysis_generator
 
@@ -737,18 +664,18 @@ def compare_command(
             if analysis_model_env is not None
             else None
         )
-        if full_progress_root is not None:
+        if results_root is not None:
             if cell_root or validation or diagnostic:
                 raise typer.BadParameter(
-                    "full progress comparison cannot use capsule roots, validations, or diagnostic mode"
+                    "question-result comparison cannot use capsule roots, validations, or diagnostic mode"
                 )
-            selection = load_full_resume_selection(
+            selection = load_live_question_results(
                 plan=plan,
-                progress_root=full_progress_root,
+                results_root=results_root,
             )
-            built = build_full_progress_comparison_project(
+            built = build_question_results_comparison_project(
                 plan,
-                selection.progress_by_cell,
+                selection.results_by_cell,
                 case_manifest=selection.case_manifest,
                 output_root=output_root,
                 dataset_source=dataset_source,

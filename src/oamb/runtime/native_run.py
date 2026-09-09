@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import math
 import multiprocessing
+import os
 import signal
 import sys
 import threading
@@ -168,6 +169,7 @@ NATIVE_RETRIEVAL_TOP_K = 100
 NATIVE_CLOSE_TIMEOUT_SECONDS = 5.0
 NATIVE_PROCESS_POLL_SECONDS = 0.01
 NATIVE_PROCESS_TERMINATION_SECONDS = 0.10
+_SUPERVISOR_EXITED_REASON = "native run stopped after its supervisor exited"
 NATIVE_OWNER_NAME = "native-run-owner.json"
 NATIVE_OWNER_ID = "native-fixture-owner-v1"
 COOPERATIVE_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
@@ -206,7 +208,7 @@ class NativeRunProcessTerminationError(RuntimeError):
 
 
 class NativeRunInterrupted(RuntimeError):
-    """A planned process signal stopped admission after accepted work drained."""
+    """A planned process signal stopped the native run."""
 
 
 class NativeCancellationEvidenceError(asyncio.CancelledError):
@@ -304,6 +306,7 @@ class NativeRunControl:
     model_max_attempts: int = 6
     model_transport_max_retries: int = 2
     provider_lifecycle_coordination_directory: Path | None = None
+    shutdown_owner_process_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         run_id = self.run_spec.run_id
@@ -341,6 +344,11 @@ class NativeRunControl:
             raise ValueError("live native lifecycle coordination directory must be absolute")
         if not callable(self.wall_clock) or not callable(self.monotonic_clock):
             raise ValueError("live native control requires trusted wall and monotonic clocks")
+        if any(
+            type(process_id) is not int or process_id <= 0
+            for process_id in self.shutdown_owner_process_ids
+        ) or len(set(self.shutdown_owner_process_ids)) != len(self.shutdown_owner_process_ids):
+            raise ValueError("live native shutdown owners must be unique positive process IDs")
         if (
             min(
                 self.max_parallel_history_ingestions,
@@ -592,6 +600,8 @@ class _NativeRunRequest:
     requested_case_manifest_entry_ids: tuple[str, ...] = ()
     terminal_case_publisher: TerminalCasePublisher | None = None
     stop_event: _NativeStopSignal | None = None
+    interrupt_event: _NativeStopSignal | None = None
+    supervisor_process_id: int | None = None
 
 
 class _NativeStopSignal(Protocol):
@@ -637,6 +647,8 @@ class _NativeExecutionState:
     provider_lifecycle: ProviderLifecycleBridge | None = None
     pending_model_usage: dict[str, TokenUsageRecordV2 | TokenUsageRecordV3] | None = None
     stop_event: _NativeStopSignal | None = None
+    shutdown_owner_process_ids: tuple[int, ...] = ()
+    supervisor_process_id: int | None = None
     sequence: int = 0
     operation_records: dict[str, AttemptRecordV2 | AttemptRecordV4] = field(default_factory=dict)
     attempt_accounting: dict[str, tuple[tuple[str, ...], str, str]] = field(default_factory=dict)
@@ -887,6 +899,10 @@ def _new_execution_state(
         provider_lifecycle=request.provider_lifecycle,
         pending_model_usage={} if control is not None else None,
         stop_event=request.stop_event,
+        shutdown_owner_process_ids=(
+            control.shutdown_owner_process_ids if control is not None else ()
+        ),
+        supervisor_process_id=request.supervisor_process_id,
         sequence=sequence,
     )
 
@@ -1040,7 +1056,13 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
         ) from exc
     receiver, sender = context.Pipe(duplex=False)
     stop_event = request.stop_event if request.stop_event is not None else context.Event()
-    supervised_request = replace(request, stop_event=stop_event)
+    interrupt_event = context.Event()
+    supervised_request = replace(
+        request,
+        stop_event=stop_event,
+        interrupt_event=interrupt_event,
+        supervisor_process_id=os.getpid(),
+    )
     process = context.Process(
         target=_native_process_entry,
         args=(supervised_request, sender),
@@ -1056,6 +1078,7 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
     try:
         previous_signal_handlers = _install_native_stop_handlers(
             stop_event,
+            interrupt_event,
             stop_signal_count,
         )
         process.start()
@@ -1188,6 +1211,7 @@ def _run_native_supervised(request: _NativeRunRequest) -> NativeRunArtifacts:
 
 def _install_native_stop_handlers(
     stop_event: _NativeStopSignal,
+    interrupt_event: _NativeStopSignal,
     stop_signal_count: list[int],
 ) -> dict[signal.Signals, Any]:
     if threading.current_thread() is not threading.main_thread():
@@ -1196,6 +1220,7 @@ def _install_native_stop_handlers(
     def request_stop(_signum: int, _frame: object) -> None:
         stop_signal_count[0] += 1
         stop_event.set()
+        interrupt_event.set()
 
     previous: dict[signal.Signals, Any] = {}
     for signum in COOPERATIVE_STOP_SIGNALS:
@@ -1251,12 +1276,86 @@ async def _run_native_with_cell_deadline(
             ),
             terminal_case_publisher=getattr(request, "terminal_case_publisher", None),
             stop_event=getattr(request, "stop_event", None),
+            supervisor_process_id=getattr(request, "supervisor_process_id", None),
         )
 
+    async def execute_with_shutdown_watch() -> _NativeRunReady:
+        task = asyncio.create_task(execute())
+        orphan_shutdown_finished: threading.Event | None = None
+        try:
+            while not task.done():
+                reason = _native_shutdown_reason(request)
+                if reason is not None:
+                    orphan_shutdown_finished = _arm_shutdown_deadline(
+                        request.close_timeout_seconds + NATIVE_PROCESS_TERMINATION_SECONDS
+                    )
+                    stop_event = getattr(request, "stop_event", None)
+                    if stop_event is not None:
+                        stop_event.set()
+                    task.cancel()
+                    try:
+                        return await task
+                    except BaseException as error:
+                        if _is_planned_stop_settlement(error):
+                            raise NativeRunInterrupted(reason) from None
+                        raise
+                await asyncio.wait((task,), timeout=NATIVE_PROCESS_POLL_SECONDS)
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if orphan_shutdown_finished is not None:
+                orphan_shutdown_finished.set()
+
     if request.control is None:
-        return await execute()
+        return await execute_with_shutdown_watch()
     async with asyncio.timeout(float(request.control.budget.max_dispatch_wall_seconds)):
-        return await execute()
+        return await execute_with_shutdown_watch()
+
+
+def _native_shutdown_reason(request: _NativeRunRequest) -> str | None:
+    interrupt_event = getattr(request, "interrupt_event", None)
+    if interrupt_event is not None and interrupt_event.is_set():
+        return "native run stopped after an operator signal"
+    supervisor_process_id = getattr(request, "supervisor_process_id", None)
+    if _native_supervisor_exited(supervisor_process_id):
+        return _SUPERVISOR_EXITED_REASON
+    if request.control is not None and any(
+        not _process_exists(process_id)
+        for process_id in getattr(request.control, "shutdown_owner_process_ids", ())
+    ):
+        return "native run stopped after an owning process exited"
+    return None
+
+
+def _native_supervisor_exited(supervisor_process_id: int | None) -> bool:
+    return supervisor_process_id is not None and os.getppid() != supervisor_process_id
+
+
+def _arm_shutdown_deadline(delay_seconds: float) -> threading.Event:
+    finished = threading.Event()
+
+    def stop_after_deadline() -> None:
+        if not finished.wait(delay_seconds):
+            os._exit(1)
+
+    threading.Thread(
+        target=stop_after_deadline,
+        name="oamb-shutdown-deadline",
+        daemon=True,
+    ).start()
+    return finished
+
+
+def _process_exists(process_id: int) -> bool:
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _join_completed_native_process(process: _StoppableNativeProcess) -> None:
@@ -1594,6 +1693,7 @@ async def _run_native_vertical_slice(
     requested_case_manifest_entry_ids: tuple[str, ...] = (),
     terminal_case_publisher: TerminalCasePublisher | None = None,
     stop_event: _NativeStopSignal | None = None,
+    supervisor_process_id: int | None = None,
 ) -> _NativeRunReady:
     capsule_root = output_root / run_id
     store = artifact_store_factory(capsule_root)
@@ -1631,6 +1731,7 @@ async def _run_native_vertical_slice(
         requested_case_manifest_entry_ids=requested_case_manifest_entry_ids,
         terminal_case_publisher=terminal_case_publisher,
         stop_event=stop_event,
+        supervisor_process_id=supervisor_process_id,
     )
     lease = lease or _native_run_lease(run_id, adapter_profile_id, control=control)
     state = _new_execution_state(request_identity, store)
@@ -1815,6 +1916,8 @@ async def _run_native_vertical_slice(
         case_occurrence_ids=case_occurrence_ids,
         lifecycle_sender=lifecycle_sender,
     )
+    if execution_error is None and _native_supervisor_exited(supervisor_process_id):
+        execution_error = NativeRunInterrupted(_SUPERVISOR_EXITED_REASON)
     if execution_error is None and state.pending_model_usage:
         execution_error = ValueError(
             "live model usage contains unreferenced records at terminal seal"
@@ -1848,6 +1951,22 @@ async def _run_native_vertical_slice(
             diagnostic_error = exc
         if diagnostic_error is not None:
             terminal_errors = (*terminal_errors, diagnostic_error)
+        elif (
+            terminal_run_state == RunState.ABORTED
+            and provider_lifecycle is not None
+            and _native_supervisor_exited(supervisor_process_id)
+        ):
+            try:
+                provider_lifecycle.release_current_supervised_aborted_run(
+                    verify_terminal_abort=lambda attempts: _verify_supervised_aborted_capsule(
+                        capsule_root,
+                        run_id=run_id,
+                        run_spec_hash=run_spec_hash,
+                        active_attempts=attempts,
+                    )
+                )
+            except BaseException as exc:
+                terminal_errors = (*terminal_errors, exc)
     if execution_error is not None:
         if len(terminal_errors) > 1:
             raise BaseExceptionGroup(
@@ -2024,8 +2143,9 @@ async def _execute_history_question_pipeline(
             return False, None
         try:
             return True, await operation()
-        except BaseException:
-            admission_stopped = True
+        except BaseException as error:
+            if not isinstance(error, NativeRunInterrupted):
+                admission_stopped = True
             stop_event = getattr(state, "stop_event", None)
             if stop_event is not None:
                 stop_event.set()
@@ -2059,7 +2179,15 @@ async def _execute_history_question_pipeline(
             )
             if len(records) != 1:
                 raise AssertionError("admitted question did not produce exactly one result")
-            return records[0]
+            result = records[0]
+            if terminal_case_publisher is not None:
+                terminal_case_publisher(
+                    plan_record,
+                    result,
+                    dict(state.operation_records),
+                    tuple(state.history_records),
+                )
+            return result
 
         was_admitted, result = await admitted(question_permits, operation)
         if not was_admitted:
@@ -2067,13 +2195,6 @@ async def _execute_history_question_pipeline(
         if result is None:
             raise AssertionError("admitted question did not produce a result")
         case_records[case_index] = result
-        if terminal_case_publisher is not None:
-            terminal_case_publisher(
-                plan_record,
-                result,
-                dict(state.operation_records),
-                tuple(state.history_records),
-            )
 
     async def execute_history(plan_index: int, plan: IngestionPlan) -> None:
         async def operation() -> tuple[NativeIngestionPlanRecord, ScopeReceipt]:
@@ -2125,7 +2246,8 @@ async def _execute_history_question_pipeline(
         _raise_pipeline_errors(question_results)
 
     history_results = await _settle_pipeline_operations(
-        tuple(execute_history(index, plan) for index, plan in enumerate(plans))
+        tuple(execute_history(index, plan) for index, plan in enumerate(plans)),
+        cancel_when=lambda: _native_stop_requested(state) and not admission_stopped,
     )
     _raise_pipeline_errors(history_results)
     if _native_stop_requested(state) and (
@@ -2147,7 +2269,16 @@ async def _execute_history_question_pipeline(
 
 def _native_stop_requested(state: object) -> bool:
     stop_event = getattr(state, "stop_event", None)
-    return stop_event is not None and stop_event.is_set()
+    if stop_event is not None and stop_event.is_set():
+        return True
+    supervisor_process_id = getattr(state, "supervisor_process_id", None)
+    owner_process_ids = getattr(state, "shutdown_owner_process_ids", ())
+    owner_lost = (
+        supervisor_process_id is not None and os.getppid() != supervisor_process_id
+    ) or any(not _process_exists(process_id) for process_id in owner_process_ids)
+    if owner_lost and stop_event is not None:
+        stop_event.set()
+    return owner_lost
 
 
 async def _capture_pipeline_outcome(
@@ -2163,20 +2294,44 @@ async def _capture_pipeline_outcome(
 
 async def _settle_pipeline_operations(
     operations: Sequence[Awaitable[_LiveDispatchResult]],
+    *,
+    cancel_when: Callable[[], bool] | None = None,
 ) -> tuple[_LiveDispatchResult | BaseException, ...]:
     tasks = tuple(
         asyncio.create_task(_capture_pipeline_outcome(operation)) for operation in operations
     )
     try:
+        while tasks and cancel_when is not None and not all(task.done() for task in tasks):
+            if cancel_when():
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                settled = await asyncio.gather(*tasks, return_exceptions=True)
+                evidence_errors = tuple(
+                    outcome
+                    for outcome in settled
+                    if isinstance(outcome, BaseException)
+                    and not _is_planned_stop_settlement(outcome)
+                )
+                interruption = NativeRunInterrupted(
+                    "native run stopped admission and cancelled accepted operations"
+                )
+                if evidence_errors:
+                    raise BaseExceptionGroup(
+                        "operator stop retained cancellation evidence failures",
+                        [interruption, *evidence_errors],
+                    )
+                raise interruption
+            await asyncio.wait(tasks, timeout=NATIVE_PROCESS_POLL_SECONDS)
         return tuple(await asyncio.gather(*tasks))
     except asyncio.CancelledError as cancellation:
         for task in tasks:
             if not task.done():
                 task.cancel()
-        settled = await asyncio.gather(*tasks, return_exceptions=True)
+        cancellation_settled = await asyncio.gather(*tasks, return_exceptions=True)
         drain_errors = tuple(
             outcome
-            for outcome in settled
+            for outcome in cancellation_settled
             if isinstance(outcome, BaseException) and type(outcome) is not asyncio.CancelledError
         )
         if drain_errors:
@@ -2185,6 +2340,18 @@ async def _settle_pipeline_operations(
                 [cancellation, *drain_errors],
             ) from None
         raise
+
+
+def _is_planned_stop_settlement(error: BaseException) -> bool:
+    if isinstance(error, NativeCancellationEvidenceError):
+        return False
+    if isinstance(error, (asyncio.CancelledError, NativeRunInterrupted)):
+        return True
+    return (
+        isinstance(error, BaseExceptionGroup)
+        and bool(error.exceptions)
+        and all(_is_planned_stop_settlement(child) for child in error.exceptions)
+    )
 
 
 def _raise_pipeline_errors(results: Sequence[object]) -> None:

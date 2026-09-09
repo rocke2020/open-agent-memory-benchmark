@@ -11,6 +11,7 @@ import queue
 import shutil
 import signal
 import threading
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,6 +83,7 @@ from oamb.runtime.native_run import (
     NativeRunProcessError,
     run_native_vertical_slice,
 )
+from oamb.runtime.provider_lifecycle import ProviderLifecycleBridge
 from oamb.workloads.fake import GeneratedFakeWorkload
 from oamb.workloads.visible_evidence import (
     LME_VISIBLE_EVIDENCE_POLICY,
@@ -2845,20 +2847,28 @@ def test_supervised_child_crash_releases_lifecycle_for_a_fresh_run(tmp_path: Pat
     assert not attempts.exists() or not tuple(attempts.iterdir())
 
 
-def test_supervised_process_group_hangup_drains_and_releases_lifecycle(
+@pytest.mark.parametrize("stop_signal", (signal.SIGINT, signal.SIGHUP))
+def test_supervised_process_group_stop_cancels_and_releases_lifecycle(
     tmp_path: Path,
+    stop_signal: signal.Signals,
 ) -> None:
     context = multiprocessing.get_context("fork")
     ingest_started = context.Event()
+    ingest_cancelled = context.Event()
 
-    class SlowIngestMemory(_RecordedNativeMemory):
+    class BlockingIngestMemory(_RecordedNativeMemory):
         async def ingest(
             self,
-            request: IngestionDispatchRequest,
+            _request: IngestionDispatchRequest,
         ) -> IngestionDispatchReceipt:
             ingest_started.set()
-            await asyncio.sleep(0.25)
-            return await super().ingest(request)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as error:
+                ingest_cancelled.set()
+                raise MemorySystemCallCancelledUnknownOutcome(
+                    "planted cancellation with unknown provider acceptance"
+                ) from error
 
     workload = _NativeFixtureWorkload()
     dataset = workload.resolve_sources()
@@ -2881,8 +2891,8 @@ def test_supervised_process_group_hangup_drains_and_releases_lifecycle(
     def memory_factory(
         store: ArtifactStorePort,
         _plans: tuple[IngestionPlan, ...],
-    ) -> SlowIngestMemory:
-        return SlowIngestMemory(store)
+    ) -> BlockingIngestMemory:
+        return BlockingIngestMemory(store)
 
     def supervise() -> None:
         os.setsid()
@@ -2905,16 +2915,321 @@ def test_supervised_process_group_hangup_drains_and_releases_lifecycle(
     supervisor.start()
     assert ingest_started.wait(timeout=2), "native ingest did not reach the planted barrier"
     assert supervisor.pid is not None
-    os.killpg(supervisor.pid, signal.SIGHUP)
-    supervisor.join(timeout=10)
+    os.killpg(supervisor.pid, stop_signal)
+    supervisor.join(timeout=3)
     if supervisor.is_alive():
         os.killpg(supervisor.pid, signal.SIGKILL)
         supervisor.join(timeout=1)
 
     assert supervisor.exitcode == 0
+    assert ingest_cancelled.is_set(), "operator stop did not cancel the admitted provider call"
     root = tmp_path / "capsules" / run_id
     run_record = json.loads((root / "source/run" / f"{run_id}.json").read_bytes())
     assert run_record["state"] == "aborted"
+    assert not (provider_runtime / "active-operation").exists()
+    attempts = provider_runtime / "active-provider-attempts"
+    assert not attempts.exists() or not tuple(attempts.iterdir())
+
+
+def test_native_child_stops_after_its_supervisor_unexpectedly_dies(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    ingest_started = context.Event()
+    ingest_cancelled = context.Event()
+    native_process_id = context.Value("i", 0)
+
+    class BlockingIngestMemory(_RecordedNativeMemory):
+        async def ingest(
+            self,
+            _request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            with native_process_id.get_lock():
+                native_process_id.value = os.getpid()
+            ingest_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as error:
+                ingest_cancelled.set()
+                raise MemorySystemCallCancelledUnknownOutcome(
+                    "supervisor died after provider dispatch"
+                ) from error
+
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    first_plan = manifest.ingestion_plans[0]
+    provider_runtime = (tmp_path / "provider-runtime-parent-loss").resolve()
+    run_id = "native-fixture-parent-loss"
+    control = _control(
+        run_id=run_id,
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> BlockingIngestMemory:
+        return BlockingIngestMemory(store)
+
+    def supervise() -> None:
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=run_id,
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=memory_factory,
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="answer-binding",
+            control=control,
+            requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
+        )
+
+    supervisor = context.Process(target=supervise)
+    supervisor.start()
+    assert ingest_started.wait(timeout=2), "native ingest did not reach the planted barrier"
+    assert supervisor.pid is not None
+    child_pid = native_process_id.value
+    assert child_pid > 0
+    os.kill(supervisor.pid, signal.SIGKILL)
+    supervisor.join(timeout=1)
+
+    stopped_itself = ingest_cancelled.wait(timeout=3)
+    deadline = time.monotonic() + 1
+    child_alive = True
+    while child_alive and time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            child_alive = False
+        else:
+            time.sleep(0.01)
+    if child_alive:
+        os.kill(child_pid, signal.SIGKILL)
+
+    assert stopped_itself, "native child did not cancel after supervisor death"
+    assert not child_alive, "native child survived its bounded parent-loss shutdown"
+    root = tmp_path / "capsules" / run_id
+    run_record = json.loads((root / "source/run" / f"{run_id}.json").read_bytes())
+    assert run_record["state"] == "aborted"
+    assert (root / "capsule-manifest.json").is_file()
+    assert not (provider_runtime / "active-operation").exists()
+    attempts = provider_runtime / "active-provider-attempts"
+    assert not attempts.exists() or not tuple(attempts.iterdir())
+    bridge = ProviderLifecycleBridge(provider_runtime)
+    authority = bridge.acquire_run(
+        run_id="fresh-after-parent-loss",
+        provider_project="oamb-providers-test-live",
+        profile_id="recorded-native-fixture-v1",
+        lease_epoch=1,
+        lease_record_hash="f" * 64,
+    )
+    bridge.release_run(authority)
+
+
+@pytest.mark.parametrize("signal_before_parent_death", (False, True))
+def test_native_child_hard_stops_when_close_hangs_after_supervisor_death(
+    tmp_path: Path,
+    signal_before_parent_death: bool,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    ingest_started = context.Event()
+    ingest_cancelled = context.Event()
+    close_started = context.Event()
+    native_process_id = context.Value("i", 0)
+
+    class HangingCloseMemory(_RecordedNativeMemory):
+        async def ingest(
+            self,
+            _request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            with native_process_id.get_lock():
+                native_process_id.value = os.getpid()
+            ingest_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as error:
+                ingest_cancelled.set()
+                raise MemorySystemCallCancelledUnknownOutcome(
+                    "supervisor died after provider dispatch"
+                ) from error
+
+        async def close(self) -> None:
+            close_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()
+
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    first_plan = manifest.ingestion_plans[0]
+    provider_runtime = (tmp_path / "provider-runtime-parent-loss-hard-close").resolve()
+    run_id = "native-fixture-parent-loss-hard-close"
+    control = _control(
+        run_id=run_id,
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=provider_runtime,
+    )
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> HangingCloseMemory:
+        return HangingCloseMemory(store)
+
+    def supervise() -> None:
+        run_native_vertical_slice(
+            output_root=tmp_path / "capsules",
+            run_id=run_id,
+            adapter_profile_id="recorded-native-fixture-v1",
+            workload=workload,
+            visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+            artifact_store_factory=ArtifactStore,
+            memory_factory=memory_factory,
+            model_factory=_RecordedNativeModel,
+            answer_role_binding_id="answer-binding",
+            close_timeout_seconds=0.05,
+            control=control,
+            requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
+        )
+
+    supervisor = context.Process(target=supervise)
+    supervisor.start()
+    assert ingest_started.wait(timeout=2), "native ingest did not reach the planted barrier"
+    assert supervisor.pid is not None
+    child_pid = native_process_id.value
+    if signal_before_parent_death:
+        os.kill(supervisor.pid, signal.SIGINT)
+        assert ingest_cancelled.wait(timeout=1), "operator stop did not cancel the active call"
+        assert close_started.wait(timeout=1), "operator stop did not begin client close"
+    os.kill(supervisor.pid, signal.SIGKILL)
+    supervisor.join(timeout=1)
+
+    assert ingest_cancelled.wait(timeout=1), "parent loss did not cancel the active call"
+    assert close_started.wait(timeout=1), "parent loss did not begin client close"
+    deadline = time.monotonic() + 1
+    child_alive = True
+    while child_alive and time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            child_alive = False
+        else:
+            time.sleep(0.01)
+    if child_alive:
+        os.kill(child_pid, signal.SIGKILL)
+
+    assert not child_alive, "orphan shutdown exceeded the hard close bound"
+    root = tmp_path / "capsules" / run_id
+    assert tuple((root / "source/attempt-receipts").glob("*.json"))
+    assert tuple((root / "source/attempts").glob("*.json"))
+
+
+def test_lost_run_sh_owner_stops_tree_and_releases_lifecycle(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    ingest_started = context.Event()
+    ingest_cancelled = context.Event()
+    run_sh_owner = context.Process(target=time.sleep, args=(30,))
+    run_sh_owner.start()
+    assert run_sh_owner.pid is not None
+
+    class BlockingIngestMemory(_RecordedNativeMemory):
+        async def ingest(
+            self,
+            _request: IngestionDispatchRequest,
+        ) -> IngestionDispatchReceipt:
+            ingest_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as error:
+                ingest_cancelled.set()
+                raise MemorySystemCallCancelledUnknownOutcome(
+                    "run.sh owner died after provider dispatch"
+                ) from error
+
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    first_plan = manifest.ingestion_plans[0]
+    provider_runtime = (tmp_path / "provider-runtime-run-sh-loss").resolve()
+    run_id = "native-fixture-run-sh-loss"
+    control = replace(
+        _control(
+            run_id=run_id,
+            dataset_manifest_hash=dataset.manifest_hash,
+            case_manifest_hash=manifest.manifest_hash,
+            workload_id=manifest.workload_id,
+            memory_system_id="fake-memory",
+            runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+            adapter_profile_id="recorded-native-fixture-v1",
+            answer_role_binding_id="answer-binding",
+            provider_runtime_directory=provider_runtime,
+        ),
+        shutdown_owner_process_ids=(run_sh_owner.pid,),
+    )
+
+    def memory_factory(
+        store: ArtifactStorePort,
+        _plans: tuple[IngestionPlan, ...],
+    ) -> BlockingIngestMemory:
+        return BlockingIngestMemory(store)
+
+    def supervise() -> None:
+        with pytest.raises(NativeRunInterrupted, match="owning process exited"):
+            run_native_vertical_slice(
+                output_root=tmp_path / "capsules",
+                run_id=run_id,
+                adapter_profile_id="recorded-native-fixture-v1",
+                workload=workload,
+                visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+                artifact_store_factory=ArtifactStore,
+                memory_factory=memory_factory,
+                model_factory=_RecordedNativeModel,
+                answer_role_binding_id="answer-binding",
+                control=control,
+                requested_case_manifest_entry_ids=(first_plan.ordered_case_manifest_entry_ids[0],),
+            )
+
+    supervisor = context.Process(target=supervise)
+    supervisor.start()
+    try:
+        assert ingest_started.wait(timeout=2), "native ingest did not reach the planted barrier"
+        run_sh_owner.terminate()
+        run_sh_owner.join(timeout=1)
+        supervisor.join(timeout=3)
+        if supervisor.is_alive():
+            supervisor.kill()
+            supervisor.join(timeout=1)
+    finally:
+        if run_sh_owner.is_alive():
+            run_sh_owner.kill()
+            run_sh_owner.join(timeout=1)
+
+    assert supervisor.exitcode == 0
+    assert ingest_cancelled.is_set(), "run.sh owner loss did not cancel the provider call"
+    root = tmp_path / "capsules" / run_id
+    run_record = json.loads((root / "source/run" / f"{run_id}.json").read_bytes())
+    assert run_record["state"] == "aborted"
+    assert (root / "capsule-manifest.json").is_file()
     assert not (provider_runtime / "active-operation").exists()
     attempts = provider_runtime / "active-provider-attempts"
     assert not attempts.exists() or not tuple(attempts.iterdir())
