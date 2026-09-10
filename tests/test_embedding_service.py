@@ -1,13 +1,96 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
-RESOLVER = Path(__file__).parents[1] / "provider-services" / "lib" / "host_embedding.sh"
+import httpx
+
+from oamb.runtime.provider_env import load_t10_provider_environment
+
+REPOSITORY_ROOT = Path(__file__).parents[1]
+RESOLVER = REPOSITORY_ROOT / "provider-services" / "lib" / "host_embedding.sh"
+ENV_FILE = REPOSITORY_ROOT / ".env"
+EMBEDDING_MODEL = "qwen3-embedding:0.6b"
+EXPECTED_DIMENSION = 1024
+NORMALIZATION_TOLERANCE = 1e-6
+PROBE_TEXT = "OAMB embedding normalization probe"
+EMBEDDING_ENVIRONMENT_KEYS = frozenset({"OAMB_EMBEDDING_BASE_URL", "OAMB_EMBEDDING_API_KEY"})
+
+
+def _load_embedding_configuration() -> tuple[str, str]:
+    environment = load_t10_provider_environment(
+        ENV_FILE,
+        expected_keys=EMBEDDING_ENVIRONMENT_KEYS,
+    )
+    base_url = environment.get("OAMB_EMBEDDING_BASE_URL", "")
+    if not base_url or base_url == "change-me":
+        raise ValueError("OAMB_EMBEDDING_BASE_URL must be configured in .env")
+    return base_url, environment.get("OAMB_EMBEDDING_API_KEY", "")
+
+
+def _request_embedding(base_url: str, api_key: str) -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    with httpx.Client(timeout=10.0, trust_env=False) as client:
+        response = client.post(
+            f"{base_url.rstrip('/')}/embeddings",
+            headers=headers,
+            json={
+                "model": EMBEDDING_MODEL,
+                "input": PROBE_TEXT,
+                "dimensions": EXPECTED_DIMENSION,
+            },
+        )
+        response.raise_for_status()
+        document = response.json()
+    if not isinstance(document, dict):
+        raise ValueError("embedding response must be a JSON object")
+    return document
+
+
+def _read_embedding(document: dict[str, Any]) -> list[float]:
+    if document.get("model") != EMBEDDING_MODEL:
+        raise ValueError("embedding response model does not match the requested model")
+    data = document.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        raise ValueError("embedding response must contain exactly one vector")
+    vector = data[0].get("embedding")
+    if not isinstance(vector, list) or len(vector) != EXPECTED_DIMENSION:
+        raise ValueError(f"embedding vector must have {EXPECTED_DIMENSION} dimensions")
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+        for value in vector
+    ):
+        raise ValueError("embedding vector contains a non-finite number")
+    return [float(value) for value in vector]
+
+
+def main() -> None:
+    try:
+        base_url, api_key = _load_embedding_configuration()
+        vector = _read_embedding(_request_embedding(base_url, api_key))
+    except (OSError, ValueError, httpx.HTTPError) as exc:
+        raise SystemExit(f"embedding service test failed: {exc}") from exc
+
+    norm = math.sqrt(sum(value * value for value in vector))
+    normalized = math.isclose(
+        norm,
+        1.0,
+        rel_tol=NORMALIZATION_TOLERANCE,
+        abs_tol=NORMALIZATION_TOLERANCE,
+    )
+    print(f"model: {EMBEDDING_MODEL}")
+    print(f"api_key: {'configured' if api_key else 'not configured'}")
+    print(f"dimension: {len(vector)}")
+    print(f"l2_norm: {norm:.9f}")
+    print(f"normalized: {str(normalized).lower()}")
+    if not normalized:
+        raise SystemExit("embedding vector is not normalized")
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -213,3 +296,7 @@ def test_online_embedding_url_is_not_rewritten(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "https://embedding.example/v1\n"
+
+
+if __name__ == "__main__":
+    main()
