@@ -52,6 +52,7 @@ HINDSIGHT_INVALID_JSON_DETAIL = (
     "First failures: chunk 0: JSONDecodeError: Invalid control character at: "
     "line 8 column 36 (char 243)"
 )
+HINDSIGHT_EMBEDDING_CONNECTION_DETAIL = "Failed to generate batch embeddings: Connection error."
 TASK_ID = "11111111-1111-4111-8111-111111111111"
 SESSION_ID = "oamb-native-session-fixture"
 
@@ -126,6 +127,41 @@ def test_live_native_retry_proof_count_ten_is_accepted() -> None:
 )
 def test_hindsight_terminal_mixed_extraction_aggregate_is_settled(detail: str) -> None:
     assert _classify(HINDSIGHT_BASIS, _raw({"detail": detail}), 500) == "provider_ingestion_error"
+
+
+@pytest.mark.parametrize(
+    ("detail", "failure_kind"),
+    (
+        (HINDSIGHT_EMBEDDING_CONNECTION_DETAIL, "supplier_connection"),
+        ("Failed to generate batch embeddings: Request timed out.", "supplier_connection"),
+        (
+            "Failed to generate batch embeddings: Error code: 429 - {'error': 'rate limited'}",
+            "supplier_rate_limit",
+        ),
+        (
+            "Failed to generate batch embeddings: Error code: 503 - {'detail': 'unavailable'}",
+            "supplier_connection",
+        ),
+    ),
+)
+def test_hindsight_terminal_transient_embedding_failure_is_settled(
+    detail: str, failure_kind: str
+) -> None:
+    assert _classify(HINDSIGHT_BASIS, _raw({"detail": detail}), 500) == failure_kind
+
+
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "Failed to generate batch embeddings: Error code: 401 - {'error': 'unauthorized'}",
+        "Failed to generate batch embeddings: embedding dimension mismatch",
+        "Failed to generate batch embeddings: unexpected backend failure",
+    ),
+)
+def test_hindsight_terminal_permanent_or_unknown_embedding_failure_is_not_settled(
+    detail: str,
+) -> None:
+    assert _classify(HINDSIGHT_BASIS, _raw({"detail": detail}), 500) is None
 
 
 def test_openviking_bound_failed_task_accepts_nonempty_extraction_error() -> None:
@@ -336,6 +372,7 @@ def test_duplicate_failure_fields_are_rejected() -> None:
     (
         (HINDSIGHT_DETAIL, "supplier_connection"),
         (HINDSIGHT_INVALID_JSON_DETAIL, "supplier_invalid_json_output"),
+        (HINDSIGHT_EMBEDDING_CONNECTION_DETAIL, "supplier_connection"),
     ),
 )
 async def test_hindsight_adapter_preserves_exact_terminal_receipt_and_proof_gate(

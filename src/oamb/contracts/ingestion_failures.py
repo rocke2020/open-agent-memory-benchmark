@@ -27,6 +27,11 @@ _HINDSIGHT_INVALID_JSON_FAILURE = re.compile(
     r"chunk (0|[1-9][0-9]*): JSONDecodeError: Invalid control character at: "
     r"line [1-9][0-9]* column [1-9][0-9]* \(char (?:0|[1-9][0-9]*)\)"
 )
+_HINDSIGHT_EMBEDDING_CONNECTION_DETAIL = "Failed to generate batch embeddings: Connection error."
+_HINDSIGHT_EMBEDDING_TIMEOUT_DETAIL = "Failed to generate batch embeddings: Request timed out."
+_HINDSIGHT_EMBEDDING_HTTP_FAILURE = re.compile(
+    r"Failed to generate batch embeddings: Error code: (429|5[0-9]{2}) - .+"
+)
 _HINDSIGHT_FAILURE_ENTRY = re.compile(
     r"chunk (0|[1-9][0-9]*): (.+?)(?=, chunk (?:0|[1-9][0-9]*): |$)"
 )
@@ -123,6 +128,16 @@ def classify_settled_ingestion_failure(
 def _hindsight_extraction_failure(value: dict[str, object]) -> SettledFailureKind | None:
     if set(value) != {"detail"} or not isinstance(value["detail"], str):
         return None
+    if value["detail"] in {
+        _HINDSIGHT_EMBEDDING_CONNECTION_DETAIL,
+        _HINDSIGHT_EMBEDDING_TIMEOUT_DETAIL,
+    }:
+        return "supplier_connection"
+    embedding_http_failure = _HINDSIGHT_EMBEDDING_HTTP_FAILURE.fullmatch(value["detail"])
+    if embedding_http_failure is not None:
+        return (
+            "supplier_rate_limit" if embedding_http_failure[1] == "429" else "supplier_connection"
+        )
     aggregate = _HINDSIGHT_AGGREGATE.fullmatch(value["detail"])
     if aggregate is None:
         return None
