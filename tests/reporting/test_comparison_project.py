@@ -891,13 +891,17 @@ def _openviking_indexing_snapshot(
         source_ids[0],
         values[0],
         task_suffix="one",
-        accepted_task_suffix=("one-mismatch" if raw_mode == "mismatched_commit_task" else None),
+        accepted_task_suffix=(
+            "one-mismatch"
+            if raw_mode in {"mismatched_commit_task", "missing_mismatched_commit_task"}
+            else None
+        ),
     )
     if raw_mode == "same_ref_repeated":
         readiness_refs.append(first_ref)
     if raw_mode == "conflicting_snapshot":
         add_completed_task(source_ids[0], values[0], task_suffix="one-conflict")
-    if raw_mode != "missing_snapshot":
+    if raw_mode not in {"missing_snapshot", "missing_mismatched_commit_task"}:
         second_values = values[1]
         if raw_mode == "broken_equation":
             second_values = (17, 5, 23, 4, 3, 9, 32)
@@ -1457,14 +1461,47 @@ def test_openviking_indexing_headline_recovers_sealed_task_llm_usage(
     assert indexing["totals"]["reasoning_tokens"]["value"] == 4
 
 
+def test_openviking_indexing_headline_ignores_unrelated_task_snapshot(
+    tmp_path: Path,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    snapshot = _openviking_indexing_snapshot(plan, raw_mode="unknown_session")
+
+    indexing = comparison_project._indexing_token_stage_document(plan, cast(Any, snapshot))
+
+    assert indexing["supplier_usage_coverage"]["record_count"] == 2
+    assert indexing["totals"]["supplier_reported_total_tokens"]["value"] == 36
+
+
+def test_openviking_indexing_headline_keeps_unavailable_when_task_snapshot_is_missing(
+    tmp_path: Path,
+) -> None:
+    from oamb.reporting import comparison_project
+
+    plan = _plan(tmp_path)
+    snapshot = _openviking_indexing_snapshot(plan, raw_mode="missing_snapshot")
+
+    indexing = comparison_project._indexing_token_stage_document(plan, cast(Any, snapshot))
+
+    assert indexing["supplier_usage_coverage"] == {
+        "billing_complete_record_count": 0,
+        "measured_record_count": 0,
+        "record_count": 2,
+        "status": "unavailable",
+        "unavailable_record_count": 2,
+    }
+    assert indexing["totals"]["supplier_reported_total_tokens"]["value"] == "unavailable"
+
+
 @pytest.mark.parametrize(
     "raw_mode",
     (
-        "missing_snapshot",
         "conflicting_snapshot",
-        "unknown_session",
         "broken_equation",
         "mismatched_commit_task",
+        "missing_mismatched_commit_task",
     ),
 )
 def test_openviking_indexing_headline_rejects_incomplete_or_inconsistent_task_usage(

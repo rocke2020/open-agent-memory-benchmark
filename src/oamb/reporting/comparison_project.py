@@ -1314,38 +1314,39 @@ def _indexing_token_stage_document(
         and all(item.get("proof_status") == "unavailable" for item in selected)
     ):
         try:
-            recovered = tuple(
-                usage
-                for ingestion_plan in snapshot.ingestion_plans
-                for usage in reconstruct_openviking_session_indexing_usage(
+            recovered_by_plan = tuple(
+                reconstruct_openviking_session_indexing_usage(
                     raw_payloads=snapshot.raw_payloads,
                     plan=ingestion_plan,
                 )
+                for ingestion_plan in snapshot.ingestion_plans
             )
         except ValueError as exc:
             raise ComparisonProjectError("OpenViking indexing usage evidence is invalid") from exc
-        if tuple(item.attempt_id for item in recovered) != physical_attempt_ids:
-            raise ComparisonProjectError("OpenViking indexing usage ledger does not close")
-        selected = [
-            {
-                "attempt_id": item.attempt_id,
-                "stage": "memory_ingest",
-                "budget_owner_kind": "model_role",
-                "budget_owner_id": producer_binding_id,
-                "input_tokens": item.prompt_tokens,
-                "visible_output_tokens": item.completion_tokens,
-                "supplier_reported_total_tokens": item.total_tokens,
-                "cached_input_tokens": item.cached_tokens,
-                "reasoning_tokens": item.reasoning_tokens,
-                "covered_dimensions": TOKEN_DIMENSIONS,
-                "unavailable_dimensions": (),
-                "proof_status": "measured_complete",
-                "billing_complete": False,
-                "measurement_source": "sealed_openviking_task_snapshot",
-                "raw_response_ref": item.raw_response_ref,
-            }
-            for item in recovered
-        ]
+        if all(recovered_by_plan):
+            recovered = tuple(item for group in recovered_by_plan for item in group)
+            if tuple(item.attempt_id for item in recovered) != physical_attempt_ids:
+                raise ComparisonProjectError("OpenViking indexing usage ledger does not close")
+            selected = [
+                {
+                    "attempt_id": item.attempt_id,
+                    "stage": "memory_ingest",
+                    "budget_owner_kind": "model_role",
+                    "budget_owner_id": producer_binding_id,
+                    "input_tokens": item.prompt_tokens,
+                    "visible_output_tokens": item.completion_tokens,
+                    "supplier_reported_total_tokens": item.total_tokens,
+                    "cached_input_tokens": item.cached_tokens,
+                    "reasoning_tokens": item.reasoning_tokens,
+                    "covered_dimensions": TOKEN_DIMENSIONS,
+                    "unavailable_dimensions": (),
+                    "proof_status": "measured_complete",
+                    "billing_complete": False,
+                    "measurement_source": "sealed_openviking_task_snapshot",
+                    "raw_response_ref": item.raw_response_ref,
+                }
+                for item in recovered
+            ]
     return _token_stage_document(tuple(selected), "memory_ingest")
 
 

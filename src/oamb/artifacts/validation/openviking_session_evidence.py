@@ -107,6 +107,8 @@ def reconstruct_openviking_session_indexing_usage(
         task_id = result.get("task_id")
         task_result = result.get("result")
         session_id = result.get("resource_id")
+        if isinstance(session_id, str) and session_id not in expected:
+            continue
         archive_uri = task_result.get("archive_uri") if isinstance(task_result, dict) else None
         if (
             document.get("status") != "ok"
@@ -118,7 +120,6 @@ def reconstruct_openviking_session_indexing_usage(
             or task_result.get("session_id") != session_id
             or not isinstance(archive_uri, str)
             or not archive_uri
-            or session_id not in expected
         ):
             raise ValueError("OpenViking indexing usage task identity does not close")
         if task_id in task_ids or session_id in completed:
@@ -135,13 +136,12 @@ def reconstruct_openviking_session_indexing_usage(
     expected_sessions = tuple(
         openviking_session_id(ingestion_occurrence_id, source_id) for source_id in source_ids
     )
-    if set(completed) != set(expected_sessions):
-        raise ValueError("OpenViking indexing usage is missing a completed snapshot")
     if any(
-        completed_identities[session_id] not in accepted[session_id]
-        for session_id in expected_sessions
+        completed_identities[session_id] not in accepted[session_id] for session_id in completed
     ):
         raise ValueError("OpenViking indexing usage task is not bound to its accepted commit")
+    if set(completed) != set(expected_sessions):
+        return ()
     return tuple(completed[session_id] for session_id in expected_sessions)
 
 
