@@ -150,20 +150,53 @@ retrieval:
       proof_kind: source_verified_endpoint_and_complete_outbound_trace
 
 execution:
-  # Maximum provider evaluations running together (three providers are selected).
+  # Two stages parallel ingestion and evalation let questions share one ingested history and run in parallel while other histories are ingested.
+
+  # Providers evaluating the dataset concurrently.
+  # Example: 3 runs Hindsight, Mem0, and OpenViking together, each with its own limits below.
   max_parallel_providers_per_dataset: 3
-  # Per provider: independent histories being ingested; sources within each stay ordered.
-  max_parallel_history_ingestions_per_provider: 2
-  # Per provider: ready-history question runs, each spanning retrieval, answer, and judge.
-  max_parallel_questions_per_provider: 2
-  # Batch ingestion retries after the initial submission; two means three submissions.
+
+  # Histories being ingested per provider; sessions within each history stay ordered.
+  # Example: 6 ingests histories for Q1-Q6 together; Q7's can start when Q1's is ready.
+  # The ingestion slot is released before Q1's retrieval, answer, and judge steps.
+  max_parallel_history_ingestions_per_provider: 6
+
+  # Concurrent evaluations per provider, each covering retrieval -> answer -> judge -> saved result.
+  # Example: 6 evaluates Q1-Q6 while histories for Q7-Q12 are being ingested.
+  # Each question starts when its own history is ready and an evaluation slot is free.
+  max_parallel_questions_per_provider: 6
+
+  # Fixed at 2: retries of one ingestion batch after a confirmed transient failure.
+  # Example: 1 initial submission + 2 retries = 3 submissions in the same question scope.
+  # After exhaustion, record that batch as skipped and continue with later batches.
   max_retries_per_operation: 2
+
+  # Fixed at 10: the provider's native retry setting for memory extraction within a batch.
+  # These retries happen inside the provider before OAMB considers resubmitting the batch.
   extraction_max_retries: 10
+
+  # Fixed at 6 total model attempts for the answer and judge separately, including the first.
+  # Invalid output can trigger a corrected attempt; exhausted rate limits can also advance attempts.
+  # Example: answering gets up to 6 attempts, and judging gets its own allowance of 6.
   model_max_attempts: 6
+
+  # Fixed at 2 extra request retries within each answer/judge attempt for network errors or retryable HTTP errors.
+  # Example: 1 request + 2 retries = 3 requests per attempt, up to 18 across 6 model attempts.
   model_transport_max_retries: 2
-  # Covers one external attempt, including provider task polling.
+
+  # Timeout for an external request or provider task polling wait; 900 seconds = 15 minutes.
+  # Each retry gets its own timeout, so a whole history, question, or run can take longer.
   operation_timeout_seconds: 900
 
 decision:
+  # All providers need 60 judged results; an accuracy leader must pass both thresholds against every other provider.
+
+  # Minimum absolute accuracy gap; fixed at "0.05" (5 percentage points).
+  # Example: 33/60 correct (55%) versus 30/60 (50%) meets this threshold.
+  # The McNemar check below must also pass.
   minimum_accuracy_delta: "0.05"
+
+  # Exact two-sided McNemar p-value limit, fixed at "0.05"; compares questions only one provider got right.
+  # Example: 6 Hindsight-only wins versus 0 Mem0-only wins gives p = 0.03125 and passes.
+  # A 3-to-0 split gives p = 0.25 and fails, despite meeting the 5-percentage-point gap.
   maximum_exact_mcnemar_p_value: "0.05"

@@ -37,8 +37,7 @@ def lme6_configuration_text() -> str:
         ("cell_id: mem0-lme60", "cell_id: mem0-lme6"),
         ("cell_id: openviking-lme60", "cell_id: openviking-lme6"),
         (
-            '\ndecision:\n  minimum_accuracy_delta: "0.05"\n'
-            '  maximum_exact_mcnemar_p_value: "0.05"\n',
+            content[content.index("\ndecision:\n") :],
             "",
         ),
     )
