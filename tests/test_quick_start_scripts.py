@@ -18,6 +18,7 @@ from oamb.config.doctor import (
     resolved_plan_bytes,
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from tests.unit.test_question_results import _judged_result
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 PRECHECK_SCRIPT = REPOSITORY_ROOT / "precheck.sh"
@@ -1269,6 +1270,35 @@ def _write_fake_oamb(fake_bin: Path) -> None:
 	      while :; do /bin/sleep 0.1 || true; done
 	    fi
 	    if [ -n "$results_root" ]; then
+	      if [ -n "${OAMB_TEST_RESULT_UPDATES:-}" ]; then
+	        python3 - "$output_root" "$results_root" <<'PY'
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+output_root, results_root = map(Path, sys.argv[1:])
+source = output_root / "progress-openviking" / "source"
+(source / "specs").mkdir(parents=True)
+(source / "cases").mkdir()
+(source / "specs" / "run-spec.json").write_text(
+    json.dumps({"memory_system_id": "openviking", "run_id": "openviking-run"})
+)
+path = results_root / "openviking.json"
+results = json.loads(path.read_text())
+print("fixture-run-active", flush=True)
+for index, result in enumerate(json.loads(os.environ["OAMB_TEST_RESULT_UPDATES"])):
+    results[result["question_id"]] = result
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(results))
+    temporary.replace(path)
+    (source / "cases" / f"{index}.json").write_text("{}")
+    time.sleep(0.5)
+print("fixture-run-finished", flush=True)
+PY
+	        exit 44
+	      fi
 	      if [ -z "$result_map" ] && \
 	        [ "${OAMB_TEST_RESUME_FAIL:-0}" = "1" ]; then
 	        printf 'planted simple resume failure\n' >&2
@@ -1303,6 +1333,18 @@ def _write_fake_oamb(fake_bin: Path) -> None:
           printf '{}\n' > "$progress_root/source/cases/$progress_index.json"
           progress_index=$((progress_index + 1))
         done
+        if [ -n "$results_root" ]; then
+          python3 - "$results_root/$progress_provider.json" "$provider_progress_cases" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+template = json.loads(os.environ["OAMB_TEST_QUESTION_RESULT"])
+results = {f"q-{i}": dict(template, question_id=f"q-{i}") for i in range(int(sys.argv[2]))}
+Path(sys.argv[1]).write_text(json.dumps(results))
+PY
+        fi
       done
     fi
     if [ -n "${OAMB_TEST_PROGRESS_RUN_RECORDS:-}" ]; then
@@ -1531,6 +1573,7 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "OAMB_TEST_TRACE": str(trace),
         "OAMB_TEST_PLAN_HASH": RESOLVED_PLAN_HASH,
+        "OAMB_TEST_QUESTION_RESULT": json.dumps(_judged_result()),
     }
     return root, env, trace
 
@@ -1875,8 +1918,7 @@ def test_run_full_reports_progress_per_provider_out_of_sixty(tmp_path: Path) -> 
     }
     for provider, (completed, percentage) in expected_progress.items():
         assert (
-            f"run: provider={provider} status=starting, completed_operations=0, "
-            "completed_questions=0, question_progress=0% (0/60)"
+            f"provider={provider} status=starting, elapsed=0s, completed_questions=0 (0/60, 0%)"
         ) in result.stdout
         progress_line = next(
             line
@@ -1891,6 +1933,54 @@ def test_run_full_reports_progress_per_provider_out_of_sixty(tmp_path: Path) -> 
         assert "question_progress=" not in progress_line
     assert "/180" not in result.stdout
     assert "/1)" not in result.stdout
+
+
+@pytest.mark.parametrize("resume", (False, True), ids=("fresh", "resume"))
+def test_full_run_logs_saved_question_updates_before_command_finishes(
+    tmp_path: Path, resume: bool
+) -> None:
+    root, env, _trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    _write_executable(fake_bin / "sleep", "/bin/sleep 0.05")
+    arguments = [str(script), "--full_test"]
+    initial = 46 if resume else 0
+    if resume:
+        arguments.append("--resume")
+        _full_root, result_paths = _write_provider_result_run(root)
+        for path, count in zip(result_paths, (60, 60, 46), strict=True):
+            path.write_text(
+                json.dumps({f"q-{i}": _judged_result(f"q-{i}") for i in range(count)}),
+                encoding="utf-8",
+            )
+    env["OAMB_TEST_RESULT_UPDATES"] = json.dumps(
+        [_judged_result(f"q-{initial}"), _judged_result(f"q-{initial + 1}")]
+    )
+
+    result = subprocess.run(
+        arguments, cwd=root, env=env, capture_output=True, text=True, check=False, timeout=20
+    )
+
+    assert result.returncode == 44, result.stdout + result.stderr
+    live_output = result.stdout.split("fixture-run-active\n", 1)[1].split(
+        "fixture-run-finished\n", 1
+    )[0]
+    for count, percent in ((47, 78), (48, 80)) if resume else ((1, 1), (2, 3)):
+        assert any(
+            line.startswith("provider=openviking status=running, elapsed=")
+            and line.endswith(f"completed_questions={count} ({count}/60, {percent}%)")
+            for line in live_output.splitlines()
+        ), result.stdout
+    if resume:
+        for provider in ("hindsight", "mem0"):
+            assert (
+                f"provider={provider} status=execution-completed, elapsed=unavailable, "
+                "completed_questions=60 (60/60, 100%)"
+            ) in live_output
+            assert f"provider={provider} status=starting" not in result.stdout
+        assert "completed_questions=46 (46/60, 76%)" in result.stdout
+    log = next((root / "outputs" / "tmp").glob("run-full-*.log"))
+    assert live_output in log.read_text(encoding="utf-8")
 
 
 def _progress_run_record(provider: str, state: str) -> dict[str, object]:

@@ -140,6 +140,8 @@ it with:
 
 OAMB atomically saves every completed question; `--resume` skips existing question IDs and reruns only missing questions in fresh scopes.
 
+Both full-test modes print each provider's status, elapsed time, and saved-question count at startup, every 30 seconds while running, and when the command finishes. Resume counts include previously saved results; providers already at `60/60` are shown as complete. The initial `reused=... remaining=...` line is a startup summary.
+
 Smoke reports are written under `outputs/smoke-test/<run-label>/`; full-study
 reports are written under `outputs/full-test/<run-label>/`. Set
 `OAMB_NO_OPEN=1` only in a headless environment; the HTML is still built and

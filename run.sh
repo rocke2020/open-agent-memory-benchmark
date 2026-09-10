@@ -112,7 +112,9 @@ run_owned_command() {
 }
 
 report_provider_progress() {
-  python3 - "$@" <<'PY'
+  local results_root=""
+  [[ "$MODE" != "full" ]] || results_root="$MODE_DIR/results"
+  python3 - "$@" "$results_root" <<'PY'
 import json
 import sys
 from datetime import datetime
@@ -122,6 +124,7 @@ output_root = Path(sys.argv[1])
 total_questions = int(sys.argv[2])
 elapsed_seconds = int(sys.argv[3])
 command_active = sys.argv[4] == "true"
+results_root = Path(sys.argv[5]) if sys.argv[5] else None
 providers = ("hindsight", "mem0", "openviking")
 provider_specs = {provider: [] for provider in providers}
 terminal_statuses = {
@@ -143,13 +146,21 @@ for path in output_root.glob("*/source/specs/run-spec.json"):
 for provider, specs in provider_specs.items():
     status = elapsed = progress = "unavailable"
     completed = None
+    if results_root is not None:
+        try:
+            results = json.loads((results_root / f"{provider}.json").read_text(encoding="utf-8"))
+            if not isinstance(results, dict) or len(results) > total_questions:
+                raise ValueError("invalid question results")
+            completed = len(results)
+        except (OSError, ValueError):
+            pass
     if len(specs) == 1:
         capsule_root, spec = specs[0]
-        completed = min(
-            sum(path.is_file() for path in (capsule_root / "source/cases").glob("*.json")),
-            total_questions,
-        )
-        progress = f"{completed} ({completed}/{total_questions}, {completed * 100 // total_questions}%)"
+        if results_root is None:
+            completed = min(
+                sum(path.is_file() for path in (capsule_root / "source/cases").glob("*.json")),
+                total_questions,
+            )
         records = list((capsule_root / "source/run").glob("*.json"))
         try:
             run_id = spec["run_id"]
@@ -176,6 +187,14 @@ for provider, specs in provider_specs.items():
                 elapsed = f"{elapsed_seconds}s"
         except (OSError, ValueError, KeyError, TypeError):
             pass
+    elif not specs and completed is not None:
+        if completed == total_questions:
+            status = "execution-completed"
+        elif command_active:
+            status = "starting"
+            elapsed = f"{elapsed_seconds}s"
+    if completed is not None:
+        progress = f"{completed} ({completed}/{total_questions}, {completed * 100 // total_questions}%)"
     print(f"provider={provider} status={status}, elapsed={elapsed}, completed_questions={progress}")
 PY
 }
@@ -212,10 +231,14 @@ run_provider_cells_with_status() {
   local provider heartbeat_pid command_code
   local started_seconds=$SECONDS
   printf 'run: providers=hindsight,mem0,openviking status=starting (%s)\n' "$context"
-  for provider in hindsight mem0 openviking; do
-    printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s)\n' \
-      "$provider" "$total_questions"
-  done
+  if [[ "$MODE" == "full" ]]; then
+    report_provider_progress "$output_root" "$total_questions" 0 true
+  else
+    for provider in hindsight mem0 openviking; do
+      printf 'run: provider=%s status=starting, completed_operations=0, completed_questions=0, question_progress=0%% (0/%s)\n' \
+        "$provider" "$total_questions"
+    done
+  fi
   provider_status_heartbeat "$output_root" "$total_questions" "$OAMB_RUN_SH_PROCESS_ID" &
   heartbeat_pid=$!
   ACTIVE_HEARTBEAT_PID=$heartbeat_pid
@@ -599,7 +622,8 @@ run_simple_resume() {
   local resume_output="$MODE_DIR/capsules/resume/$resume_label"
   mkdir -p "$MODE_DIR/capsules/resume"
   printf 'run: status=resuming-from-saved-question-results\n'
-  run_owned_command uv run --locked oamb run "$PLAN" \
+  run_provider_cells_with_status "$resume_output" "full resume, 60 questions each" 60 \
+    uv run --locked oamb run "$PLAN" \
     --run-label "$resume_label" \
     --output-root "$resume_output" \
     --results-root "$MODE_DIR/results"
