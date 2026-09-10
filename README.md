@@ -113,7 +113,18 @@ Run the complete balanced LME-60 comparison with:
 ./run.sh --full_test
 ```
 
-Full mode immediately starts Hindsight, Mem0, and OpenViking together. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. All three use up to 10 native extraction retries and three ingestion submissions per batch. After a settled batch exhausts its submissions, OAMB records the skipped sources, preserves any partial memory, and continues the question’s remaining history in the same scope. Answer and judge calls have independent limits of six outer attempts and two transport retries per attempt; invalid output is fed back with its validation error. The report identifies partial ingestion and unjudged results, and retains physical attempts and available usage evidence. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
+Full mode starts Hindsight, Mem0, and OpenViking together with the default parallel limits. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. All three use up to 10 native extraction retries and three ingestion submissions per batch. After a settled batch exhausts its submissions, OAMB records the skipped sources, preserves any partial memory, and continues the question’s remaining history in the same scope. Answer and judge calls have independent limits of six outer attempts and two transport retries per attempt; invalid output is fed back with its validation error. The report identifies partial ingestion and unjudged results, and retains physical attempts and available usage evidence. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
+
+Set parallel limits under `execution` in `configs/benchmark.yml` before running `./precheck.sh`:
+
+```yaml
+execution:
+  max_parallel_providers_per_dataset: 3
+  max_parallel_history_ingestions_per_provider: 2
+  max_parallel_questions_per_provider: 2
+```
+
+These required positive integers limit active provider evaluations, independent history ingestions per provider, and question runs per provider. Each question slot spans retrieval, answer, and judge after its history is ready; source writes within one history stay sequential. The defaults allow up to six history ingestions and six question runs across three providers. A provider limit of 1 or 2 queues the remaining providers and starts the next when a slot becomes free. The limits apply to both smoke and full execution and are frozen into the resolved plan; editing YAML does not alter an existing plan. They do not limit a provider service's internal model or embedding requests.
 
 Press `Ctrl-C` once to stop a full run. OAMB immediately force-stops the benchmark process tree and this repository's provider-service containers, while preserving atomically saved question results, provider volumes, and result data. Native workers also stop themselves if their `run.sh` owner or immediate supervisor disappears.
 

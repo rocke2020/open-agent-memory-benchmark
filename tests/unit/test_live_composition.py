@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import signal
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -1181,6 +1182,94 @@ def test_three_isolated_live_cells_are_dispatched_in_parallel(
     assert tuple(item.capsule_root for item in completed) == tuple(
         cell.capsule_root for cell in cells
     )
+
+
+@pytest.mark.parametrize("limit", (1, 2, 3))
+@pytest.mark.parametrize("stop", (None, "failure", "signal"))
+def test_configured_provider_cap_releases_slots_and_drains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: int, stop: str | None
+) -> None:
+    from oamb import live
+
+    configuration = load_lme6_configuration()
+    plan = build_resolved_plan(
+        replace(
+            configuration,
+            evaluation_controls=replace(
+                configuration.evaluation_controls,
+                max_parallel_providers_per_dataset=limit,
+                max_parallel_history_ingestions_per_provider=4,
+                max_parallel_questions_per_provider=5,
+            ),
+        )
+    )
+    cells = tuple(
+        live.build_live_cell(
+            plan=plan,
+            cell_id=spec.cell_id,
+            output_root=tmp_path / "capsules",
+            provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+            provider_project_id="oamb-providers-test-live",
+            provider_evidence=_provider_evidence(),
+            environment=_environment(),
+            run_label="limited-cells",
+            observed_at=NOW,
+            code_revision="source-tree-test",
+        )
+        for spec in plan.cells
+    )
+    context = multiprocessing.get_context("fork")
+    active = context.Value("i", 0)
+    peak = context.Value("i", 0)
+    started = context.Value("i", 0)
+    first_wave = context.Event()
+    third_started = context.Event()
+
+    def execute(cell: live.LiveCell, *, stop_event: Any) -> object:
+        assert cell.control.max_parallel_history_ingestions == 4
+        assert cell.control.max_parallel_questions == 5
+        with active.get_lock():
+            active.value += 1
+            peak.value = max(peak.value, active.value)
+            started.value += 1
+            if started.value == limit:
+                first_wave.set()
+        if cell.cell.provider_id == "openviking":
+            third_started.set()
+        try:
+            assert first_wave.wait(timeout=3), "configured provider slots did not overlap"
+            if stop is not None:
+                if cell.cell.provider_id == "hindsight":
+                    if stop == "failure":
+                        raise RuntimeError("planted limited-provider failure")
+                    os.kill(os.getppid(), signal.SIGTERM)
+                assert stop_event.wait(timeout=3), "stop did not reach admitted peers"
+            elif limit == 2 and cell.cell.provider_id == "hindsight":
+                # Mem0 finishes first: its slot must start OpenViking without
+                # waiting for this earlier cell to finish.
+                assert third_started.wait(timeout=3), "completed slot was not replenished"
+            return SimpleNamespace(capsule_root=cell.capsule_root)
+        finally:
+            with active.get_lock():
+                active.value -= 1
+
+    monkeypatch.setattr(live, "execute_live_cell", execute)
+
+    if stop == "failure" or (stop == "signal" and limit < 3):
+        with pytest.raises(live.LiveCellExecutionError) as failure:
+            live.execute_live_cells(cells)
+        assert started.value == limit
+        assert tuple(item.status for item in failure.value.outcomes)[limit:] == ("not_started",) * (
+            3 - limit
+        )
+    else:
+        completed = live.execute_live_cells(cells)
+        assert tuple(item.cell_id for item in completed) == tuple(
+            spec.cell_id for spec in plan.cells
+        )
+        assert started.value == 3
+    assert peak.value == limit
+    assert active.value == 0
 
 
 @pytest.mark.parametrize("pointer_name", ("active-operation", "active-provider-attempt"))

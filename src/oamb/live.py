@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from multiprocessing.connection import Connection
+from multiprocessing.connection import Connection, wait
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal
@@ -847,7 +847,7 @@ def execute_live_cell(
 
 
 def execute_live_cells(cells: tuple[LiveCell, ...]) -> tuple[LiveCellCompletion, ...]:
-    """Admit isolated provider cells together and return canonical-order completions."""
+    """Admit isolated provider cells up to the plan cap; return canonical order."""
 
     if not cells:
         raise LiveConfigurationError("live execution requires at least one cell")
@@ -858,8 +858,6 @@ def execute_live_cells(cells: tuple[LiveCell, ...]) -> tuple[LiveCellCompletion,
     lifecycle_domains = tuple(cell.control.provider_runtime_directory for cell in cells)
     if len(plan_hashes) != 1:
         raise LiveConfigurationError("parallel live cells must share one resolved plan")
-    if len(cells) > cells[0].plan.execution.max_parallel_providers_per_dataset:
-        raise LiveConfigurationError("selected cells exceed the provider concurrency limit")
     for label, values in (
         ("provider IDs", provider_ids),
         ("run IDs", run_ids),
@@ -922,151 +920,188 @@ def _execute_parallel_live_cells(
         cell.cell.cell_id: LiveCellOutcome(cell.cell.cell_id, "not_started", None, None)
         for cell in cells
     }
-    for cell, stop_event in zip(cells, stop_events, strict=True):
-        receiver: Connection | None = None
-        sender: Connection | None = None
-        created_process: BaseProcess | None = None
-        try:
-            receiver, sender = context.Pipe(duplex=False)
-            created_process = context.Process(
-                target=_execute_live_cell_worker,
-                args=(cell, sender, stop_event),
-                name=f"oamb-cell-{cell.cell.provider_id}",
-                daemon=False,
-            )
-            created_process.start()
-        except BaseException as exc:
-            error = LiveCellExecutionError(
-                f"cell {cell.cell.cell_id} admission failed with {type(exc).__name__}: {exc}"
-            )
-            errors.append(error)
-            outcomes[cell.cell.cell_id] = LiveCellOutcome(
-                cell.cell.cell_id,
-                "failed",
-                cell.capsule_root if cell.capsule_root.exists() else None,
-                str(error),
-            )
-            if created_process is not None and created_process.pid is not None:
-                assert receiver is not None and sender is not None
-                sender.close()
-                workers.append((cell, created_process, receiver))
-            else:
-                if sender is not None:
-                    sender.close()
-                if receiver is not None:
-                    receiver.close()
-                if created_process is not None:
-                    created_process.close()
-            break
-        assert receiver is not None and sender is not None
-        sender.close()
-        workers.append((cell, created_process, receiver))
+    provider_limit = cells[0].plan.execution.max_parallel_providers_per_dataset
+    next_cell = 0
 
-    completions: dict[str, LiveCellCompletion] = {}
-    for cell, worker_process, receiver in workers:
-        message: object | None = None
-        try:
-            message = receiver.recv()
-        except EOFError:
-            message = ("failed", cell.cell.cell_id, "WorkerExit", "no result message")
-        except BaseException as exc:
-            error = LiveCellExecutionError(
-                f"cell {cell.cell.cell_id} supervision failed with {type(exc).__name__}: {exc}"
-            )
-            errors.append(error)
-            outcomes[cell.cell.cell_id] = LiveCellOutcome(
-                cell.cell.cell_id,
-                "failed",
-                cell.capsule_root if cell.capsule_root.exists() else None,
-                str(error),
-            )
-        finally:
-            receiver.close()
-        while True:
+    def admit_cells() -> None:
+        nonlocal next_cell
+        while (
+            next_cell < len(cells)
+            and len(workers) < provider_limit
+            and not errors
+            and not stop_events[0].is_set()
+        ):
+            cell, stop_event = cells[next_cell], stop_events[next_cell]
+            next_cell += 1
+            receiver: Connection | None = None
+            sender: Connection | None = None
+            created_process: BaseProcess | None = None
             try:
-                worker_process.join()
+                receiver, sender = context.Pipe(duplex=False)
+                created_process = context.Process(
+                    target=_execute_live_cell_worker,
+                    args=(cell, sender, stop_event),
+                    name=f"oamb-cell-{cell.cell.provider_id}",
+                    daemon=False,
+                )
+                created_process.start()
             except BaseException as exc:
                 error = LiveCellExecutionError(
-                    f"cell {cell.cell.cell_id} join was interrupted by {type(exc).__name__}: {exc}"
+                    f"cell {cell.cell.cell_id} admission failed with {type(exc).__name__}: {exc}"
                 )
                 errors.append(error)
+                stop_event.set()
                 outcomes[cell.cell.cell_id] = LiveCellOutcome(
                     cell.cell.cell_id,
                     "failed",
                     cell.capsule_root if cell.capsule_root.exists() else None,
                     str(error),
                 )
-                continue
-            break
-        kind = message[0] if isinstance(message, tuple) and message else None
-        if worker_process.exitcode != 0 and kind == "completed":
-            message = (
-                "failed",
-                cell.cell.cell_id,
-                "WorkerExit",
-                f"worker exited with status {worker_process.exitcode}",
-            )
-            kind = "failed"
+                if created_process is not None and created_process.pid is not None:
+                    assert receiver is not None and sender is not None
+                    sender.close()
+                    workers.append((cell, created_process, receiver))
+                else:
+                    if sender is not None:
+                        sender.close()
+                    if receiver is not None:
+                        receiver.close()
+                    if created_process is not None:
+                        created_process.close()
+                break
+            assert receiver is not None and sender is not None
+            sender.close()
+            workers.append((cell, created_process, receiver))
+
+    completions: dict[str, LiveCellCompletion] = {}
+    admit_cells()
+    while workers:
         try:
-            worker_process.close()
+            ready = wait([receiver for _cell, _process, receiver in workers])
         except BaseException as exc:
-            error = LiveCellExecutionError(
-                f"cell {cell.cell.cell_id} worker close failed with {type(exc).__name__}: {exc}"
-            )
-            errors.append(error)
-            current = outcomes[cell.cell.cell_id]
-            outcomes[cell.cell.cell_id] = LiveCellOutcome(
-                current.cell_id,
-                current.status,
-                current.capsule_root,
-                str(error) if current.detail is None else f"{current.detail}; {error}",
-            )
-        if kind == "completed" and isinstance(message, tuple) and len(message) == 3:
-            _kind, cell_id, capsule_root = message
-            if cell_id != cell.cell.cell_id or Path(capsule_root) != cell.capsule_root:
+            errors.append(exc)
+            stop_events[0].set()
+            ready = [receiver for _cell, _process, receiver in workers]
+        # Settle every ready result before admitting another provider: a ready
+        # peer failure must stop admission even when another peer succeeded.
+        for cell, worker_process, receiver in tuple(workers):
+            if receiver not in ready:
+                continue
+            workers.remove((cell, worker_process, receiver))
+            message: object | None = None
+            try:
+                message = receiver.recv()
+            except EOFError:
+                message = ("failed", cell.cell.cell_id, "WorkerExit", "no result message")
+            except BaseException as exc:
                 error = LiveCellExecutionError(
-                    f"cell {cell.cell.cell_id} returned a mismatched completion identity"
+                    f"cell {cell.cell.cell_id} supervision failed with {type(exc).__name__}: {exc}"
                 )
                 errors.append(error)
+                stop_events[0].set()
                 outcomes[cell.cell.cell_id] = LiveCellOutcome(
                     cell.cell.cell_id,
                     "failed",
                     cell.capsule_root if cell.capsule_root.exists() else None,
                     str(error),
                 )
-            else:
-                completions[cell_id] = LiveCellCompletion(cell_id, Path(capsule_root))
-                prior_detail = outcomes[cell_id].detail
-                outcomes[cell_id] = LiveCellOutcome(
-                    cell_id,
-                    "completed",
-                    Path(capsule_root),
-                    prior_detail,
+            finally:
+                receiver.close()
+            while True:
+                try:
+                    worker_process.join()
+                except BaseException as exc:
+                    error = LiveCellExecutionError(
+                        f"cell {cell.cell.cell_id} join was interrupted by {type(exc).__name__}: {exc}"
+                    )
+                    errors.append(error)
+                    stop_events[0].set()
+                    outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                        cell.cell.cell_id,
+                        "failed",
+                        cell.capsule_root if cell.capsule_root.exists() else None,
+                        str(error),
+                    )
+                    continue
+                break
+            kind = message[0] if isinstance(message, tuple) and message else None
+            if worker_process.exitcode != 0 and kind == "completed":
+                message = (
+                    "failed",
+                    cell.cell.cell_id,
+                    "WorkerExit",
+                    f"worker exited with status {worker_process.exitcode}",
                 )
-        elif kind == "failed" and isinstance(message, tuple) and len(message) == 4:
-            _kind, cell_id, error_type, error_message = message
-            error = LiveCellExecutionError(
-                f"cell {cell_id} failed with {error_type}: {error_message}"
-            )
-            errors.append(error)
-            if cell_id in outcomes:
-                outcomes[cell_id] = LiveCellOutcome(
-                    cell_id,
+                kind = "failed"
+            try:
+                worker_process.close()
+            except BaseException as exc:
+                error = LiveCellExecutionError(
+                    f"cell {cell.cell.cell_id} worker close failed with {type(exc).__name__}: {exc}"
+                )
+                errors.append(error)
+                stop_events[0].set()
+                current = outcomes[cell.cell.cell_id]
+                outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                    current.cell_id,
+                    current.status,
+                    current.capsule_root,
+                    str(error) if current.detail is None else f"{current.detail}; {error}",
+                )
+            if kind == "completed" and isinstance(message, tuple) and len(message) == 3:
+                _kind, cell_id, capsule_root = message
+                if cell_id != cell.cell.cell_id or Path(capsule_root) != cell.capsule_root:
+                    error = LiveCellExecutionError(
+                        f"cell {cell.cell.cell_id} returned a mismatched completion identity"
+                    )
+                    errors.append(error)
+                    stop_events[0].set()
+                    outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                        cell.cell.cell_id,
+                        "failed",
+                        cell.capsule_root if cell.capsule_root.exists() else None,
+                        str(error),
+                    )
+                else:
+                    completions[cell_id] = LiveCellCompletion(cell_id, Path(capsule_root))
+                    prior_detail = outcomes[cell_id].detail
+                    outcomes[cell_id] = LiveCellOutcome(
+                        cell_id,
+                        "completed",
+                        Path(capsule_root),
+                        prior_detail,
+                    )
+            elif kind == "failed" and isinstance(message, tuple) and len(message) == 4:
+                _kind, cell_id, error_type, error_message = message
+                error = LiveCellExecutionError(
+                    f"cell {cell_id} failed with {error_type}: {error_message}"
+                )
+                errors.append(error)
+                stop_events[0].set()
+                if cell_id in outcomes:
+                    outcomes[cell_id] = LiveCellOutcome(
+                        cell_id,
+                        "failed",
+                        cell.capsule_root if cell.capsule_root.exists() else None,
+                        f"{error_type}: {error_message}",
+                    )
+            else:
+                error = LiveCellExecutionError(
+                    f"cell {cell.cell.cell_id} returned a malformed worker result"
+                )
+                errors.append(error)
+                stop_events[0].set()
+                outcomes[cell.cell.cell_id] = LiveCellOutcome(
+                    cell.cell.cell_id,
                     "failed",
                     cell.capsule_root if cell.capsule_root.exists() else None,
-                    f"{error_type}: {error_message}",
+                    str(error),
                 )
-        else:
-            error = LiveCellExecutionError(
-                f"cell {cell.cell.cell_id} returned a malformed worker result"
-            )
-            errors.append(error)
-            outcomes[cell.cell.cell_id] = LiveCellOutcome(
-                cell.cell.cell_id,
-                "failed",
-                cell.capsule_root if cell.capsule_root.exists() else None,
-                str(error),
-            )
+        admit_cells()
+    if next_cell < len(cells) and not errors:
+        errors.append(
+            LiveCellExecutionError("live execution stopped before all cells were admitted")
+        )
     if errors:
         raise LiveCellExecutionError(
             "; ".join(str(error) for error in errors),

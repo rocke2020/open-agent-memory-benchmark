@@ -200,6 +200,9 @@ _EXECUTION_KEYS = frozenset(
         "model_max_attempts",
         "model_transport_max_retries",
         "operation_timeout_seconds",
+        "max_parallel_providers_per_dataset",
+        "max_parallel_history_ingestions_per_provider",
+        "max_parallel_questions_per_provider",
     }
 )
 _ENVIRONMENT_REFERENCE = re.compile(r"(?:LLM|OAMB)_[A-Z0-9_]+")
@@ -348,9 +351,12 @@ class RetrievalConfiguration:
 class EvaluationControls:
     max_retries_per_operation: int
     operation_timeout_seconds: int
-    extraction_max_retries: int = 10
-    model_max_attempts: int = 6
-    model_transport_max_retries: int = 2
+    extraction_max_retries: int
+    model_max_attempts: int
+    model_transport_max_retries: int
+    max_parallel_providers_per_dataset: int
+    max_parallel_history_ingestions_per_provider: int
+    max_parallel_questions_per_provider: int
 
     def as_tuple(self) -> tuple[int, int, int, int, int]:
         return (
@@ -690,6 +696,18 @@ def _parse_evaluation_controls(value: object) -> EvaluationControls:
         extraction_max_retries=extraction_retries,
         model_max_attempts=model_attempts,
         model_transport_max_retries=model_transport_retries,
+        max_parallel_providers_per_dataset=_require_positive_integer(
+            document["max_parallel_providers_per_dataset"],
+            "execution max_parallel_providers_per_dataset",
+        ),
+        max_parallel_history_ingestions_per_provider=_require_positive_integer(
+            document["max_parallel_history_ingestions_per_provider"],
+            "execution max_parallel_history_ingestions_per_provider",
+        ),
+        max_parallel_questions_per_provider=_require_positive_integer(
+            document["max_parallel_questions_per_provider"],
+            "execution max_parallel_questions_per_provider",
+        ),
     )
 
 

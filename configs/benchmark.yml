@@ -150,6 +150,12 @@ retrieval:
       proof_kind: source_verified_endpoint_and_complete_outbound_trace
 
 execution:
+  # Maximum provider evaluations running together (three providers are selected).
+  max_parallel_providers_per_dataset: 3
+  # Per provider: independent histories being ingested; sources within each stay ordered.
+  max_parallel_history_ingestions_per_provider: 2
+  # Per provider: ready-history question runs, each spanning retrieval, answer, and judge.
+  max_parallel_questions_per_provider: 2
   # Batch ingestion retries after the initial submission; two means three submissions.
   max_retries_per_operation: 2
   extraction_max_retries: 10

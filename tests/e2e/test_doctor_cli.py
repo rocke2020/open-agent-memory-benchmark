@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 from typer.testing import CliRunner, Result
 
 from oamb.cli import app
@@ -49,6 +50,49 @@ def _rehash_plan(document: dict[str, object]) -> bytes:
     payload.pop("resolved_plan_hash", None)
     document["resolved_plan_hash"] = canonical_sha256(["oamb-resolved-plan-initial-v1", payload])
     return canonical_json_bytes(document)
+
+
+def test_doctor_freezes_configured_parallel_limits(tmp_path: Path) -> None:
+    document = yaml.safe_load(BENCHMARK_CONFIG_PATH.read_text(encoding="utf-8"))
+    document["execution"].update(
+        max_parallel_providers_per_dataset=1,
+        max_parallel_history_ingestions_per_provider=4,
+        max_parallel_questions_per_provider=5,
+    )
+    config = tmp_path / "custom.yml"
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    output = tmp_path / "plan"
+
+    result = _invoke_doctor(config=config, output=output)
+
+    assert result.exit_code == 0, result.output
+    config.unlink()  # Runtime must consume the frozen plan, not reopen YAML.
+    plan = load_resolved_plan_for_run(output / "resolved-plan.json")
+    assert plan.execution.as_tuple() == (1, 1, 4, 5)
+    assert plan.execution.comparison_max_operation_attempt_count == 32_997
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "max_parallel_providers_per_dataset",
+        "max_parallel_history_ingestions_per_provider",
+        "max_parallel_questions_per_provider",
+    ),
+)
+@pytest.mark.parametrize("value", (0, -1, True, 1.5, "2", None))
+def test_doctor_rejects_invalid_parallel_limits(tmp_path: Path, key: str, value: object) -> None:
+    document = yaml.safe_load(BENCHMARK_CONFIG_PATH.read_text(encoding="utf-8"))
+    document["execution"][key] = value
+    config = tmp_path / "invalid.yml"
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    output = tmp_path / "plan"
+
+    result = _invoke_doctor(config=config, output=output)
+
+    assert result.exit_code != 0
+    assert f"execution {key}" in result.output
+    assert not output.exists()
 
 
 def test_doctor_public_interface_has_no_free_provider_dataset_or_workload_selection() -> None:

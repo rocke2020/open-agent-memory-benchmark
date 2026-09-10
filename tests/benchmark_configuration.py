@@ -25,6 +25,11 @@ def lme6_configuration_text() -> str:
         ("workload_id: lme60-balanced-v1", "workload_id: lme30-native-smoke-plus-v1"),
         ("selection: lme60", "selection: lme6"),
         (
+            "max_parallel_history_ingestions_per_provider: 2",
+            "max_parallel_history_ingestions_per_provider: 3",
+        ),
+        ("max_parallel_questions_per_provider: 2", "max_parallel_questions_per_provider: 3"),
+        (
             "case_manifest_hash: 90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80",
             "case_manifest_hash: 3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4",
         ),

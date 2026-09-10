@@ -662,13 +662,9 @@ def _resolve_execution(
     if selection == "lme6":
         case_count = len(LME6_EXPECTED_QUESTION_IDS)
         source_count = LME6_EXPECTED_SESSION_COUNT
-        history_concurrency = 3
-        question_concurrency = 3
     elif selection == "lme60":
         case_count = len(LME60_EXPECTED_QUESTION_IDS)
         source_count = LME60_EXPECTED_SESSION_COUNT
-        history_concurrency = 2
-        question_concurrency = 2
     else:
         raise ResolvedPlanError(f"unsupported resolved execution selection: {selection}")
     base_operations = 1 + source_count + 8 * case_count
@@ -698,9 +694,11 @@ def _resolve_execution(
         model_transport_max_retries=controls.model_transport_max_retries,
         operation_timeout_seconds=controls.operation_timeout_seconds,
         max_parallel_datasets=1,
-        max_parallel_providers_per_dataset=3,
-        max_parallel_history_ingestions_per_provider=history_concurrency,
-        max_parallel_questions_per_provider=question_concurrency,
+        max_parallel_providers_per_dataset=controls.max_parallel_providers_per_dataset,
+        max_parallel_history_ingestions_per_provider=(
+            controls.max_parallel_history_ingestions_per_provider
+        ),
+        max_parallel_questions_per_provider=controls.max_parallel_questions_per_provider,
         per_cell_base_operation_count=base_operations,
         per_cell_retry_eligible_operation_count=retry_eligible_operations,
         per_cell_max_operation_attempt_count=maximum_operations,
@@ -864,6 +862,18 @@ def _parse_execution(value: object, *, selection: str) -> ResolvedExecution:
         ),
         model_transport_max_retries=_require_non_negative_integer(
             document["model_transport_max_retries"], "resolved model transport max retries"
+        ),
+        max_parallel_providers_per_dataset=_require_positive_integer(
+            document["max_parallel_providers_per_dataset"],
+            "resolved max parallel providers per dataset",
+        ),
+        max_parallel_history_ingestions_per_provider=_require_positive_integer(
+            document["max_parallel_history_ingestions_per_provider"],
+            "resolved max parallel history ingestions per provider",
+        ),
+        max_parallel_questions_per_provider=_require_positive_integer(
+            document["max_parallel_questions_per_provider"],
+            "resolved max parallel questions per provider",
         ),
     )
     if controls.as_tuple()[:4] != (2, 10, 6, 2):

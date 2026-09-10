@@ -502,12 +502,9 @@ def test_loader_rejects_invalid_evaluation_controls(
         '  max_cost: "100.00"\n',
         "  currency: CNY\n",
         "  max_parallel_datasets: 1\n",
-        "  max_parallel_providers_per_dataset: 3\n",
-        "  max_parallel_history_ingestions_per_provider: 2\n",
-        "  max_parallel_questions_per_provider: 2\n",
     ),
 )
-def test_loader_rejects_each_removed_ceiling_or_concurrency_key(
+def test_loader_rejects_each_removed_ceiling_or_dataset_concurrency_key(
     tmp_path: Path,
     legacy_line: str,
 ) -> None:

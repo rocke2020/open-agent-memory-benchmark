@@ -90,10 +90,10 @@ def test_lme60_resolved_execution_freezes_whole_history_budget() -> None:
 @pytest.mark.parametrize(
     "controls",
     (
-        EvaluationControls(1, 900, 10, 6, 2),
-        EvaluationControls(2, 900, 9, 6, 2),
-        EvaluationControls(2, 900, 10, 5, 2),
-        EvaluationControls(2, 900, 10, 6, 1),
+        EvaluationControls(1, 900, 10, 6, 2, 3, 2, 2),
+        EvaluationControls(2, 900, 9, 6, 2, 3, 2, 2),
+        EvaluationControls(2, 900, 10, 5, 2, 3, 2, 2),
+        EvaluationControls(2, 900, 10, 6, 1, 3, 2, 2),
     ),
 )
 def test_resolved_execution_parser_rejects_self_consistent_non_profile_controls(
