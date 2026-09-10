@@ -58,25 +58,31 @@ request_embedding() {
 probe_embedding() {
     local base_url=$1
     local api_key=$2
+    local expected_dimension=${3:-1024}
     local request
+    case "$expected_dimension" in
+        ""|*[!0-9]*|0) return 1 ;;
+    esac
     request="$(jq -cn --arg model "$OAMB_EMBEDDING_MODEL" \
-        '{model: $model, input: "OAMB startup probe", dimensions: 1024}')"
+        --argjson dimension "$expected_dimension" \
+        '{model: $model, input: "OAMB startup probe", dimensions: $dimension}')"
     request_embedding "$base_url" "$api_key" "$request" | \
         python3 -c '
 import json
 import math
 import sys
 
+expected_dimension = int(sys.argv[1])
 payload = json.load(sys.stdin)
 data = payload.get("data")
 if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
     raise SystemExit(1)
 vector = data[0].get("embedding")
-if not isinstance(vector, list) or len(vector) != 1024:
+if not isinstance(vector, list) or len(vector) != expected_dimension:
     raise SystemExit(1)
 if any(isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item) for item in vector):
     raise SystemExit(1)
-'
+' "$expected_dimension"
 }
 
 start_local_embedding() {

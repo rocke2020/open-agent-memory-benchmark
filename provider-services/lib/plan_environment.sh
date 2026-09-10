@@ -34,16 +34,23 @@ EOF
     select(type == "number" and . == 10)
   ' "$plan_environment_plan")" || return 1
   export OAMB_EXTRACTION_MAX_RETRIES="$plan_environment_extraction_max_retries"
-  plan_environment_embedding_base_url="$(jq -er '
-    .embedding_endpoint.effective_endpoint |
-    select(type == "string" and length > 0)
-  ' "$plan_environment_plan")" || return 1
-  export OAMB_EMBEDDING_BASE_URL="$plan_environment_embedding_base_url"
-  plan_environment_embedding_ownership="$(jq -er '
-    .embedding_endpoint.ownership |
-    select(. == "embedding_local_fallback" or . == "external")
-  ' "$plan_environment_plan")" || return 1
-  export OAMB_EMBEDDING_OWNERSHIP="$plan_environment_embedding_ownership"
+  if plan_environment_embedding_base_url="$(jq -er '
+      .embedding_endpoint.effective_endpoint |
+      select(type == "string" and length > 0)
+    ' "$plan_environment_plan" 2>/dev/null)" && \
+    plan_environment_embedding_ownership="$(jq -er '
+      .embedding_endpoint.ownership |
+      select(. == "embedding_local_fallback" or . == "external")
+    ' "$plan_environment_plan" 2>/dev/null)"
+  then
+    export OAMB_EMBEDDING_BASE_URL="$plan_environment_embedding_base_url"
+    export OAMB_EMBEDDING_OWNERSHIP="$plan_environment_embedding_ownership"
+  elif [ -n "${OAMB_RESUME_EMBEDDING_ENDPOINT:-}" ]; then
+    export OAMB_EMBEDDING_BASE_URL="$OAMB_RESUME_EMBEDDING_ENDPOINT"
+    export OAMB_EMBEDDING_OWNERSHIP=external
+  else
+    return 1
+  fi
 
   # These provider processes expose an OpenAI-compatible protocol; this is an
   # implementation detail, not a user-selectable model setting.

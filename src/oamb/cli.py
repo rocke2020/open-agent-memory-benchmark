@@ -286,7 +286,19 @@ def run_command(
     if result_map is not None and (result_map.exists() or result_map.is_symlink()):
         raise typer.BadParameter("result map already exists")
     try:
-        plan = load_resolved_plan_for_run(resolved_plan)
+        resume_embedding_endpoint = os.environ.get("OAMB_RESUME_EMBEDDING_ENDPOINT")
+        if resume_embedding_endpoint is not None and results_root is None:
+            raise LiveConfigurationError(
+                "resume embedding compatibility mode requires provider results"
+            )
+        plan = (
+            load_resolved_plan_for_run(resolved_plan)
+            if resume_embedding_endpoint is None
+            else load_resolved_plan_for_run(
+                resolved_plan,
+                resume_embedding_endpoint=resume_embedding_endpoint,
+            )
+        )
         selected_cells = select_live_cells(plan, tuple(cell or ()))
         result_selection = None
         if results_root is not None:
@@ -345,7 +357,7 @@ def run_command(
             base_environment=os.environ,
         )
         service_receipt_path = None
-        if plan.dataset.selection == "lme60":
+        if plan.dataset.selection == "lme60" and resume_embedding_endpoint is None:
             service_receipt_path = validate_live_readiness_receipt(
                 plan=plan,
                 provider_runtime_directory=provider_runtime,
@@ -659,7 +671,15 @@ def compare_command(
     from .reporting.report_analysis import build_report_analysis_generator
 
     try:
-        plan = load_resolved_plan_for_run(resolved_plan)
+        resume_embedding_endpoint = os.environ.get("OAMB_RESUME_EMBEDDING_ENDPOINT")
+        plan = (
+            load_resolved_plan_for_run(resolved_plan)
+            if resume_embedding_endpoint is None
+            else load_resolved_plan_for_run(
+                resolved_plan,
+                resume_embedding_endpoint=resume_embedding_endpoint,
+            )
+        )
         if analysis_model_env is None and analysis_cache_root is not None:
             raise typer.BadParameter("--analysis-cache-root requires --analysis-model-env")
         analysis_generator = (

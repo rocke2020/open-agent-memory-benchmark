@@ -38,6 +38,8 @@ or enforces a real user-visible requirement. Do not build speculative
 compatibility families, control protocols, review layers, or benchmark-specific
 architectures before the simple end-to-end product flow works with real data.
 
+Keep OAMB focused on the evaluation itself and default to the minimum sufficient complexity. Resume is a required basic capability for experienced developers working with coding agents, and the operator remains responsible for the complete evaluation and its cost. Resume must not add URL or ownership auditing or a migration protocol for embedding services; its embedding gate verifies only the minimum evaluation contract: one finite vector whose dimension matches the previous run configuration.
+
 ## Real-use vertical slice gate
 
 The first hard delivery gate is the smallest safe real user flow, not broader

@@ -309,11 +309,14 @@ RUN_LABEL="$(jq -er '.run_label | select(type == "string" and length > 0)' "$STA
 WORK_DIR="$(jq -er '.work_dir | select(type == "string" and length > 0)' "$STATE_FILE")"
 PRECHECK_PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
 QUESTION_ID="$(jq -er '.question_id | select(type == "string" and length > 0)' "$STATE_FILE")"
-STATE_EMBEDDING_OWNERSHIP="$(jq -er '
-  .embedding_ownership |
-  select(. == "embedding_local_fallback" or . == "external")
-' "$STATE_FILE")" || \
-  die "precheck state has invalid embedding ownership"
+STATE_EMBEDDING_OWNERSHIP=""
+if [[ "$RESUME" == false ]]; then
+  STATE_EMBEDDING_OWNERSHIP="$(jq -er '
+    .embedding_ownership |
+    select(. == "embedding_local_fallback" or . == "external")
+  ' "$STATE_FILE")" || \
+    die "precheck state has invalid embedding ownership"
+fi
 case "$RUN_LABEL" in
   ""|"."|".."|*[!A-Za-z0-9._-]*) die "precheck state has invalid run label" ;;
 esac
@@ -348,9 +351,30 @@ case "$DATASET_PATH" in
   *) DATASET_SOURCE="$ROOT/$DATASET_PATH" ;;
 esac
 [[ -f "$DATASET_SOURCE" && ! -L "$DATASET_SOURCE" ]] || die "stored-plan dataset is missing"
+RESUME_EMBEDDING_ENDPOINT=""
+if [[ "$RESUME" == true ]]; then
+  RESUME_EMBEDDING_ENDPOINT="$(read_optional_env_value \
+    "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)" || \
+    die "cannot load the resume embedding endpoint"
+  if [[ -z "$RESUME_EMBEDDING_ENDPOINT" || "$RESUME_EMBEDDING_ENDPOINT" == change-me* ]]; then
+    RESUME_EMBEDDING_ENDPOINT="$(jq -er '
+      .embedding_endpoint.effective_endpoint |
+      select(type == "string" and length > 0)
+    ' "$PLAN" 2>/dev/null)" || \
+      die "resume requires a reachable embedding endpoint"
+  fi
+  export OAMB_RESUME_EMBEDDING_ENDPOINT="$RESUME_EMBEDDING_ENDPOINT"
+  export OAMB_EMBEDDING_BASE_URL="$RESUME_EMBEDDING_ENDPOINT"
+  export OAMB_EMBEDDING_OWNERSHIP=external
+fi
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
-[[ "$STATE_EMBEDDING_OWNERSHIP" == "$OAMB_EMBEDDING_OWNERSHIP" ]] || \
-  die "precheck state and resolved plan embedding ownership differ"
+if [[ "$RESUME" == true ]]; then
+  export OAMB_EMBEDDING_BASE_URL="$RESUME_EMBEDDING_ENDPOINT"
+  export OAMB_EMBEDDING_OWNERSHIP=external
+else
+  [[ "$STATE_EMBEDDING_OWNERSHIP" == "$OAMB_EMBEDDING_OWNERSHIP" ]] || \
+    die "precheck state and resolved plan embedding ownership differ"
+fi
 
 "$ROOT/provider-services/bin/provider-services" doctor
 uv run --locked python - "$PLAN" "$ENV_FILE" "$ROOT/provider-services/.runtime" \
@@ -371,7 +395,11 @@ env_file = Path(sys.argv[2])
 runtime = Path(sys.argv[3])
 dataset_source = Path(sys.argv[4])
 expected_cells = tuple(sys.argv[5:])
-plan = load_resolved_plan_for_run(plan_path)
+resume_embedding_endpoint = os.environ.get("OAMB_RESUME_EMBEDDING_ENDPOINT")
+plan = load_resolved_plan_for_run(
+    plan_path,
+    resume_embedding_endpoint=resume_embedding_endpoint,
+)
 actual_cells = tuple(cell.cell_id for cell in plan.cells)
 if actual_cells != expected_cells:
     raise SystemExit(f"unexpected plan cells: {actual_cells!r}")
@@ -387,28 +415,31 @@ environment = load_live_environment(
     provider_runtime_directory=runtime,
     base_environment=os.environ,
 )
-validate_live_readiness_receipt(
-    plan=plan,
-    provider_runtime_directory=runtime,
-    environment=environment,
-)
+if resume_embedding_endpoint is None:
+    validate_live_readiness_receipt(
+        plan=plan,
+        provider_runtime_directory=runtime,
+        environment=environment,
+    )
 PY
 if [[ "$RESUME" == true ]]; then
   embedding_url=$OAMB_EMBEDDING_BASE_URL
   embedding_api_key="$(read_optional_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY)" || \
     die "cannot load the prechecked embedding API key"
-  if [[ "$OAMB_EMBEDDING_OWNERSHIP" == embedding_local_fallback ]]; then
-    embedding_stamp="$(date -u +%Y%m%d-%H%M%S)-$$"
-    start_local_embedding "$embedding_url" "$embedding_api_key" \
-      "$WORK_DIR/embedding-resume-$embedding_stamp.log" \
-      "$WORK_DIR/embedding.pid"
-  else
-    host_embedding_url="$(resolve_host_embedding_base "$embedding_url")" || \
-      die "cannot resolve the prechecked embedding endpoint"
-    probe_embedding "$host_embedding_url" "$embedding_api_key" >/dev/null 2>&1 || \
-      die "prechecked external embedding endpoint is unavailable"
-    printf 'embedding: PASS (prechecked external endpoint reachable)\n'
-  fi
+  embedding_request="$ROOT/provider-services/.runtime/embedding-ready-request.json"
+  [[ -f "$embedding_request" && ! -L "$embedding_request" ]] || \
+    die "last-run embedding configuration is missing"
+  embedding_dimension="$(jq -er '
+    .dimensions |
+    select(type == "number" and . == floor and . > 0)
+  ' "$embedding_request")" || \
+    die "last-run embedding dimension is invalid"
+  host_embedding_url="$(resolve_host_embedding_base "$embedding_url")" || \
+    die "cannot resolve the resume embedding endpoint"
+  probe_embedding \
+    "$host_embedding_url" "$embedding_api_key" "$embedding_dimension" >/dev/null 2>&1 || \
+    die "resume embedding must return one finite $embedding_dimension-dimensional vector"
+  printf 'embedding: PASS (finite %s-dimensional vector)\n' "$embedding_dimension"
   "$ROOT/provider-services/bin/provider-services" up
   "$ROOT/provider-services/bin/provider-services" verify --services
 fi

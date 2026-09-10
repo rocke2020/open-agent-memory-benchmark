@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from oamb.config.benchmark import load_benchmark_configuration
-from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
+from oamb.config.doctor import (
+    build_resolved_plan,
+    load_resolved_plan_for_run,
+    resolved_plan_bytes,
+)
+from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 PRECHECK_SCRIPT = REPOSITORY_ROOT / "precheck.sh"
@@ -1452,6 +1457,10 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
 """.strip(),
     )
     (root / "provider-services" / ".runtime").mkdir()
+    (root / "provider-services" / ".runtime" / "embedding-ready-request.json").write_text(
+        '{"dimensions":1024}\n',
+        encoding="utf-8",
+    )
     (root / ".env").write_text(
         "LLM_URL_TYPE=openai_chat\n"
         "LLM_BASE_URL=test\n"
@@ -2434,22 +2443,39 @@ def test_run_full_resume_probes_configured_embedding_without_starting_local(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "embedding: PASS (prechecked external endpoint reachable)" in result.stdout
+    assert "embedding: PASS (finite 1024-dimensional vector)" in result.stdout
     calls = trace.read_text(encoding="utf-8")
     probe_line = next(line for line in calls.splitlines() if line.startswith("embedding-probe "))
     assert probe_line.endswith(f"{embedding_url}/embeddings")
     assert "provider-services up" in calls
 
 
-def test_run_rejects_malformed_explicit_embedding_ownership_before_dispatch(
+def test_run_full_resume_ignores_embedding_ownership_state(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
+    _write_provider_result_run(root)
     state_path = root / "outputs" / "tmp" / "quick-start-current.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["embedding_ownership"] = "false"
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    (root / "provider-services" / ".runtime" / "embedding-ready-request.json").write_text(
+        '{"dimensions":768}\n', encoding="utf-8"
+    )
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "OAMB_EMBEDDING_BASE_URL=change-me",
+            "OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:19001/v1",
+        ),
+        encoding="utf-8",
+    )
+    _write_executable(
+        Path(env["PATH"].split(":", 1)[0]) / "curl",
+        'printf "embedding-probe %s\\n" "$*" >> "$OAMB_TEST_TRACE"; '
+        'python3 -c \'import json; print(json.dumps({"data": [{"embedding": [0.0] * 768}]}))\'',
+    )
 
     result = subprocess.run(
         [str(script), "--full_test", "--resume"],
@@ -2461,12 +2487,105 @@ def test_run_rejects_malformed_explicit_embedding_ownership_before_dispatch(
         timeout=20,
     )
 
-    assert result.returncode != 0
-    assert "precheck state has invalid embedding ownership" in result.stderr
-    assert not trace.exists()
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8")
+    assert "http://127.0.0.1:19001/v1/embeddings" in calls
+    assert "embedding: PASS (finite 768-dimensional vector)" in result.stdout
+    assert "provider-services up" in calls
+    assert "oamb run" in calls
 
 
-def test_run_full_resume_restores_local_runtime_before_dispatch(
+def test_run_full_resume_accepts_legacy_plan_without_embedding_identity(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    full_root, _result_paths = _write_provider_result_run(root)
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("embedding_ownership")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "OAMB_EMBEDDING_BASE_URL=change-me",
+            "OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:19000/v1",
+        ),
+        encoding="utf-8",
+    )
+    for plan_path in (Path(state["resolved_plan"]), full_root / "resolved-plan.json"):
+        document = json.loads(plan_path.read_text(encoding="utf-8"))
+        document.pop("embedding_endpoint")
+        plan_path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(script), "--full_test", "--resume"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8")
+    assert "embedding-start" not in calls
+    assert "provider-services up" in calls
+    assert "oamb run" in calls
+
+
+def test_plan_loader_accepts_legacy_resume_with_runtime_embedding_endpoint(
+    tmp_path: Path,
+) -> None:
+    plan = build_resolved_plan(
+        load_benchmark_configuration(REPOSITORY_ROOT / "configs/benchmark.yml")
+    )
+    document = json.loads(resolved_plan_bytes(plan))
+    document.pop("embedding_endpoint")
+    payload = dict(document)
+    payload.pop("resolved_plan_hash")
+    legacy_hash = canonical_sha256(["oamb-resolved-plan-initial-v1", payload])
+    document["resolved_plan_hash"] = legacy_hash
+    plan_path = tmp_path / "legacy-plan.json"
+    plan_path.write_bytes(canonical_json_bytes(document))
+
+    loaded = load_resolved_plan_for_run(
+        plan_path,
+        resume_embedding_endpoint="http://127.0.0.1:19000/v1",
+    )
+
+    assert loaded.resolved_plan_hash == legacy_hash
+    assert loaded.embedding_endpoint.effective_endpoint == "http://127.0.0.1:19000/v1"
+    assert loaded.embedding_endpoint.ownership == "external"
+
+
+def test_plan_loader_ignores_saved_embedding_identity_during_resume(
+    tmp_path: Path,
+) -> None:
+    plan = build_resolved_plan(
+        load_benchmark_configuration(REPOSITORY_ROOT / "configs/benchmark.yml")
+    )
+    document = json.loads(resolved_plan_bytes(plan))
+    document["embedding_endpoint"] = {}
+    payload = dict(document)
+    payload.pop("resolved_plan_hash")
+    saved_hash = canonical_sha256(["oamb-resolved-plan-initial-v1", payload])
+    document["resolved_plan_hash"] = saved_hash
+    plan_path = tmp_path / "saved-plan.json"
+    plan_path.write_bytes(canonical_json_bytes(document))
+
+    loaded = load_resolved_plan_for_run(
+        plan_path,
+        resume_embedding_endpoint="http://127.0.0.1:19000/v1",
+    )
+
+    assert loaded.resolved_plan_hash == saved_hash
+    assert loaded.embedding_endpoint.effective_endpoint == "http://127.0.0.1:19000/v1"
+    assert loaded.embedding_endpoint.ownership == "external"
+
+
+def test_run_full_resume_rejects_wrong_embedding_dimension_without_starting_it(
     tmp_path: Path,
 ) -> None:
     root, env, trace = _run_fixture(tmp_path)
@@ -2476,10 +2595,9 @@ def test_run_full_resume_restores_local_runtime_before_dispatch(
         Path(env["PATH"].split(":", 1)[0]) / "curl",
         """
 printf 'embedding-probe\n' >> "$OAMB_TEST_TRACE"
-[ -f "$OAMB_TEST_EMBED_READY" ] || exit 22
 python3 - <<'PY'
 import json
-print(json.dumps({"data": [{"embedding": [0.0] * 1024}]}))
+print(json.dumps({"data": [{"embedding": [0.0] * 768}]}))
 PY
 """.strip(),
     )
@@ -2487,7 +2605,6 @@ PY
         root / "scripts" / "start_local_embedding" / "start_vllm_metal.sh",
         """
 printf 'embedding-start\n' >> "$OAMB_TEST_TRACE"
-touch "$OAMB_TEST_EMBED_READY"
 """.strip(),
     )
     provider_ready = tmp_path / "provider-ready"
@@ -2507,7 +2624,6 @@ fi
     )
     env.update(
         {
-            "OAMB_TEST_EMBED_READY": str(tmp_path / "embedding-ready"),
             "OAMB_TEST_PROVIDER_READY": str(provider_ready),
             "OAMB_EMBEDDING_STARTUP_ATTEMPTS": "3",
         }
@@ -2523,17 +2639,17 @@ fi
         timeout=20,
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode != 0
     calls = trace.read_text(encoding="utf-8").splitlines()
-    embedding_start_index = calls.index("embedding-start")
-    provider_up_index = calls.index("provider-services up")
-    provider_verify_index = calls.index("provider-services verify --services")
-    dispatch_index = next(index for index, line in enumerate(calls) if "oamb run" in line)
-    assert embedding_start_index < provider_up_index < provider_verify_index < dispatch_index
-    assert provider_ready.is_file()
+    assert "embedding-start" not in calls
+    assert "provider-services up" not in calls
+    assert not any("oamb run" in line for line in calls)
+    assert not provider_ready.exists()
 
 
-def test_run_full_resume_waits_for_recorded_embedding_startup(tmp_path: Path) -> None:
+def test_run_full_resume_does_not_wait_for_recorded_embedding_startup(
+    tmp_path: Path,
+) -> None:
     root, env, trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
     _write_provider_result_run(root)
@@ -2579,12 +2695,13 @@ python3 -c 'import json; print(json.dumps({"data": [{"embedding": [0.0] * 1024}]
         timeout=20,
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode != 0
     calls = trace.read_text(encoding="utf-8").splitlines()
     assert "embedding-start" not in calls
     assert calls.count("embedding-probe 1") == 1
-    assert calls.count("embedding-probe 2") == 1
-    assert "embedding: PASS (existing startup, pid " in result.stdout
+    assert "embedding-probe 2" not in calls
+    assert "embedding: waiting for existing startup" not in result.stdout
+    assert not any("oamb run" in line for line in calls)
 
 
 def test_recorded_embedding_timeout_names_pid_without_claiming_a_new_log(

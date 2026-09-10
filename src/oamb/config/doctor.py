@@ -60,6 +60,7 @@ _ROOT_KEYS = frozenset(
         "cells",
     }
 )
+_LEGACY_ROOT_KEYS = _ROOT_KEYS - {"embedding_endpoint"}
 _EMBEDDING_ENDPOINT_KEYS = frozenset({"effective_endpoint", "ownership"})
 _DATASET_KEYS = frozenset(
     {
@@ -396,7 +397,11 @@ def resolved_plan_bytes(plan: ResolvedPlan) -> bytes:
     return canonical_json_bytes(document)
 
 
-def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
+def load_resolved_plan_for_run(
+    path: Path,
+    *,
+    resume_embedding_endpoint: str | None = None,
+) -> ResolvedPlan:
     """Load only canonical frozen bytes; never reopen source YAML or environment."""
 
     try:
@@ -410,14 +415,31 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
         raise ResolvedPlanError(f"cannot load resolved plan: {path}") from exc
     if canonical_json_bytes(document) != content:
         raise ResolvedPlanError("resolved plan bytes are not canonical JSON")
-    root = _require_exact_mapping(document, _ROOT_KEYS, "resolved plan")
+    document_keys = frozenset(document) if isinstance(document, dict) else frozenset()
+    resume_mode = resume_embedding_endpoint is not None
+    legacy_resume_plan = resume_mode and document_keys == _LEGACY_ROOT_KEYS
+    root = _require_exact_mapping(
+        document,
+        _LEGACY_ROOT_KEYS if legacy_resume_plan else _ROOT_KEYS,
+        "resolved plan",
+    )
     if root["schema_name"] != _SCHEMA_NAME or type(root["schema_name"]) is not str:
         raise ResolvedPlanError("resolved plan schema_name is invalid")
     if root["schema_version"] != _SCHEMA_VERSION or type(root["schema_version"]) is not int:
         raise ResolvedPlanError("resolved plan schema_version is invalid")
     comparison_id = _require_text(root["comparison_id"], "comparison ID")
     dataset = _parse_dataset(root["dataset"])
-    embedding_endpoint = _parse_embedding_endpoint(root["embedding_endpoint"])
+    runtime_embedding_endpoint = (
+        ResolvedEmbeddingEndpoint(
+            ownership="external",
+            effective_endpoint=_require_text(
+                resume_embedding_endpoint,
+                "resume embedding effective endpoint",
+            ),
+        )
+        if resume_mode
+        else _parse_embedding_endpoint(root["embedding_endpoint"])
+    )
     model_roles = _parse_model_roles(root["model_roles"])
     retrieval = _parse_retrieval(root["retrieval"])
     execution = _parse_execution(root["execution"], selection=dataset.selection)
@@ -432,13 +454,18 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
     payload = _payload(
         comparison_id=comparison_id,
         dataset=dataset,
-        embedding_endpoint=embedding_endpoint,
+        embedding_endpoint=runtime_embedding_endpoint,
         model_roles=model_roles,
         retrieval=retrieval,
         execution=execution,
         decision=decision,
         cells=cells,
     )
+    if resume_mode:
+        if legacy_resume_plan:
+            payload.pop("embedding_endpoint")
+        else:
+            payload["embedding_endpoint"] = root["embedding_endpoint"]
     plan_hash = root["resolved_plan_hash"]
     if type(plan_hash) is not str or plan_hash != _plan_hash(payload):
         raise ResolvedPlanError("resolved plan hash does not match its frozen content")
@@ -448,7 +475,7 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
         resolved_plan_hash=plan_hash,
         comparison_id=comparison_id,
         dataset=dataset,
-        embedding_endpoint=embedding_endpoint,
+        embedding_endpoint=runtime_embedding_endpoint,
         model_roles=model_roles,
         retrieval=retrieval,
         execution=execution,
