@@ -197,6 +197,10 @@ class OperatorDoctorTests(unittest.TestCase):
         plan.write_text(
             json.dumps(
                 {
+                    "embedding_endpoint": {
+                        "effective_endpoint": "http://127.0.0.1:18000/v1",
+                        "ownership": "embedding_local_fallback",
+                    },
                     "execution": {"extraction_max_retries": 10},
                     "model_roles": [
                         {
@@ -249,6 +253,7 @@ class OperatorDoctorTests(unittest.TestCase):
             '  [ -n "${OAMB_EMBEDDING_MODEL:-}" ] || exit 42\n'
             '  [ "${OAMB_MEM0_LLM_REASONING_EFFORT:-}" = high ] || exit 43\n'
             '  [ "${OAMB_EXTRACTION_MAX_RETRIES:-}" = 10 ] || exit 44\n'
+            '  [ "${OAMB_EMBEDDING_BASE_URL:-}" = http://host.docker.internal:18000/v1 ] || exit 45\n'
             '  printf \'compose-env=%s|%s|%s|%s\\n\' "$OAMB_MEM0_POSTGRES_PASSWORD" "$OAMB_MEM0_LLM_MODEL" "$OAMB_MEM0_LLM_REASONING_EFFORT" "$OAMB_EXTRACTION_MAX_RETRIES"\n'
             "fi\n"
             "exit 0\n",

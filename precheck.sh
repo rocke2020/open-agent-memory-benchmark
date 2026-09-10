@@ -9,7 +9,6 @@ readonly OUTPUTS_ROOT="$ROOT/outputs"
 readonly TMP_ROOT="$OUTPUTS_ROOT/tmp"
 readonly STATE_FILE="$TMP_ROOT/quick-start-current.json"
 readonly QUESTION_ID="72e3ee87"
-readonly DEFAULT_EMBEDDING_URL="http://host.docker.internal:18000/v1"
 readonly DEFAULT_HINDSIGHT_PORT="18888"
 readonly DEFAULT_MEM0_PORT="18889"
 readonly DEFAULT_MEM0_INSPECTOR_PORT="16333"
@@ -267,28 +266,23 @@ ensure_provider_environment() {
   for key in OAMB_EMBEDDING_BASE_URL OAMB_EMBEDDING_API_KEY; do
     reject_duplicate_env_assignment "$key"
   done
-  if [[ -n "$EMBEDDING_API_URL" ]]; then
-    set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$EMBEDDING_API_URL"
-  fi
-
   local embedding_url embedding_api_key
   embedding_url="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL 2>/dev/null || true)"
   embedding_api_key="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY 2>/dev/null || true)"
   if [[ "$embedding_url" == change-me* ]]; then embedding_url=""; fi
-  if [[ "$embedding_api_key" == change-me* ]]; then
-    embedding_api_key=""
-    set_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY ""
+  if [[ "$embedding_api_key" == change-me* ]]; then embedding_api_key=""; fi
+
+  if [[ -n "$EMBEDDING_API_URL" ]]; then
+    embedding_url=$EMBEDDING_API_URL
   fi
 
   if [[ -z "$embedding_url" && -n "$embedding_api_key" ]]; then
     die "OAMB_EMBEDDING_API_KEY requires OAMB_EMBEDDING_BASE_URL"
   fi
   if [[ -z "$embedding_url" ]]; then
-    embedding_url=$DEFAULT_EMBEDDING_URL
-    if [[ "$START_LOCAL_EMBEDDING" == false ]]; then
-      set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
-    fi
+    EMBEDDING_API_URL=""
   else
+    EMBEDDING_API_URL=$embedding_url
     START_LOCAL_EMBEDDING=false
   fi
 }
@@ -308,6 +302,7 @@ from oamb.live import (
 plan_path, env_file, runtime = map(Path, sys.argv[1:])
 plan = load_resolved_plan_for_run(plan_path)
 environment = load_live_environment(
+    plan=plan,
     provider_env_path=env_file,
     model_env_path=env_file,
     provider_runtime_directory=runtime,
@@ -367,8 +362,22 @@ fi
 ensure_model_environment
 ensure_provider_environment "$RUN_LABEL" "$MEM0_CHECKOUT"
 
-uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan"
+doctor_arguments=(
+  uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan"
+)
+if [[ -n "$EMBEDDING_API_URL" ]]; then
+  doctor_arguments+=(--embedding-api-url "$EMBEDDING_API_URL")
+fi
+"${doctor_arguments[@]}"
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
+EMBEDDING_OWNERSHIP="$(jq -er '
+  .embedding_endpoint.ownership |
+  select(. == "embedding_local_fallback" or . == "external")
+' "$PLAN")" || die "cannot load embedding ownership from resolved plan"
+EMBEDDING_EFFECTIVE_ENDPOINT="$(jq -er '
+  .embedding_endpoint.effective_endpoint |
+  select(type == "string" and length > 0)
+' "$PLAN")" || die "cannot load embedding endpoint from resolved plan"
 
 uv run --locked python - "$DATASET_SOURCE" <<'PY'
 import sys
@@ -385,9 +394,8 @@ PY
 
 if [[ "$START_LOCAL_EMBEDDING" == true ]]; then
   start_local_embedding \
-    "$DEFAULT_EMBEDDING_URL" \
+    "$EMBEDDING_EFFECTIVE_ENDPOINT" \
     "$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY)"
-  set_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL "$DEFAULT_EMBEDDING_URL"
 else
   printf 'embedding: local startup skipped; configured API will be verified directly\n'
 fi
@@ -412,10 +420,10 @@ jq -n \
   --arg plan "$PLAN" \
   --arg dataset "$DATASET_SOURCE" \
   --arg question "$QUESTION_ID" \
-  --argjson embedding_local_fallback "$START_LOCAL_EMBEDDING" \
+  --arg embedding_ownership "$EMBEDDING_OWNERSHIP" \
   '{run_label: $run_label, work_dir: $work_dir,
     resolved_plan: $plan, dataset_source: $dataset, question_id: $question,
-    embedding_local_fallback: $embedding_local_fallback}' \
+    embedding_ownership: $embedding_ownership}' \
   > "$state_temporary"
 mv "$state_temporary" "$STATE_FILE"
 

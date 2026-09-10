@@ -7,18 +7,26 @@ EMBEDDING_DIMENSION=1024
 OLLAMA_CONTEXT_LENGTH_TOKENS=8192
 OLLAMA_PORT="${OAMB_OLLAMA_PORT:-18000}"
 OLLAMA_BIND_HOST="${OAMB_OLLAMA_BIND_HOST:-}"
+OLLAMA_RELAY_HOST="${OAMB_OLLAMA_RELAY_HOST:-}"
 OLLAMA_BIND_ADDRESS="$OLLAMA_BIND_HOST:$OLLAMA_PORT"
 OLLAMA_CLIENT_URL="http://$OLLAMA_BIND_ADDRESS"
-STARTUP_ATTEMPTS=60
+OLLAMA_RELAY_ADDRESS="$OLLAMA_RELAY_HOST:$OLLAMA_PORT"
+OLLAMA_RELAY_URL="http://$OLLAMA_RELAY_ADDRESS"
+RELAY_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/loopback_gateway_relay.py"
+STARTUP_ATTEMPTS="${OAMB_EMBEDDING_STARTUP_ATTEMPTS:-60}"
 STARTUP_INTERVAL_SECONDS=1
 
 if [[ ! "$OLLAMA_PORT" =~ ^[0-9]+$ ]] || ((OLLAMA_PORT < 1 || OLLAMA_PORT > 65535)); then
   echo "OAMB_OLLAMA_PORT must be an integer from 1 through 65535" >&2
   exit 1
 fi
-if [[ ! "$OLLAMA_BIND_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
-   [[ "$OLLAMA_BIND_HOST" == "0.0.0.0" ]]; then
-  echo "OAMB_OLLAMA_BIND_HOST must be the Docker bridge gateway IPv4 address" >&2
+if [[ "$OLLAMA_BIND_HOST" != "127.0.0.1" ]]; then
+  echo "OAMB_OLLAMA_BIND_HOST must be 127.0.0.1" >&2
+  exit 1
+fi
+if [[ ! "$OLLAMA_RELAY_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+   [[ "$OLLAMA_RELAY_HOST" == "0.0.0.0" ]]; then
+  echo "OAMB_OLLAMA_RELAY_HOST must be the Docker bridge gateway IPv4 address" >&2
   exit 1
 fi
 
@@ -36,8 +44,13 @@ if ! PYTHON_BIN="$(command -v python3)"; then
 fi
 
 server_pid=""
+relay_pid=""
 
 cleanup() {
+  if [[ -n "$relay_pid" ]] && kill -0 "$relay_pid" 2>/dev/null; then
+    kill "$relay_pid" 2>/dev/null || true
+    wait "$relay_pid" 2>/dev/null || true
+  fi
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
@@ -51,6 +64,11 @@ trap 'exit 143' TERM
 server_is_ready() {
   "$CURL_BIN" --noproxy '*' --fail --silent --show-error \
     --connect-timeout 1 --max-time 2 "$OLLAMA_CLIENT_URL/api/version" >/dev/null 2>&1
+}
+
+relay_is_ready() {
+  "$CURL_BIN" --noproxy '*' --fail --silent --show-error \
+    --connect-timeout 1 --max-time 2 "$OLLAMA_RELAY_URL/api/version" >/dev/null 2>&1
 }
 
 if ! server_is_ready; then
@@ -76,6 +94,28 @@ if ! server_is_ready; then
     echo "Ollama did not become ready within $STARTUP_ATTEMPTS seconds" >&2
     exit 1
   fi
+fi
+
+"$PYTHON_BIN" "$RELAY_SCRIPT" \
+  --listen-host "$OLLAMA_RELAY_HOST" \
+  --listen-port "$OLLAMA_PORT" \
+  --target-host "$OLLAMA_BIND_HOST" \
+  --target-port "$OLLAMA_PORT" &
+relay_pid=$!
+for ((attempt = 1; attempt <= STARTUP_ATTEMPTS; attempt++)); do
+  if relay_is_ready; then
+    break
+  fi
+  if ! kill -0 "$relay_pid" 2>/dev/null; then
+    wait "$relay_pid" || true
+    echo "Ollama Docker-gateway relay failed to start on $OLLAMA_RELAY_ADDRESS" >&2
+    exit 1
+  fi
+  sleep "$STARTUP_INTERVAL_SECONDS"
+done
+if ! relay_is_ready; then
+  echo "Ollama Docker-gateway relay did not become ready on $OLLAMA_RELAY_ADDRESS" >&2
+  exit 1
 fi
 
 env OLLAMA_HOST="$OLLAMA_CLIENT_URL" "$OLLAMA_BIN" pull "$MODEL_NAME"
@@ -152,7 +192,19 @@ if (
 printf 'PASS: %s returned one finite %s-dimensional vector with an %s-token context\n' \
   "$MODEL_NAME" "$EMBEDDING_DIMENSION" "$OLLAMA_CONTEXT_LENGTH_TOKENS"
 
-if [[ -n "$server_pid" ]]; then
-  printf 'Ollama is listening on %s; keep this terminal open.\n' "$OLLAMA_BIND_ADDRESS"
-  wait "$server_pid"
+printf 'Ollama is listening on %s with relay %s; keep this terminal open.\n' \
+  "$OLLAMA_BIND_ADDRESS" "$OLLAMA_RELAY_ADDRESS"
+while kill -0 "$relay_pid" 2>/dev/null && \
+      { [[ -z "$server_pid" ]] || kill -0 "$server_pid" 2>/dev/null; }; do
+  sleep "$STARTUP_INTERVAL_SECONDS"
+done
+if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
+  wait "$server_pid" || true
+  server_pid=""
+  echo "owned Ollama server exited after readiness" >&2
+  exit 1
 fi
+wait "$relay_pid" || true
+relay_pid=""
+echo "Ollama Docker-gateway relay exited after readiness" >&2
+exit 1

@@ -119,6 +119,76 @@ def test_doctor_writes_one_canonical_plan_with_three_ordered_cell_specs(tmp_path
     assert f"resolved plan sha256: {hashlib.sha256(content).hexdigest()}" in result.output
 
 
+def test_doctor_freezes_managed_local_embedding_endpoint_from_configuration(
+    tmp_path: Path,
+) -> None:
+    configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
+    output = tmp_path / "comparison"
+
+    result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
+
+    assert result.exit_code == 0, result.output
+    document = json.loads((output / "resolved-plan.json").read_bytes())
+    assert configuration.embedding.managed_local_endpoint == "http://127.0.0.1:18000/v1"
+    assert document["embedding_endpoint"] == {
+        "effective_endpoint": "http://127.0.0.1:18000/v1",
+        "ownership": "embedding_local_fallback",
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ("http://127.0.0.1:18000/v1", "https://embedding.example/v1"),
+)
+def test_doctor_freezes_explicit_embedding_endpoint_as_external(
+    tmp_path: Path,
+    endpoint: str,
+) -> None:
+    output = tmp_path / hashlib.sha256(endpoint.encode()).hexdigest()[:8]
+
+    result = _invoke_doctor(
+        config=BENCHMARK_CONFIG_PATH,
+        output=output,
+        extra=("--embedding-api-url", endpoint),
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads((output / "resolved-plan.json").read_bytes())
+    assert document["embedding_endpoint"] == {
+        "effective_endpoint": endpoint,
+        "ownership": "external",
+    }
+
+
+def test_doctor_rejects_noncanonical_managed_local_embedding_endpoint(
+    tmp_path: Path,
+) -> None:
+    config = _write_mutated_config(
+        tmp_path,
+        "managed_local_endpoint: http://127.0.0.1:18000/v1",
+        "managed_local_endpoint: http://host.docker.internal:18000/v1",
+    )
+    output = tmp_path / "comparison"
+
+    result = _invoke_doctor(config=config, output=output)
+
+    assert result.exit_code != 0
+    assert "managed local embedding endpoint" in result.output
+    assert not (output / "resolved-plan.json").exists()
+
+
+def test_plan_loader_rejects_rehashed_invalid_embedding_ownership(tmp_path: Path) -> None:
+    output = tmp_path / "comparison"
+    assert _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output).exit_code == 0
+    document = json.loads((output / "resolved-plan.json").read_bytes())
+    document["embedding_endpoint"]["ownership"] = "inferred_from_url"
+    invalid = tmp_path / "invalid-embedding-ownership.json"
+    invalid.write_bytes(_rehash_plan(document))
+
+    with pytest.raises(ResolvedPlanError, match="embedding ownership"):
+        load_resolved_plan_for_run(invalid)
+
+
 def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Path) -> None:
     source_configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
     source_models = dict(source_configuration.models.ordered_items())

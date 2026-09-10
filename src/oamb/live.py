@@ -178,6 +178,7 @@ class LiveQuestionSelection:
 
 def load_live_environment(
     *,
+    plan: ResolvedPlan,
     provider_env_path: Path,
     model_env_path: Path,
     provider_runtime_directory: Path,
@@ -196,6 +197,7 @@ def load_live_environment(
             expected_keys=frozenset({_LLM_URL_TYPE_VARIABLE, "LLM_BASE_URL", "LLM_API_KEY"}),
         )
     )
+    environment["OAMB_EMBEDDING_BASE_URL"] = plan.embedding_endpoint.effective_endpoint
     if environment.get(_LLM_URL_TYPE_VARIABLE) != _SUPPORTED_LLM_URL_TYPE:
         raise LiveConfigurationError("LLM_URL_TYPE must be openai_chat in OAMB v0.1.0")
     aliases = {
@@ -398,17 +400,27 @@ def _expected_provider_thinking_efforts(plan: ResolvedPlan) -> dict[str, str]:
     }
 
 
+_LIVE_MODEL_VARIABLES: tuple[tuple[ModelRoleId, str], ...] = (
+    ("hindsight_extraction", "OAMB_HINDSIGHT_LLM_MODEL"),
+    ("mem0_extraction", "OAMB_MEM0_LLM_MODEL"),
+    ("openviking_semantic_understanding", "OAMB_OPENVIKING_VLM_MODEL"),
+    ("embedding", "OAMB_EMBEDDING_MODEL"),
+)
+
+
+def plan_model_environment(plan: ResolvedPlan) -> dict[str, str]:
+    """Derive the plan-owned live model variables without dotenv input."""
+
+    return {
+        variable: _model_plan(plan, role_id).model for role_id, variable in _LIVE_MODEL_VARIABLES
+    }
+
+
 def _validate_live_models(
     plan: ResolvedPlan,
     environment: Mapping[str, str],
 ) -> None:
-    model_variables: tuple[tuple[ModelRoleId, str], ...] = (
-        ("hindsight_extraction", "OAMB_HINDSIGHT_LLM_MODEL"),
-        ("mem0_extraction", "OAMB_MEM0_LLM_MODEL"),
-        ("openviking_semantic_understanding", "OAMB_OPENVIKING_VLM_MODEL"),
-        ("embedding", "OAMB_EMBEDDING_MODEL"),
-    )
-    for role_id, variable in model_variables:
+    for role_id, variable in _LIVE_MODEL_VARIABLES:
         if environment.get(variable) != _model_plan(plan, role_id).model:
             raise LiveConfigurationError(f"{role_id} model differs from the plan")
 
@@ -1705,6 +1717,7 @@ __all__ = [
     "load_live_environment",
     "load_live_provider_evidence",
     "live_readiness_environment_hash",
+    "plan_model_environment",
     "resolve_live_question_case_ids",
     "select_live_cells",
     "validate_live_readiness_receipt",

@@ -12,7 +12,7 @@ oamb_compose() {
         return 1
     }
     oamb_embedding_base=$(resolve_container_embedding_base \
-        "$(read_env_value "$oamb_compose_env_file" OAMB_EMBEDDING_BASE_URL)") || {
+        "$(read_runtime_env_value "$oamb_compose_env_file" OAMB_EMBEDDING_BASE_URL)") || {
         printf 'unsupported loopback OAMB_EMBEDDING_BASE_URL for provider containers\n' >&2
         return 1
     }

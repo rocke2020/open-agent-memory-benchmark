@@ -86,17 +86,28 @@ start_local_embedding() {
     local pid_file=${4:-$WORK_DIR/embedding.pid}
     local host_url=$configured_url
     local helper_bind_host=""
+    local helper_relay_host=""
+    local relay_url=""
     case "$(uname -s)" in
         Darwin) ;;
         Linux)
-            helper_bind_host="$(resolve_docker_bridge_gateway)" || \
+            helper_relay_host="$(resolve_docker_bridge_gateway)" || \
                 die "cannot resolve the Docker bridge gateway for local Ollama"
+            helper_bind_host=127.0.0.1
+            case "$configured_url" in
+                http://127.0.0.1:*)
+                    relay_url="http://$helper_relay_host${configured_url#http://127.0.0.1}"
+                    ;;
+                *) die "managed-local Linux embedding endpoint must use 127.0.0.1" ;;
+            esac
             ;;
         *) die "local embedding startup supports only macOS and Linux; use --embedding-api-url" ;;
     esac
     host_url="$(resolve_host_embedding_base "$configured_url" "$helper_bind_host")" || \
         die "cannot resolve the host embedding URL"
-    if probe_embedding "$host_url" "$api_key" >/dev/null 2>&1; then
+    if probe_embedding "$host_url" "$api_key" >/dev/null 2>&1 && \
+        { [ -z "$relay_url" ] || probe_embedding "$relay_url" "$api_key" >/dev/null 2>&1; }
+    then
         printf 'embedding: PASS (reusing %s)\n' "$host_url"
         return
     fi
@@ -123,8 +134,10 @@ start_local_embedding() {
         Linux) helper="$ROOT/scripts/start_local_embedding/start_ollama_embedding.sh" ;;
     esac
     if [ -z "$embedding_pid" ]; then
-        if [ -n "$helper_bind_host" ]; then
-            OAMB_OLLAMA_BIND_HOST="$helper_bind_host" "$helper" >"$log_file" 2>&1 &
+        if [ -n "$helper_relay_host" ]; then
+            OAMB_OLLAMA_BIND_HOST="$helper_bind_host" \
+                OAMB_OLLAMA_RELAY_HOST="$helper_relay_host" \
+                "$helper" >"$log_file" 2>&1 &
         else
             "$helper" >"$log_file" 2>&1 &
         fi
@@ -135,7 +148,9 @@ start_local_embedding() {
 
     local attempt=1
     while [ "$attempt" -le "$EMBEDDING_STARTUP_ATTEMPTS" ]; do
-        if probe_embedding "$host_url" "$api_key" >/dev/null 2>&1; then
+        if probe_embedding "$host_url" "$api_key" >/dev/null 2>&1 && \
+            { [ -z "$relay_url" ] || probe_embedding "$relay_url" "$api_key" >/dev/null 2>&1; }
+        then
             if [ "$started_here" = true ]; then
                 printf 'embedding: PASS (%s, pid %s)\n' "$(basename "$helper")" "$embedding_pid"
             else

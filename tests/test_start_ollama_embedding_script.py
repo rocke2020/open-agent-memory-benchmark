@@ -40,6 +40,10 @@ printf 'OLLAMA_HOST=%s %s\n' "${OLLAMA_HOST:-}" "$*" >> "$FAKE_OLLAMA_CALLS"
 case "${1:-}" in
   serve)
     touch "$FAKE_READY_FILE"
+    if [ "${FAKE_SERVER_EXIT_AFTER_READY:-}" = "1" ]; then
+      sleep 1
+      exit 91
+    fi
     trap 'touch "$FAKE_STOPPED_FILE"; exit 0' TERM INT
     while :; do sleep 1; done
     ;;
@@ -57,6 +61,10 @@ esac
         fake_bin / "curl",
         """
 printf '%s\n' "$*" >> "$FAKE_CURL_CALLS"
+if [ "${FAKE_RELAY_UNREADY:-}" = "1" ] && \
+   [ "$(wc -l < "$FAKE_CURL_CALLS")" -ge 2 ]; then
+  exit 22
+fi
 case "$*" in
   */api/version*)
     [ -f "$FAKE_READY_FILE" ] || exit 22
@@ -95,7 +103,9 @@ esac
         "FAKE_CURL_CALLS": str(curl_calls),
         "FAKE_EMBEDDING_DIMENSION": str(embedding_dimension),
         "OAMB_OLLAMA_PORT": "18001",
-        "OAMB_OLLAMA_BIND_HOST": "172.17.0.1",
+        "OAMB_OLLAMA_BIND_HOST": "127.0.0.1",
+        "OAMB_OLLAMA_RELAY_HOST": "127.0.0.1",
+        "OAMB_EMBEDDING_STARTUP_ATTEMPTS": "1",
         "OAMB_EMBEDDING_MODEL": EMBEDDING_MODEL,
     }
     return env, ollama_calls, curl_calls, stopped_file
@@ -109,28 +119,42 @@ def test_start_ollama_embedding_reuses_server_and_verifies_exact_vector(
     tmp_path: Path,
 ) -> None:
     env, ollama_calls, curl_calls, _ = _fake_environment(tmp_path, ready=True)
+    output_path = tmp_path / "output"
+    with output_path.open("w", encoding="utf-8") as output:
+        process = subprocess.Popen(
+            [str(SCRIPT_PATH)],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                output.flush()
+                if "PASS:" in output_path.read_text(encoding="utf-8"):
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("startup verification timed out")
+            assert process.poll() is None, output_path.read_text(encoding="utf-8")
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
 
-    result = subprocess.run(
-        [str(SCRIPT_PATH)],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=10,
-    )
-
-    assert result.returncode == 0, result.stderr
     assert ollama_calls.read_text(encoding="utf-8").splitlines() == [
-        f"OLLAMA_HOST=http://172.17.0.1:18001 pull {EMBEDDING_MODEL}"
+        f"OLLAMA_HOST=http://127.0.0.1:18001 pull {EMBEDDING_MODEL}"
     ]
     curl_call_lines = curl_calls.read_text(encoding="utf-8").splitlines()
     embedding_call = next(line for line in curl_call_lines if "/v1/embeddings" in line)
-    assert "http://172.17.0.1:18001/v1/embeddings" in embedding_call
+    assert "http://127.0.0.1:18001/v1/embeddings" in embedding_call
     assert '"dimensions":1024' in embedding_call
-    assert any("http://172.17.0.1:18001/api/ps" in line for line in curl_call_lines)
+    assert any("http://127.0.0.1:18001/api/ps" in line for line in curl_call_lines)
     assert (
         f"PASS: {EMBEDDING_MODEL} returned one finite 1024-dimensional vector "
-        "with an 8192-token context" in result.stdout
+        "with an 8192-token context" in output_path.read_text(encoding="utf-8")
     )
 
 
@@ -159,8 +183,8 @@ def test_start_ollama_embedding_starts_and_owns_missing_server(tmp_path: Path) -
 
             assert process.poll() is None, output_path.read_text(encoding="utf-8")
             assert ollama_calls.read_text(encoding="utf-8").splitlines() == [
-                "OLLAMA_HOST=172.17.0.1:18001 serve",
-                f"OLLAMA_HOST=http://172.17.0.1:18001 pull {EMBEDDING_MODEL}",
+                "OLLAMA_HOST=127.0.0.1:18001 serve",
+                f"OLLAMA_HOST=http://127.0.0.1:18001 pull {EMBEDDING_MODEL}",
             ]
         finally:
             process.terminate()
@@ -190,3 +214,37 @@ def test_start_ollama_embedding_rejects_wrong_vector_dimension(tmp_path: Path) -
 
     assert result.returncode != 0
     assert "expected exactly 1024 embedding values" in result.stderr
+
+
+def test_start_ollama_embedding_rejects_relay_that_stays_unready(tmp_path: Path) -> None:
+    env, _, _, _ = _fake_environment(tmp_path, ready=True)
+    env["FAKE_RELAY_UNREADY"] = "1"
+
+    result = subprocess.run(
+        [str(SCRIPT_PATH)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "Docker-gateway relay did not become ready" in result.stderr
+
+
+def test_start_ollama_embedding_exits_when_owned_server_dies(tmp_path: Path) -> None:
+    env, _, _, _ = _fake_environment(tmp_path, ready=False)
+    env["FAKE_SERVER_EXIT_AFTER_READY"] = "1"
+
+    result = subprocess.run(
+        [str(SCRIPT_PATH)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "owned Ollama server exited after readiness" in result.stderr

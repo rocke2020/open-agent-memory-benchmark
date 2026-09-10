@@ -123,15 +123,7 @@ resolved cell, runtime outbound trace, and fresh capsule validation.
 
 ## Controlled embedding, native storage
 
-All three default profiles use the same controlled embedding endpoint, model,
-and dimension: `qwen3-embedding:0.6b` with 1,024 dimensions. They intentionally
-do not share one vector database. Hindsight keeps its embedded pg0/pgvector
-store, Mem0 uses its private PostgreSQL/pgvector store, and OpenViking uses its
-embedded AGFS and local vector workspace. Storage and indexing are part of each memory
-provider's native behavior; forcing one common database would bypass that
-behavior and would no longer be the default provider comparison. A future
-common-vector-store experiment must be a separately named ablation and may run
-only when all selected releases officially support the same backend.
+All three default profiles use the same controlled embedding endpoint, model, and dimension: `qwen3-embedding:0.6b` with 1,024 dimensions. The resolved plan owns the effective host endpoint; Compose alone translates an HTTP loopback host to `host.docker.internal` for provider containers. On native Linux, Ollama remains loopback-only while a bounded helper relay exposes the same port only on the Docker bridge gateway, so host probes retain the frozen loopback URL without opening an unauthenticated LAN listener. The providers intentionally do not share one vector database. Hindsight keeps its embedded pg0/pgvector store, Mem0 uses its private PostgreSQL/pgvector store, and OpenViking uses its embedded AGFS and local vector workspace. Storage and indexing are part of each memory provider's native behavior; forcing one common database would bypass that behavior and would no longer be the default provider comparison. A future common-vector-store experiment must be a separately named ablation and may run only when all selected releases officially support the same backend.
 
 Query embedding is allowed non-generative retrieval infrastructure and remains
 separate from prohibited generation paths. The v0.1 profiles select Hindsight

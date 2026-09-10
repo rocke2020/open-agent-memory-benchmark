@@ -134,12 +134,22 @@ MODEL_EXECUTION_OWNER_BY_ROLE: dict[ModelRoleId, ExecutionOwner] = {
     "embedding": "provider_internal",
 }
 _REQUIRED_TOP_LEVEL_KEYS = frozenset(
-    {"comparison", "dataset", "cells", "llm_profiles", "models", "retrieval", "execution"}
+    {
+        "comparison",
+        "dataset",
+        "embedding",
+        "cells",
+        "llm_profiles",
+        "models",
+        "retrieval",
+        "execution",
+    }
 )
 _OPTIONAL_TOP_LEVEL_KEYS = frozenset({"decision"})
 _DATASET_KEYS = frozenset(_DATASET_COMMON) | frozenset(
     {"workload_id", "selection", "case_manifest_hash"}
 )
+_EMBEDDING_KEYS = frozenset({"managed_local_endpoint"})
 _CELL_KEYS = frozenset(
     {
         "cell_id",
@@ -246,6 +256,11 @@ class DatasetConfiguration:
     revision: str
     source_sha256: str
     case_manifest_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingConfiguration:
+    managed_local_endpoint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +372,7 @@ class DecisionConfiguration:
 class BenchmarkConfiguration:
     comparison_id: str
     dataset: DatasetConfiguration
+    embedding: EmbeddingConfiguration
     cells: tuple[CellConfiguration, ...]
     llm_profiles: LlmProfilesConfiguration
     models: ModelRoleConfigurations
@@ -389,6 +405,7 @@ def _parse_benchmark_configuration(document: object) -> BenchmarkConfiguration:
     )
     comparison_id = _require_text(root["comparison"], "comparison")
     dataset = _parse_dataset(root["dataset"])
+    embedding = _parse_embedding(root["embedding"])
     llm_profiles = _parse_llm_profiles(root["llm_profiles"])
     models = _parse_model_roles(root["models"], llm_profiles=llm_profiles)
     retrieval = _parse_retrieval(root["retrieval"])
@@ -403,6 +420,7 @@ def _parse_benchmark_configuration(document: object) -> BenchmarkConfiguration:
     return BenchmarkConfiguration(
         comparison_id=comparison_id,
         dataset=dataset,
+        embedding=embedding,
         cells=cells,
         llm_profiles=llm_profiles,
         models=models,
@@ -421,6 +439,16 @@ def _parse_dataset(value: object) -> DatasetConfiguration:
             "dataset does not match a pinned v0.1 LongMemEval profile"
         )
     return DatasetConfiguration(**parsed)
+
+
+def _parse_embedding(value: object) -> EmbeddingConfiguration:
+    document = _require_exact_mapping(value, _EMBEDDING_KEYS, "embedding")
+    endpoint = _require_text(document["managed_local_endpoint"], "managed local endpoint")
+    if endpoint != "http://127.0.0.1:18000/v1":
+        raise BenchmarkConfigurationError(
+            "managed local embedding endpoint does not match the v0.1 profile"
+        )
+    return EmbeddingConfiguration(managed_local_endpoint=endpoint)
 
 
 def _parse_cells(

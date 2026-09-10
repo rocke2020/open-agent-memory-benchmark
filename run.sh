@@ -309,13 +309,9 @@ RUN_LABEL="$(jq -er '.run_label | select(type == "string" and length > 0)' "$STA
 WORK_DIR="$(jq -er '.work_dir | select(type == "string" and length > 0)' "$STATE_FILE")"
 PRECHECK_PLAN="$(jq -er '.resolved_plan | select(type == "string" and length > 0)' "$STATE_FILE")"
 QUESTION_ID="$(jq -er '.question_id | select(type == "string" and length > 0)' "$STATE_FILE")"
-EMBEDDING_LOCAL_FALLBACK="$(jq -er '
-  if has("embedding_local_fallback") then
-    .embedding_local_fallback |
-    if . == true then "true" elif . == false then "false" else error("not boolean") end
-  else
-    "legacy-url-inference"
-  end
+STATE_EMBEDDING_OWNERSHIP="$(jq -er '
+  .embedding_ownership |
+  select(. == "embedding_local_fallback" or . == "external")
 ' "$STATE_FILE")" || \
   die "precheck state has invalid embedding ownership"
 case "$RUN_LABEL" in
@@ -353,6 +349,8 @@ case "$DATASET_PATH" in
 esac
 [[ -f "$DATASET_SOURCE" && ! -L "$DATASET_SOURCE" ]] || die "stored-plan dataset is missing"
 load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
+[[ "$STATE_EMBEDDING_OWNERSHIP" == "$OAMB_EMBEDDING_OWNERSHIP" ]] || \
+  die "precheck state and resolved plan embedding ownership differ"
 
 "$ROOT/provider-services/bin/provider-services" doctor
 uv run --locked python - "$PLAN" "$ENV_FILE" "$ROOT/provider-services/.runtime" \
@@ -383,6 +381,7 @@ print(
     "zero model/provider calls)"
 )
 environment = load_live_environment(
+    plan=plan,
     provider_env_path=env_file,
     model_env_path=env_file,
     provider_runtime_directory=runtime,
@@ -395,17 +394,10 @@ validate_live_readiness_receipt(
 )
 PY
 if [[ "$RESUME" == true ]]; then
-  embedding_url="$(read_env_value "$ENV_FILE" OAMB_EMBEDDING_BASE_URL)" || \
-    die "cannot load the prechecked embedding endpoint"
+  embedding_url=$OAMB_EMBEDDING_BASE_URL
   embedding_api_key="$(read_optional_env_value "$ENV_FILE" OAMB_EMBEDDING_API_KEY)" || \
     die "cannot load the prechecked embedding API key"
-  if [[ "$EMBEDDING_LOCAL_FALLBACK" == legacy-url-inference ]]; then
-    case "$embedding_url" in
-      http://host.docker.internal:*) EMBEDDING_LOCAL_FALLBACK=true ;;
-      *) EMBEDDING_LOCAL_FALLBACK=false ;;
-    esac
-  fi
-  if [[ "$EMBEDDING_LOCAL_FALLBACK" == true ]]; then
+  if [[ "$OAMB_EMBEDDING_OWNERSHIP" == embedding_local_fallback ]]; then
     embedding_stamp="$(date -u +%Y%m%d-%H%M%S)-$$"
     start_local_embedding "$embedding_url" "$embedding_api_key" \
       "$WORK_DIR/embedding-resume-$embedding_stamp.log" \

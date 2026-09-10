@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 RESOLVER = Path(__file__).parents[1] / "provider-services" / "lib" / "host_embedding.sh"
@@ -54,6 +56,74 @@ def test_linux_host_embedding_uses_the_docker_bridge_gateway(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "http://172.17.0.1:18000/v1\n"
+
+
+def test_linux_managed_local_start_uses_loopback_listener_and_gateway_relay(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    helper = root / "scripts" / "start_local_embedding" / "start_ollama_embedding.sh"
+    helper.parent.mkdir(parents=True)
+    trace = tmp_path / "helper-environment"
+    host_ready = tmp_path / "host-ready"
+    gateway_ready = tmp_path / "gateway-ready"
+    _write_executable(
+        helper,
+        'printf "%s|%s\\n" "$OAMB_OLLAMA_BIND_HOST" "$OAMB_OLLAMA_RELAY_HOST" '
+        '> "$OAMB_TEST_TRACE"; touch "$OAMB_TEST_HOST_READY" "$OAMB_TEST_GATEWAY_READY"; '
+        "while :; do sleep 1; done",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "uname", "printf '%s\\n' Linux")
+    _write_executable(fake_bin / "docker", "printf '%s\\n' 172.17.0.1")
+    program = f"""
+ROOT={root}
+WORK_DIR={tmp_path}
+EMBEDDING_STARTUP_ATTEMPTS=3
+. "{RESOLVER}"
+die() {{ printf '%s\n' "$*" >&2; exit 1; }}
+probe_embedding() {{
+  case "$1" in
+    http://127.0.0.1:18000/v1) [ -f "$OAMB_TEST_HOST_READY" ] ;;
+    http://172.17.0.1:18000/v1) [ -f "$OAMB_TEST_GATEWAY_READY" ] ;;
+    *) return 1 ;;
+  esac
+}}
+start_local_embedding 'http://127.0.0.1:18000/v1' ''
+"""
+
+    pid_path = tmp_path / "embedding.pid"
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-c", program],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "OAMB_TEST_TRACE": str(trace),
+                "OAMB_TEST_HOST_READY": str(host_ready),
+                "OAMB_TEST_GATEWAY_READY": str(gateway_ready),
+            },
+        )
+    finally:
+        if pid_path.is_file():
+            helper_pid = int(pid_path.read_text(encoding="utf-8"))
+            os.kill(helper_pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(helper_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert trace.read_text(encoding="utf-8") == "127.0.0.1|172.17.0.1\n"
+    assert "embedding: PASS (start_ollama_embedding.sh" in result.stdout
 
 
 def test_macos_host_embedding_uses_loopback(tmp_path: Path) -> None:

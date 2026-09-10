@@ -47,6 +47,13 @@ def doctor_command(
         Path,
         typer.Option("--output", help="Comparison output directory."),
     ],
+    embedding_api_url: Annotated[
+        str | None,
+        typer.Option(
+            "--embedding-api-url",
+            help="Explicit external embedding endpoint to freeze instead of managed local.",
+        ),
+    ] = None,
 ) -> None:
     """Resolve generic benchmark configuration without constructing providers."""
 
@@ -55,7 +62,10 @@ def doctor_command(
 
     try:
         configuration = load_benchmark_configuration(config)
-        plan = build_resolved_plan(configuration)
+        plan = build_resolved_plan(
+            configuration,
+            external_embedding_endpoint=embedding_api_url,
+        )
     except (BenchmarkConfigurationError, ResolvedPlanError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     destination = output / "resolved-plan.json"
@@ -328,6 +338,7 @@ def run_command(
                 typer.echo("question results: PASS complete=180 zero_dispatch=true")
                 return
         environment = load_live_environment(
+            plan=plan,
             provider_env_path=provider_env,
             model_env_path=model_env,
             provider_runtime_directory=provider_runtime,

@@ -650,6 +650,7 @@ def test_live_model_env_file_overrides_process_generic_connection(
     )
 
     environment = live.load_live_environment(
+        plan=_lme60_plan(),
         provider_env_path=provider_env,
         model_env_path=model_env,
         provider_runtime_directory=tmp_path / "runtime",

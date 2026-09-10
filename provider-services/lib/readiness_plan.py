@@ -25,6 +25,7 @@ def readiness_plan_document(
 ) -> dict[str, object]:
     plan = load_resolved_plan_for_run(path)
     environment = load_live_environment(
+        plan=plan,
         provider_env_path=provider_env_path,
         model_env_path=model_env_path,
         provider_runtime_directory=provider_runtime_directory,

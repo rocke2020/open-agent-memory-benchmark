@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from oamb.artifacts.atomic import read_regular_file
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
@@ -52,6 +52,7 @@ _ROOT_KEYS = frozenset(
         "resolved_plan_hash",
         "comparison_id",
         "dataset",
+        "embedding_endpoint",
         "model_roles",
         "retrieval",
         "execution",
@@ -59,6 +60,7 @@ _ROOT_KEYS = frozenset(
         "cells",
     }
 )
+_EMBEDDING_ENDPOINT_KEYS = frozenset({"effective_endpoint", "ownership"})
 _DATASET_KEYS = frozenset(
     {
         "dataset_id",
@@ -170,6 +172,12 @@ class ResolvedDataset:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedEmbeddingEndpoint:
+    ownership: Literal["embedding_local_fallback", "external"]
+    effective_endpoint: str
+
+
+@dataclass(frozen=True, slots=True)
 class ModelExecutionBinding:
     binding_hash: str
     role_id: ModelRoleId
@@ -274,6 +282,7 @@ class ResolvedPlan:
     resolved_plan_hash: str
     comparison_id: str
     dataset: ResolvedDataset
+    embedding_endpoint: ResolvedEmbeddingEndpoint
     model_roles: tuple[ModelExecutionBinding, ...]
     retrieval: ResolvedRetrieval
     execution: ResolvedExecution
@@ -281,7 +290,11 @@ class ResolvedPlan:
     cells: tuple[CellSpec, ...]
 
 
-def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
+def build_resolved_plan(
+    configuration: BenchmarkConfiguration,
+    *,
+    external_embedding_endpoint: str | None = None,
+) -> ResolvedPlan:
     """Freeze the complete comparison into three ordered executable cells."""
 
     dataset = ResolvedDataset(
@@ -292,6 +305,21 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
         revision=configuration.dataset.revision,
         source_sha256=configuration.dataset.source_sha256,
         case_manifest_hash=configuration.dataset.case_manifest_hash,
+    )
+    if external_embedding_endpoint is not None and (
+        not external_embedding_endpoint
+        or external_embedding_endpoint.strip() != external_embedding_endpoint
+    ):
+        raise ResolvedPlanError("external embedding endpoint must be non-empty text")
+    embedding_endpoint = ResolvedEmbeddingEndpoint(
+        ownership=(
+            "embedding_local_fallback" if external_embedding_endpoint is None else "external"
+        ),
+        effective_endpoint=(
+            configuration.embedding.managed_local_endpoint
+            if external_embedding_endpoint is None
+            else external_embedding_endpoint
+        ),
     )
     model_roles = tuple(
         _build_model_binding(role_id, role)
@@ -329,6 +357,7 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
     payload = _payload(
         comparison_id=configuration.comparison_id,
         dataset=dataset,
+        embedding_endpoint=embedding_endpoint,
         model_roles=model_roles,
         retrieval=retrieval,
         execution=execution,
@@ -341,6 +370,7 @@ def build_resolved_plan(configuration: BenchmarkConfiguration) -> ResolvedPlan:
         resolved_plan_hash=_plan_hash(payload),
         comparison_id=configuration.comparison_id,
         dataset=dataset,
+        embedding_endpoint=embedding_endpoint,
         model_roles=model_roles,
         retrieval=retrieval,
         execution=execution,
@@ -355,6 +385,7 @@ def resolved_plan_bytes(plan: ResolvedPlan) -> bytes:
     document = _payload(
         comparison_id=plan.comparison_id,
         dataset=plan.dataset,
+        embedding_endpoint=plan.embedding_endpoint,
         model_roles=plan.model_roles,
         retrieval=plan.retrieval,
         execution=plan.execution,
@@ -386,6 +417,7 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
         raise ResolvedPlanError("resolved plan schema_version is invalid")
     comparison_id = _require_text(root["comparison_id"], "comparison ID")
     dataset = _parse_dataset(root["dataset"])
+    embedding_endpoint = _parse_embedding_endpoint(root["embedding_endpoint"])
     model_roles = _parse_model_roles(root["model_roles"])
     retrieval = _parse_retrieval(root["retrieval"])
     execution = _parse_execution(root["execution"], selection=dataset.selection)
@@ -400,6 +432,7 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
     payload = _payload(
         comparison_id=comparison_id,
         dataset=dataset,
+        embedding_endpoint=embedding_endpoint,
         model_roles=model_roles,
         retrieval=retrieval,
         execution=execution,
@@ -415,6 +448,7 @@ def load_resolved_plan_for_run(path: Path) -> ResolvedPlan:
         resolved_plan_hash=plan_hash,
         comparison_id=comparison_id,
         dataset=dataset,
+        embedding_endpoint=embedding_endpoint,
         model_roles=model_roles,
         retrieval=retrieval,
         execution=execution,
@@ -520,6 +554,7 @@ def _payload(
     *,
     comparison_id: str,
     dataset: ResolvedDataset,
+    embedding_endpoint: ResolvedEmbeddingEndpoint,
     model_roles: tuple[ModelExecutionBinding, ...],
     retrieval: ResolvedRetrieval,
     execution: ResolvedExecution,
@@ -531,6 +566,9 @@ def _payload(
         "schema_version": _SCHEMA_VERSION,
         "comparison_id": comparison_id,
         "dataset": _dataset_document(dataset),
+        "embedding_endpoint": {
+            key: getattr(embedding_endpoint, key) for key in sorted(_EMBEDDING_ENDPOINT_KEYS)
+        },
         "model_roles": [_model_binding_document(role) for role in model_roles],
         "retrieval": {
             "generation": retrieval.generation,
@@ -654,6 +692,22 @@ def _parse_dataset(value: object) -> ResolvedDataset:
     document = _require_exact_mapping(value, _DATASET_KEYS, "resolved dataset")
     values = {key: _require_text(document[key], f"resolved dataset {key}") for key in _DATASET_KEYS}
     return ResolvedDataset(**values)
+
+
+def _parse_embedding_endpoint(value: object) -> ResolvedEmbeddingEndpoint:
+    document = _require_exact_mapping(
+        value, _EMBEDDING_ENDPOINT_KEYS, "resolved embedding endpoint"
+    )
+    ownership = document["ownership"]
+    if ownership not in {"embedding_local_fallback", "external"}:
+        raise ResolvedPlanError("resolved embedding ownership is invalid")
+    effective_endpoint = _require_text(
+        document["effective_endpoint"], "resolved embedding effective endpoint"
+    )
+    return ResolvedEmbeddingEndpoint(
+        ownership=cast(Literal["embedding_local_fallback", "external"], ownership),
+        effective_endpoint=effective_endpoint,
+    )
 
 
 def _parse_model_roles(value: object) -> tuple[ModelExecutionBinding, ...]:
@@ -985,6 +1039,7 @@ __all__ = [
     "DecisionConfiguration",
     "ModelExecutionBinding",
     "ResolvedDataset",
+    "ResolvedEmbeddingEndpoint",
     "ResolvedExecution",
     "ResolvedModelRole",
     "ResolvedPlan",

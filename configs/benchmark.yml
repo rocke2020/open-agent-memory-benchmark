@@ -1,5 +1,5 @@
-# One complete v0.1 LME-60 comparison. Secrets are referenced by environment-variable
-# name only; this file never contains credential or endpoint values.
+# One complete v0.1 LME-60 comparison. Secrets and human-supplied external
+# endpoints remain environment references; the public managed-local endpoint lives here.
 comparison: v0.1-lme60
 
 dataset:
@@ -10,6 +10,9 @@ dataset:
   revision: 98d7416c24c778c2fee6e6f3006e7a073259d48f
   source_sha256: d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442
   case_manifest_hash: 90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80
+
+embedding:
+  managed_local_endpoint: http://127.0.0.1:18000/v1
 
 cells:
   - cell_id: hindsight-lme60
@@ -105,8 +108,8 @@ models:
     proof_kind: sealed_outbound_request_and_response
     proof_reference: reasoning_effort=high
     usage_coverage: classified
-  # Embedding is non-generative. The OpenAI-compatible service connection comes
-  # from root .env; a missing or empty API key is keyless, and an absent URL selects local fallback.
+  # Embedding is non-generative. A human external endpoint comes from root .env;
+  # otherwise the managed-local endpoint above is frozen into the resolved plan.
   embedding:
     model: qwen3-embedding:0.6b
     thinking_effort: not_applicable
