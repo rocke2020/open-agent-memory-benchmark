@@ -13,10 +13,11 @@ from oamb.cli import app
 from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import ResolvedPlanError, load_resolved_plan_for_run
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
-from tests.benchmark_configuration import write_lme6_configuration
+from tests.benchmark_configuration import MODEL_ENVIRONMENT, write_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
+MODEL_ENV_PATH = REPOSITORY_ROOT / ".env.example"
 EXPECTED_CELL_IDS = ("hindsight-lme60", "mem0-lme60", "openviking-lme60")
 EXPECTED_ROLE_IDS = (
     "hindsight_extraction",
@@ -31,7 +32,15 @@ EXPECTED_ROLE_IDS = (
 def _invoke_doctor(*, config: Path, output: Path, extra: tuple[str, ...] = ()) -> Result:
     return CliRunner().invoke(
         app,
-        ["doctor", str(config), "--output", str(output), *extra],
+        [
+            "doctor",
+            str(config),
+            "--output",
+            str(output),
+            "--model-env",
+            str(MODEL_ENV_PATH),
+            *extra,
+        ],
     )
 
 
@@ -101,6 +110,7 @@ def test_doctor_public_interface_has_no_free_provider_dataset_or_workload_select
     assert result.exit_code == 0, result.output
     assert "CONFIG" in result.output
     assert "--output" in result.output
+    assert "--model-env" in result.output
     assert "--provider" not in result.output
     assert "--dataset" not in result.output
     assert "--workload" not in result.output
@@ -163,10 +173,44 @@ def test_doctor_writes_one_canonical_plan_with_three_ordered_cell_specs(tmp_path
     assert f"resolved plan sha256: {hashlib.sha256(content).hexdigest()}" in result.output
 
 
+def test_doctor_freezes_models_from_explicit_model_environment(tmp_path: Path) -> None:
+    model_env = tmp_path / ".env"
+    model_env.write_text(
+        "LLM_LIGHT_MODEL=fixture-light-model\nLLM_DEEP_MODEL=fixture-deep-model\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "comparison"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "doctor",
+            str(BENCHMARK_CONFIG_PATH),
+            "--output",
+            str(output),
+            "--model-env",
+            str(model_env),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    plan = load_resolved_plan_for_run(output / "resolved-plan.json")
+    assert {role.role_id: role.model for role in plan.model_roles} == {
+        "hindsight_extraction": "fixture-light-model",
+        "mem0_extraction": "fixture-light-model",
+        "openviking_semantic_understanding": "fixture-light-model",
+        "answer": "fixture-deep-model",
+        "judge": "fixture-light-model",
+        "embedding": "qwen3-embedding:0.6b",
+    }
+
+
 def test_doctor_freezes_managed_local_embedding_endpoint_from_configuration(
     tmp_path: Path,
 ) -> None:
-    configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
+    configuration = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
+    )
     output = tmp_path / "comparison"
 
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
@@ -234,7 +278,9 @@ def test_plan_loader_rejects_rehashed_invalid_embedding_ownership(tmp_path: Path
 
 
 def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Path) -> None:
-    source_configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
+    source_configuration = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
+    )
     source_models = dict(source_configuration.models.ordered_items())
     output = tmp_path / "comparison"
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
@@ -335,7 +381,9 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
 
 
 def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
-    source = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
+    source = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
+    )
     output = tmp_path / "comparison"
 
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
@@ -362,7 +410,9 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
 
 
 def test_doctor_omits_thinking_effort_from_embedding_summary(tmp_path: Path) -> None:
-    embedding_model = load_benchmark_configuration(BENCHMARK_CONFIG_PATH).models.embedding.model
+    embedding_model = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
+    ).models.embedding.model
     output = tmp_path / "comparison"
 
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
@@ -373,7 +423,9 @@ def test_doctor_omits_thinking_effort_from_embedding_summary(tmp_path: Path) -> 
 
 
 def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) -> None:
-    source_configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
+    source_configuration = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
+    )
     config = tmp_path / "benchmark.yml"
     config.write_bytes(BENCHMARK_CONFIG_PATH.read_bytes())
     output = tmp_path / "comparison"

@@ -24,7 +24,7 @@ from oamb.contracts.specifications import (
     SourceEvidenceBinding,
     SourceEvidenceKind,
 )
-from tests.benchmark_configuration import load_lme6_configuration
+from tests.benchmark_configuration import MODEL_ENVIRONMENT, load_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 LME60_BENCHMARK_CONFIG = REPOSITORY_ROOT / "configs" / "benchmark.yml"
@@ -36,7 +36,12 @@ def _plan() -> ResolvedPlan:
 
 
 def _lme60_plan() -> ResolvedPlan:
-    return build_resolved_plan(load_benchmark_configuration(LME60_BENCHMARK_CONFIG))
+    return build_resolved_plan(
+        load_benchmark_configuration(
+            LME60_BENCHMARK_CONFIG,
+            model_environment=MODEL_ENVIRONMENT,
+        )
+    )
 
 
 def _provider_evidence() -> SourceEvidenceBinding:
@@ -55,7 +60,9 @@ def _provider_evidence() -> SourceEvidenceBinding:
 
 
 def _environment() -> dict[str, str]:
-    models = load_benchmark_configuration(LME60_BENCHMARK_CONFIG).models
+    models = load_benchmark_configuration(
+        LME60_BENCHMARK_CONFIG, model_environment=MODEL_ENVIRONMENT
+    ).models
     return {
         "OAMB_HINDSIGHT_BASE_URL": "http://127.0.0.1:64888",
         "OAMB_HINDSIGHT_LLM_MODEL": models.hindsight_extraction.model,

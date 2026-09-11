@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from oamb.config.benchmark import load_benchmark_configuration
+from tests.benchmark_configuration import MODEL_ENVIRONMENT
 
 if TYPE_CHECKING:
     from oamb.config.provider_services import ProviderServiceProfileBinding
@@ -21,7 +22,9 @@ HASH_F = "f" * 64
 
 PROJECT = "oamb-providers-test-alpha"
 BENCHMARK_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "benchmark.yml"
-BENCHMARK_MODELS = load_benchmark_configuration(BENCHMARK_CONFIG).models
+BENCHMARK_MODELS = load_benchmark_configuration(
+    BENCHMARK_CONFIG, model_environment=MODEL_ENVIRONMENT
+).models
 EXPECTED_PROVIDER_MODELS = {
     "hindsight-rest-v1": BENCHMARK_MODELS.hindsight_extraction.model,
     "mem0-rest-v1": BENCHMARK_MODELS.mem0_extraction.model,

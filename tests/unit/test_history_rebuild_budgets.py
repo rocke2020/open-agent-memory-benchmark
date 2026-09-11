@@ -17,6 +17,7 @@ from oamb.config.doctor import build_resolved_plan
 from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.specifications import ModelRole, SourceEvidenceBinding, SourceEvidenceKind
 from oamb.live import build_live_cell
+from tests.benchmark_configuration import MODEL_ENVIRONMENT
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
@@ -24,7 +25,9 @@ NOW = datetime(2026, 9, 6, tzinfo=UTC)
 
 
 def _configuration(*, retries: int) -> BenchmarkConfiguration:
-    configuration = load_benchmark_configuration(BENCHMARK_CONFIG_PATH)
+    configuration = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
+    )
     return replace(
         configuration,
         evaluation_controls=replace(
@@ -50,7 +53,9 @@ def _provider_evidence() -> SourceEvidenceBinding:
 
 
 def _environment() -> dict[str, str]:
-    models = load_benchmark_configuration(BENCHMARK_CONFIG_PATH).models
+    models = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
+    ).models
     return {
         "OAMB_HINDSIGHT_BASE_URL": "http://127.0.0.1:64888",
         "OAMB_HINDSIGHT_LLM_MODEL": models.hindsight_extraction.model,

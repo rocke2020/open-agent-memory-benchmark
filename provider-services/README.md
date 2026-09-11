@@ -64,7 +64,7 @@ cp .env.example .env
 chmod 600 .env
 # Edit the root .env and replace every change-me value.
 
-uv run --locked oamb doctor configs/benchmark.yml --output outputs/tmp/provider-plan
+uv run --locked oamb doctor configs/benchmark.yml --output outputs/tmp/provider-plan --model-env .env
 . ./provider-services/lib/plan_environment.sh
 load_plan_model_environment outputs/tmp/provider-plan/resolved-plan.json
 

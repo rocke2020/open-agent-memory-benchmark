@@ -18,6 +18,7 @@ from oamb.config.doctor import (
     resolved_plan_bytes,
 )
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from tests.benchmark_configuration import MODEL_ENVIRONMENT
 from tests.unit.test_question_results import _judged_result
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
@@ -89,6 +90,8 @@ def test_root_env_template_owns_one_generic_llm_connection() -> None:
     ]
 
     assert assignment_names.count("LLM_URL_TYPE") == 1
+    assert assignment_names.count("LLM_LIGHT_MODEL") == 1
+    assert assignment_names.count("LLM_DEEP_MODEL") == 1
     assert assignment_names.count("LLM_BASE_URL") == 1
     assert assignment_names.count("LLM_API_KEY") == 1
     assert "DEEPSEEK_BASE_URL" not in assignment_names
@@ -101,8 +104,40 @@ def test_root_env_template_owns_one_generic_llm_connection() -> None:
     example_values = dict(
         line.split("=", 1) for line in example.splitlines() if line and not line.startswith("#")
     )
+    assert example_values["LLM_LIGHT_MODEL"] == "deepseek-flash"
+    assert example_values["LLM_DEEP_MODEL"] == "deepseek-flash"
     assert example_values["OAMB_EMBEDDING_BASE_URL"] == "change-me"
     assert example_values["OAMB_EMBEDDING_API_KEY"] == ""
+
+
+@pytest.mark.parametrize("model_variable", ("LLM_LIGHT_MODEL", "LLM_DEEP_MODEL"))
+def test_precheck_rejects_an_empty_model_name(
+    tmp_path: Path,
+    model_variable: str,
+) -> None:
+    root, env, _trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    configured = env_path.read_text(encoding="utf-8")
+    configured = configured.replace(
+        f"{model_variable}=deepseek-flash",
+        f"{model_variable}=",
+        1,
+    )
+    env_path.write_text(configured, encoding="utf-8")
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert f"configure {model_variable} in .env" in result.stderr
 
 
 def test_provider_shell_derives_model_connections_from_generic_llm_pair(tmp_path: Path) -> None:
@@ -185,7 +220,10 @@ def test_compose_uses_plan_endpoint_and_translates_only_at_container_boundary(
     )
     env_file.write_text(configured, encoding="utf-8")
     plan = build_resolved_plan(
-        load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml")
+        load_benchmark_configuration(
+            REPOSITORY_ROOT / "configs" / "benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
     )
     plan_path = tmp_path / "resolved-plan.json"
     plan_path.write_bytes(resolved_plan_bytes(plan))
@@ -294,7 +332,10 @@ def test_live_environment_derives_provider_connections_from_generic_llm_pair(
 
     environment = load_live_environment(
         plan=build_resolved_plan(
-            load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml")
+            load_benchmark_configuration(
+                REPOSITORY_ROOT / "configs" / "benchmark.yml",
+                model_environment=MODEL_ENVIRONMENT,
+            )
         ),
         provider_env_path=env_file,
         model_env_path=env_file,
@@ -333,7 +374,10 @@ def test_live_environment_treats_missing_and_empty_embedding_keys_as_keyless(
 
     environment = load_live_environment(
         plan=build_resolved_plan(
-            load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml")
+            load_benchmark_configuration(
+                REPOSITORY_ROOT / "configs" / "benchmark.yml",
+                model_environment=MODEL_ENVIRONMENT,
+            )
         ),
         provider_env_path=env_file,
         model_env_path=env_file,
@@ -360,7 +404,10 @@ def test_live_environment_uses_frozen_managed_local_endpoint_without_dotenv_writ
         encoding="utf-8",
     )
     plan = build_resolved_plan(
-        load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml")
+        load_benchmark_configuration(
+            REPOSITORY_ROOT / "configs" / "benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
     )
 
     environment = load_live_environment(
@@ -388,7 +435,10 @@ def test_live_environment_rejects_unsupported_llm_url_type(tmp_path: Path) -> No
     with pytest.raises(LiveConfigurationError, match="LLM_URL_TYPE.*openai_chat"):
         load_live_environment(
             plan=build_resolved_plan(
-                load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml")
+                load_benchmark_configuration(
+                    REPOSITORY_ROOT / "configs" / "benchmark.yml",
+                    model_environment=MODEL_ENVIRONMENT,
+                )
             ),
             provider_env_path=env_file,
             model_env_path=env_file,
@@ -502,7 +552,7 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
     resolver = root / "provider-services" / "lib" / "host_embedding.sh"
     resolver.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(HOST_EMBEDDING_SCRIPT, resolver)
-    (root / ".env.example").write_text("", encoding="utf-8")
+    shutil.copy2(REPOSITORY_ROOT / ".env.example", root / ".env.example")
 
     env = {
         **os.environ,
@@ -2631,7 +2681,10 @@ def test_plan_loader_accepts_legacy_resume_with_runtime_embedding_endpoint(
     tmp_path: Path,
 ) -> None:
     plan = build_resolved_plan(
-        load_benchmark_configuration(REPOSITORY_ROOT / "configs/benchmark.yml")
+        load_benchmark_configuration(
+            REPOSITORY_ROOT / "configs/benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
     )
     document = json.loads(resolved_plan_bytes(plan))
     document.pop("embedding_endpoint")
@@ -2656,7 +2709,10 @@ def test_plan_loader_ignores_saved_embedding_identity_during_resume(
     tmp_path: Path,
 ) -> None:
     plan = build_resolved_plan(
-        load_benchmark_configuration(REPOSITORY_ROOT / "configs/benchmark.yml")
+        load_benchmark_configuration(
+            REPOSITORY_ROOT / "configs/benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
     )
     document = json.loads(resolved_plan_bytes(plan))
     document["embedding_endpoint"] = {}

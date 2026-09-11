@@ -47,6 +47,10 @@ def doctor_command(
         Path,
         typer.Option("--output", help="Comparison output directory."),
     ],
+    model_env: Annotated[
+        Path,
+        typer.Option("--model-env", help="Dotenv file containing the selected model names."),
+    ],
     embedding_api_url: Annotated[
         str | None,
         typer.Option(
@@ -57,16 +61,33 @@ def doctor_command(
 ) -> None:
     """Resolve generic benchmark configuration without constructing providers."""
 
-    from .config.benchmark import BenchmarkConfigurationError, load_benchmark_configuration
+    from .config.benchmark import (
+        MODEL_PROFILE_ENVIRONMENT_KEYS,
+        BenchmarkConfigurationError,
+        load_benchmark_configuration,
+    )
     from .config.doctor import ResolvedPlanError, build_resolved_plan, resolved_plan_bytes
+    from .runtime.provider_env import ProviderEnvironmentFileError, load_t10_provider_environment
 
     try:
-        configuration = load_benchmark_configuration(config)
+        model_environment = load_t10_provider_environment(
+            model_env,
+            expected_keys=MODEL_PROFILE_ENVIRONMENT_KEYS,
+        )
+        configuration = load_benchmark_configuration(
+            config,
+            model_environment=model_environment,
+        )
         plan = build_resolved_plan(
             configuration,
             external_embedding_endpoint=embedding_api_url,
         )
-    except (BenchmarkConfigurationError, ResolvedPlanError) as exc:
+    except (
+        BenchmarkConfigurationError,
+        OSError,
+        ProviderEnvironmentFileError,
+        ResolvedPlanError,
+    ) as exc:
         raise typer.BadParameter(str(exc)) from exc
     destination = output / "resolved-plan.json"
     if destination.exists():

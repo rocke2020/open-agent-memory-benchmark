@@ -50,8 +50,10 @@ cells:
     retrieval_binding: openviking
 
 llm_profiles:
-  light_model: &light_model deepseek/deepseek-flash
-  deep_model: &deep_model deepseek/deepseek-flash
+  light_model: &light_model
+    env: LLM_LIGHT_MODEL
+  deep_model: &deep_model
+    env: LLM_DEEP_MODEL
 
 models:
   # DeepSeek scale is low < high < max. Low is enabled thinking at rank 1/3.

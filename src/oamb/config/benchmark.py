@@ -34,6 +34,15 @@ MODEL_ROLE_IDS: tuple[ModelRoleId, ...] = (
     "judge",
     "embedding",
 )
+MODEL_PROFILE_ENVIRONMENT_KEYS = frozenset({"LLM_LIGHT_MODEL", "LLM_DEEP_MODEL"})
+_MODEL_VARIABLE_BY_ROLE: dict[ModelRoleId, str | None] = {
+    "hindsight_extraction": "LLM_LIGHT_MODEL",
+    "mem0_extraction": "LLM_LIGHT_MODEL",
+    "openviking_semantic_understanding": "LLM_LIGHT_MODEL",
+    "answer": "LLM_DEEP_MODEL",
+    "judge": "LLM_LIGHT_MODEL",
+    "embedding": None,
+}
 DEEPSEEK_THINKING_EFFORT_SCALE: tuple[GenerativeThinkingEffort, ...] = (
     "low",
     "high",
@@ -179,6 +188,7 @@ _MODEL_KEYS = frozenset(
     }
 )
 _LLM_PROFILE_KEYS = frozenset({"light_model", "deep_model"})
+_MODEL_REFERENCE_KEYS = frozenset({"env"})
 _DECISION_KEYS = frozenset({"minimum_accuracy_delta", "maximum_exact_mcnemar_p_value"})
 _RETRIEVAL_KEYS = frozenset({"generation", "bindings"})
 _RETRIEVAL_BINDING_KEYS = frozenset(
@@ -387,8 +397,12 @@ class BenchmarkConfiguration:
     decision: DecisionConfiguration | None
 
 
-def load_benchmark_configuration(path: Path) -> BenchmarkConfiguration:
-    """Load one strict comparison without reading endpoints or credential values."""
+def load_benchmark_configuration(
+    path: Path,
+    *,
+    model_environment: Mapping[str, str] | None = None,
+) -> BenchmarkConfiguration:
+    """Load one strict comparison and resolve only its non-secret model names."""
 
     try:
         content = Path(path).read_text(encoding="utf-8")
@@ -399,10 +413,14 @@ def load_benchmark_configuration(path: Path) -> BenchmarkConfiguration:
         raise
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise BenchmarkConfigurationError(f"cannot load benchmark configuration: {path}") from exc
-    return _parse_benchmark_configuration(document)
+    return _parse_benchmark_configuration(document, model_environment=model_environment)
 
 
-def _parse_benchmark_configuration(document: object) -> BenchmarkConfiguration:
+def _parse_benchmark_configuration(
+    document: object,
+    *,
+    model_environment: Mapping[str, str] | None,
+) -> BenchmarkConfiguration:
     root = _require_mapping_with_optional_keys(
         document,
         required_keys=_REQUIRED_TOP_LEVEL_KEYS,
@@ -412,8 +430,12 @@ def _parse_benchmark_configuration(document: object) -> BenchmarkConfiguration:
     comparison_id = _require_text(root["comparison"], "comparison")
     dataset = _parse_dataset(root["dataset"])
     embedding = _parse_embedding(root["embedding"])
-    llm_profiles = _parse_llm_profiles(root["llm_profiles"])
-    models = _parse_model_roles(root["models"], llm_profiles=llm_profiles)
+    llm_profiles = _parse_llm_profiles(root["llm_profiles"], model_environment=model_environment)
+    models = _parse_model_roles(
+        root["models"],
+        llm_profiles=llm_profiles,
+        model_environment=model_environment,
+    )
     retrieval = _parse_retrieval(root["retrieval"])
     cells = _parse_cells(
         root["cells"],
@@ -535,11 +557,25 @@ def _parse_cells(
     return tuple(cells)
 
 
-def _parse_llm_profiles(value: object) -> LlmProfilesConfiguration:
+def _parse_llm_profiles(
+    value: object,
+    *,
+    model_environment: Mapping[str, str] | None,
+) -> LlmProfilesConfiguration:
     document = _require_exact_mapping(value, _LLM_PROFILE_KEYS, "LLM profiles")
     return LlmProfilesConfiguration(
-        light_model=_require_text(document["light_model"], "light model profile"),
-        deep_model=_require_text(document["deep_model"], "deep model profile"),
+        light_model=_resolve_model_reference(
+            document["light_model"],
+            variable="LLM_LIGHT_MODEL",
+            environment=model_environment,
+            label="light model profile",
+        ),
+        deep_model=_resolve_model_reference(
+            document["deep_model"],
+            variable="LLM_DEEP_MODEL",
+            environment=model_environment,
+            label="deep model profile",
+        ),
     )
 
 
@@ -547,9 +583,17 @@ def _parse_model_roles(
     value: object,
     *,
     llm_profiles: LlmProfilesConfiguration,
+    model_environment: Mapping[str, str] | None,
 ) -> ModelRoleConfigurations:
     document = _require_exact_mapping(value, frozenset(MODEL_ROLE_IDS), "models")
-    parsed = {role_id: _parse_model_role(role_id, document[role_id]) for role_id in MODEL_ROLE_IDS}
+    parsed = {
+        role_id: _parse_model_role(
+            role_id,
+            document[role_id],
+            model_environment=model_environment,
+        )
+        for role_id in MODEL_ROLE_IDS
+    }
     result = ModelRoleConfigurations(**parsed)
     for role_id in (
         "hindsight_extraction",
@@ -566,9 +610,24 @@ def _parse_model_roles(
     return result
 
 
-def _parse_model_role(role_id: ModelRoleId, value: object) -> ModelRoleConfiguration:
+def _parse_model_role(
+    role_id: ModelRoleId,
+    value: object,
+    *,
+    model_environment: Mapping[str, str] | None,
+) -> ModelRoleConfiguration:
     document = _require_exact_mapping(value, _MODEL_KEYS, f"model role {role_id}")
-    model = _require_text(document["model"], f"model role {role_id} model")
+    model_variable = _MODEL_VARIABLE_BY_ROLE[role_id]
+    model = (
+        _require_text(document["model"], f"model role {role_id} model")
+        if model_variable is None
+        else _resolve_model_reference(
+            document["model"],
+            variable=model_variable,
+            environment=model_environment,
+            label=f"model role {role_id} model",
+        )
+    )
     effort = document["thinking_effort"]
     if type(effort) is not str or effort not in (*DEEPSEEK_THINKING_EFFORT_SCALE, "not_applicable"):
         raise BenchmarkConfigurationError(f"model role {role_id} has an invalid thinking effort")
@@ -743,6 +802,21 @@ def _require_environment_reference(value: object, label: str) -> str:
     return value
 
 
+def _resolve_model_reference(
+    value: object,
+    *,
+    variable: str,
+    environment: Mapping[str, str] | None,
+    label: str,
+) -> str:
+    reference = _require_exact_mapping(value, _MODEL_REFERENCE_KEYS, label)
+    if reference["env"] != variable:
+        raise BenchmarkConfigurationError(f"{label} must reference {variable}")
+    if environment is None or variable not in environment:
+        raise BenchmarkConfigurationError(f"{label} requires {variable} in the model environment")
+    return _require_text(environment[variable], f"model environment {variable}")
+
+
 def _require_credential_reference(value: object, *, role_id: ModelRoleId) -> str:
     return _require_environment_reference(value, f"model role {role_id} credential")
 
@@ -830,6 +904,7 @@ __all__ = [
     "DecisionConfiguration",
     "EvaluationControls",
     "GenerativeThinkingEffort",
+    "MODEL_PROFILE_ENVIRONMENT_KEYS",
     "MODEL_ROLE_IDS",
     "MODEL_EXECUTION_OWNER_BY_ROLE",
     "ModelRoleConfiguration",

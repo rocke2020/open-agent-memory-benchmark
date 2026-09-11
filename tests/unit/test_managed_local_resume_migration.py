@@ -12,6 +12,7 @@ from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
+from tests.benchmark_configuration import MODEL_ENVIRONMENT
 from tests.unit.test_question_results import _judged_result
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -41,7 +42,10 @@ def _migration_module() -> ModuleType:
 
 def _legacy_plan_bytes() -> bytes:
     plan = build_resolved_plan(
-        load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml")
+        load_benchmark_configuration(
+            REPOSITORY_ROOT / "configs" / "benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
     )
     document = json.loads(resolved_plan_bytes(plan))
     document.pop("embedding_endpoint")
@@ -132,7 +136,10 @@ def _write_legacy_resume_source(root: Path, *, mismatch: bool = False) -> tuple[
 
 def _write_target_precheck(root: Path) -> tuple[bytes, Path]:
     plan = build_resolved_plan(
-        load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml")
+        load_benchmark_configuration(
+            REPOSITORY_ROOT / "configs" / "benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
     )
     label = "current-new-plan-precheck"
     work_dir = root / "outputs" / "tmp" / "precheck" / label
@@ -182,7 +189,10 @@ def test_migration_preserves_completed_results_and_selects_only_unfinished_quest
     target_state_bytes, target_plan = _write_target_precheck(target)
     readiness_validations: list[object] = []
     migration = _migration_module()
-    models = load_benchmark_configuration(REPOSITORY_ROOT / "configs" / "benchmark.yml").models
+    models = load_benchmark_configuration(
+        REPOSITORY_ROOT / "configs" / "benchmark.yml",
+        model_environment=MODEL_ENVIRONMENT,
+    ).models
 
     def validate_readiness(**kwargs: object) -> Path:
         environment = kwargs["environment"]
@@ -215,6 +225,7 @@ def test_migration_preserves_completed_results_and_selects_only_unfinished_quest
         benchmark_config=REPOSITORY_ROOT / "configs" / "benchmark.yml",
         dataset_source=dataset_source,
         target_label="managed-local-migration",
+        model_environment=MODEL_ENVIRONMENT,
     )
 
     target_full_root = target / "outputs" / "full-test" / "managed-local-migration"
@@ -275,6 +286,7 @@ def test_migration_requires_new_plan_readiness_before_publishing_target(
             benchmark_config=REPOSITORY_ROOT / "configs" / "benchmark.yml",
             dataset_source=dataset_source,
             target_label="managed-local-migration",
+            model_environment=MODEL_ENVIRONMENT,
         )
 
     assert (
@@ -306,6 +318,7 @@ def test_migration_mismatch_leaves_active_state_and_target_unchanged(tmp_path: P
             benchmark_config=REPOSITORY_ROOT / "configs" / "benchmark.yml",
             dataset_source=dataset_source,
             target_label="managed-local-migration",
+            model_environment=MODEL_ENVIRONMENT,
         )
 
     assert (target_tmp / "quick-start-current.json").read_bytes() == previous_state

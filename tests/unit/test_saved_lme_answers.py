@@ -19,6 +19,7 @@ from oamb.workloads.longmemeval import (
     LongMemEvalRow,
     render_lme_judge_prompt,
 )
+from tests.benchmark_configuration import MODEL_ENVIRONMENT
 
 
 def _study() -> ModuleType:
@@ -30,7 +31,10 @@ def _study() -> ModuleType:
 
 def _inputs(tmp_path: Path) -> tuple[Any, tuple[LongMemEvalRow, ...], Path, dict[str, str]]:
     plan = build_resolved_plan(
-        load_benchmark_configuration(Path(__file__).resolve().parents[2] / "configs/benchmark.yml")
+        load_benchmark_configuration(
+            Path(__file__).resolve().parents[2] / "configs/benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
     )
     rows = tuple(
         LongMemEvalRow(

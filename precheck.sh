@@ -182,6 +182,17 @@ ensure_env_default() {
   fi
 }
 
+ensure_missing_env_default_from_example() {
+  local key=$1
+  local default_value
+  if read_env_value "$ENV_FILE" "$key" >/dev/null 2>&1; then
+    return
+  fi
+  default_value="$(read_env_value "$ROOT/.env.example" "$key")" || \
+    die "$key is missing from .env.example"
+  set_env_value "$ENV_FILE" "$key" "$default_value"
+}
+
 migrate_legacy_model_environment() {
   local generic_value legacy_value
   generic_value="$(read_env_value "$ENV_FILE" LLM_BASE_URL 2>/dev/null || true)"
@@ -197,6 +208,8 @@ migrate_legacy_model_environment() {
     set_env_value "$ENV_FILE" LLM_API_KEY "$legacy_value"
   fi
   ensure_env_default LLM_URL_TYPE openai_chat
+  ensure_missing_env_default_from_example LLM_LIGHT_MODEL
+  ensure_missing_env_default_from_example LLM_DEEP_MODEL
 }
 
 ensure_model_environment() {
@@ -207,20 +220,26 @@ ensure_model_environment() {
   chmod 600 "$ENV_FILE"
   local key
   for key in \
-    LLM_URL_TYPE LLM_BASE_URL LLM_API_KEY \
+    LLM_URL_TYPE LLM_LIGHT_MODEL LLM_DEEP_MODEL LLM_BASE_URL LLM_API_KEY \
     DEEPSEEK_BASE_URL DEEPSEEK_API_KEY; do
     reject_duplicate_env_assignment "$key"
   done
   migrate_legacy_model_environment
   remove_noncanonical_environment_values
-  for key in LLM_URL_TYPE LLM_BASE_URL LLM_API_KEY; do
+  for key in LLM_URL_TYPE LLM_LIGHT_MODEL LLM_DEEP_MODEL LLM_BASE_URL LLM_API_KEY; do
     require_single_env_assignment "$key"
   done
 
-  local url_type base_url api_key
+  local url_type light_model deep_model base_url api_key
   url_type="$(read_env_value "$ENV_FILE" LLM_URL_TYPE 2>/dev/null || true)"
   [[ "$url_type" == openai_chat ]] || \
     die "LLM_URL_TYPE must be openai_chat in OAMB v0.1.0"
+  light_model="$(read_env_value "$ENV_FILE" LLM_LIGHT_MODEL 2>/dev/null || true)"
+  [[ -n "$light_model" && "$light_model" != change-me* ]] || \
+    die "configure LLM_LIGHT_MODEL in .env, then rerun"
+  deep_model="$(read_env_value "$ENV_FILE" LLM_DEEP_MODEL 2>/dev/null || true)"
+  [[ -n "$deep_model" && "$deep_model" != change-me* ]] || \
+    die "configure LLM_DEEP_MODEL in .env, then rerun"
   base_url="$(read_env_value "$ENV_FILE" LLM_BASE_URL 2>/dev/null || true)"
   api_key="$(read_env_value "$ENV_FILE" LLM_API_KEY 2>/dev/null || true)"
   if [[ -n "$base_url" && "$base_url" != change-me* && -n "$api_key" && "$api_key" != change-me* ]]; then
@@ -363,7 +382,7 @@ ensure_model_environment
 ensure_provider_environment "$RUN_LABEL" "$MEM0_CHECKOUT"
 
 doctor_arguments=(
-  uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan"
+  uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan" --model-env "$ENV_FILE"
 )
 if [[ -n "$EMBEDDING_API_URL" ]]; then
   doctor_arguments+=(--embedding-api-url "$EMBEDDING_API_URL")

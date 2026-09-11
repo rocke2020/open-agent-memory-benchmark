@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from oamb.config.benchmark import load_benchmark_configuration
+from oamb.config.benchmark import MODEL_PROFILE_ENVIRONMENT_KEYS, load_benchmark_configuration
 from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.live import (
@@ -21,6 +21,7 @@ from oamb.live import (
     plan_model_environment,
     validate_live_readiness_receipt,
 )
+from oamb.runtime.provider_env import load_t10_provider_environment
 from oamb.runtime.question_results import load_question_results, remaining_question_ids
 from oamb.workloads.longmemeval import build_longmemeval_bundle
 
@@ -244,6 +245,7 @@ def migrate_resume_data(
     benchmark_config: Path,
     dataset_source: Path,
     target_label: str,
+    model_environment: Mapping[str, str],
 ) -> dict[str, Any]:
     """Transfer one selected legacy resume into the current create-only format."""
 
@@ -271,7 +273,10 @@ def migrate_resume_data(
     if _sha256(_read_regular(state_dataset)) != _sha256(dataset_bytes):
         raise ValueError("legacy and selected dataset sources differ")
 
-    configuration = load_benchmark_configuration(benchmark_config)
+    configuration = load_benchmark_configuration(
+        benchmark_config,
+        model_environment=model_environment,
+    )
     current_plan = build_resolved_plan(configuration)
     current_plan_bytes = resolved_plan_bytes(current_plan)
     current_plan_document = json.loads(current_plan_bytes)
@@ -444,12 +449,17 @@ def main() -> None:
     parser.add_argument("--dataset-source", type=Path, required=True)
     parser.add_argument("--target-label", required=True)
     arguments = parser.parse_args()
+    model_environment = load_t10_provider_environment(
+        arguments.target_repository / ".env",
+        expected_keys=MODEL_PROFILE_ENVIRONMENT_KEYS,
+    )
     receipt = migrate_resume_data(
         source_repository=arguments.source_repository,
         target_repository=arguments.target_repository,
         benchmark_config=arguments.benchmark_config,
         dataset_source=arguments.dataset_source,
         target_label=arguments.target_label,
+        model_environment=model_environment,
     )
     print(
         "migration: PASS "

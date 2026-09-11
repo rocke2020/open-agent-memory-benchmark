@@ -11,7 +11,7 @@ from oamb.config.benchmark import (
     BenchmarkConfigurationError,
     load_benchmark_configuration,
 )
-from tests.benchmark_configuration import load_lme6_configuration
+from tests.benchmark_configuration import MODEL_ENVIRONMENT, load_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
@@ -39,7 +39,7 @@ def _write_configuration(tmp_path: Path, content: str) -> Path:
 
 
 def _load(path: Path) -> BenchmarkConfiguration:
-    return load_benchmark_configuration(path)
+    return load_benchmark_configuration(path, model_environment=MODEL_ENVIRONMENT)
 
 
 def test_checked_in_configuration_selects_one_lme60_three_provider_comparison() -> None:
@@ -83,6 +83,27 @@ def test_checked_in_configuration_selects_one_lme60_three_provider_comparison() 
     assert configuration.decision is not None
     assert configuration.decision.minimum_accuracy_delta == "0.05"
     assert configuration.decision.maximum_exact_mcnemar_p_value == "0.05"
+
+
+def test_checked_in_generative_models_resolve_from_model_environment() -> None:
+    configuration = load_benchmark_configuration(
+        BENCHMARK_CONFIG_PATH,
+        model_environment={
+            "LLM_LIGHT_MODEL": "fixture-light-model",
+            "LLM_DEEP_MODEL": "fixture-deep-model",
+        },
+    )
+
+    assert configuration.llm_profiles.light_model == "fixture-light-model"
+    assert configuration.llm_profiles.deep_model == "fixture-deep-model"
+    assert {role_id: role.model for role_id, role in configuration.models.ordered_items()} == {
+        "hindsight_extraction": "fixture-light-model",
+        "mem0_extraction": "fixture-light-model",
+        "openviking_semantic_understanding": "fixture-light-model",
+        "answer": "fixture-deep-model",
+        "judge": "fixture-light-model",
+        "embedding": "qwen3-embedding:0.6b",
+    }
 
 
 def test_preserved_lme6_configuration_keeps_original_selection_and_concurrency() -> None:
@@ -210,58 +231,6 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
     )
 
 
-def test_light_model_alias_updates_every_linked_role(tmp_path: Path) -> None:
-    source = _valid_configuration_yaml()
-    light_model = _load(BENCHMARK_CONFIG_PATH).llm_profiles.light_model
-    anchor = f"light_model: &light_model {light_model}"
-    assert anchor in source
-    configuration = _load(
-        _write_configuration(
-            tmp_path,
-            source.replace(
-                anchor,
-                "light_model: &light_model alternate-light-model",
-                1,
-            ),
-        )
-    )
-
-    assert (
-        tuple(
-            binding.model
-            for role_id, binding in configuration.models.ordered_items()
-            if role_id
-            in {
-                "hindsight_extraction",
-                "mem0_extraction",
-                "openviking_semantic_understanding",
-                "judge",
-            }
-        )
-        == ("alternate-light-model",) * 4
-    )
-
-
-def test_deep_model_alias_updates_every_linked_role(tmp_path: Path) -> None:
-    source = _valid_configuration_yaml()
-    deep_model = _load(BENCHMARK_CONFIG_PATH).llm_profiles.deep_model
-    anchor = f"deep_model: &deep_model {deep_model}"
-    assert anchor in source
-    configuration = _load(
-        _write_configuration(
-            tmp_path,
-            source.replace(
-                anchor,
-                "deep_model: &deep_model alternate-deep-model",
-                1,
-            ),
-        )
-    )
-
-    answer = configuration.models.answer
-    assert answer.model == "alternate-deep-model"
-
-
 def test_loader_rejects_a_role_model_outside_llm_profiles(tmp_path: Path) -> None:
     content = _valid_configuration_yaml().replace(
         "  mem0_extraction:\n    model: *light_model\n",
@@ -269,7 +238,7 @@ def test_loader_rejects_a_role_model_outside_llm_profiles(tmp_path: Path) -> Non
         1,
     )
 
-    with pytest.raises(BenchmarkConfigurationError, match="light_model profile"):
+    with pytest.raises(BenchmarkConfigurationError, match="model role mem0_extraction model"):
         _load(_write_configuration(tmp_path, content))
 
 

@@ -13,14 +13,19 @@ from oamb.cli import app
 from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import ResolvedPlan, build_resolved_plan
 from oamb.contracts.ids import canonical_sha256
-from tests.benchmark_configuration import load_lme6_configuration
+from tests.benchmark_configuration import MODEL_ENVIRONMENT, load_lme6_configuration
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG = REPOSITORY_ROOT / "configs/benchmark.yml"
 
 
 def _plan() -> ResolvedPlan:
-    return build_resolved_plan(load_benchmark_configuration(BENCHMARK_CONFIG))
+    return build_resolved_plan(
+        load_benchmark_configuration(
+            BENCHMARK_CONFIG,
+            model_environment=MODEL_ENVIRONMENT,
+        )
+    )
 
 
 def _lme6_plan() -> ResolvedPlan:
@@ -43,6 +48,8 @@ def test_root_environment_template_contains_model_placeholders_without_credentia
             entries[key] = value
 
     assert entries["LLM_URL_TYPE"] == "openai_chat"
+    assert entries["LLM_LIGHT_MODEL"] == "deepseek-flash"
+    assert entries["LLM_DEEP_MODEL"] == "deepseek-flash"
     assert entries["LLM_BASE_URL"] == "change-me"
     assert entries["LLM_API_KEY"] == "change-me"
     assert "DEEPSEEK_BASE_URL" not in entries
