@@ -57,6 +57,7 @@ def _environment() -> dict[str, str]:
         BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
     ).models
     return {
+        **MODEL_ENVIRONMENT,
         "OAMB_HINDSIGHT_BASE_URL": "http://127.0.0.1:64888",
         "OAMB_HINDSIGHT_LLM_MODEL": models.hindsight_extraction.model,
         "OAMB_MEM0_BASE_URL": "http://127.0.0.1:64889",

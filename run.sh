@@ -627,7 +627,8 @@ run_simple_resume() {
     uv run --locked oamb run "$PLAN" \
     --run-label "$resume_label" \
     --output-root "$resume_output" \
-    --results-root "$MODE_DIR/results"
+    --results-root "$MODE_DIR/results" \
+    --resume-concurrency-config "$ROOT/configs/benchmark.yml"
   printf 'run: status=resume-completed\n'
 }
 

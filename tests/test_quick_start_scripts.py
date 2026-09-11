@@ -2547,6 +2547,7 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
 
     assert len(run_calls) == 1
     assert f"oamb run {full_root}/resolved-plan.json" in run_calls[0]
+    assert f"--resume-concurrency-config {root}/configs/benchmark.yml" in run_calls[0]
     owner_lines = [line for line in calls if line.startswith("run-owner-pid ")]
     assert len(owner_lines) == 1
     assert owner_lines[0].removeprefix("run-owner-pid ").isdigit()

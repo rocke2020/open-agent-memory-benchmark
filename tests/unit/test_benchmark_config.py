@@ -10,6 +10,7 @@ from oamb.config.benchmark import (
     BenchmarkConfiguration,
     BenchmarkConfigurationError,
     load_benchmark_configuration,
+    load_resume_concurrency,
 )
 from tests.benchmark_configuration import MODEL_ENVIRONMENT, load_lme6_configuration
 
@@ -40,6 +41,24 @@ def _write_configuration(tmp_path: Path, content: str) -> Path:
 
 def _load(path: Path) -> BenchmarkConfiguration:
     return load_benchmark_configuration(path, model_environment=MODEL_ENVIRONMENT)
+
+
+@pytest.mark.parametrize("value", ("true", "0", "-1", "1.5", "'3'", "null"))
+def test_resume_concurrency_rejects_non_positive_integer_caps(tmp_path: Path, value: str) -> None:
+    path = _write_configuration(
+        tmp_path,
+        "execution:\n"
+        f"  max_parallel_history_ingestions_per_provider: {value}\n"
+        "  max_parallel_questions_per_provider: 3\n",
+    )
+    with pytest.raises(BenchmarkConfigurationError, match="positive finite integer"):
+        load_resume_concurrency(path)
+
+
+@pytest.mark.parametrize("content", ("{}", "execution: []", "execution: {}"))
+def test_resume_concurrency_requires_explicit_execution_caps(tmp_path: Path, content: str) -> None:
+    with pytest.raises(BenchmarkConfigurationError):
+        load_resume_concurrency(_write_configuration(tmp_path, content))
 
 
 def test_checked_in_configuration_selects_one_lme60_three_provider_comparison() -> None:

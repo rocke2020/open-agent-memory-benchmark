@@ -255,6 +255,13 @@ def run_command(
             help="Directory containing one ordinary result file per LME-60 provider.",
         ),
     ] = None,
+    resume_concurrency_config: Annotated[
+        Path | None,
+        typer.Option(
+            "--resume-concurrency-config",
+            help="Read current history/question caps from YAML when resuming provider results.",
+        ),
+    ] = None,
     provider_runtime: Annotated[
         Path,
         typer.Option("--provider-runtime", help="Verified provider runtime directory."),
@@ -274,6 +281,8 @@ def run_command(
 ) -> None:
     """Execute frozen cells and seal source capsules."""
 
+    if resume_concurrency_config is not None and results_root is None:
+        raise typer.BadParameter("--resume-concurrency-config requires --results-root")
     if results_root is not None and any((cell, case, question)):
         raise typer.BadParameter(
             "provider results cannot be combined with case, cell, or question selection"
@@ -287,6 +296,7 @@ def run_command(
         _run_fake_resolved_plan(resolved_plan, scenario=scenario)
         return
 
+    from .config.benchmark import load_resume_concurrency
     from .config.doctor import ResolvedPlanError, load_resolved_plan_for_run
     from .live import (
         LiveCellExecutionError,
@@ -374,6 +384,14 @@ def run_command(
             if not selected_cells:
                 typer.echo("question results: PASS complete=180 zero_dispatch=true")
                 return
+        resume_concurrency = None
+        if resume_concurrency_config is not None:
+            resume_concurrency = load_resume_concurrency(resume_concurrency_config)
+            typer.echo(
+                "resume concurrency: "
+                f"histories={resume_concurrency.max_parallel_history_ingestions_per_provider} "
+                f"questions={resume_concurrency.max_parallel_questions_per_provider}"
+            )
         environment = load_live_environment(
             plan=plan,
             provider_env_path=provider_env,
@@ -427,6 +445,7 @@ def run_command(
                     requested_case_manifest_entry_ids=requested_case_ids,
                     results_path=results_path,
                     ordered_question_ids=ordered_question_ids,
+                    resume_concurrency=resume_concurrency,
                 )
             )
 

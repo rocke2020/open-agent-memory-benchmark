@@ -397,6 +397,31 @@ class BenchmarkConfiguration:
     decision: DecisionConfiguration | None
 
 
+@dataclass(frozen=True)
+class ResumeConcurrency:
+    max_parallel_history_ingestions_per_provider: int
+    max_parallel_questions_per_provider: int
+
+
+def load_resume_concurrency(path: Path) -> ResumeConcurrency:
+    """Read only invocation-local scheduling caps, not frozen benchmark settings."""
+
+    document = _load_yaml_document(path)
+    if not isinstance(document, dict) or not isinstance(document.get("execution"), dict):
+        raise BenchmarkConfigurationError("resume configuration requires an execution mapping")
+    execution = document["execution"]
+    return ResumeConcurrency(
+        max_parallel_history_ingestions_per_provider=_require_positive_integer(
+            execution.get("max_parallel_history_ingestions_per_provider"),
+            "execution.max_parallel_history_ingestions_per_provider",
+        ),
+        max_parallel_questions_per_provider=_require_positive_integer(
+            execution.get("max_parallel_questions_per_provider"),
+            "execution.max_parallel_questions_per_provider",
+        ),
+    )
+
+
 def load_benchmark_configuration(
     path: Path,
     *,
@@ -404,16 +429,22 @@ def load_benchmark_configuration(
 ) -> BenchmarkConfiguration:
     """Load one strict comparison and resolve only its non-secret model names."""
 
+    return _parse_benchmark_configuration(
+        _load_yaml_document(path), model_environment=model_environment
+    )
+
+
+def _load_yaml_document(path: Path) -> object:
     try:
         content = Path(path).read_text(encoding="utf-8")
         if any(isinstance(token, TagToken) for token in yaml.scan(content)):
             raise BenchmarkConfigurationError("explicit YAML tags are not permitted")
-        document = yaml.load(content, Loader=_DuplicateRejectingSafeLoader)
+        document: object = yaml.load(content, Loader=_DuplicateRejectingSafeLoader)
     except BenchmarkConfigurationError:
         raise
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise BenchmarkConfigurationError(f"cannot load benchmark configuration: {path}") from exc
-    return _parse_benchmark_configuration(document, model_environment=model_environment)
+    return document
 
 
 def _parse_benchmark_configuration(

@@ -161,12 +161,12 @@ execution:
   # Histories being ingested per provider; sessions within each history stay ordered.
   # Example: 6 ingests histories for Q1-Q6 together; Q7's can start when Q1's is ready.
   # The ingestion slot is released before Q1's retrieval, answer, and judge steps.
-  max_parallel_history_ingestions_per_provider: 6
+  max_parallel_history_ingestions_per_provider: 3
 
   # Concurrent evaluations per provider, each covering retrieval -> answer -> judge -> saved result.
   # Example: 6 evaluates Q1-Q6 while histories for Q7-Q12 are being ingested.
   # Each question starts when its own history is ready and an evaluation slot is free.
-  max_parallel_questions_per_provider: 6
+  max_parallel_questions_per_provider: 3
 
   # Fixed at 2: retries of one ingestion batch after a confirmed transient failure.
   # Example: 1 initial submission + 2 retries = 3 submissions in the same question scope.

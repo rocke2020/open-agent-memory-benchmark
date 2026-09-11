@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from oamb.artifacts.atomic import read_regular_file
-from oamb.config.benchmark import MODEL_PROFILE_ENVIRONMENT_KEYS, MODEL_ROLE_IDS, ModelRoleId
+from oamb.config.benchmark import (
+    MODEL_PROFILE_ENVIRONMENT_KEYS,
+    MODEL_ROLE_IDS,
+    ModelRoleId,
+    ResumeConcurrency,
+)
 from oamb.config.doctor import CellSpec, ModelExecutionBinding, ResolvedPlan
 from oamb.config.provider_services import (
     ProviderServiceBindingError,
@@ -744,11 +749,13 @@ def execute_live_cell(
         provider = cell.cell.provider_id
         internal_retry_count = _validated_cell_internal_retry_count(cell)
         if provider == "hindsight":
+            extraction_model = bindings_by_role["hindsight_extraction"].model
+            assert extraction_model is not None
             return HindsightAdapter(
                 store=store,  # type: ignore[arg-type]
                 base_url=environment[cell.cell.endpoint_variable],
                 authorization=None,
-                extraction_model=bindings_by_role["hindsight_extraction"].model,
+                extraction_model=extraction_model,
                 runtime_binding_hash=cell.control.run_spec.runtime_binding_hash,
                 internal_retry_count=internal_retry_count,
                 read_timeout_seconds=memory_timeout_seconds,
@@ -1227,6 +1234,7 @@ def build_live_cell(
     requested_case_manifest_entry_ids: tuple[str, ...] = (),
     results_path: Path | None = None,
     ordered_question_ids: tuple[str, ...] = (),
+    resume_concurrency: ResumeConcurrency | None = None,
 ) -> LiveCell:
     """Close one live cell without constructing provider or model clients."""
 
@@ -1370,6 +1378,7 @@ def build_live_cell(
             **preflight_fields,
         }
     )
+    concurrency = plan.execution if resume_concurrency is None else resume_concurrency
     control = NativeRunControl(
         run_spec=run_spec,
         preflight_record=preflight,
@@ -1381,10 +1390,8 @@ def build_live_cell(
         provider_runtime_directory=lifecycle_domain,
         wall_clock=lambda: datetime.now(UTC),
         monotonic_clock=time.monotonic,
-        max_parallel_history_ingestions=(
-            plan.execution.max_parallel_history_ingestions_per_provider
-        ),
-        max_parallel_questions=plan.execution.max_parallel_questions_per_provider,
+        max_parallel_history_ingestions=(concurrency.max_parallel_history_ingestions_per_provider),
+        max_parallel_questions=concurrency.max_parallel_questions_per_provider,
         max_retries_per_operation=plan.execution.max_retries_per_operation,
         extraction_max_retries=plan.execution.extraction_max_retries,
         model_max_attempts=plan.execution.model_max_attempts,

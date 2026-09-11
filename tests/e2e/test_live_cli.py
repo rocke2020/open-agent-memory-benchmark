@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from oamb import live
 from oamb.cli import app
-from oamb.config.benchmark import load_benchmark_configuration
+from oamb.config.benchmark import ResumeConcurrency, load_benchmark_configuration
 from oamb.config.doctor import ResolvedPlan, build_resolved_plan
 from oamb.contracts.ids import canonical_sha256
 from tests.benchmark_configuration import MODEL_ENVIRONMENT, load_lme6_configuration
@@ -536,9 +536,11 @@ def test_question_result_failure_stops_before_environment_or_provider_preparatio
     assert runtime_loaded is False
 
 
+@pytest.mark.parametrize("limits", (None, (1, 2), (7, 8), (0, 3), (3, 0)))
 def test_question_results_build_only_cells_with_remaining_questions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    limits: tuple[int, int] | None,
 ) -> None:
     from oamb.config import doctor
 
@@ -568,7 +570,11 @@ def test_question_results_build_only_cells_with_remaining_questions(
     monkeypatch.setattr(live, "load_live_question_results", lambda **_kwargs: selection)
     monkeypatch.setattr(live, "validate_live_readiness_receipt", lambda **_kwargs: None)
 
+    environment_loaded = False
+
     def load_environment(**_kwargs: object) -> dict[str, str]:
+        nonlocal environment_loaded
+        environment_loaded = True
         return {}
 
     monkeypatch.setattr(live, "load_live_environment", load_environment)
@@ -595,6 +601,16 @@ def test_question_results_build_only_cells_with_remaining_questions(
     )
     results_root = tmp_path / "fresh-run" / "results"
     results_root.mkdir(parents=True)
+    resume_options: list[str] = []
+    if limits is not None:
+        configuration = tmp_path / "benchmark.yml"
+        configuration.write_text(
+            "models: ignored-on-resume\nexecution:\n"
+            f"  max_parallel_history_ingestions_per_provider: {limits[0]}\n"
+            f"  max_parallel_questions_per_provider: {limits[1]}\n",
+            encoding="utf-8",
+        )
+        resume_options = ["--resume-concurrency-config", str(configuration)]
 
     result = CliRunner().invoke(
         app,
@@ -607,9 +623,18 @@ def test_question_results_build_only_cells_with_remaining_questions(
             "simple-resume",
             "--results-root",
             str(results_root),
+            *resume_options,
         ],
     )
 
+    if limits is not None and 0 in limits:
+        assert result.exit_code != 0
+        assert "must be a positive finite integer" in " ".join(
+            result.output.replace("│", " ").split()
+        )
+        assert not built
+        assert not environment_loaded
+        return
     assert result.exit_code == 0, result.output
     assert tuple(item["cell_id"] for item in built) == (
         plan.cells[0].cell_id,
@@ -621,6 +646,18 @@ def test_question_results_build_only_cells_with_remaining_questions(
         assert item["requested_case_manifest_entry_ids"] == remaining[cell_id]
         assert item["ordered_question_ids"] is selection.ordered_question_ids
         assert item["results_path"] == results_root / f"{provider_id}.json"
+        assert item["plan"] is plan
+        concurrency = item["resume_concurrency"]
+        if limits is None:
+            assert concurrency is None
+        else:
+            assert isinstance(concurrency, ResumeConcurrency)
+            assert concurrency.max_parallel_history_ingestions_per_provider == limits[0]
+            assert concurrency.max_parallel_questions_per_provider == limits[1]
+            assert (
+                f"resume concurrency: histories={limits[0]} questions={limits[1]}" in result.output
+            )
+    assert resolved_plan.read_text(encoding="utf-8") == '{"schema_name":"resolved_plan"}'
 
 
 def test_complete_question_results_return_before_runtime_or_provider_dispatch(
@@ -659,6 +696,8 @@ def test_complete_question_results_return_before_runtime_or_provider_dispatch(
             "complete-results",
             "--results-root",
             str(tmp_path / "results"),
+            "--resume-concurrency-config",
+            str(tmp_path / "not-needed-when-complete.yml"),
         ],
     )
 

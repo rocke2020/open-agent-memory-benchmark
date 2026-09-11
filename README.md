@@ -1,202 +1,111 @@
 # Open Agent Memory Benchmark
 
-## What is Open Agent Memory Benchmark?
+## Overview
 
-Open Agent Memory Benchmark (OAMB) is an open-source, provider-neutral way to
-compare agent-memory systems under one shared evaluation protocol. Agent memory
-is the layer that turns an agent's past interactions into searchable memory and
-retrieves useful information for later tasks.
+Open Agent Memory Benchmark (OAMB) compares Hindsight, Mem0, and OpenViking through their native REST APIs under one shared evaluation protocol. The v0.1.0 profile uses the same balanced selection of 60 LongMemEval questions for each provider: ten questions from each of six question types, producing 180 provider-specific results.
 
-The v0.1.0 profile runs Hindsight, Mem0, and OpenViking on the same balanced selection of 60 LongMemEval questions: ten questions from each of six question types. It reports five main metrics separately, in decision-priority order:
+The offline report presents five metrics separately:
 
-- **Answer accuracy** — how often the agent answers correctly using retrieved memory.
-- **Context tokens** — how much retrieved memory is shown to the answer model.
-- **Indexing tokens** — the measured token usage required to turn the test history into searchable memory.
-- **Retrieval latency** — how long the provider memory-query request takes.
-- **Indexing time** — how long the complete ingestion path takes from the first provider write through terminal readiness.
+- **Answer accuracy** — correctness using retrieved memory.
+- **Context tokens** — retrieved evidence shown to the answer model.
+- **Indexing tokens** — measured token usage for building memory.
+- **Retrieval latency** — time spent on the provider's memory-query request.
+- **Indexing time** — time from the first history write to query readiness.
 
-Retries, failures, resource usage, cost, and measurement coverage remain visible
-supporting evidence. OAMB does not hide the trade-offs inside one universal
-score, so users can choose a memory system according to their own needs.
-
-## Why Open Agent Memory Benchmark?
-
-Most agent-memory comparisons are published by individual memory providers.
-Their results are hard to compare because they may use different prompts,
-extraction, answer, and judge models, retrieval modes, limits, or token
-definitions. Important adoption costs, especially indexing tokens, may be
-missing entirely.
-
-OAMB fixes the questions, answer and judge policy, model roles, and comparison
-rules before a run starts. Each provider still uses its native memory API, while
-provider-specific settings and measured results remain visible in saved evidence
-and a self-contained offline report.
-
-OAMB separates memory extraction, answer generation, and scoring. Its extraction
-context frames each session as a conversation in which the model is the
-assistant, preserves the session timestamp, and omits the benchmark name. Answer
-generation uses OAMB's evidence-grounded prompt. Scoring preserves the original
-LongMemEval judge rubrics, with source attribution and byte-pinned templates.
-
-The goal is a fair and open evaluation of agent memory that is quick to run,
-inspect, and reproduce.
-
-## How do I use Open Agent Memory Benchmark?
-
-The normal workflow is two commands: `precheck.sh` prepares and verifies the
-complete runtime, then `run.sh --full_test` runs all three providers in
-parallel, validates their capsules, builds the comparison, and opens its offline
-report. Smoke mode is an optional one-question diagnostic.
-
-`execution.max_retries_per_operation` in `configs/benchmark.yml` is fixed at `2` additional batch submissions, for three total attempts after up to 10 native extraction retries per submission. A settled batch that exhausts those attempts is recorded as skipped, and the remaining history continues in the same question scope. Answer and judge each use six outer attempts with two transport retries per attempt. Every physical attempt's available token usage, resource measurements, and actual billing evidence remain in the operational totals; see the [runtime retry flow](src/oamb/runtime/native_run.py).
-
-LongMemEval [visible evidence](src/oamb/workloads/visible_evidence.py) preserves provider-returned empty text in its original position and JSONL representation. The [report parser](src/oamb/reporting/comparison_project.py) accepts the same representation; evidence identity and kind must remain non-empty.
-
-LongMemEval source messages also preserve empty string content through the [Mem0 adapter](src/oamb/memory_systems/mem0/adapter.py) and [REST request encoder](src/oamb/memory_systems/mem0/wire.py), matching the dataset and native service schema. Message roles remain non-empty strings, and non-string content is rejected.
-
-The 900-second timeout applies to each external attempt. These controls do not impose a whole-run, aggregate-token, storage, resource, memory, or cost cap. Tokens, latency, storage, resources, and cost are measured results; unavailable measurements remain unavailable rather than becoming zero.
-
-Retrieval generation is disabled in v0.1.0. Query embedding is allowed, but
-query rewriting, decomposition, reflection, generative reranking, and fallback
-to a generation-model retrieval path are not.
+OAMB fixes questions, model roles, answer/judge policy, and comparison settings before execution. Providers retain their native storage and indexing behavior. Retries, failures, partial ingestion, costs, and unavailable measurements remain visible; there is no universal combined score. Retrieval permits query embedding but disables generative query rewriting, reflection, and reranking.
 
 ## Quick start
 
-These two steps run a real comparison. They create isolated provider state and
-can make billable model calls; neither script deletes provider or database data.
+You need Git, Python 3.11+, `uv`, Docker with Compose, `curl`, `jq`, `shasum`, and credentials for an OpenAI-compatible model endpoint. Preparation and evaluation can make billable model calls. They create isolated provider state and preserve existing provider/database data.
 
-Install Git, Python 3.11 or newer, `uv`, Docker Engine with Compose, `curl`, `jq`, and `shasum`. You also need an OpenAI-compatible endpoint that serves the models selected in your root `.env`.
+### 1. Configure
 
-The tracked `.env.example` sets both `LLM_LIGHT_MODEL` and `LLM_DEEP_MODEL` to `deepseek-flash`, which serves DeepSeek-V4.1-Flash on the official DeepSeek API as of its [September 10, 2026 release](https://www.deepseek.com/en/news/deepseek-v4-1-flash/). You may replace either value with a model ID served by your endpoint. The light profile supplies Hindsight extraction, Mem0 extraction, OpenViking semantic understanding, and judging; the deep profile supplies answering. Extraction, semantic understanding, and answering use `low` thinking effort; judging uses `high`. Supplier-returned model metadata remains in each run's raw evidence, and historical results retain their recorded model settings.
-
-OAMB can reuse any local or paid OpenAI-compatible embedding service. The configured service must serve `qwen3-embedding:0.6b`, return 1,024 dimensions, and accept at least 8,192 input tokens. The API key is optional for an unauthenticated local service. If no embedding service URL is configured, macOS starts the checked-in vLLM-Metal helper and Linux starts the checked-in Ollama helper. The macOS fallback expects a sibling `vllm-metal` checkout and the cached model paths described by its error messages; the Linux fallback requires Ollama and may download the 639 MB model on first use. On Linux, Ollama binds to loopback and the checked-in bounded relay listens only on the Docker bridge gateway needed by provider containers; neither binds the unauthenticated service to LAN interfaces.
-
-### 1. Precheck
-
-Clone OAMB and enter its root:
+Clone the repository and prepare its private configuration:
 
 ```bash
-git clone https://github.com/rocke2020/open-agent-memory-benchmark.git && \
-  cd open-agent-memory-benchmark
+git clone https://github.com/rocke2020/open-agent-memory-benchmark.git
+cd open-agent-memory-benchmark
+cp .env.example .env
+chmod 600 .env
 ```
 
-Prepare the ignored root `.env` from `./.env.example`, keep `LLM_URL_TYPE=openai_chat`, set `LLM_LIGHT_MODEL`, `LLM_DEEP_MODEL`, `LLM_BASE_URL`, and `LLM_API_KEY`, and keep the file mode `0600`. To reuse a local or paid embedding API, set `OAMB_EMBEDDING_BASE_URL`; set `OAMB_EMBEDDING_API_KEY` only when that service requires authentication. You may omit `OAMB_EMBEDDING_API_KEY` or leave it empty for an unauthenticated service; both forms have the same behavior. For example, an already-running host-local vLLM-Metal service uses:
+Edit `.env`: set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_LIGHT_MODEL`, and `LLM_DEEP_MODEL`; keep `LLM_URL_TYPE=openai_chat`. The [template](.env.example) uses `deepseek-flash` for both model profiles. The light profile handles provider extraction and judging; the deep profile handles answering. [Benchmark configuration](configs/benchmark.yml) owns role assignments, thinking effort, and execution controls.
+
+To reuse an embedding service, set its OpenAI-compatible base URL. The default profile requires `qwen3-embedding:0.6b`, 1,024-dimensional vectors, and sufficient context capacity for the providers' source-session inputs. For an existing host-local service:
 
 ```dotenv
 OAMB_EMBEDDING_BASE_URL=http://127.0.0.1:18000/v1
 OAMB_EMBEDDING_API_KEY=
 ```
 
-OAMB keeps this host-side URL unchanged for probing and derives `http://host.docker.internal:18000/v1` only for the provider containers. HTTPS or IPv6 loopback URLs are rejected because rewriting them would either break TLS hostname verification or leave containers pointing at themselves; use the HTTP IPv4 loopback form above or a hostname reachable from Docker. A paid service uses the same fields with its HTTPS base URL and API key.
+The embedding API key may be missing or empty for a keyless service. OAMB translates this HTTP IPv4 loopback URL for Docker containers while keeping the host probe unchanged. Remote HTTPS endpoints are also supported; HTTPS and IPv6 loopback URLs are rejected.
 
-Then run:
+If the URL is unset or remains `change-me`, precheck uses the local fallback: macOS requires a sibling `vllm-metal` installation and cached model files; Linux requires Ollama and may download the embedding model on first use. See the [local embedding helpers](scripts/start_local_embedding).
+
+### 2. Precheck and run
+
+Prepare dependencies, the dataset, pinned provider services, and model readiness:
 
 ```bash
 ./precheck.sh
 ```
 
-The root `.env` is the source for model names, external endpoints, and credentials. `configs/benchmark.yml` keeps role assignments, thinking effort, environment-variable references, and the managed-local embedding host endpoint. `precheck.sh` resolves the selected model names into the frozen benchmark plan, completes private runtime inputs, freezes the embedding ownership and effective endpoint, and exports plan-owned settings to the provider processes. When the embedding URL is configured, it reuses that service and does not start vLLM-Metal or Ollama; a missing or empty API key selects keyless access. When the URL is absent or remains the documented placeholder, precheck starts the OS-specific fallback without changing `OAMB_EMBEDDING_BASE_URL` in `.env`. An API key without a URL fails closed. It then installs locked dependencies, downloads and verifies LongMemEval, clones and verifies the pinned Mem0 source, starts all three memory providers, and verifies every runtime role. Existing configured values and provider data are reused, not overwritten.
-
-Provider applications derive their `NO_PROXY` list from the host in the root `LLM_BASE_URL`, together with the required local service hosts, so requests to that model endpoint bypass proxy routing.
-
-The all-role readiness gate sends a real embedding request and validates the returned model and dimensions for either an external service or the local fallback. Its direct host-side probe sends no `Authorization` header when `OAMB_EMBEDDING_API_KEY` is missing or empty. For keyless endpoints, provider-owned OpenAI clients receive the non-secret `oamb-no-auth` compatibility value because some clients require a non-empty constructor argument. `--embedding-api-url URL` remains available as a one-run external URL override, does not require a key, and does not write the URL to `.env`. Use `./precheck.sh --no-start-embedding` only when the managed-local endpoint is already managed separately. Do not continue unless precheck prints `precheck: PASS`.
-
-### 2. Run
-
-Every smoke/full run first verifies the frozen plan and runtime readiness before
-dispatch. To run only that same gate without model or provider calls, use
-`./run.sh --dry-run`.
-
-Run the complete balanced LME-60 comparison with:
+Continue only after `precheck: PASS`. Then run the complete comparison:
 
 ```bash
 ./run.sh --full_test
 ```
 
-Full mode starts Hindsight, Mem0, and OpenViking together with the default parallel limits. Each provider runs the same 60 questions in isolated state and reports its own progress from `0/60` through `60/60`. All three use up to 10 native extraction retries and three ingestion submissions per batch. After a settled batch exhausts its submissions, OAMB records the skipped sources, preserves any partial memory, and continues the question’s remaining history in the same scope. Answer and judge calls have independent limits of six outer attempts and two transport retries per attempt; invalid output is fed back with its validation error. The report identifies partial ingestion and unjudged results, and retains physical attempts and available usage evidence. OAMB freshly validates each capsule before building and opening the final 180-result comparison report. Full mode does not require or consume a smoke run.
+Providers run concurrently within the configured limits. Each provider prints its status, elapsed time, and saved-question count every 30 seconds. Completed results are saved atomically; the final comparison requires all 180 results and fresh evidence validation.
 
-Set parallel limits under `execution` in `configs/benchmark.yml` before running `./precheck.sh`:
-
-```yaml
-execution:
-  max_parallel_providers_per_dataset: 3
-  max_parallel_history_ingestions_per_provider: 2
-  max_parallel_questions_per_provider: 2
-```
-
-These required positive integers limit active provider evaluations, independent history ingestions per provider, and question runs per provider. Each question slot spans retrieval, answer, and judge after its history is ready; source writes within one history stay sequential. The defaults allow up to six history ingestions and six question runs across three providers. A provider limit of 1 or 2 queues the remaining providers and starts the next when a slot becomes free. The limits apply to both smoke and full execution and are frozen into the resolved plan; editing YAML does not alter an existing plan. They do not limit a provider service's internal model or embedding requests.
-
-Press `Ctrl-C` once to stop a full run. OAMB immediately force-stops the benchmark process tree and this repository's provider-service containers, while preserving atomically saved question results, provider volumes, and result data. Native workers also stop themselves if their `run.sh` owner or immediate supervisor disappears.
-
-After deterministic comparison data closes, report generation starts two bounded branches: base HTML preparation and one concise five-metric analysis using the frozen judge model and the configured `LLM_BASE_URL`/`LLM_API_KEY`. Analysis permits at most six total attempts, stores received responses in a content-addressed private cache, and publishes `report-analysis.json` only after strict schema and report-hash validation. Final HTML waits for both branches and embeds a valid analysis directly; if analysis remains unavailable, the numeric report still opens with an explicit unavailable notice. A matching cache prevents another billable call, and the final HTML remains self-contained and network-free. Analysis-call usage is recorded in the sidecar but remains outside the five benchmark metrics.
-
-For optional debugging, run the frozen question `72e3ee87` once on all three
-providers in parallel. `--smoke_test` is the default, so these are identical:
+Other run modes:
 
 ```bash
-./run.sh
-# ./run.sh --smoke_test
+./run.sh --full_test --resume  # Reuse completed questions; rerun missing ones in fresh scopes
+./run.sh --smoke_test         # Optional one-question diagnostic across all three providers
+./run.sh --dry-run            # Check the frozen plan without model or provider calls
 ```
 
-Smoke freshly validates all three capsules, builds a diagnostic comparison over
-the same question, and opens `report.html`. Its one-question report never claims
-a full-study accuracy leader, and its artifacts are not a full-run prerequisite.
+Plain `./run.sh` also selects smoke mode. Smoke results are separate and are not required for a full run.
 
-If an explicitly started full run stops after sealing partial capsules, resume
-it with:
+Set concurrency under `execution` in [configs/benchmark.yml](configs/benchmark.yml):
 
-```bash
-./run.sh --full_test --resume
-```
+| Setting | Limits |
+|---|---|
+| `max_parallel_providers_per_dataset` | Concurrent provider evaluations |
+| `max_parallel_history_ingestions_per_provider` | Independent histories being ingested per provider |
+| `max_parallel_questions_per_provider` | Retrieval, answer, and judge pipelines per provider |
 
-OAMB atomically saves every completed question; `--resume` skips existing question IDs and reruns only missing questions in fresh scopes.
+Sessions within one history remain sequential. These limits do not cap a provider's internal embedding/model requests. Fresh runs use the prechecked plan. Each `--resume` reads the current YAML's history and question caps for unfinished work; changing those two values does not invalidate completed results. Other plan settings stay frozen, and already-running processes do not reload YAML. Do not edit `resolved-plan.json`.
 
-Both full-test modes print each provider's status, elapsed time, and saved-question count at startup, every 30 seconds while running, and when the command finishes. Resume counts include previously saved results; providers already at `60/60` are shown as complete. The initial `reused=... remaining=...` line is a startup summary.
+Retry and per-attempt timeout settings are documented alongside these controls in the configuration. They are not whole-run or spending caps. A local timeout does not prove remote processing or billing stopped.
 
-Smoke reports are written under `outputs/smoke-test/<run-label>/`; full-study
-reports are written under `outputs/full-test/<run-label>/`. Set
-`OAMB_NO_OPEN=1` only in a headless environment; the HTML is still built and
-validated, and its path is printed.
+### 3. Stop provider services
 
-`run.sh` saves stdout and stderr to a new private `outputs/tmp/run-<mode>-<UTC-timestamp>-<pid>.log` while continuing to display them in the terminal. The script prints `run: log=<path>` at startup; use `tail -f <path>` to follow it from another terminal. Logging includes preflight errors and applies to smoke, full, dry-run, and resume invocations; earlier logs are preserved.
-
-## If a run stops or fails
-
-Preserve `outputs/smoke-test`, `outputs/full-test`, `provider-services/.runtime`,
-and all provider state. Do not delete or overwrite them. Inspect the printed
-result-map paths first; they retain canonical outcomes and every completed
-capsule root. `outputs/tmp` contains shared preparation state and reproducible
-scratch outputs, not successful-run evidence.
-
-A readiness failure whose runtime is already bound to a provider project needs
-a separate fresh clone and provider project. Stop the old project without
-deleting its volumes:
+Press `Ctrl-C` once to stop an active full run and its provider containers. To stop this repository's provider-service containers directly:
 
 ```bash
 ./provider-services/bin/provider-services stop
 ```
 
-The per-operation timeout limits local waiting for one attempt. It does not
-prove remote work or supplier billing stopped, so reconcile uncertain calls
-before starting another project.
+Stopping preserves Docker volumes, provider/database data, saved results, logs, and evidence. It clears ephemeral lifecycle markers after provider execution ends. Use the resume command above to continue an interrupted full run.
 
-## Provider and evidence boundaries
+## Results and troubleshooting
 
-The default comparison uses local REST APIs for Hindsight, Mem0, and
-OpenViking. The optional Mem0 Python SDK profile is separate and cannot
-substitute for REST evidence. Exact release pins, service preparation, state
-isolation, and non-destructive lifecycle commands are documented in
-[`provider-services/README.md`](provider-services/README.md).
+Full reports are written under `outputs/full-test/<run-label>/`; smoke reports use `outputs/smoke-test/<run-label>/`. The self-contained HTML opens automatically. Set `OAMB_NO_OPEN=1` for headless use; the report is still generated and its path printed.
 
-Source inspection, a healthy service, or a non-empty response alone does not
-prove a completed benchmark. OAMB comparison reads freshly validated capsules
-and reports missing measurements as unavailable.
+Every run prints `run: log=<path>` and saves terminal output under `outputs/tmp/`. Follow it with `tail -f <path>`. Full-run progress comes from saved `results/{hindsight,mem0,openviking}.json`; resume counts include earlier completed questions.
+
+If a run fails, retain its outputs, provider volumes, and `provider-services/.runtime`. Inspect the printed log before retrying. Service preparation and recovery details are in the [provider-service guide](provider-services/README.md); observed performance differences and root-cause analyses are in [Investigations](docs/investigations/README.md).
+
+## Acknowledgments
+
+Thank you to Vectorize's [Agent Memory Benchmark (AMB)](https://github.com/vectorize-io/agent-memory-benchmark) and its contributors for publishing their evaluation harness, methodology, prompts, and results. AMB was an important reference for OAMB's evaluation workflow and design. OAMB is independently implemented.
+
+We also thank the [LongMemEval authors](https://github.com/xiaowu0162/LongMemEval) for the dataset and judge rubrics, and the Hindsight, Mem0, and OpenViking communities for their open-source memory systems. Directly reused prompt materials retain their [source attribution and notices](prompt-packs/README.md).
 
 ## Project policies
 
-- [`SECURITY.md`](SECURITY.md) — vulnerability reporting and secret safety.
-- [`DATASETS.md`](DATASETS.md) — dataset provenance and redistribution rules.
-- [`THIRD_PARTY.md`](THIRD_PARTY.md) — direct dependency and license inventory.
+See [Security](SECURITY.md), [Dataset provenance](DATASETS.md), and [Third-party components](THIRD_PARTY.md).
 
-OAMB is licensed under Apache-2.0. Datasets and third-party artifacts retain
-their own licenses and are not relicensed by OAMB.
+OAMB is licensed under [Apache-2.0](LICENSE). Datasets and third-party artifacts retain their own licenses.

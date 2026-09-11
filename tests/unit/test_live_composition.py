@@ -1222,6 +1222,47 @@ def test_three_isolated_live_cells_are_dispatched_in_parallel(
     )
 
 
+@pytest.mark.parametrize("limits", (None, (3, 4), (8, 7)))
+def test_resume_concurrency_reaches_scheduler_without_changing_saved_plan(
+    tmp_path: Path, limits: tuple[int, int] | None
+) -> None:
+    from oamb.config.benchmark import ResumeConcurrency
+    from oamb.live import build_live_cell
+
+    configuration = load_lme6_configuration()
+    plan = build_resolved_plan(
+        replace(
+            configuration,
+            evaluation_controls=replace(
+                configuration.evaluation_controls,
+                max_parallel_history_ingestions_per_provider=6,
+                max_parallel_questions_per_provider=6,
+            ),
+        )
+    )
+    built = build_live_cell(
+        plan=plan,
+        cell_id=plan.cells[0].cell_id,
+        output_root=tmp_path / "capsules",
+        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
+        provider_project_id="oamb-providers-test-live",
+        provider_evidence=_provider_evidence(),
+        environment=_environment(),
+        run_label="resume-concurrency",
+        observed_at=NOW,
+        code_revision="source-tree-test",
+        resume_concurrency=None if limits is None else ResumeConcurrency(*limits),
+    )
+
+    assert (
+        built.control.max_parallel_history_ingestions,
+        built.control.max_parallel_questions,
+    ) == ((6, 6) if limits is None else limits)
+    assert built.plan is plan
+    assert plan.execution.max_parallel_history_ingestions_per_provider == 6
+    assert plan.execution.max_parallel_questions_per_provider == 6
+
+
 @pytest.mark.parametrize("limit", (1, 2, 3))
 @pytest.mark.parametrize("stop", (None, "failure", "signal"))
 def test_configured_provider_cap_releases_slots_and_drains(
