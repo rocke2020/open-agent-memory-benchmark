@@ -368,6 +368,16 @@ def _memory_detail(
     return detail
 
 
+def _canonical_memory_record(page: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize validated entity membership; native endpoints do not order names."""
+
+    entities = sorted(detail["entities"])
+    return {
+        "page": {**page, "entities": ", ".join(entities)},
+        "detail": {**detail, "entities": entities},
+    }
+
+
 def _unordered_entity_join_matches(entities: tuple[str, ...], serialized: str) -> bool:
     """Match the page's ambiguous comma join against the detail's unordered entities."""
 
@@ -482,7 +492,7 @@ async def _build_projection(
         response = await client.get_memory(bank_id, item["id"])
         responses.append(response)
         detail = _memory_detail(response.raw_bytes, list_item=item)
-        memory_records.append({"page": item, "detail": detail})
+        memory_records.append(_canonical_memory_record(item, detail))
 
     mental_response = await client.list_mental_models(bank_id, limit=PAGE_LIMIT, offset=0)
     responses.append(mental_response)

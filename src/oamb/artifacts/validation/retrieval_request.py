@@ -34,9 +34,10 @@ def retrieval_request_proves_generation_free(profile_id: str, payload: bytes) ->
         return (
             isinstance(path, str)
             and path.endswith("/memories/recall")
-            and set(body)
-            == {"query", "types", "budget", "max_tokens", "query_timestamp", "trace", "include"}
-            and "reflect" not in body
+            and set(body) == {"query", "types", "query_timestamp", "trace", "include"}
+            and body.get("types") == ["world", "experience"]
+            and body.get("trace") is True
+            and body.get("include") == {"entities": None, "chunks": {}}
         )
     if profile_id == MEM0_PROFILE_ID:
         return path == "/search" and set(body) == {

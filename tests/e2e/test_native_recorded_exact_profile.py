@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -279,14 +280,28 @@ class _RecordedHindsightService:
             return httpx.Response(
                 200,
                 json={
-                    "results": [],
+                    "results": [
+                        {
+                            "id": "fixture-fact",
+                            "text": "Alice cares about exact evidence.",
+                            "type": "world",
+                            "chunk_id": "fixture-chunk",
+                        }
+                    ],
                     "trace": {
                         "query": "What does Alice care about?",
-                        "num_results": 0,
+                        "num_results": 1,
                         "time_seconds": 0.01,
                     },
                     "entities": None,
-                    "chunks": {},
+                    "chunks": {
+                        "fixture-chunk": {
+                            "id": "fixture-chunk",
+                            "text": '[{"role":"assistant","content":"Keep it for ten minutes',
+                            "chunk_index": 0,
+                            "truncated": True,
+                        }
+                    },
                     "source_facts": None,
                     "source_facts_truncated": None,
                 },
@@ -439,9 +454,20 @@ def _model_factory(
     model: str,
     output: str,
     thinking_effort: ThinkingEffort,
+    context_error: bool = False,
 ) -> OpenAICompatibleModelClient:
     def handler(request: httpx.Request) -> httpx.Response:
         assert json.loads(request.content)["reasoning_effort"] == thinking_effort
+        if context_error:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": "Context capacity exceeded",
+                    }
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -467,7 +493,7 @@ def _model_factory(
     )
 
 
-def _run_recorded_hindsight(tmp_path: Path) -> NativeRunArtifacts:
+def _run_recorded_hindsight(tmp_path: Path, *, context_error: bool = False) -> NativeRunArtifacts:
     return run_native_vertical_slice(
         output_root=tmp_path / "capsules",
         run_id=RUN_ID,
@@ -483,6 +509,7 @@ def _run_recorded_hindsight(tmp_path: Path) -> NativeRunArtifacts:
             model="fixture-answer-model",
             output="Alice prefers exact evidence.",
             thinking_effort="low",
+            context_error=context_error,
         ),
         answer_role_binding_id=ANSWER_ROLE_ID,
         judge_model_factory=lambda store: _model_factory(
@@ -495,6 +522,32 @@ def _run_recorded_hindsight(tmp_path: Path) -> NativeRunArtifacts:
         ),
         judge_role_binding_id=LME_JUDGE_PROMPT_PACK_ID,
     )
+
+
+def test_model_context_capacity_error_preserves_complete_evidence_without_retry(
+    tmp_path: Path,
+) -> None:
+    from oamb.artifacts.validation.native import _load_native_capsule
+
+    completed = _run_recorded_hindsight(tmp_path, context_error=True)
+    case = completed.case_records[0]
+    snapshot = _load_native_capsule(completed.capsule_root)
+    assert case.error_stage == "answer"
+    assert case.evaluation_disposition == "not_run"
+    assert case.visible_kept_count == case.native_candidate_count == 2
+    assert case.prompt_raw_ref is not None
+    prompt = snapshot.raw_payloads[case.prompt_raw_ref]
+    assert b"Keep it for ten minutes" in prompt
+    assert b"Question date: 2026-01-02T00:00:00+00:00" in prompt
+    assert b'[{"role":"assistant","content":"Keep it for ten minutes' in prompt
+    from oamb.contracts.evidence import AttemptRecordV2
+
+    attempts = [item for item in snapshot.contracts if isinstance(item, AttemptRecordV2)]
+    assert sum(item.stage == "answer" for item in attempts) == 1
+    assert not any(item.stage == "judge" for item in attempts)
+    assert any(b"context_length_exceeded" in raw for raw in snapshot.raw_payloads.values())
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
 
 
 def _run_recorded_hindsight_lme6(
@@ -782,6 +835,57 @@ def test_openviking_session_capsule_rejects_a_resealed_generating_retrieval_requ
     assert "retrieval-request-proof-invalid" in {issue.code for issue in validation.issues}
 
 
+@pytest.mark.parametrize("mutation", ["omit_chunk", "reorder", "label", "text", "truncation"])
+def test_compact_validation_rejects_coherent_evidence_tampering(
+    tmp_path: Path, mutation: str
+) -> None:
+    from oamb.artifacts.validation.native import _load_native_capsule, _visible_context_rule
+
+    completed = _run_recorded_hindsight(tmp_path)
+    case = completed.case_records[0]
+    snapshot = _load_native_capsule(completed.capsule_root)
+    assert _visible_context_rule(snapshot) == ()
+    assert case.native_candidate_count == case.visible_kept_count == 2
+    assert case.visible_truncated_count == 1
+    assert case.visible_decision_ledger_raw_ref is not None
+    assert case.visible_evidence_raw_ref is not None
+    ledger = json.loads(snapshot.raw_payloads[case.visible_decision_ledger_raw_ref])
+    raw_payloads = dict(snapshot.raw_payloads)
+    if mutation == "omit_chunk":
+        ledger["decisions"] = ledger["decisions"][:1]
+        ledger["included_native_ids"] = ledger["included_native_ids"][:1]
+        ledger.update(candidate_count=1, kept_count=1, dropped_count=0, truncated_count=0)
+        case = case.model_copy(
+            update={
+                "native_candidate_count": 1,
+                "visible_kept_count": 1,
+                "visible_truncated_count": 0,
+            }
+        )
+    elif mutation == "reorder":
+        ledger["decisions"].reverse()
+        ledger["included_native_ids"].reverse()
+    elif mutation == "label":
+        ledger["decisions"][1]["label"] = "S2"
+    elif mutation == "text":
+        ledger["decisions"][1]["normalized_text_sha256"] = hashlib.sha256(
+            b"planted different text"
+        ).hexdigest()
+    else:
+        ledger["truncated_count"] = 0
+        case = case.model_copy(update={"visible_truncated_count": 0})
+    assert case.visible_decision_ledger_raw_ref is not None
+    raw_payloads[case.visible_decision_ledger_raw_ref] = json.dumps(ledger).encode()
+    changed = replace(
+        snapshot,
+        raw_payloads=raw_payloads,
+        contracts=tuple(
+            case if item == completed.case_records[0] else item for item in snapshot.contracts
+        ),
+    )
+    assert _visible_context_rule(changed), mutation
+
+
 def test_real_lme_hindsight_and_model_clients_seal_one_root_validatable_capsule(
     tmp_path: Path,
 ) -> None:
@@ -813,6 +917,14 @@ def test_real_lme_hindsight_and_model_clients_seal_one_root_validatable_capsule(
         report_spec=report_spec,
     )
     assert report.summary.completed_cases == 1
+    case_projection = next(item for item in report.record_projections if item.axis == "case")
+    details = dict(case_projection.detail_items)
+    assert details["native_candidate_count"] == str(
+        completed.case_records[0].native_candidate_count
+    )
+    assert details["admitted_native_truncated_count"] == str(
+        completed.case_records[0].visible_truncated_count
+    )
     publication = build_report_derivation(
         model=report,
         report_spec=report_spec,

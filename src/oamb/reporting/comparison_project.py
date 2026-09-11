@@ -76,17 +76,6 @@ RESOURCE_REPORT_DIMENSIONS = (
 )
 WILSON_95_Z = Decimal("1.959963984540054")
 SIX_DECIMAL_PLACES = Decimal("0.000001")
-VISIBLE_EVIDENCE_KEYS = frozenset(
-    {
-        "provider_evidence_identity",
-        "source_unit_id",
-        "evidence_kind",
-        "text",
-        "occurred_start",
-        "occurred_end",
-        "mentioned_at",
-    }
-)
 _BIDI_CONTROL_PATTERN = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _UNSAFE_HTML_TAGS = frozenset(
     {"script", "img", "link", "iframe", "object", "embed", "audio", "video", "source"}
@@ -1945,6 +1934,8 @@ def _judge_decision(payload: bytes, case: Mapping[str, Any]) -> str:
 
 
 def _visible_context_text(snapshot: _CellSnapshot, case: Mapping[str, Any]) -> str:
+    """Preserve the complete rendered context; native validation owns its evidence semantics."""
+
     from oamb.workloads.visible_evidence import count_o200k_tokens, tokenizer_fingerprint
 
     reference = case.get("visible_evidence_raw_ref")
@@ -1957,6 +1948,10 @@ def _visible_context_text(snapshot: _CellSnapshot, case: Mapping[str, Any]) -> s
     payload = snapshot.raw_payloads.get(reference)
     if payload is None:
         raise ComparisonProjectError("answer-visible context raw reference is absent")
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ComparisonProjectError("answer-visible context is not strict UTF-8") from exc
     if (
         reference != expected_hash
         or hashlib.sha256(payload).hexdigest() != reference
@@ -1965,33 +1960,6 @@ def _visible_context_text(snapshot: _CellSnapshot, case: Mapping[str, Any]) -> s
         or count_o200k_tokens(payload) != token_count
     ):
         raise ComparisonProjectError("answer-visible context hash, token, or fingerprint drifted")
-    try:
-        text = payload.decode("utf-8", errors="strict")
-        lines = () if text == "" else text.split("\n")
-        for line in lines:
-            item = json.loads(line, object_pairs_hook=_unique_json_object)
-            if not isinstance(item, dict) or set(item) != VISIBLE_EVIDENCE_KEYS:
-                raise ValueError("visible evidence line has the wrong shape")
-            if not all(
-                isinstance(item[field], str) and item[field]
-                for field in (
-                    "provider_evidence_identity",
-                    "evidence_kind",
-                )
-            ) or not isinstance(item["text"], str):
-                raise ValueError("visible evidence line has empty identity/kind or non-string text")
-            source_unit_id = item["source_unit_id"]
-            if source_unit_id is not None and (
-                not isinstance(source_unit_id, str) or not source_unit_id
-            ):
-                raise ValueError("visible evidence line has an invalid source unit")
-            if any(
-                item[field] is not None and not isinstance(item[field], str)
-                for field in ("occurred_start", "occurred_end", "mentioned_at")
-            ):
-                raise ValueError("visible evidence line has an invalid timestamp")
-    except (UnicodeDecodeError, TypeError, ValueError) as exc:
-        raise ComparisonProjectError("answer-visible context is not strict UTF-8 JSONL") from exc
     return text
 
 

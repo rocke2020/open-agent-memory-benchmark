@@ -142,11 +142,14 @@ class GeneratedFakeWorkload:
         token_count = 0
         for candidate in native_batch.candidates:
             candidate_tokens = len(candidate.content.split())
-            if len(selected) >= policy.max_items:
+            if policy.max_items is not None and len(selected) >= policy.max_items:
                 break
-            if character_count + len(candidate.content) > policy.max_characters:
+            if (
+                policy.max_characters is not None
+                and character_count + len(candidate.content) > policy.max_characters
+            ):
                 break
-            if token_count + candidate_tokens > policy.max_tokens:
+            if policy.max_tokens is not None and token_count + candidate_tokens > policy.max_tokens:
                 break
             selected.append((candidate.native_id, candidate.content))
             character_count += len(candidate.content)

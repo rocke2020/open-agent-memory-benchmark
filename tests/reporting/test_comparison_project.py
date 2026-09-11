@@ -186,17 +186,9 @@ def _write_cell_root(
             "evaluation_disposition": "judged",
             "attempt_ids": [query_attempt_id, answer_attempt_id],
         }
-        injected_context = canonical_json_bytes(
-            {
-                "evidence_kind": "memory",
-                "provider_evidence_identity": f"memory-{cell_index}-{index}",
-                "source_unit_id": f"source-{index}",
-                "text": f"context for {cell.provider_id} case {index + 1}",
-                "occurred_start": None,
-                "occurred_end": None,
-                "mentioned_at": None,
-            }
-        )
+        injected_context = (
+            f"[F1] memory\ncontext for {cell.provider_id} case {index + 1}"
+        ).encode()
         visible_ref = hashlib.sha256(injected_context).hexdigest()
         raw_payloads[visible_ref] = injected_context
         case_document.update(
@@ -209,22 +201,10 @@ def _write_cell_root(
             }
         )
         if include_case_content:
-            injected_context = canonical_json_bytes(
-                {
-                    "evidence_kind": "memory",
-                    "provider_evidence_identity": f"memory-{cell_index}-{index}",
-                    "source_unit_id": (
-                        None if cell.provider_id == "openviking" else f"source-{index}"
-                    ),
-                    "text": (
-                        "context <img src=x> javascript: is text onerror=example "
-                        f"https://example.invalid/ \u202e {cell.provider_id}"
-                    ),
-                    "occurred_start": None,
-                    "occurred_end": None,
-                    "mentioned_at": None,
-                }
-            )
+            injected_context = (
+                "[F1] memory\ncontext <img src=x> javascript: is text onerror=example "
+                f"https://example.invalid/ \u202e {cell.provider_id}"
+            ).encode()
             answer_text = f"answer <script>bad()</script> from {cell.provider_id}"
             answer_payload = canonical_json_bytes(
                 {
@@ -1240,15 +1220,15 @@ def test_project_reports_separated_accounting_and_preserves_unavailable_measurem
     assert accounting["answer_visible_context_tokens"] == {
         "case_count": 6,
         "measured_case_count": 6,
-        "mean": "52",
+        "mean": "11",
         "status": "measured_complete",
-        "total": 312,
+        "total": 66,
     }
     rendered = built.html_path.read_text(encoding="utf-8")
     assert "<th>Answer accuracy</th>" in rendered
     assert "<th>Context tokens</th>" in rendered
     assert "Five decision metrics" in rendered
-    assert "312 total / 52 mean" in rendered
+    assert "66 total / 11 mean" in rendered
     assert "<th>Indexing tokens</th>" in rendered
     assert "<th>Retrieval latency (s)</th>" in rendered
     assert "<th>Indexing time (s)</th>" in rendered
@@ -2704,33 +2684,81 @@ def test_model_output_parser_rejects_multiple_choices_and_hash_mismatch() -> Non
         comparison_project._model_output_text(one, expected_sha256="f" * 64)
 
 
+def test_visible_context_parser_preserves_complete_compact_payload() -> None:
+    from oamb.reporting import comparison_project
+
+    payload = (
+        "[F1] world source=S1\n\n\n[S1] source_chunk native_truncated=true\n"
+        '[{"role":"assistant","content":"Keep it for ten minutes.\n原文'
+    ).encode()
+    reference = hashlib.sha256(payload).hexdigest()
+    snapshot = cast(Any, SimpleNamespace(raw_payloads={reference: payload}))
+    case = {
+        "visible_evidence_byte_count": len(payload),
+        "visible_evidence_raw_ref": reference,
+        "visible_evidence_sha256": reference,
+        "visible_evidence_token_count": count_o200k_tokens(payload),
+        "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
+    }
+
+    assert comparison_project._visible_context_text(snapshot, case) == payload.decode("utf-8")
+
+
 @pytest.mark.parametrize(
-    ("field", "value", "accepted"),
+    ("field", "value"),
     (
-        ("source_unit_id", "", False),
-        ("provider_evidence_identity", "", False),
-        ("evidence_kind", "", False),
-        ("text", "", True),
-        ("text", None, False),
-        ("text", 42, False),
+        ("visible_evidence_byte_count", 0),
+        ("visible_evidence_sha256", "0" * 64),
+        ("visible_evidence_token_count", 0),
+        ("visible_evidence_tokenizer_fingerprint", "0" * 64),
     ),
 )
-def test_visible_context_parser_preserves_empty_text_but_rejects_invalid_fields(
-    field: str, value: object, accepted: bool
+def test_visible_context_parser_rejects_compact_payload_accounting_drift(
+    field: str, value: object
 ) -> None:
     from oamb.reporting import comparison_project
 
-    payload = canonical_json_bytes(
-        {
-            "evidence_kind": "memory",
-            "mentioned_at": None,
-            "occurred_end": None,
-            "occurred_start": None,
-            "provider_evidence_identity": "provider-item",
-            "source_unit_id": None,
-            "text": "context",
-            field: value,
-        }
+    payload = b"[F1] world\ncontext"
+    reference = hashlib.sha256(payload).hexdigest()
+    snapshot = cast(Any, SimpleNamespace(raw_payloads={reference: payload}))
+    case = {
+        "visible_evidence_byte_count": len(payload),
+        "visible_evidence_raw_ref": reference,
+        "visible_evidence_sha256": reference,
+        "visible_evidence_token_count": count_o200k_tokens(payload),
+        "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
+        field: value,
+    }
+
+    with pytest.raises(comparison_project.ComparisonProjectError, match="drifted"):
+        comparison_project._visible_context_text(snapshot, case)
+
+
+def test_visible_context_parser_rejects_invalid_utf8() -> None:
+    from oamb.reporting import comparison_project
+
+    payload = b"\xff"
+    reference = hashlib.sha256(payload).hexdigest()
+    snapshot = cast(Any, SimpleNamespace(raw_payloads={reference: payload}))
+    case = {
+        "visible_evidence_byte_count": len(payload),
+        "visible_evidence_raw_ref": reference,
+        "visible_evidence_sha256": reference,
+        "visible_evidence_token_count": 1,
+        "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
+    }
+
+    with pytest.raises(comparison_project.ComparisonProjectError, match="strict UTF-8"):
+        comparison_project._visible_context_text(snapshot, case)
+
+
+def test_visible_context_parser_preserves_unicode_line_separators() -> None:
+    from oamb.reporting import comparison_project
+
+    payload = (
+        "[F1] world\nbefore\u2028after\n\n[S1] source_chunk\nUSER: first\nASSISTANT: second".encode(
+            "utf-8"
+        )
     )
     reference = hashlib.sha256(payload).hexdigest()
     snapshot = cast(Any, SimpleNamespace(raw_payloads={reference: payload}))
@@ -2742,11 +2770,7 @@ def test_visible_context_parser_preserves_empty_text_but_rejects_invalid_fields(
         "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
     }
 
-    if accepted:
-        assert comparison_project._visible_context_text(snapshot, case) == payload.decode("utf-8")
-    else:
-        with pytest.raises(comparison_project.ComparisonProjectError, match="strict UTF-8 JSONL"):
-            comparison_project._visible_context_text(snapshot, case)
+    assert comparison_project._visible_context_text(snapshot, case) == payload.decode("utf-8")
 
 
 def test_visible_context_parser_accepts_an_empty_evidence_sequence() -> None:
@@ -2766,33 +2790,6 @@ def test_visible_context_parser_accepts_an_empty_evidence_sequence() -> None:
     assert comparison_project._visible_context_text(snapshot, case) == ""
 
 
-def test_visible_context_parser_treats_unicode_line_separator_as_json_text() -> None:
-    from oamb.reporting import comparison_project
-
-    payload = canonical_json_bytes(
-        {
-            "evidence_kind": "memory",
-            "mentioned_at": None,
-            "occurred_end": None,
-            "occurred_start": None,
-            "provider_evidence_identity": "provider-item",
-            "source_unit_id": None,
-            "text": "before\u2028after",
-        }
-    )
-    reference = hashlib.sha256(payload).hexdigest()
-    snapshot = cast(Any, SimpleNamespace(raw_payloads={reference: payload}))
-    case = {
-        "visible_evidence_byte_count": len(payload),
-        "visible_evidence_raw_ref": reference,
-        "visible_evidence_sha256": reference,
-        "visible_evidence_token_count": count_o200k_tokens(payload),
-        "visible_evidence_tokenizer_fingerprint": tokenizer_fingerprint(),
-    }
-
-    assert comparison_project._visible_context_text(snapshot, case) == payload.decode("utf-8")
-
-
 @pytest.mark.parametrize(
     ("cell_index", "path", "body"),
     (
@@ -2802,8 +2799,6 @@ def test_visible_context_parser_treats_unicode_line_separator_as_json_text() -> 
             {
                 "query": "question",
                 "types": ["world", "experience"],
-                "budget": "high",
-                "max_tokens": 32768,
                 "query_timestamp": None,
                 "trace": True,
                 "include": {"entities": None, "chunks": {}},

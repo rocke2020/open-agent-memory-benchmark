@@ -1007,11 +1007,14 @@ def build_mab_visible_evidence(
         item = _mab_evidence_item_bytes(candidate, identity, candidate.content)
         proposed = b"\n".join((*lines, item))
         exceeded: str | None = None
-        if len(lines) + 1 > policy.max_items:
+        if policy.max_items is not None and len(lines) + 1 > policy.max_items:
             exceeded = "max_items"
-        elif len(proposed.decode("utf-8", errors="strict")) > policy.max_characters:
+        elif (
+            policy.max_characters is not None
+            and len(proposed.decode("utf-8", errors="strict")) > policy.max_characters
+        ):
             exceeded = "max_characters"
-        elif count_o200k_tokens(proposed) > policy.max_tokens:
+        elif policy.max_tokens is not None and count_o200k_tokens(proposed) > policy.max_tokens:
             exceeded = "max_tokens"
         if exceeded is None:
             lines.append(item)
@@ -1024,7 +1027,7 @@ def build_mab_visible_evidence(
         first_exceeded = exceeded
         truncated = (
             _truncate_mab_item_to_tokens(candidate, identity, lines, policy.max_tokens)
-            if exceeded == "max_tokens"
+            if exceeded == "max_tokens" and policy.max_tokens is not None
             else None
         )
         if truncated is not None:

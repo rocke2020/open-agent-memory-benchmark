@@ -27,6 +27,7 @@ from oamb.contracts.accounting import (
 )
 from oamb.contracts.evidence import (
     AttemptRecordV2,
+    AttemptRecordV4,
     CapsuleManifest,
     CaseEvaluationDisposition,
     CaseRecordV3,
@@ -45,6 +46,7 @@ from oamb.contracts.reporting import (
     ReportRecordProjection,
     RunReportModelV3,
 )
+from oamb.contracts.schema import parse_contract
 from oamb.contracts.specifications import (
     CaseManifest,
     ReportSpec,
@@ -90,7 +92,7 @@ class _NativeReportRecords:
     run_spec: RunSpec | None
     plans: tuple[NativePlanRecord, ...]
     cases: tuple[CaseRecordV3, ...]
-    attempts: tuple[AttemptRecordV2, ...]
+    attempts: tuple[AttemptRecordV2 | AttemptRecordV4, ...]
     history_attempts: tuple[HistoryAttemptRecord, ...]
     tokens: tuple[TokenRecord, ...]
     resources: tuple[ResourceUsageRecord, ...]
@@ -108,10 +110,10 @@ NATIVE_REPORT_REDUCER_CONTRACT = {
         "case_manifest@1",
         "ingestion_plan_record@2|3",
         "case_record@3",
-        "attempt_record@2",
-        "token_usage_record@1|2|3",
-        "resource_usage_record@1",
-        "cost_record@1",
+        "attempt_record@2|4",
+        "token_usage_record@1|2|3|5",
+        "resource_usage_record@1|2",
+        "cost_record@1|2",
     ),
     "output_schema": "run_report_model@3",
     "plan_order": "case_manifest.ingestion_plans",
@@ -200,6 +202,11 @@ def reduce_native_run_report(
     case_manifest = records.case_manifest
     plans = _ordered_plans(records.plans, case_manifest)
     cases = _ordered_cases(records.cases, case_manifest)
+    included_context_ids = {
+        context_id
+        for plan in plans
+        for context_id in plan.ordered_member_context_manifest_entry_ids
+    }
     attempts = tuple(sorted(records.attempts, key=lambda item: (item.started_at, item.attempt_id)))
     summary = _completion_summary(manifest.run_id, case_manifest, plans, cases)
     accounting = _accounting_summary(
@@ -255,6 +262,10 @@ def reduce_native_run_report(
         limitations.append(
             f"partial ingestion: {skipped_source_count} source(s) were skipped after settled "
             "batch failure; projected provider state may include partial writes"
+        )
+    if len(cases) < len(case_manifest.cases):
+        limitations.append(
+            f"Selected run covers {len(cases)} of {len(case_manifest.cases)} source-manifest questions; this is not a complete dataset result."
         )
     return build_run_report_model(
         report_spec_hash=canonical_sha256(report_spec),
@@ -313,7 +324,9 @@ def reduce_native_run_report(
         mab65_reduction=mab65_reduction,
         measurement_lines=accounting.lines,
         logical_context_ids=tuple(
-            item.context_manifest_entry_id for item in case_manifest.logical_contexts
+            item.context_manifest_entry_id
+            for item in case_manifest.logical_contexts
+            if item.context_manifest_entry_id in included_context_ids
         ),
         ingestion_occurrence_ids=tuple(item.ingestion_occurrence_id for item in plans),
         case_occurrence_ids=tuple(item.case_occurrence_id for item in cases),
@@ -472,7 +485,7 @@ def _load_report_records(
     run_specs: list[RunSpec] = []
     plans: list[NativePlanRecord] = []
     cases: list[CaseRecordV3] = []
-    attempts: list[AttemptRecordV2] = []
+    attempts: list[AttemptRecordV2 | AttemptRecordV4] = []
     history_attempts: list[HistoryAttemptRecord] = []
     tokens: list[TokenRecord] = []
     resources: list[ResourceUsageRecord] = []
@@ -520,15 +533,24 @@ def _load_report_records(
             elif graph_index == 0 and entry.record_kind == "case_record":
                 cases.append(CaseRecordV3.model_validate_json(content))
             elif entry.record_kind == "attempt_record":
-                attempts.append(AttemptRecordV2.model_validate_json(content))
+                attempt = parse_contract(document)
+                if not isinstance(attempt, (AttemptRecordV2, AttemptRecordV4)):
+                    raise NativeReportReductionError("unsupported native attempt record")
+                attempts.append(attempt)
             elif entry.record_kind == "history_attempt_record":
                 history_attempts.append(HistoryAttemptRecord.model_validate_json(content))
             elif entry.record_kind == "token_usage_record":
                 tokens.append(_parse_token_usage(content))
             elif entry.record_kind == "resource_usage_record":
-                resources.append(ResourceUsageRecord.model_validate_json(content))
+                resource = parse_contract(document)
+                if not isinstance(resource, ResourceUsageRecord):
+                    raise NativeReportReductionError("unsupported native resource record")
+                resources.append(resource)
             elif entry.record_kind == "cost_record":
-                costs.append(CostRecord.model_validate_json(content))
+                cost = parse_contract(document)
+                if not isinstance(cost, CostRecord):
+                    raise NativeReportReductionError("unsupported native cost record")
+                costs.append(cost)
     if len(case_manifests) != 1 or len(run_specs) > 1 or not plans or not cases:
         raise NativeReportReductionError("native capsule report inventory is incomplete")
     return _NativeReportRecords(
@@ -551,10 +573,13 @@ def _ordered_plans(
     manifest: CaseManifest,
 ) -> tuple[NativePlanRecord, ...]:
     by_plan = {item.ingestion_plan_id: item for item in values}
-    try:
-        return tuple(by_plan[item.ingestion_plan_id] for item in manifest.ingestion_plans)
-    except KeyError as exc:
-        raise NativeReportReductionError("native plan records do not close the manifest") from exc
+    if not set(by_plan) <= {item.ingestion_plan_id for item in manifest.ingestion_plans}:
+        raise NativeReportReductionError("native plan records are outside the manifest")
+    return tuple(
+        by_plan[item.ingestion_plan_id]
+        for item in manifest.ingestion_plans
+        if item.ingestion_plan_id in by_plan
+    )
 
 
 def _ordered_cases(
@@ -562,10 +587,13 @@ def _ordered_cases(
     manifest: CaseManifest,
 ) -> tuple[CaseRecordV3, ...]:
     by_case = {item.case_manifest_entry_id: item for item in values}
-    try:
-        return tuple(by_case[item.case_manifest_entry_id] for item in manifest.cases)
-    except KeyError as exc:
-        raise NativeReportReductionError("native case records do not close the manifest") from exc
+    if not set(by_case) <= {item.case_manifest_entry_id for item in manifest.cases}:
+        raise NativeReportReductionError("native case records are outside the manifest")
+    return tuple(
+        by_case[item.case_manifest_entry_id]
+        for item in manifest.cases
+        if item.case_manifest_entry_id in by_case
+    )
 
 
 def _completion_summary(
@@ -583,10 +611,16 @@ def _completion_summary(
     }
     return CompletionSummaryV3(
         run_id=run_id,
-        intended_logical_contexts=len(manifest.logical_contexts),
-        intended_ingestion_plans=len(manifest.ingestion_plans),
+        intended_logical_contexts=len(
+            {
+                context_id
+                for plan in plans
+                for context_id in plan.ordered_member_context_manifest_entry_ids
+            }
+        ),
+        intended_ingestion_plans=len(plans),
         ready_ingestion_plans=sum(item.state == IngestionPlanState.SEALED for item in plans),
-        intended_cases=len(manifest.cases),
+        intended_cases=len(cases),
         terminal_cases=sum(item.state in terminal_states for item in cases),
         completed_cases=sum(item.state == CaseState.COMPLETED for item in cases),
         errored_cases=sum(item.state == CaseState.ERROR for item in cases),
@@ -643,6 +677,11 @@ def build_native_accounting_validation_input(
         read_regular_file(capsule_root / "capsule-manifest.json")
     )
     records = _load_report_records(capsule_root, manifest)
+    legacy_attempts = tuple(item for item in records.attempts if isinstance(item, AttemptRecordV2))
+    if len(legacy_attempts) != len(records.attempts):
+        raise NativeReportReductionError(
+            "standalone accounting validation does not support live attempt records"
+        )
     plans = _ordered_plans(records.plans, records.case_manifest)
     return accounting_validation_input(
         token_records=records.tokens,
@@ -658,7 +697,7 @@ def build_native_accounting_validation_input(
             item.ingestion_occurrence_id for item in (*plans, *records.history_attempts)
         ),
         expected_attempt_ids=frozenset(item.attempt_id for item in records.attempts),
-        attempts=records.attempts,
+        attempts=legacy_attempts,
         require_attempt_accounting_closure=True,
     )
 
@@ -706,19 +745,10 @@ def _accounting_record_views(
 
 
 def _parse_token_usage(content: bytes) -> TokenRecord:
-    try:
-        schema_version = int(json.loads(content)["schema_version"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise NativeReportReductionError("native token usage has no schema version") from exc
-    if schema_version == 1:
-        return TokenUsageRecord.model_validate_json(content)
-    if schema_version == 2:
-        return TokenUsageRecordV2.model_validate_json(content)
-    if schema_version == 3:
-        return TokenUsageRecordV3.model_validate_json(content)
-    raise NativeReportReductionError(
-        f"unsupported native token usage schema version: {schema_version}"
-    )
+    record = parse_contract(json.loads(content))
+    if not isinstance(record, (TokenUsageRecord, TokenUsageRecordV2, TokenUsageRecordV3)):
+        raise NativeReportReductionError("unsupported native token usage record")
+    return record
 
 
 def _accounting_owner(value: str) -> AccountingOwner:
@@ -736,7 +766,7 @@ def _record_projections(
     records: _NativeReportRecords,
     plans: tuple[NativePlanRecord, ...],
     cases: tuple[CaseRecordV3, ...],
-    attempts: tuple[AttemptRecordV2, ...],
+    attempts: tuple[AttemptRecordV2 | AttemptRecordV4, ...],
     *,
     capsule_root: Path,
     report_spec: ReportSpec,
@@ -792,6 +822,8 @@ def _record_projections(
             for plan in plans
             if context.context_manifest_entry_id in plan.ordered_member_context_manifest_entry_ids
         )
+        if not member_plans:
+            continue
         projections.append(
             build_report_record_projection(
                 record_id=context.context_manifest_entry_id,
@@ -935,13 +967,17 @@ def _record_projections(
                     )
                 ),
                 latency_microseconds=None,
-                context_view_tokens=context_tokens,
+                context_view_tokens=case.visible_evidence_token_count,
                 declared_usage=declared_usage,
                 detail_items=(
                     ("case_manifest_entry_id", case.case_manifest_entry_id),
                     ("ingestion_occurrence_id", case.ingestion_occurrence_id),
                     ("attempt_ids", ",".join(case.attempt_ids)),
                     ("parsed_answer_sha256", case.parsed_answer_sha256 or "unavailable"),
+                    ("native_candidate_count", str(case.native_candidate_count)),
+                    ("visible_kept_count", str(case.visible_kept_count)),
+                    ("visible_dropped_count", str(case.visible_dropped_count)),
+                    ("admitted_native_truncated_count", str(case.visible_truncated_count)),
                 ),
             )
         )

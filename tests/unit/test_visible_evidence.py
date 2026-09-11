@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import replace
 
 import pytest
@@ -43,18 +42,9 @@ def test_lme_evidence_preserves_provider_order_deduplicates_and_counts_exact_byt
     )
 
     visible = build_lme_visible_evidence(batch, LME_VISIBLE_EVIDENCE_POLICY)
-    lines = visible.canonical_bytes.decode().splitlines()
-
-    assert len(lines) == 2
-    assert list(json.loads(lines[0])) == [
-        "provider_evidence_identity",
-        "source_unit_id",
-        "evidence_kind",
-        "text",
-        "occurred_start",
-        "occurred_end",
-        "mentioned_at",
-    ]
+    assert visible.canonical_bytes == (
+        "[F1] memory\n你好 <|endoftext|>\n\n[F2] memory\nsecond".encode()
+    )
     assert visible.included_native_ids == ("native-1", "native-3")
     assert visible.candidate_count == 3
     assert visible.kept_count == 2
@@ -67,7 +57,7 @@ def test_lme_evidence_preserves_provider_order_deduplicates_and_counts_exact_byt
     assert not visible.canonical_bytes.endswith(b"\n")
 
 
-def test_lme_evidence_stops_at_first_whole_item_and_conflicting_identity_fails() -> None:
+def test_lme_evidence_rejects_a_harness_ceiling_and_conflicting_identity() -> None:
     batch = NativeEvidenceBatch(
         raw_reference=RawReferenceHandle("a" * 64),
         candidates=(_candidate("id-1", "first", 1), _candidate("id-2", "second", 2)),
@@ -78,11 +68,8 @@ def test_lme_evidence_stops_at_first_whole_item_and_conflicting_identity_fails()
         max_tokens=LME_VISIBLE_EVIDENCE_POLICY.max_tokens,
     )
 
-    visible = build_lme_visible_evidence(batch, policy)
-
-    assert visible.kept_count == 1
-    assert visible.dropped_count == 1
-    assert visible.first_exceeded_limit == "max_items"
+    with pytest.raises(ValueError, match="without.*ceiling"):
+        build_lme_visible_evidence(batch, policy)
     conflict = NativeEvidenceBatch(
         raw_reference=batch.raw_reference,
         candidates=(_candidate("same", "one", 1), _candidate("same", "two", 2)),
@@ -91,16 +78,58 @@ def test_lme_evidence_stops_at_first_whole_item_and_conflicting_identity_fails()
         build_lme_visible_evidence(conflict, LME_VISIBLE_EVIDENCE_POLICY)
 
 
-def test_lme_evidence_rejects_a_native_read_truncation() -> None:
-    truncated = replace(_candidate("id-1", "partial", 1), native_truncated=True)
-
-    with pytest.raises(ValueError, match="native truncation"):
-        build_lme_visible_evidence(
-            NativeEvidenceBatch(
-                raw_reference=RawReferenceHandle("a" * 64),
-                candidates=(truncated,),
-            )
+def test_lme_evidence_keeps_partial_chunk_and_complete_fact_with_exact_labels() -> None:
+    fact = replace(
+        _candidate("fact-id", "Leave it for ten minutes.", 1),
+        evidence_kind="world",
+        native_reference="chunk-id",
+        occurred_start="2023-04-18T10:00:00+02:00",
+        mentioned_at="2023-04-19T00:00:00+00:00",
+    )
+    chunk = replace(
+        _candidate("chunk:chunk-id", '[{"role":"assistant","content":"ten minutes', 2),
+        evidence_kind="source_chunk",
+        native_reference="chunk-id",
+        native_truncated=True,
+    )
+    visible = build_lme_visible_evidence(
+        NativeEvidenceBatch(
+            raw_reference=RawReferenceHandle("a" * 64),
+            candidates=(fact, chunk),
         )
+    )
+    assert visible.canonical_bytes == (
+        b"[F1] world source=S1 occurred_start=2023-04-18T08:00:00.000000+00:00 "
+        b"mentioned_at=2023-04-19T00:00:00.000000+00:00\nLeave it for ten minutes.\n\n"
+        b'[S1] source_chunk native_truncated=true\n[{"role":"assistant","content":"ten minutes'
+    )
+    assert (
+        visible.candidate_count,
+        visible.kept_count,
+        visible.dropped_count,
+        visible.truncated_count,
+    ) == (2, 2, 0, 1)
+    assert [d.disposition for d in visible.decisions] == ["kept", "kept"]
+    assert [d.label for d in visible.decisions] == ["F1", "S1"]
+
+
+def test_lme_evidence_preserves_content_beyond_all_former_limits() -> None:
+    text = "marker: alpha beta gamma delta " * 12000
+    candidates = tuple(
+        _candidate(f"id-{i}", text if i == 257 else str(i), i) for i in range(1, 258)
+    )
+    visible = build_lme_visible_evidence(
+        NativeEvidenceBatch(
+            raw_reference=RawReferenceHandle("a" * 64),
+            candidates=candidates,
+        )
+    )
+    assert visible.kept_count == 257
+    assert visible.dropped_count == 0
+    assert visible.first_exceeded_limit is None
+    assert visible.character_count > 262144
+    assert visible.token_count > 65536
+    assert visible.canonical_bytes.endswith(text.encode())
 
 
 def test_lme_evidence_preserves_empty_provider_text_in_order() -> None:
@@ -113,9 +142,7 @@ def test_lme_evidence_preserves_empty_provider_text_in_order() -> None:
     )
 
     visible = build_lme_visible_evidence(batch)
-    items = [json.loads(line) for line in visible.canonical_bytes.splitlines()]
-
-    assert [item["text"] for item in items] == ["", "provider content"]
+    assert visible.canonical_bytes == b"[F1] memory\n\n\n[F2] memory\nprovider content"
     assert visible.included_native_ids == ("native-1", "native-2")
     assert visible.kept_count == visible.candidate_count == 2
     assert visible.dropped_count == 0

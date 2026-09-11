@@ -63,7 +63,6 @@ from .profiles import (
 from .projection import ProjectionSnapshot, build_projection
 
 _BANK_PAGE_LIMIT = 1000
-_RECALL_MAX_TOKENS = 32768
 
 
 class HindsightAdapter:
@@ -645,8 +644,6 @@ class HindsightAdapter:
             {
                 "query": query,
                 "types": ["world", "experience"],
-                "budget": "high",
-                "max_tokens": _RECALL_MAX_TOKENS,
                 "query_timestamp": request.query_timestamp,
                 "trace": True,
                 "include": {"entities": None, "chunks": {}},

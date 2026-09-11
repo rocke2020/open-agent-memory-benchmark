@@ -277,9 +277,13 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         "model_max_attempts": 6,
         "model_transport_max_retries": 2,
         "max_parallel_datasets": 1,
-        "max_parallel_history_ingestions_per_provider": 2,
+        "max_parallel_history_ingestions_per_provider": (
+            source_configuration.evaluation_controls.max_parallel_history_ingestions_per_provider
+        ),
         "max_parallel_providers_per_dataset": 3,
-        "max_parallel_questions_per_provider": 2,
+        "max_parallel_questions_per_provider": (
+            source_configuration.evaluation_controls.max_parallel_questions_per_provider
+        ),
         "max_retries_per_operation": 2,
         "operation_timeout_seconds": 900,
         "per_cell_base_operation_count": 3_307,

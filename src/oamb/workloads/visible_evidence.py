@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from functools import cache
 from importlib.metadata import version
@@ -23,9 +24,9 @@ TOKENIZER_PACKAGE = "tiktoken"
 TOKENIZER_VERSION = "0.14.0"
 TOKENIZER_ENCODING = "o200k_base"
 LME_VISIBLE_EVIDENCE_POLICY = VisibleEvidencePolicy(
-    max_items=256,
-    max_characters=262_144,
-    max_tokens=32_768,
+    max_items=None,
+    max_characters=None,
+    max_tokens=None,
 )
 
 
@@ -99,44 +100,57 @@ def verify_visible_evidence_hash(evidence: VisibleEvidence) -> None:
         raise ValueError("visible evidence hash does not match its exact bytes")
 
 
-def _item_bytes(candidate: NativeEvidenceCandidate, identity: str) -> bytes:
-    if not candidate.evidence_kind:
-        raise ValueError("visible evidence requires a non-empty kind")
-    item = {
-        "provider_evidence_identity": identity,
-        "source_unit_id": candidate.source_unit_id,
-        "evidence_kind": candidate.evidence_kind,
-        "text": candidate.content,
-        "occurred_start": _canonical_timestamp(candidate.occurred_start),
-        "occurred_end": _canonical_timestamp(candidate.occurred_end),
-        "mentioned_at": _canonical_timestamp(candidate.mentioned_at),
-    }
-    return json.dumps(
-        item,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
+def render_compact_evidence(
+    candidates: Sequence[NativeEvidenceCandidate],
+) -> tuple[bytes, tuple[str, ...]]:
+    """Render unchanged evidence text with deterministic short source references."""
+
+    labels: list[str] = []
+    fact_count = source_count = 0
+    source_labels: dict[str, str] = {}
+    for candidate in candidates:
+        if candidate.evidence_kind == "source_chunk":
+            source_count += 1
+            label = f"S{source_count}"
+            if candidate.native_reference is not None:
+                source_labels[candidate.native_reference] = label
+        else:
+            fact_count += 1
+            label = f"F{fact_count}"
+        labels.append(label)
+    blocks: list[str] = []
+    for candidate, label in zip(candidates, labels, strict=True):
+        if not candidate.evidence_kind:
+            raise ValueError("visible evidence requires a non-empty kind")
+        header = [f"[{label}]", candidate.evidence_kind]
+        if candidate.evidence_kind != "source_chunk":
+            source_label = source_labels.get(candidate.native_reference or "")
+            if source_label is not None:
+                header.append(f"source={source_label}")
+        for name in ("occurred_start", "occurred_end", "mentioned_at"):
+            timestamp = _canonical_timestamp(getattr(candidate, name))
+            if timestamp is not None:
+                header.append(f"{name}={timestamp}")
+        if candidate.native_truncated:
+            header.append("native_truncated=true")
+        blocks.append(" ".join(header) + "\n" + candidate.content)
+    return "\n\n".join(blocks).encode("utf-8"), tuple(labels)
 
 
 def build_lme_visible_evidence(
     native_batch: NativeEvidenceBatch,
     policy: VisibleEvidencePolicy = LME_VISIBLE_EVIDENCE_POLICY,
 ) -> VisibleEvidence:
-    """Keep complete JSONL items until the first frozen ceiling is exceeded."""
+    """Preserve provider-returned evidence without a harness admission ceiling."""
 
+    if policy != LME_VISIBLE_EVIDENCE_POLICY:
+        raise ValueError("LongMemEval renders without a harness evidence ceiling")
     seen_content: dict[str, str] = {}
-    lines: list[bytes] = []
-    included_ids: list[str] = []
+    kept: list[NativeEvidenceCandidate] = []
     decisions: list[EvidenceDecision] = []
-    stopped = False
-    first_exceeded: str | None = None
-
     for expected_rank, candidate in enumerate(native_batch.candidates, start=1):
         if candidate.native_rank_1_indexed != expected_rank:
             raise ValueError("native evidence ranks must preserve provider order")
-        if candidate.native_truncated:
-            raise ValueError("visible evidence rejects native truncation")
         identity = _identity(candidate)
         text_hash = hashlib.sha256(candidate.content.encode()).hexdigest()
         previous_hash = seen_content.get(identity)
@@ -144,77 +158,35 @@ def build_lme_visible_evidence(
             raise EvidenceConflictError(
                 f"provider evidence identity has conflicting content: {identity}"
             )
-        if previous_hash == text_hash:
-            decisions.append(
-                EvidenceDecision(
-                    native_id=candidate.native_id,
-                    provider_evidence_identity=identity,
-                    normalized_text_sha256=text_hash,
-                    disposition="duplicate",
-                    reason="duplicate_identity_and_text",
-                )
-            )
-            continue
-        seen_content[identity] = text_hash
-        if stopped:
-            decisions.append(
-                EvidenceDecision(
-                    native_id=candidate.native_id,
-                    provider_evidence_identity=identity,
-                    normalized_text_sha256=text_hash,
-                    disposition="budget_dropped",
-                    reason=first_exceeded,
-                )
-            )
-            continue
-        item = _item_bytes(candidate, identity)
-        proposed = b"\n".join((*lines, item))
-        exceeded: str | None = None
-        if len(lines) + 1 > policy.max_items:
-            exceeded = "max_items"
-        elif len(proposed.decode("utf-8")) > policy.max_characters:
-            exceeded = "max_characters"
-        elif count_o200k_tokens(proposed) > policy.max_tokens:
-            exceeded = "max_tokens"
-        if exceeded is not None:
-            stopped = True
-            first_exceeded = exceeded
-            decisions.append(
-                EvidenceDecision(
-                    native_id=candidate.native_id,
-                    provider_evidence_identity=identity,
-                    normalized_text_sha256=text_hash,
-                    disposition="budget_dropped",
-                    reason=exceeded,
-                )
-            )
-            continue
-        lines.append(item)
-        included_ids.append(candidate.native_id)
+        duplicate = previous_hash == text_hash
+        if not duplicate:
+            kept.append(candidate)
+            seen_content[identity] = text_hash
         decisions.append(
             EvidenceDecision(
                 native_id=candidate.native_id,
                 provider_evidence_identity=identity,
                 normalized_text_sha256=text_hash,
-                disposition="kept",
-                reason=None,
+                disposition="duplicate" if duplicate else "kept",
+                reason="duplicate_identity_and_text" if duplicate else None,
             )
         )
-
-    payload = b"\n".join(lines)
-    if native_batch.candidates and not payload:
-        raise ValueError("non-empty native evidence produced an empty visible context")
-    dropped = sum(item.disposition != "kept" for item in decisions)
+    payload, labels = render_compact_evidence(kept)
+    labels_by_identity = dict(zip((_identity(item) for item in kept), labels, strict=True))
+    decisions = [
+        replace(item, label=labels_by_identity[item.provider_evidence_identity])
+        for item in decisions
+    ]
     return VisibleEvidence(
         canonical_bytes=payload,
         sha256=hashlib.sha256(payload).hexdigest(),
-        included_native_ids=tuple(included_ids),
+        included_native_ids=tuple(item.native_id for item in kept),
         token_count=count_o200k_tokens(payload),
         candidate_count=len(native_batch.candidates),
-        kept_count=len(lines),
-        dropped_count=dropped,
-        truncated_count=0,
-        first_exceeded_limit=first_exceeded,
+        kept_count=len(kept),
+        dropped_count=len(decisions) - len(kept),
+        truncated_count=sum(item.native_truncated for item in kept),
+        first_exceeded_limit=None,
         decisions=tuple(decisions),
         payload_byte_count=len(payload),
         character_count=len(payload.decode("utf-8")),

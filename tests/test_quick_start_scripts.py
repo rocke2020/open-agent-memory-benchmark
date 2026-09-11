@@ -1965,12 +1965,14 @@ def test_full_run_logs_saved_question_updates_before_command_finishes(
     live_output = result.stdout.split("fixture-run-active\n", 1)[1].split(
         "fixture-run-finished\n", 1
     )[0]
-    for count, percent in ((47, 78), (48, 80)) if resume else ((1, 1), (2, 3)):
-        assert any(
-            line.startswith("provider=openviking status=running, elapsed=")
-            and line.endswith(f"completed_questions={count} ({count}/60, {percent}%)")
-            for line in live_output.splitlines()
-        ), result.stdout
+    # A polling monitor can coalesce consecutive writes; the latest update must
+    # still be observable while the command is running, before its final output.
+    count, percent = (48, 80) if resume else (2, 3)
+    assert any(
+        line.startswith("provider=openviking status=running, elapsed=")
+        and line.endswith(f"completed_questions={count} ({count}/60, {percent}%)")
+        for line in live_output.splitlines()
+    ), result.stdout
     if resume:
         for provider in ("hindsight", "mem0"):
             assert (

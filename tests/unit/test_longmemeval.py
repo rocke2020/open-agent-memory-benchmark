@@ -399,10 +399,15 @@ def test_answer_renderer_binds_exact_visible_evidence_bytes() -> None:
     lme = require_longmemeval()
     evidence = b'{"text":"literal <|endoftext|>"}'
 
-    rendered = lme.render_lme_answer_prompt(question="What is literal?", evidence=evidence)
+    rendered = lme.render_lme_answer_prompt(
+        question="What is literal?",
+        evidence=evidence,
+        question_timestamp="2023-04-18T00:00:00+00:00",
+    )
 
     assert rendered.prompt_pack_id == "oamb-lme-answer-v1"
     assert evidence in rendered.canonical_bytes
+    assert b"Question date: 2023-04-18T00:00:00+00:00" in rendered.canonical_bytes
     assert rendered.sha256 == hashlib.sha256(rendered.canonical_bytes).hexdigest()
 
 
@@ -457,7 +462,7 @@ def test_lme_workload_rejects_visible_evidence_policy_drift() -> None:
         )
     )
     changed_policy = LME_VISIBLE_EVIDENCE_POLICY.__class__(
-        max_items=LME_VISIBLE_EVIDENCE_POLICY.max_items - 1,
+        max_items=1,
         max_characters=LME_VISIBLE_EVIDENCE_POLICY.max_characters,
         max_tokens=LME_VISIBLE_EVIDENCE_POLICY.max_tokens,
     )

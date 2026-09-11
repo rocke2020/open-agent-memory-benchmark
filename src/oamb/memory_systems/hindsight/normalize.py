@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Final
 
 from oamb.contracts.ports import NativeEvidenceCandidate
@@ -133,12 +134,13 @@ def normalize_recall(
         raise ValueError("Hindsight recall returned unrequested source facts")
     if document["trace"] is not None and not isinstance(document["trace"], dict):
         raise ValueError("Hindsight recall trace must be an object or null")
-    _chunks(document.get("chunks", {}))
+    chunks = _chunks(document.get("chunks", {}))
     results = document["results"]
     if not isinstance(results, list):
         raise ValueError("Hindsight recall results must be an array")
 
-    candidates: list[NativeEvidenceCandidate] = []
+    facts: list[NativeEvidenceCandidate] = []
+    chunk_sources: dict[str, str] = {}
     seen_ids: set[str] = set()
     for rank, raw_result in enumerate(results, start=1):
         result = _closed_object(
@@ -175,11 +177,15 @@ def normalize_recall(
                     "Hindsight recall result names an unknown source document"
                 ) from exc
         chunk_id = _nullable_string(result.get("chunk_id"), "chunk_id")
+        if chunk_id is not None and chunk_id in chunks and source_unit_id is not None:
+            previous_source = chunk_sources.setdefault(chunk_id, source_unit_id)
+            if previous_source != source_unit_id:
+                raise ValueError("Hindsight recall chunk has conflicting source identity")
         occurred_start = _nullable_string(result.get("occurred_start"), "occurred_start")
         occurred_end = _nullable_string(result.get("occurred_end"), "occurred_end")
         mentioned_at = _nullable_string(result.get("mentioned_at"), "mentioned_at")
         _nullable_string(result.get("context"), "context")
-        candidates.append(
+        facts.append(
             NativeEvidenceCandidate(
                 native_id=memory_id,
                 native_rank_1_indexed=rank,
@@ -195,4 +201,36 @@ def normalize_recall(
                 native_truncated=False,
             )
         )
+    if any(f"chunk:{chunk_id}" in seen_ids for chunk_id in chunks):
+        raise ValueError("Hindsight recall fact and chunk identity collision")
+
+    candidates: list[NativeEvidenceCandidate] = []
+    emitted_chunks: set[str] = set()
+
+    def append_chunk(chunk_id: str) -> None:
+        if chunk_id in emitted_chunks or chunk_id not in chunks:
+            return
+        chunk = chunks[chunk_id]
+        identity = f"chunk:{chunk_id}"
+        candidates.append(
+            NativeEvidenceCandidate(
+                native_id=identity,
+                native_rank_1_indexed=len(candidates) + 1,
+                content=chunk["text"],
+                native_score=None,
+                provider_evidence_identity=identity,
+                source_unit_id=chunk_sources.get(chunk_id),
+                evidence_kind="source_chunk",
+                native_reference=chunk_id,
+                native_truncated=chunk["truncated"],
+            )
+        )
+        emitted_chunks.add(chunk_id)
+
+    for fact in facts:
+        candidates.append(replace(fact, native_rank_1_indexed=len(candidates) + 1))
+        if fact.native_reference is not None:
+            append_chunk(fact.native_reference)
+    for chunk_id in chunks:
+        append_chunk(chunk_id)
     return tuple(candidates)

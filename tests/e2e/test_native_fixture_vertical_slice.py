@@ -3864,6 +3864,61 @@ def test_validated_native_capsule_reduces_and_publishes_without_transient_receip
     assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
 
 
+def test_current_live_record_versions_publish_a_single_capsule_report(tmp_path: Path) -> None:
+    from oamb.reporting.source_root import build_source_root_report
+
+    workload = _NativeFixtureWorkload()
+    dataset = workload.resolve_sources()
+    manifest = workload.build_case_manifest(dataset)
+    control = _control(
+        run_id="current-live-report",
+        dataset_manifest_hash=dataset.manifest_hash,
+        case_manifest_hash=manifest.manifest_hash,
+        workload_id=manifest.workload_id,
+        memory_system_id="fake-memory",
+        runtime_binding_hash=canonical_sha256(["oamb-fake-runtime-v1"]),
+        adapter_profile_id="recorded-native-fixture-v1",
+        answer_role_binding_id="answer-binding",
+        provider_runtime_directory=(tmp_path / "runtime").resolve(),
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "answer-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": 'alpha onClick="show()"'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 1, "total_tokens": 21},
+            },
+        )
+
+    completed = run_native_vertical_slice(
+        output_root=tmp_path / "capsules",
+        run_id=control.run_spec.run_id,
+        adapter_profile_id="recorded-native-fixture-v1",
+        workload=workload,
+        visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
+        artifact_store_factory=ArtifactStore,
+        memory_factory=_memory_factory,
+        model_factory=lambda store: _client(cast(Any, store), handler),
+        answer_role_binding_id="answer-binding",
+        requested_case_manifest_entry_ids=(manifest.cases[0].case_manifest_entry_id,),
+        control=control,
+    )
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+    built = build_source_root_report(
+        completed.capsule_root, validation, output_root=tmp_path / "reports", audience="local"
+    )
+    assert built.report_path.is_file()
+
+
 def test_invalid_native_capsule_requires_explicit_restricted_diagnostic_publication(
     tmp_path: Path,
 ) -> None:

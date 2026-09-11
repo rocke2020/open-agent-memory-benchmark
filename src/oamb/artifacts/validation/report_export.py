@@ -503,17 +503,9 @@ def _model_validation_roots_close(
             accounting = None
             if isinstance(validation_targets[0], NativeRunEvidenceValidationInput):
                 accounting = validation_targets[0].accounting_target.reduction
-            elif isinstance(validation_targets[0], Path):
-                try:
-                    from oamb.reporting.native_reduce import (
-                        build_native_accounting_validation_input,
-                    )
-
-                    accounting = build_native_accounting_validation_input(
-                        validation_targets[0]
-                    ).reduction
-                except (OSError, TypeError, ValueError):
-                    return False
+            # Native capsule paths are re-reduced below. Exact model equality
+            # includes accounting lines and completeness without imposing the
+            # older standalone accounting profile's one-usage-per-attempt rule.
             if accounting is not None and (
                 model.claim_boundary.billing_complete != accounting.billing_complete
                 or model.claim_boundary.cost_complete != accounting.cost_complete
@@ -699,11 +691,20 @@ def _safe_html_rule(target: ReportExportInput) -> tuple[ValidationIssue, ...]:
         "form-action 'none'",
         "font-src 'none'",
     )
+    # This exact renderer escapes markup in its inert JSON data element.
+    # Historical code examples there are data, not active HTML attributes.
+    active_html = re.sub(
+        r'<script type="application/json" id="oamb-report-data">.*?</script>',
+        "",
+        html,
+        count=1,
+        flags=re.DOTALL,
+    )
     unsafe = bool(
-        re.search(r"(?:src|href)=[\"'](?:https?:)?//", html, re.IGNORECASE)
-        or re.search(r"\son[a-z]+\s*=", html, re.IGNORECASE)
-        or "javascript:" in html.lower()
-        or "@import" in html.lower()
+        re.search(r"(?:src|href)=[\"'](?:https?:)?//", active_html, re.IGNORECASE)
+        or re.search(r"\son[a-z]+\s*=", active_html, re.IGNORECASE)
+        or "javascript:" in active_html.lower()
+        or "@import" in active_html.lower()
     )
     if (
         html_bytes != render_offline_report(target.model)

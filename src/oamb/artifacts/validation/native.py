@@ -7,7 +7,6 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -120,6 +119,11 @@ from oamb.memory_systems.hindsight.profiles import (
     parse_retain_response,
 )
 from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
+from oamb.workloads.visible_evidence import (
+    count_o200k_tokens,
+    render_compact_evidence,
+    tokenizer_fingerprint,
+)
 
 NATIVE_EVIDENCE_PROFILE_ID = "oamb-t8-native-evidence-v1"
 NATIVE_EVIDENCE_RULE_IDS = (
@@ -2143,7 +2147,7 @@ def _visible_context_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
         visible = snapshot.raw_payloads.get(case.visible_evidence_raw_ref or "")
         ledger = _raw_object(snapshot, case.visible_decision_ledger_raw_ref)
         decisions = ledger.get("decisions") if ledger is not None else None
-        if visible is None or not isinstance(decisions, list):
+        if visible is None or ledger is None or not isinstance(decisions, list):
             issues.append(_issue(rule_id, case.case_occurrence_id, "visible-evidence-missing"))
             continue
         kept_ids = tuple(
@@ -2151,8 +2155,15 @@ def _visible_context_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
             for item in decisions
             if isinstance(item, dict) and item.get("disposition") == "kept"
         )
+        plans = {item.ingestion_occurrence_id: item for item in _ingestion_plans(snapshot)}
+        candidates = _normalized_native_candidates(
+            snapshot, case, plans.get(case.ingestion_occurrence_id)
+        )
+        if candidates is None:
+            issues.append(_issue(rule_id, case.case_occurrence_id, "native-evidence-missing"))
+            continue
         truncated_count = sum(
-            isinstance(item, dict) and item.get("disposition") == "truncated" for item in decisions
+            item.native_truncated for item in candidates if item.native_id in kept_ids
         )
         ledger_values_match = _matches(
             ledger,
@@ -2175,6 +2186,11 @@ def _visible_context_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[ValidationI
             or truncated_count != case.visible_truncated_count
             or hashlib.sha256(visible).hexdigest() != case.visible_evidence_sha256
             or len(visible) != case.visible_evidence_byte_count
+            or count_o200k_tokens(visible) != case.visible_evidence_token_count
+            or tokenizer_fingerprint() != case.visible_evidence_tokenizer_fingerprint
+            or ledger.get("policy")
+            != {"max_items": None, "max_characters": None, "max_tokens": None}
+            or ledger.get("first_exceeded_limit") is not None
         ):
             issues.append(_issue(rule_id, case.case_occurrence_id, "visible-decision-mismatch"))
             continue
@@ -2456,44 +2472,43 @@ def _rebuild_visible(
     )
     if candidates is None:
         return None
-    candidates_by_id = {item.native_id: item for item in candidates}
-    lines: list[bytes] = []
-    for decision in decisions:
-        if not isinstance(decision, dict) or decision.get("disposition") != "kept":
-            continue
-        decision_native_id = decision.get("native_id")
-        if not isinstance(decision_native_id, str):
-            return None
-        candidate = candidates_by_id.get(decision_native_id)
-        if candidate is None:
-            return None
-        content = candidate.content
+    if len(decisions) != len(candidates):
+        return None
+    seen: dict[str, str] = {}
+    kept: list[NativeEvidenceCandidate] = []
+    expected_decisions: list[dict[str, Any]] = []
+    for candidate in candidates:
         identity = candidate.provider_evidence_identity
-        if not isinstance(content, str) or not isinstance(identity, str):
+        if not identity:
             return None
-        if (
-            decision.get("provider_evidence_identity") != identity
-            or decision.get("normalized_text_sha256")
-            != hashlib.sha256(content.encode("utf-8")).hexdigest()
-        ):
+        content_hash = hashlib.sha256(candidate.content.encode("utf-8")).hexdigest()
+        if identity in seen and seen[identity] != content_hash:
             return None
-        lines.append(
-            json.dumps(
-                {
-                    "provider_evidence_identity": identity,
-                    "source_unit_id": candidate.source_unit_id,
-                    "evidence_kind": candidate.evidence_kind,
-                    "text": content,
-                    "occurred_start": _canonical_visible_timestamp(candidate.occurred_start),
-                    "occurred_end": _canonical_visible_timestamp(candidate.occurred_end),
-                    "mentioned_at": _canonical_visible_timestamp(candidate.mentioned_at),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
+        duplicate = identity in seen
+        if not duplicate:
+            seen[identity] = content_hash
+            kept.append(candidate)
+        expected_decisions.append(
+            {
+                "native_id": candidate.native_id,
+                "provider_evidence_identity": identity,
+                "normalized_text_sha256": content_hash,
+                "disposition": "duplicate" if duplicate else "kept",
+                "reason": "duplicate_identity_and_text" if duplicate else None,
+            }
         )
-    return b"\n".join(lines)
+    try:
+        payload, labels = render_compact_evidence(kept)
+    except (ValueError, UnicodeError):
+        return None
+    labels_by_identity = dict(
+        zip((item.provider_evidence_identity for item in kept), labels, strict=True)
+    )
+    for expected in expected_decisions:
+        expected["label"] = labels_by_identity[expected["provider_evidence_identity"]]
+    if decisions != expected_decisions:
+        return None
+    return payload
 
 
 def _normalized_native_candidates(
@@ -2832,7 +2847,14 @@ def _model_attempt_receipt_layers_close(
         if same_messages:
             if not retryable_status:
                 return False
-        elif terminal_failure and retryable_status:
+        elif terminal_failure and (
+            retryable_status
+            or (
+                receipt.failure_kind == "supplier_error"
+                and isinstance(receipt.supplier_status_code, int)
+                and 400 <= receipt.supplier_status_code <= 499
+            )
+        ):
             pass
         elif (
             receipt.failure_kind != "output_contract_error"
@@ -2857,18 +2879,6 @@ def _model_attempt_receipt_layers_close(
                 return False
         segment_start = segment_end
     return outer_attempts <= 6
-
-
-def _canonical_visible_timestamp(value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return "invalid"
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return "invalid"
-    return parsed.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _optional_string(value: object) -> str | None:

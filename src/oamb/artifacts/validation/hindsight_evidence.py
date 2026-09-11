@@ -15,6 +15,7 @@ from oamb.memory_systems.hindsight.projection import (
     DOCUMENT_ITEM_FIELDS,
     MEMORY_ITEM_FIELDS,
     PAGE_LIMIT,
+    _canonical_memory_record,
     _document_detail,
     _memory_detail,
     _page,
@@ -107,7 +108,7 @@ def reconstruct_hindsight_projection(
         _validate_memory_item(item, document_ids=set(ordered_source_unit_ids))
         detail_payload, cursor = _next_payload(supporting_payloads, cursor)
         detail = _memory_detail(detail_payload, list_item=item)
-        memory_records.append({"page": item, "detail": detail})
+        memory_records.append(_canonical_memory_record(item, detail))
 
     mental_payload, cursor = _next_payload(supporting_payloads, cursor)
     mental_page = _page(

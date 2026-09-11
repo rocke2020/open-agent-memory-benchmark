@@ -88,9 +88,9 @@ class NativeEvidenceBatch:
 
 @dataclass(frozen=True, slots=True)
 class VisibleEvidencePolicy:
-    max_items: int
-    max_characters: int
-    max_tokens: int
+    max_items: int | None
+    max_characters: int | None
+    max_tokens: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +117,7 @@ class EvidenceDecision:
     normalized_text_sha256: str
     disposition: Literal["kept", "duplicate", "budget_dropped", "truncated"]
     reason: str | None
+    label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

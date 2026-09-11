@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import re
@@ -1125,22 +1126,30 @@ async def test_readiness_projection_and_recall_close_the_exact_v092_lifecycle(
     assert len(readiness.evidence_references) == 10
     assert [candidate.native_id for candidate in batch.candidates] == [
         "22222222-2222-4222-8222-222222222222",
+        "chunk:44444444-4444-4444-8444-444444444444",
         "11111111-1111-4111-8111-111111111111",
+        "chunk:33333333-3333-4333-8333-333333333333",
     ]
-    assert [candidate.native_rank_1_indexed for candidate in batch.candidates] == [1, 2]
+    assert [candidate.native_rank_1_indexed for candidate in batch.candidates] == [1, 2, 3, 4]
     assert [candidate.source_unit_id for candidate in batch.candidates] == [
+        sources[0].source_unit_id,
+        sources[0].source_unit_id,
         sources[0].source_unit_id,
         sources[0].source_unit_id,
     ]
     assert [candidate.evidence_kind for candidate in batch.candidates] == [
         "experience",
+        "source_chunk",
         "world",
+        "source_chunk",
     ]
     assert [candidate.native_reference for candidate in batch.candidates] == [
         "44444444-4444-4444-8444-444444444444",
+        "44444444-4444-4444-8444-444444444444",
+        "33333333-3333-4333-8333-333333333333",
         "33333333-3333-4333-8333-333333333333",
     ]
-    assert len(batch.candidates) == 2
+    assert len(batch.candidates) == 4
     assert batch.supporting_raw_references == ()
     assert batch.request_raw_reference is not None
     assert batch.request_raw_reference != batch.raw_reference
@@ -1154,8 +1163,6 @@ async def test_readiness_projection_and_recall_close_the_exact_v092_lifecycle(
     assert json.loads(recall_request.content) == {
         "query": "What does Alice care about?",
         "types": ["world", "experience"],
-        "budget": "high",
-        "max_tokens": 32768,
         "query_timestamp": "2026-01-02T00:00:00+00:00",
         "trace": True,
         "include": {"entities": None, "chunks": {}},
@@ -1359,6 +1366,99 @@ async def test_projection_call_failure_preserves_prior_response_references(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("change", ("page_order", "detail_order", "entity_added"))
+async def test_query_projection_ignores_entity_order_but_detects_membership_changes(
+    tmp_path: Path, change: str
+) -> None:
+    from oamb.artifacts.validation.hindsight_evidence import reconstruct_hindsight_projection
+
+    names = ["Zulu", "Waste Not, Want Not", "Alpha"]
+
+    class EntityOrderService(_HindsightFixtureService):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            response = super().__call__(request)
+            path = request.url.path
+            document = response.json()
+            current = names + (
+                ["New entity"] if self.recall_seen and change == "entity_added" else []
+            )
+            if path.endswith("/memories/list") and document.get("items"):
+                ordered = (
+                    list(reversed(current))
+                    if self.recall_seen and change == "page_order"
+                    else current
+                )
+                document["items"][0]["entities"] = ", ".join(ordered)
+            elif path.endswith("/memories/11111111-1111-4111-8111-111111111111"):
+                document["entities"] = (
+                    list(reversed(current))
+                    if self.recall_seen and change == "detail_order"
+                    else current
+                )
+            return httpx.Response(response.status_code, json=document)
+
+    service = EntityOrderService("a" * 64)
+    adapter, scope, sources, receipt = await _ingested_fixture_lifecycle(tmp_path, service)
+    await adapter.wait_ready(
+        ReadinessRequest(
+            scope=scope, expected_source_unit_ids=("source-1",), ingestion_receipt=receipt
+        )
+    )
+    ticks = count()
+    request = RetrievalRequest(
+        scope=scope,
+        case_occurrence_id="d" * 64,
+        query_bytes=b"What does Alice care about?",
+        top_k=1,
+        query_timestamp="2026-01-02T00:00:00+00:00",
+    )
+    try:
+        if change == "entity_added":
+            with pytest.raises(MemorySystemProjectionMutation):
+                await execute_read_only_retrieval(
+                    memory=adapter, request=request, clock=lambda: Decimal(next(ticks))
+                )
+        else:
+            query = await execute_read_only_retrieval(
+                memory=adapter, request=request, clock=lambda: Decimal(next(ticks))
+            )
+            assert (
+                query.before_projection.state_digest.state_sha256
+                == query.after_projection.state_digest.state_sha256
+            )
+            for projection in (query.before_projection, query.after_projection):
+                references = tuple(
+                    reference.sha256
+                    for reference in (
+                        projection.inventory.raw_reference,
+                        projection.state_digest.raw_reference,
+                        *projection.supporting_raw_references,
+                    )
+                )
+                payloads = {
+                    reference: gzip.decompress(
+                        (tmp_path / "capsule/source/raw" / f"{reference}.json.gz").read_bytes()
+                    )
+                    for reference in references
+                }
+                memory = json.loads(payloads[references[0]])["memories"][0]
+                assert memory["detail"]["entities"] == ["Alpha", "Waste Not, Want Not", "Zulu"]
+                assert memory["page"]["entities"] == "Alpha, Waste Not, Want Not, Zulu"
+                reconstructed = reconstruct_hindsight_projection(
+                    raw_payloads=payloads,
+                    references=references,
+                    bank_id=scope.scope_id,
+                    ordered_source_unit_ids=tuple(source.source_unit_id for source in sources),
+                    ordered_source_payload_sha256=tuple(
+                        source.payload_sha256 for source in sources
+                    ),
+                )
+                assert reconstructed.state_sha256 == projection.state_digest.state_sha256
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_retrieve_rejects_query_side_projection_mutation(tmp_path: Path) -> None:
     service = _HindsightFixtureService("a" * 64, mutate_after_recall=True)
     adapter, scope, _, ingestion_receipt = await _ingested_fixture_lifecycle(tmp_path, service)
@@ -1545,7 +1645,7 @@ def test_recall_normalization_accepts_live_omitted_nullable_result_fields() -> N
         document_to_source_unit={"source-1": "source-unit-1"},
     )
 
-    assert len(candidates) == 1
+    assert len(candidates) == 2
     assert candidates[0].source_unit_id == "source-unit-1"
     assert candidates[0].native_score == "0.9"
 
@@ -1567,9 +1667,12 @@ def test_recall_normalization_accepts_budget_limited_chunk_hydration() -> None:
         document_to_source_unit={"source-1": "source-unit-1"},
     )
 
-    assert len(candidates) == 1
+    assert len(candidates) == 2
     assert candidates[0].native_reference == "chunk-1"
     assert candidates[0].native_truncated is False
+    assert candidates[1].native_id == "chunk:prefilter-chunk"
+    assert candidates[1].source_unit_id is None
+    assert candidates[1].content == "A hydrated chunk whose fact did not fit the result budget."
 
 
 def test_recall_normalization_does_not_relabel_a_complete_fact_as_truncated() -> None:
@@ -1589,7 +1692,98 @@ def test_recall_normalization_does_not_relabel_a_complete_fact_as_truncated() ->
         document_to_source_unit={"source-1": "source-unit-1"},
     )
 
-    assert len(candidates) == 1
+    assert len(candidates) == 2
     assert candidates[0].content == "The memory conformance code is ALPHA-417."
     assert candidates[0].native_reference == "chunk-1"
     assert candidates[0].native_truncated is False
+    assert candidates[1].evidence_kind == "source_chunk"
+    assert candidates[1].native_truncated is True
+    assert candidates[1].source_unit_id == "source-unit-1"
+    assert candidates[1].content == payload["chunks"]["chunk-1"]["text"]
+
+
+def test_recall_normalization_keeps_source_only_detail_once_in_first_reference_order() -> None:
+    from oamb.memory_systems.hindsight.normalize import normalize_recall
+
+    payload = {
+        "results": [
+            {"id": "f1", "text": "Remedy", "type": "world", "chunk_id": "s1", "document_id": "d1"},
+            {
+                "id": "f2",
+                "text": "Remedy",
+                "type": "experience",
+                "chunk_id": "s1",
+                "document_id": "d1",
+            },
+            {"id": "f3", "text": "Missing source", "type": "world", "chunk_id": "missing"},
+            {"id": "f4", "text": "Another fact", "type": "world", "chunk_id": "s2"},
+        ],
+        "trace": None,
+        "chunks": {
+            "orphan": {
+                "id": "orphan",
+                "text": "Unreferenced returned source",
+                "chunk_index": 0,
+                "truncated": False,
+            },
+            "s2": {"id": "s2", "text": "", "chunk_index": 1, "truncated": False},
+            "s1": {
+                "id": "s1",
+                "text": "2023-02-18 USER: Keep it on for ten minutes.\nASSISTANT: 好。",
+                "chunk_index": 2,
+                "truncated": True,
+            },
+        },
+    }
+
+    candidates = normalize_recall(
+        json.dumps(payload).encode(), document_to_source_unit={"d1": "unit1"}
+    )
+
+    assert [item.native_id for item in candidates] == [
+        "f1",
+        "chunk:s1",
+        "f2",
+        "f3",
+        "f4",
+        "chunk:s2",
+        "chunk:orphan",
+    ]
+    assert [item.native_rank_1_indexed for item in candidates] == [1, 2, 3, 4, 5, 6, 7]
+    assert candidates[1].provider_evidence_identity == "chunk:s1"
+    assert candidates[1].native_reference == "s1"
+    assert candidates[1].content == "2023-02-18 USER: Keep it on for ten minutes.\nASSISTANT: 好。"
+    assert candidates[1].source_unit_id == "unit1"
+    assert candidates[1].native_truncated is True
+    assert candidates[1].occurred_start is None
+    assert candidates[1].occurred_end is None
+    assert candidates[1].mentioned_at is None
+    assert candidates[5].content == ""
+    assert candidates[6].source_unit_id is None
+    assert [item.content for item in candidates if item.evidence_kind != "source_chunk"] == [
+        "Remedy",
+        "Remedy",
+        "Missing source",
+        "Another fact",
+    ]
+
+
+@pytest.mark.parametrize("conflict", ["native_id", "source_unit"])
+def test_recall_normalization_rejects_conflicting_chunk_identity(conflict: str) -> None:
+    from oamb.memory_systems.hindsight.normalize import normalize_recall
+
+    payload: dict[str, Any] = {
+        "results": [
+            {"id": "f1", "text": "first", "type": "world", "chunk_id": "s1", "document_id": "d1"},
+            {"id": "f2", "text": "second", "type": "world", "chunk_id": "s1", "document_id": "d2"},
+        ],
+        "trace": None,
+        "chunks": {"s1": {"id": "s1", "text": "source", "chunk_index": 0, "truncated": False}},
+    }
+    if conflict == "native_id":
+        payload["results"][1].update(id="chunk:s1", document_id="d1")
+
+    with pytest.raises(ValueError, match="conflict|collision"):
+        normalize_recall(
+            json.dumps(payload).encode(), document_to_source_unit={"d1": "unit1", "d2": "unit2"}
+        )
