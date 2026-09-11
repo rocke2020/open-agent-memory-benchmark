@@ -170,6 +170,6 @@ docker compose --env-file /path/to/canary.env \
   -f provider-services/compose.yaml config --quiet
 ```
 
-The second command still requires a mode-`0600` canary env containing all
+The second command still requires a readable canary env containing all
 required names. Never print resolved Compose output when real secrets are in
 use.
