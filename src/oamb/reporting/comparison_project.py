@@ -2950,14 +2950,11 @@ a { color:inherit; }
 </head>
 <body><main>
 <h1>OAMB comparison report</h1>
-<p><strong>{_escape(export["controlled_comparison_warning"])}</strong></p>
-{dataset_notice}
-<p class="muted">Report ID: <code>{_escape(export["report_id"])}</code></p>
 <section><h2>Provider decision summary</h2><p class="metric-key"><strong>Five decision metrics:</strong> Answer accuracy · Context tokens · Indexing tokens · Retrieval latency · Indexing time</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Context tokens are the exact retrieval context shown to the answer model.</p>
 <p><strong>{_escape(accuracy_decision_text)}</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Provider / profile</th><th>Answer accuracy</th><th>Context tokens</th><th>Indexing tokens</th><th>Retrieval latency (s)</th><th>Indexing time (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Answer accuracy</th><th>Context tokens</th><th>Indexing tokens</th><th>Retrieval latency (s)</th><th>Indexing time (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
 {partial_ingestion_note}
-{_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Context tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Retrieval latency is the provider memory-query request. Indexing time spans first provider write through terminal readiness per isolated context. Both show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
+{_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Context tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Retrieval latency is the provider memory-query request. Indexing time measures one question's history from first ingestion attempt through readiness; it is not the elapsed time to finish all questions. Histories can overlap, and earlier interrupted attempts are not reconstructed here. Both time columns show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
 {_REPORT_ANALYSIS_SLOT.decode("ascii")}
 {accuracy_by_type}
 <section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points. Exact McNemar p uses the matched discordant outcomes.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th><th>Discordant A/B</th><th>Exact McNemar p</th><th>Decision</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
@@ -2966,6 +2963,11 @@ a { color:inherit; }
 <section><h2>Generation-free retrieval</h2><div class="table-wrap"><table><thead><tr><th>Provider</th><th>Route</th><th>Disabled setting</th><th>Runtime proof</th></tr></thead><tbody>{retrieval_rows}</tbody></table></div></section>
 <section><h2>Limitations</h2><ul>{limitation_items}</ul></section>
 <section><h2>Deterministic export</h2><p><a href="report.json" download>Download report.json</a> for the complete machine-readable evidence and unavailable-measurement detail.</p></section>
+<footer><h2>References</h2>
+<p><strong>{_escape(export["controlled_comparison_warning"])}</strong></p>
+{dataset_notice}
+<p class="muted">Report ID: <code>{_escape(export["report_id"])}</code></p>
+</footer>
 </main></body></html>
 """
     return document.encode("utf-8")
@@ -2974,8 +2976,7 @@ a { color:inherit; }
 def _provider_summary_row(item: Mapping[str, Any]) -> str:
     return (
         "<tr>"
-        f"<td><strong>{_escape(item['provider_id'])}</strong><br>"
-        f'<span class="muted">{_escape(item["adapter_profile_id"])}</span></td>'
+        f"<td><strong>{_escape(item['provider_id'])}</strong></td>"
         f"<td>{_escape(_accuracy_text(item))}</td>"
         f"<td>{_escape(_context_text(item))}</td>"
         f"<td>{_escape(_supplier_tokens_text(item['accounting']['tokens']['indexing']))}</td>"
@@ -3053,11 +3054,8 @@ def _accuracy_text(item: Mapping[str, Any]) -> str:
         Decimal("0.1"),
         rounding=ROUND_HALF_UP,
     )
-    accuracy = item.get("accuracy")
-    all_60 = accuracy.get("all_60") if isinstance(accuracy, Mapping) else None
-    interval = _wilson_interval_text(all_60)
-    interval_suffix = f"; {interval}" if interval != "unavailable" else ""
-    return f"{numerator}/{denominator} ({format(percentage, 'f')}%{interval_suffix}); {coverage}"
+    coverage_suffix = f"; {coverage}" if judged_case_count < case_count else ""
+    return f"{numerator}/{denominator} ({format(percentage, 'f')}%){coverage_suffix}"
 
 
 def _accuracy_by_type_html(cells: tuple[Mapping[str, Any], ...]) -> str:
@@ -3219,7 +3217,13 @@ def _supplier_tokens_text(stage: Mapping[str, Any]) -> str:
     records = coverage["record_count"]
     if total == "unavailable":
         return f"unavailable ({metered}/{records} metered)"
-    return f"{_number_text(total)}; {metered}/{records} metered ({coverage['status']})"
+    if metered < records:
+        return f"{_number_text(total)}; {metered}/{records} totals recorded (incomplete)"
+    if coverage["status"] == "measured_partial":
+        return (
+            f"{_number_text(total)}; {metered}/{records} totals recorded; usage details incomplete"
+        )
+    return f"{_number_text(total)}; {metered}/{records} totals recorded"
 
 
 def _number_text(value: object) -> str:
@@ -3276,7 +3280,9 @@ def _indexing_measurement_note(cells: tuple[Mapping[str, Any], ...]) -> str:
                 f"{prefix}; the displayed total sums only those metered records and is incomplete"
             )
         else:
-            parts.append(f"{prefix}; the displayed total covers all producer records")
+            parts.append(
+                f"{prefix}; every report record has a total, but usage details can still be incomplete"
+            )
         totals = indexing["totals"]
         supplier_total = totals["supplier_reported_total_tokens"]
         reasoning = totals["reasoning_tokens"]
@@ -3285,7 +3291,7 @@ def _indexing_measurement_note(cells: tuple[Mapping[str, Any], ...]) -> str:
                 reasoning_parts.append(
                     f"{item['provider_id']} reasoning breakdown is unavailable, not zero; "
                     f"{_number_text(supplier_total['value'])} is the measured supplier total, "
-                    "with no inferred reasoning added, so the measurement remains partial"
+                    "with no inferred reasoning added"
                 )
             else:
                 reasoning_parts.append(

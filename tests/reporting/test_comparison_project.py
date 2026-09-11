@@ -1358,10 +1358,9 @@ def test_indexing_measurement_note_explains_partial_and_unavailable_coverage() -
     assert "successful logical producer records" in note
     assert "Embedding and failed physical attempts are excluded" in note
     assert "hindsight: 300/300 metered" in note
-    assert "displayed total covers all producer records" in note
+    assert "every report record has a total, but usage details can still be incomplete" in note
     assert "hindsight reasoning breakdown is unavailable, not zero" in note
     assert "5,764,508 is the measured supplier total, with no inferred reasoning added" in note
-    assert "measurement remains partial" in note
     assert "mem0: 0/300 metered" in note
     assert "openviking: 300/300 metered" in note
     assert "openviking reasoning: 1,436,612, already included in its total" in note
