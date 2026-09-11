@@ -156,22 +156,25 @@ def test_rejects_duplicate_or_unsupported_provider_dotenv_syntax(
         )
 
 
-def test_provider_dotenv_rejects_symlink_and_non_utf8(tmp_path: Path) -> None:
-    from oamb.runtime.provider_env import (
-        ProviderEnvironmentFileError,
-        load_t10_provider_environment,
-    )
+def test_provider_dotenv_loads_a_readable_symlink(tmp_path: Path) -> None:
+    from oamb.runtime.provider_env import load_t10_provider_environment
 
     target = tmp_path / "target.env"
     target.write_text("OAMB_MEM0_PORT=18889\n", encoding="utf-8")
     link = tmp_path / "link.env"
     link.symlink_to(target)
 
-    with pytest.raises(ProviderEnvironmentFileError, match="regular file"):
-        load_t10_provider_environment(
-            link,
-            expected_keys=frozenset({"OAMB_MEM0_PORT"}),
-        )
+    assert load_t10_provider_environment(
+        link,
+        expected_keys=frozenset({"OAMB_MEM0_PORT"}),
+    ) == {"OAMB_MEM0_PORT": "18889"}
+
+
+def test_provider_dotenv_rejects_non_utf8(tmp_path: Path) -> None:
+    from oamb.runtime.provider_env import (
+        ProviderEnvironmentFileError,
+        load_t10_provider_environment,
+    )
 
     invalid = tmp_path / "invalid.env"
     invalid.write_bytes(b"OAMB_MEM0_PORT=\xff\n")

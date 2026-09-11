@@ -53,11 +53,12 @@ def load_t10_provider_environment(
 
     if not expected_keys or any(_DOTENV_KEY.fullmatch(key) is None for key in expected_keys):
         raise ValueError("expected provider environment keys must be valid and non-empty")
-    metadata = path.lstat()
+    resolved_path = path.resolve(strict=True)
+    metadata = resolved_path.lstat()
     if not stat.S_ISREG(metadata.st_mode):
         raise ProviderEnvironmentFileError("provider env path must be a regular file")
-    payload = read_regular_file(path)
-    after_read = path.lstat()
+    payload = read_regular_file(resolved_path)
+    after_read = resolved_path.lstat()
     if (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size) != (
         after_read.st_dev,
         after_read.st_ino,

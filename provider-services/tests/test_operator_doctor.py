@@ -138,6 +138,8 @@ class OperatorDoctorTests(unittest.TestCase):
         dotenv_overrides: dict[str, str] | None = None,
         omitted_dotenv_names: frozenset[str] = frozenset(),
         env_extra: str = "",
+        dotenv_mode: int = 0o600,
+        symlink_dotenv: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -190,7 +192,11 @@ class OperatorDoctorTests(unittest.TestCase):
             lines.append(f"{name}={value}")
         env_file = directory / ".env"
         env_file.write_text("\n".join(lines) + "\n" + env_extra, encoding="utf-8")
-        env_file.chmod(0o600)
+        env_file.chmod(dotenv_mode)
+        if symlink_dotenv:
+            target = directory / "shared.env"
+            env_file.replace(target)
+            env_file.symlink_to(target)
 
         plan = directory / "outputs" / "tmp" / "precheck" / "operator-plan" / "resolved-plan.json"
         plan.parent.mkdir(parents=True)
@@ -316,6 +322,18 @@ class OperatorDoctorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_doctor_accepts_a_readable_dotenv_with_mode_0755(self) -> None:
+        result = self._run_operator(dotenv_mode=0o755)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("doctor: PASS", result.stdout)
+
+    def test_doctor_accepts_a_readable_symlinked_dotenv(self) -> None:
+        result = self._run_operator(symlink_dotenv=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("doctor: PASS", result.stdout)
 
     def test_fresh_shell_loads_current_plan_for_doctor_status_and_stop(self) -> None:
         for command in ("doctor", "status", "stop"):

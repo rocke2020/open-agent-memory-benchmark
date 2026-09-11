@@ -64,8 +64,7 @@ compose() {
 
 check_env_file() {
     [ -f "$ENV_FILE" ] || die "prepare $ENV_FILE from $REPOSITORY_ROOT/.env.example"
-    mode=$(read_file_mode "$ENV_FILE" || true)
-    [ "$mode" = "600" ] || die "$ENV_FILE must have mode 0600 (found ${mode:-unknown})"
+    [ -r "$ENV_FILE" ] || die "$ENV_FILE must be readable"
     validate_env_file "$ENV_FILE" || die "$ENV_FILE uses duplicate keys or unsupported dotenv syntax"
     reject_plan_owned_env_values "$ENV_FILE" || die "$ENV_FILE contains plan-owned configuration"
     llm_url_type=$(read_env_value "$ENV_FILE" LLM_URL_TYPE) || \
@@ -576,8 +575,7 @@ verify_model_readiness() {
     model_env=$4
     [ -f "$resolved_plan" ] || die "resolved plan is absent"
     [ -f "$model_env" ] || die "model environment file is absent"
-    model_env_mode=$(read_file_mode "$model_env" || true)
-    [ "$model_env_mode" = "600" ] || die "$model_env must have mode 0600"
+    [ -r "$model_env" ] || die "$model_env must be readable"
     validate_env_file "$model_env" || die "$model_env uses unsupported dotenv syntax"
     llm_url_type=$(read_env_value "$model_env" LLM_URL_TYPE) || \
         die "LLM_URL_TYPE is missing from $model_env"
