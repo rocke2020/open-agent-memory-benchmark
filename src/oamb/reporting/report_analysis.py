@@ -81,7 +81,9 @@ def build_report_analysis_generator(
     if len(judge_roles) != 1:
         raise ValueError("report analysis requires exactly one frozen judge model role")
     role = judge_roles[0]
-    expected_keys = frozenset({"LLM_URL_TYPE", role.endpoint_variable, role.credential_variable})
+    expected_keys = frozenset(
+        {"LLM_URL_TYPE", role.endpoint_variable, role.credential_variable, role.model}
+    )
     environment = dict(os.environ if base_environment is None else base_environment)
     environment.update(load_t10_provider_environment(model_env_path, expected_keys=expected_keys))
     if environment.get("LLM_URL_TYPE") != "openai_chat":
@@ -96,7 +98,7 @@ def build_report_analysis_generator(
         try:
             result = generate_report_analysis(
                 report,
-                model=role.model,
+                model=environment[role.model],
                 thinking_effort=role.thinking_effort,
                 base_url=base_url,
                 api_key=api_key,

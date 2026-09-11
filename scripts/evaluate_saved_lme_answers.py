@@ -180,7 +180,7 @@ def load_study(
     environment = load_t10_provider_environment(
         model_env,
         expected_keys=frozenset(
-            {"LLM_URL_TYPE", judge.endpoint_variable, judge.credential_variable}
+            {"LLM_URL_TYPE", judge.endpoint_variable, judge.credential_variable, judge.model}
         ),
     )
     return prepare_study(plan, bundle.selected_rows, baseline, environment)

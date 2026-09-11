@@ -18,7 +18,6 @@ from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.live import (
     load_live_environment,
-    plan_model_environment,
     validate_live_readiness_receipt,
 )
 from oamb.runtime.provider_env import load_t10_provider_environment
@@ -366,7 +365,7 @@ def migrate_resume_data(
             provider_env_path=target_repository / ".env",
             model_env_path=target_repository / ".env",
             provider_runtime_directory=target_repository / "provider-services" / ".runtime",
-            base_environment=plan_model_environment(current_plan),
+            base_environment=os.environ,
         )
         validate_live_readiness_receipt(
             plan=current_plan,

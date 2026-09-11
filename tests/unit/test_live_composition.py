@@ -79,6 +79,8 @@ def _environment() -> dict[str, str]:
         "LLM_URL_TYPE": "openai_chat",
         "LLM_BASE_URL": "https://model.example/v1",
         "LLM_API_KEY": "model-key",
+        "LLM_LIGHT_MODEL": models.hindsight_extraction.model,
+        "LLM_DEEP_MODEL": models.answer.model,
         "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
         "OAMB_EMBEDDING_API_KEY": "",
         "OAMB_EMBEDDING_MODEL": models.embedding.model,
@@ -653,7 +655,9 @@ def test_live_model_env_file_overrides_process_generic_connection(
     model_env.write_text(
         "LLM_URL_TYPE=openai_chat\n"
         "LLM_BASE_URL=https://file-model.example/v1\n"
-        "LLM_API_KEY=file-answer-key\n",
+        "LLM_API_KEY=file-answer-key\n"
+        "LLM_LIGHT_MODEL=file-light-model\n"
+        "LLM_DEEP_MODEL=file-deep-model\n",
         encoding="utf-8",
     )
 
@@ -672,6 +676,33 @@ def test_live_model_env_file_overrides_process_generic_connection(
     assert environment["LLM_URL_TYPE"] == "openai_chat"
     assert environment["LLM_BASE_URL"] == "https://file-model.example/v1"
     assert environment["LLM_API_KEY"] == "file-answer-key"
+    assert environment["LLM_LIGHT_MODEL"] == "file-light-model"
+    assert environment["LLM_DEEP_MODEL"] == "file-deep-model"
+
+
+def test_runtime_role_bindings_use_current_generative_model_names() -> None:
+    from oamb import live
+
+    bindings = live._role_bindings(
+        _lme60_plan().model_roles,
+        {
+            "LLM_LIGHT_MODEL": "runtime-light-model",
+            "LLM_DEEP_MODEL": "runtime-deep-model",
+            "LLM_BASE_URL": "https://model.example/v1",
+            "LLM_API_KEY": "model-key",
+            "OAMB_EMBEDDING_BASE_URL": "http://127.0.0.1:18000/v1",
+            "OAMB_EMBEDDING_API_KEY": "",
+        },
+    )
+
+    assert tuple(binding.model for binding in bindings) == (
+        "runtime-light-model",
+        "runtime-light-model",
+        "runtime-light-model",
+        "runtime-deep-model",
+        "runtime-light-model",
+        "qwen3-embedding:0.6b",
+    )
 
 
 def test_live_readiness_hash_binds_llm_url_type() -> None:

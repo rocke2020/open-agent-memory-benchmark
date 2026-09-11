@@ -77,6 +77,7 @@ def _inputs(tmp_path: Path) -> tuple[Any, tuple[LongMemEvalRow, ...], Path, dict
             "LLM_URL_TYPE": "openai_chat",
             "LLM_BASE_URL": "https://judge.example/v1",
             "LLM_API_KEY": "test-key",
+            **MODEL_ENVIRONMENT,
         },
     )
 
@@ -148,7 +149,7 @@ async def test_frozen_wire_valid_no_and_reuse_preserve_baseline_and_completed_by
     ).canonical_bytes.decode()
     judge = next(role for role in plan.model_roles if role.role_id == "judge")
     assert payloads[0] == {
-        "model": judge.model,
+        "model": MODEL_ENVIRONMENT["LLM_LIGHT_MODEL"],
         "messages": [{"role": "user", "content": first_prompt}],
         "n": 1,
         "temperature": 0.0,

@@ -390,7 +390,8 @@ if [[ "$RESUME" == true ]]; then
   export OAMB_EMBEDDING_BASE_URL="$RESUME_EMBEDDING_ENDPOINT"
   export OAMB_EMBEDDING_OWNERSHIP=external
 fi
-load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
+load_plan_model_environment "$PLAN" "$ENV_FILE" || \
+  die "cannot load model configuration from resolved plan and current .env"
 if [[ "$RESUME" == true ]]; then
   export OAMB_EMBEDDING_BASE_URL="$RESUME_EMBEDDING_ENDPOINT"
   export OAMB_EMBEDDING_OWNERSHIP=external

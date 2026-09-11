@@ -35,7 +35,7 @@ MODEL_ROLE_IDS: tuple[ModelRoleId, ...] = (
     "embedding",
 )
 MODEL_PROFILE_ENVIRONMENT_KEYS = frozenset({"LLM_LIGHT_MODEL", "LLM_DEEP_MODEL"})
-_MODEL_VARIABLE_BY_ROLE: dict[ModelRoleId, str | None] = {
+MODEL_VARIABLE_BY_ROLE: dict[ModelRoleId, str | None] = {
     "hindsight_extraction": "LLM_LIGHT_MODEL",
     "mem0_extraction": "LLM_LIGHT_MODEL",
     "openviking_semantic_understanding": "LLM_LIGHT_MODEL",
@@ -617,7 +617,7 @@ def _parse_model_role(
     model_environment: Mapping[str, str] | None,
 ) -> ModelRoleConfiguration:
     document = _require_exact_mapping(value, _MODEL_KEYS, f"model role {role_id}")
-    model_variable = _MODEL_VARIABLE_BY_ROLE[role_id]
+    model_variable = MODEL_VARIABLE_BY_ROLE[role_id]
     model = (
         _require_text(document["model"], f"model role {role_id} model")
         if model_variable is None
@@ -905,6 +905,7 @@ __all__ = [
     "EvaluationControls",
     "GenerativeThinkingEffort",
     "MODEL_PROFILE_ENVIRONMENT_KEYS",
+    "MODEL_VARIABLE_BY_ROLE",
     "MODEL_ROLE_IDS",
     "MODEL_EXECUTION_OWNER_BY_ROLE",
     "ModelRoleConfiguration",

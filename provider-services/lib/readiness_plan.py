@@ -9,6 +9,7 @@ from pathlib import Path
 from oamb.config.doctor import load_resolved_plan_for_run
 from oamb.contracts.ids import canonical_json_bytes
 from oamb.live import (
+    _runtime_model,
     live_readiness_environment_hash,
     load_live_environment,
     resolve_service_verification_receipt,
@@ -49,7 +50,7 @@ def readiness_plan_document(
         "model_roles": [
             {
                 "role_id": role.role_id,
-                "model": role.model,
+                "model": _runtime_model(role, environment),
                 "thinking_effort": role.thinking_effort,
                 "endpoint_variable": role.endpoint_variable,
                 "credential_variable": role.credential_variable,

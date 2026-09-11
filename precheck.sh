@@ -388,7 +388,8 @@ if [[ -n "$EMBEDDING_API_URL" ]]; then
   doctor_arguments+=(--embedding-api-url "$EMBEDDING_API_URL")
 fi
 "${doctor_arguments[@]}"
-load_plan_model_environment "$PLAN" || die "cannot load model configuration from resolved plan"
+load_plan_model_environment "$PLAN" "$ENV_FILE" || \
+  die "cannot load model configuration from resolved plan and current .env"
 EMBEDDING_OWNERSHIP="$(jq -er '
   .embedding_endpoint.ownership |
   select(. == "embedding_local_fallback" or . == "external")

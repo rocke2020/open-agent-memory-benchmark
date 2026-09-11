@@ -99,7 +99,7 @@ ensure_plan_model_environment() {
         "$QUICK_START_PRECHECK_ROOT/"*) ;;
         *) die "quick-start state resolved plan is outside outputs/tmp/precheck" ;;
     esac
-    load_plan_model_environment "$resolved_plan" || \
+    load_plan_model_environment "$resolved_plan" "$ENV_FILE" || \
         die "cannot load model configuration from resolved plan"
 }
 

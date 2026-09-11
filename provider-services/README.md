@@ -66,7 +66,7 @@ chmod 600 .env
 
 uv run --locked oamb doctor configs/benchmark.yml --output outputs/tmp/provider-plan --model-env .env
 . ./provider-services/lib/plan_environment.sh
-load_plan_model_environment outputs/tmp/provider-plan/resolved-plan.json
+load_plan_model_environment outputs/tmp/provider-plan/resolved-plan.json .env
 
 ./provider-services/bin/provider-services doctor
 ./provider-services/bin/provider-services build

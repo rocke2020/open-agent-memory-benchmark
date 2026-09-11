@@ -129,8 +129,8 @@ derive_llm_no_proxy() {
     unset llm_endpoint llm_authority llm_host
 }
 
-# Plan-derived non-secret values must be exported by the frozen-plan loader.
-# They never fall back to the private dotenv file.
+# Provider aliases and plan-derived controls are exported by the runtime loader.
+# Generative model names come from the current root dotenv file.
 read_runtime_env_value() {
     _env_file=$1
     wanted_name=$2

@@ -173,34 +173,41 @@ def test_doctor_writes_one_canonical_plan_with_three_ordered_cell_specs(tmp_path
     assert f"resolved plan sha256: {hashlib.sha256(content).hexdigest()}" in result.output
 
 
-def test_doctor_freezes_models_from_explicit_model_environment(tmp_path: Path) -> None:
-    model_env = tmp_path / ".env"
-    model_env.write_text(
-        "LLM_LIGHT_MODEL=fixture-light-model\nLLM_DEEP_MODEL=fixture-deep-model\n",
-        encoding="utf-8",
-    )
-    output = tmp_path / "comparison"
+def test_doctor_keeps_generative_model_names_out_of_the_frozen_plan(tmp_path: Path) -> None:
+    plan_bytes: list[bytes] = []
+    for suffix in ("first", "second"):
+        model_env = tmp_path / f"{suffix}.env"
+        model_env.write_text(
+            f"LLM_LIGHT_MODEL={suffix}-light-model\nLLM_DEEP_MODEL={suffix}-deep-model\n",
+            encoding="utf-8",
+        )
+        output = tmp_path / suffix
+        result = CliRunner().invoke(
+            app,
+            [
+                "doctor",
+                str(BENCHMARK_CONFIG_PATH),
+                "--output",
+                str(output),
+                "--model-env",
+                str(model_env),
+            ],
+        )
 
-    result = CliRunner().invoke(
-        app,
-        [
-            "doctor",
-            str(BENCHMARK_CONFIG_PATH),
-            "--output",
-            str(output),
-            "--model-env",
-            str(model_env),
-        ],
-    )
+        assert result.exit_code == 0, result.output
+        content = (output / "resolved-plan.json").read_bytes()
+        assert f"{suffix}-light-model".encode() not in content
+        assert f"{suffix}-deep-model".encode() not in content
+        plan_bytes.append(content)
 
-    assert result.exit_code == 0, result.output
-    plan = load_resolved_plan_for_run(output / "resolved-plan.json")
+    assert plan_bytes[0] == plan_bytes[1]
+    plan = load_resolved_plan_for_run(tmp_path / "first" / "resolved-plan.json")
     assert {role.role_id: role.model for role in plan.model_roles} == {
-        "hindsight_extraction": "fixture-light-model",
-        "mem0_extraction": "fixture-light-model",
-        "openviking_semantic_understanding": "fixture-light-model",
-        "answer": "fixture-deep-model",
-        "judge": "fixture-light-model",
+        "hindsight_extraction": "LLM_LIGHT_MODEL",
+        "mem0_extraction": "LLM_LIGHT_MODEL",
+        "openviking_semantic_understanding": "LLM_LIGHT_MODEL",
+        "answer": "LLM_DEEP_MODEL",
+        "judge": "LLM_LIGHT_MODEL",
         "embedding": "qwen3-embedding:0.6b",
     }
 
@@ -297,11 +304,11 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         )
         for item in document["model_roles"]
     ) == (
-        (source_models["hindsight_extraction"].model, "low", 1, None),
-        (source_models["mem0_extraction"].model, "low", 1, None),
-        (source_models["openviking_semantic_understanding"].model, "low", 1, None),
-        (source_models["answer"].model, "low", 1, None),
-        (source_models["judge"].model, "high", 2, None),
+        ("LLM_LIGHT_MODEL", "low", 1, None),
+        ("LLM_LIGHT_MODEL", "low", 1, None),
+        ("LLM_LIGHT_MODEL", "low", 1, None),
+        ("LLM_DEEP_MODEL", "low", 1, None),
+        ("LLM_LIGHT_MODEL", "high", 2, None),
         (source_models["embedding"].model, "not_applicable", None, None),
     )
     assert document["retrieval"]["generation"] == "disabled"
@@ -381,9 +388,6 @@ def test_doctor_preserves_descriptive_lme6_profile(tmp_path: Path) -> None:
 
 
 def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
-    source = load_benchmark_configuration(
-        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
-    )
     output = tmp_path / "comparison"
 
     result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
@@ -392,11 +396,9 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "comparison: v0.1-lme60" in result.output
     assert "cells: 3" in result.output
     assert "retrieval generation: disabled" in result.output
-    assert (
-        f"model hindsight_extraction: {source.models.hindsight_extraction.model} / low (rank 1/3)"
-    ) in result.output
-    assert f"model answer: {source.models.answer.model} / low (rank 1/3)" in result.output
-    assert f"model judge: {source.models.judge.model} / high (rank 2/3)" in result.output
+    assert "model hindsight_extraction: from LLM_LIGHT_MODEL / low (rank 1/3)" in result.output
+    assert "model answer: from LLM_DEEP_MODEL / low (rank 1/3)" in result.output
+    assert "model judge: from LLM_LIGHT_MODEL / high (rank 2/3)" in result.output
     assert "recipient=llm-api" in result.output
     assert "decision: accuracy delta >= 0.05 and exact McNemar p <= 0.05" in result.output
     assert "evaluation controls: retries=2; operation timeout=900s" in result.output
@@ -445,7 +447,7 @@ def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) 
 
     assert plan.comparison_id == "v0.1-lme60"
     assert plan.decision is not None
-    assert plan.model_roles[0].model == source_configuration.llm_profiles.light_model
+    assert plan.model_roles[0].model == "LLM_LIGHT_MODEL"
     with pytest.raises(FrozenInstanceError):
         plan.comparison_id = "changed"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):

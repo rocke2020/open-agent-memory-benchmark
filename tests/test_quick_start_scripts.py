@@ -238,7 +238,7 @@ def test_compose_uses_plan_endpoint_and_translates_only_at_container_boundary(
         [
             "/bin/sh",
             "-c",
-            '. "$1"; . "$2"; . "$3"; load_plan_model_environment "$4"; '
+            '. "$1"; . "$2"; . "$3"; load_plan_model_environment "$4" "$6"; '
             'oamb_compose "$5" "$6" config',
             "sh",
             str(PROVIDER_ENVIRONMENT_SCRIPT),
@@ -256,6 +256,46 @@ def test_compose_uses_plan_endpoint_and_translates_only_at_container_boundary(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == "http://host.docker.internal:18000/v1|oamb-no-auth\n"
+
+
+def test_plan_environment_uses_current_dotenv_generative_models(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LLM_LIGHT_MODEL=runtime-light-model\nLLM_DEEP_MODEL=runtime-deep-model\n",
+        encoding="utf-8",
+    )
+    plan = build_resolved_plan(
+        load_benchmark_configuration(
+            REPOSITORY_ROOT / "configs" / "benchmark.yml",
+            model_environment=MODEL_ENVIRONMENT,
+        )
+    )
+    plan_path = tmp_path / "resolved-plan.json"
+    plan_path.write_bytes(resolved_plan_bytes(plan))
+
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            '. "$1"; . "$2"; load_plan_model_environment "$3" "$4"; '
+            'printf "%s|%s|%s|%s\\n" "$OAMB_HINDSIGHT_LLM_MODEL" '
+            '"$OAMB_MEM0_LLM_MODEL" "$OAMB_OPENVIKING_VLM_MODEL" '
+            '"$OAMB_EMBEDDING_MODEL"',
+            "sh",
+            str(REPOSITORY_ROOT / "provider-services" / "lib" / "env.sh"),
+            str(PLAN_ENVIRONMENT_SCRIPT),
+            str(plan_path),
+            str(env_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == (
+        "runtime-light-model|runtime-light-model|runtime-light-model|qwen3-embedding:0.6b\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -507,7 +547,7 @@ import json
 import sys
 
 target, endpoint, ownership = sys.argv[1:]
-document = {"schema_name":"resolved_comparison_plan","embedding_endpoint":{"effective_endpoint":endpoint,"ownership":ownership},"execution":{"extraction_max_retries":10},"model_roles":[{"role_id":"hindsight_extraction","model":"plan-hindsight","thinking_effort":"low"},{"role_id":"mem0_extraction","model":"plan-mem0","thinking_effort":"high"},{"role_id":"openviking_semantic_understanding","model":"plan-openviking","thinking_effort":"max"},{"role_id":"embedding","model":"plan-embedding","thinking_effort":"not_applicable"}]}
+document = {"schema_name":"resolved_comparison_plan","embedding_endpoint":{"effective_endpoint":endpoint,"ownership":ownership},"execution":{"extraction_max_retries":10},"model_roles":[{"role_id":"hindsight_extraction","model":"LLM_LIGHT_MODEL","thinking_effort":"low"},{"role_id":"mem0_extraction","model":"LLM_LIGHT_MODEL","thinking_effort":"high"},{"role_id":"openviking_semantic_understanding","model":"LLM_LIGHT_MODEL","thinking_effort":"max"},{"role_id":"embedding","model":"plan-embedding","thinking_effort":"not_applicable"}]}
 with open(target, "w", encoding="utf-8") as output:
     json.dump(document, output)
 PY
@@ -1050,7 +1090,7 @@ def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path
     ):
         assert stale not in root_env
     assert (
-        "provider-config plan-hindsight|plan-mem0|plan-openviking|plan-embedding|low|high|max|openai|openai"
+        "provider-config deepseek-flash|deepseek-flash|deepseek-flash|plan-embedding|low|high|max|openai|openai"
         in (trace.read_text(encoding="utf-8"))
     )
     assert any(
@@ -1105,7 +1145,7 @@ def test_precheck_upgrades_legacy_two_key_root_env(tmp_path: Path) -> None:
     ):
         assert expected in root_env
     assert (
-        "provider-config plan-hindsight|plan-mem0|plan-openviking|plan-embedding|low|high|max|openai|openai"
+        "provider-config deepseek-flash|deepseek-flash|deepseek-flash|plan-embedding|low|high|max|openai|openai"
         in (trace.read_text(encoding="utf-8"))
     )
     assert not (root / "provider-services" / ".env").exists()
@@ -1557,6 +1597,8 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
         "LLM_URL_TYPE=openai_chat\n"
         "LLM_BASE_URL=test\n"
         "LLM_API_KEY=test\n"
+        "LLM_LIGHT_MODEL=runtime-light-model\n"
+        "LLM_DEEP_MODEL=runtime-deep-model\n"
         "OAMB_EMBEDDING_BASE_URL=change-me\n"
         "OAMB_EMBEDDING_API_KEY=\n",
         encoding="utf-8",
@@ -1581,17 +1623,17 @@ printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
                 "model_roles": [
                     {
                         "role_id": "hindsight_extraction",
-                        "model": "plan-hindsight",
+                        "model": "LLM_LIGHT_MODEL",
                         "thinking_effort": "low",
                     },
                     {
                         "role_id": "mem0_extraction",
-                        "model": "plan-mem0",
+                        "model": "LLM_LIGHT_MODEL",
                         "thinking_effort": "high",
                     },
                     {
                         "role_id": "openviking_semantic_understanding",
-                        "model": "plan-openviking",
+                        "model": "LLM_LIGHT_MODEL",
                         "thinking_effort": "max",
                     },
                     {
@@ -1708,7 +1750,7 @@ def test_run_dry_run_validates_without_dispatch(
     calls = trace.read_text(encoding="utf-8")
     assert "provider-services doctor" in calls
     assert (
-        "provider-config plan-hindsight|plan-mem0|plan-openviking|plan-embedding|low|high|max|openai|openai"
+        "provider-config runtime-light-model|runtime-light-model|runtime-light-model|plan-embedding|low|high|max|openai|openai"
         in calls
     )
     assert "uv run --locked python -" in calls
@@ -2474,14 +2516,14 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
     script = _copy_quick_start_script(RUN_SCRIPT, root)
     full_root, result_paths = _write_provider_result_run(root)
     original_results = tuple(path.read_bytes() for path in result_paths)
-    current_plan_path = (
-        root / "outputs" / "tmp" / "precheck" / "lme60-test" / "plan" / "resolved-plan.json"
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "LLM_LIGHT_MODEL=runtime-light-model",
+            "LLM_LIGHT_MODEL=changed-runtime-model",
+        ),
+        encoding="utf-8",
     )
-    current_plan = json.loads(current_plan_path.read_bytes())
-    for role in current_plan["model_roles"]:
-        if role["role_id"] != "embedding":
-            role["model"] = f"current-{role['role_id']}"
-    current_plan_path.write_text(json.dumps(current_plan) + "\n", encoding="utf-8")
 
     result = subprocess.run(
         [str(script), "--full_test", "--resume"],
@@ -2537,7 +2579,7 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
     assert tuple(path.read_bytes() for path in result_paths) == original_results
     provider_config = next(line for line in calls if line.startswith("provider-config "))
     assert provider_config.startswith(
-        "provider-config plan-hindsight|plan-mem0|plan-openviking|plan-embedding|"
+        "provider-config changed-runtime-model|changed-runtime-model|changed-runtime-model|plan-embedding|"
     )
     assert "run: PASS (full, 60 questions, 180 provider results)" in result.stdout
 

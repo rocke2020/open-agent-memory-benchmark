@@ -23,6 +23,7 @@ from .benchmark import (
     DEEPSEEK_THINKING_EFFORT_SCALE,
     MODEL_EXECUTION_OWNER_BY_ROLE,
     MODEL_ROLE_IDS,
+    MODEL_VARIABLE_BY_ROLE,
     T10_RETRIEVAL_BINDING_IDS,
     BenchmarkConfiguration,
     CellConfiguration,
@@ -489,7 +490,7 @@ def _build_model_binding(
 ) -> ModelExecutionBinding:
     values = {
         "role_id": role_id,
-        "model": role.model,
+        "model": MODEL_VARIABLE_BY_ROLE[role_id] or role.model,
         "thinking_effort": role.thinking_effort,
         "thinking_effort_scale": role.thinking_effort_scale,
         "thinking_effort_rank_1_indexed": role.thinking_effort_rank_1_indexed,
@@ -768,6 +769,9 @@ def _parse_model_role(value: object) -> ModelExecutionBinding:
     ):
         raise ResolvedPlanError(f"resolved model role {role_id} effort closure is invalid")
     model = _require_text(document["model"], "model")
+    model_variable = MODEL_VARIABLE_BY_ROLE[role_id]
+    if model_variable is not None and model != model_variable:
+        raise ResolvedPlanError(f"resolved model role {role_id} must reference {model_variable}")
     execution_owner = _require_text(document["execution_owner"], "execution owner")
     expected_owner = MODEL_EXECUTION_OWNER_BY_ROLE[role_id]
     if execution_owner != expected_owner:

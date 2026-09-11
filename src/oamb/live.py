@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from oamb.artifacts.atomic import read_regular_file
-from oamb.config.benchmark import MODEL_ROLE_IDS, ModelRoleId
+from oamb.config.benchmark import MODEL_PROFILE_ENVIRONMENT_KEYS, MODEL_ROLE_IDS, ModelRoleId
 from oamb.config.doctor import CellSpec, ModelExecutionBinding, ResolvedPlan
 from oamb.config.provider_services import (
     ProviderServiceBindingError,
@@ -194,9 +194,17 @@ def load_live_environment(
     environment.update(
         load_t10_provider_environment(
             model_env_path,
-            expected_keys=frozenset({_LLM_URL_TYPE_VARIABLE, "LLM_BASE_URL", "LLM_API_KEY"}),
+            expected_keys=frozenset(
+                {
+                    _LLM_URL_TYPE_VARIABLE,
+                    "LLM_BASE_URL",
+                    "LLM_API_KEY",
+                    *MODEL_PROFILE_ENVIRONMENT_KEYS,
+                }
+            ),
         )
     )
+    environment["OAMB_EMBEDDING_MODEL"] = _model_plan(plan, "embedding").model
     environment["OAMB_EMBEDDING_BASE_URL"] = plan.embedding_endpoint.effective_endpoint
     if environment.get(_LLM_URL_TYPE_VARIABLE) != _SUPPORTED_LLM_URL_TYPE:
         raise LiveConfigurationError("LLM_URL_TYPE must be openai_chat in OAMB v0.1.0")
@@ -207,6 +215,9 @@ def load_live_environment(
         "OAMB_MEM0_LLM_API_KEY": "LLM_API_KEY",
         "OAMB_OPENVIKING_VLM_BASE_URL": "LLM_BASE_URL",
         "OAMB_OPENVIKING_VLM_API_KEY": "LLM_API_KEY",
+        "OAMB_HINDSIGHT_LLM_MODEL": "LLM_LIGHT_MODEL",
+        "OAMB_MEM0_LLM_MODEL": "LLM_LIGHT_MODEL",
+        "OAMB_OPENVIKING_VLM_MODEL": "LLM_LIGHT_MODEL",
     }
     for target, source in aliases.items():
         if source in environment:
@@ -312,7 +323,7 @@ def load_live_provider_evidence(
         expected_project=provider_project,
         expected_project_attestation_sha256=attestation_hash,
         controlled_embeddings={profile_id: embedding for profile_id in profile_ids},
-        expected_provider_models=_expected_provider_models(plan),
+        expected_provider_models=_expected_provider_models(plan, environment),
         expected_provider_thinking_efforts=_expected_provider_thinking_efforts(plan),
     )
     evidence_by_provider: dict[str, SourceEvidenceBinding] = {}
@@ -350,7 +361,7 @@ def validate_live_service_verification_receipt(
             service_receipt_path,
             expected_project=provider_project,
             expected_project_attestation_sha256=attestation_hash,
-            expected_provider_models=_expected_provider_models(plan),
+            expected_provider_models=_expected_provider_models(plan, environment),
             expected_provider_thinking_efforts=_expected_provider_thinking_efforts(plan),
         )
     except (OSError, ProviderServiceBindingError) as exc:
@@ -382,11 +393,13 @@ def _live_service_identity(
     return provider_project, attestation_hash
 
 
-def _expected_provider_models(plan: ResolvedPlan) -> dict[str, str]:
+def _expected_provider_models(plan: ResolvedPlan, environment: Mapping[str, str]) -> dict[str, str]:
     return {
-        "hindsight-rest-v1": _model_plan(plan, "hindsight_extraction").model,
-        "mem0-rest-v1": _model_plan(plan, "mem0_extraction").model,
-        "openviking-rest-v1": _model_plan(plan, "openviking_semantic_understanding").model,
+        "hindsight-rest-v1": _runtime_model(_model_plan(plan, "hindsight_extraction"), environment),
+        "mem0-rest-v1": _runtime_model(_model_plan(plan, "mem0_extraction"), environment),
+        "openviking-rest-v1": _runtime_model(
+            _model_plan(plan, "openviking_semantic_understanding"), environment
+        ),
     }
 
 
@@ -408,11 +421,12 @@ _LIVE_MODEL_VARIABLES: tuple[tuple[ModelRoleId, str], ...] = (
 )
 
 
-def plan_model_environment(plan: ResolvedPlan) -> dict[str, str]:
-    """Derive the plan-owned live model variables without dotenv input."""
+def plan_model_environment(plan: ResolvedPlan, environment: Mapping[str, str]) -> dict[str, str]:
+    """Derive provider model variables from plan references and runtime values."""
 
     return {
-        variable: _model_plan(plan, role_id).model for role_id, variable in _LIVE_MODEL_VARIABLES
+        variable: _runtime_model(_model_plan(plan, role_id), environment)
+        for role_id, variable in _LIVE_MODEL_VARIABLES
     }
 
 
@@ -421,8 +435,8 @@ def _validate_live_models(
     environment: Mapping[str, str],
 ) -> None:
     for role_id, variable in _LIVE_MODEL_VARIABLES:
-        if environment.get(variable) != _model_plan(plan, role_id).model:
-            raise LiveConfigurationError(f"{role_id} model differs from the plan")
+        if environment.get(variable) != _runtime_model(_model_plan(plan, role_id), environment):
+            raise LiveConfigurationError(f"{role_id} model differs from the runtime model")
 
 
 def resolve_service_verification_receipt(
@@ -616,6 +630,8 @@ def live_readiness_environment_hash(
         required_names.append(role.endpoint_variable)
         if role.credential_variable != "not_applicable":
             required_names.append(role.credential_variable)
+        if role.role_id != "embedding":
+            required_names.append(role.model)
     unique_names = tuple(dict.fromkeys(required_names))
     resolved = _resolve_environment(environment, unique_names)
     return _environment_hash(unique_names, resolved)
@@ -728,12 +744,11 @@ def execute_live_cell(
         provider = cell.cell.provider_id
         internal_retry_count = _validated_cell_internal_retry_count(cell)
         if provider == "hindsight":
-            producer = _model_plan(cell.plan, "hindsight_extraction")
             return HindsightAdapter(
                 store=store,  # type: ignore[arg-type]
                 base_url=environment[cell.cell.endpoint_variable],
                 authorization=None,
-                extraction_model=producer.model,
+                extraction_model=bindings_by_role["hindsight_extraction"].model,
                 runtime_binding_hash=cell.control.run_spec.runtime_binding_hash,
                 internal_retry_count=internal_retry_count,
                 read_timeout_seconds=memory_timeout_seconds,
@@ -1404,6 +1419,8 @@ def _required_environment(
         names.append(role.endpoint_variable)
         if role.credential_variable != "not_applicable":
             names.append(role.credential_variable)
+        if role.role_id != "embedding":
+            names.append(role.model)
     names.extend(_EXTRA_ENVIRONMENT_BY_PROVIDER[cell.provider_id])
     return tuple(dict.fromkeys(names))
 
@@ -1413,6 +1430,18 @@ def _model_plan(plan: ResolvedPlan, role_id: ModelRoleId) -> ModelExecutionBindi
     if len(matches) != 1:
         raise LiveConfigurationError(f"resolved plan does not contain one model role: {role_id}")
     return matches[0]
+
+
+def _runtime_model(
+    role: ModelExecutionBinding,
+    environment: Mapping[str, str],
+) -> str:
+    if role.role_id == "embedding":
+        return role.model
+    value = environment.get(role.model)
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise LiveConfigurationError(f"runtime model is missing for {role.role_id}")
+    return value
 
 
 def _resolve_environment(
@@ -1486,6 +1515,7 @@ def _role_bindings(
             "answer": "oamb-lme-answer-v1",
             "judge": "oamb-lme-judge-v1",
         }.get(role.role_id, role.binding_hash)
+        runtime_model = _runtime_model(role, environment)
         result.append(
             ModelRoleBindingV2(
                 binding_id=binding_id,
@@ -1512,7 +1542,7 @@ def _role_bindings(
                     if role.credential_variable == "not_applicable"
                     else role.credential_variable
                 ),
-                model=role.model,
+                model=runtime_model,
                 thinking_effort=role.thinking_effort,
                 parameters_fingerprint=canonical_sha256(
                     [
