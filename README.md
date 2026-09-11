@@ -65,9 +65,9 @@ to a generation-model retrieval path are not.
 These two steps run a real comparison. They create isolated provider state and
 can make billable model calls; neither script deletes provider or database data.
 
-Install Git, Python 3.11 or newer, `uv`, Docker Engine with Compose, `curl`,
-`jq`, and `shasum`. You also need an OpenAI-compatible endpoint that serves
-`deepseek-v4-flash` and `deepseek-v4-pro`.
+Install Git, Python 3.11 or newer, `uv`, Docker Engine with Compose, `curl`, `jq`, and `shasum`. You also need an OpenAI-compatible endpoint that serves the models selected in [configs/benchmark.yml](configs/benchmark.yml).
+
+Both `llm_profiles.light_model` and `llm_profiles.deep_model` currently request `deepseek-flash`, which serves DeepSeek-V4.1-Flash on the official DeepSeek API as of its [September 10, 2026 release](https://www.deepseek.com/en/news/deepseek-v4-1-flash/). The light profile supplies Hindsight extraction, Mem0 extraction, OpenViking semantic understanding, and judging; the deep profile supplies answering. These are role assignments and may use the same model. Extraction, semantic understanding, and answering use `low` thinking effort; judging uses `high`. The API alias is the configured request name; supplier-returned model metadata remains in each run's raw evidence, and historical results retain their recorded model settings.
 
 OAMB can reuse any local or paid OpenAI-compatible embedding service. The configured service must serve `qwen3-embedding:0.6b`, return 1,024 dimensions, and accept at least 8,192 input tokens. The API key is optional for an unauthenticated local service. If no embedding service URL is configured, macOS starts the checked-in vLLM-Metal helper and Linux starts the checked-in Ollama helper. The macOS fallback expects a sibling `vllm-metal` checkout and the cached model paths described by its error messages; the Linux fallback requires Ollama and may download the 639 MB model on first use. On Linux, Ollama binds to loopback and the checked-in bounded relay listens only on the Docker bridge gateway needed by provider containers; neither binds the unauthenticated service to LAN interfaces.
 
