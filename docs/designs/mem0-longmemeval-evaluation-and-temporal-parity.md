@@ -6,7 +6,7 @@
 2. Mem0's current 94.4% headline is not independently supported by the public repository artifacts inspected for this report. The public result file still contains the older 467/500 result, while the change to 472/500 updated the README without publishing a corresponding 500-question raw artifact. This is a reproducibility and evidence gap, not evidence of dishonesty.
 3. Mem0's published score is an end-to-end system result: managed Mem0 retrieval, GPT-5 answer generation, a LongMemEval-specific reader prompt, and a more permissive custom judge. It must not be described as pure retrieval accuracy or compared directly with a provider score produced by OAMB's common answer and judge path.
 4. OAMB's current Mem0 diagnostic result of 22/30 has a serious timestamp-fairness defect. OAMB preserves the same source-session timestamp for every provider, but its Mem0 adapter does not transmit that time to Mem0. Historical events are consequently extracted and stored using the benchmark execution date.
-5. The selected correction changes OAMB only. It keeps Mem0 2.0.19, the original LongMemEval rows, the original two-message pairs, the common OAMB answer and judge path, and `top_k=150`. For each Mem0 pair, OAMB supplies the source timestamp as both storage metadata and a generic highest-priority extraction instruction. This adapter translation is accepted only after a timestamp-sensitive real case proves the intended semantics in a fresh isolated scope.
+5. The selected correction changes OAMB only. It keeps Mem0 2.0.19, the original LongMemEval rows, the original two-message pairs, the common OAMB answer and judge path, and `top_k=150`. For each Mem0 pair, OAMB supplies the source timestamp as both storage metadata and a generic highest-priority extraction instruction. A fresh timestamp-sensitive case passed the semantic gate, and the subsequent isolated LME30 run completed at 27/30, or 90.0%.
 
 ## 1. Scope and terminology
 
@@ -136,7 +136,35 @@ If the single case passes the semantic checks, run the fixed 30-question selecti
 
 The LME30 result is accepted only with exactly 30 unique terminal cases, 30 valid judgments, five questions from each LongMemEval type, independently recomputed accuracy, exactly recorded native candidate counts, and a fresh capsule validation. A low score remains a completed result; it does not authorize prompt tuning, question-specific rules, method changes, or expansion to 500 questions.
 
-## 9. Reporting language
+## 9. Completed OAMB evidence
+
+The real gate and LME30 run completed on 2026-09-12 without changing the selected method.
+
+The fresh `1d4e3b97` gate preserved the chain-and-cassette fact as February 1, 2024, stored the extracted memories with the source session's `2024-02-20T19:01:00+00:00` timestamp rather than the 2026 execution date, returned the chain-and-cassette fact at rank 1 and the Garmin fact at rank 33 of 150, produced a correct common-path answer, received a `Yes` judgment, and passed all eight capsule-validation rules. Its capsule ID is `4879311ea7844b0b9c935dad790644f28e98ac2d73a573f27b69b8627bdfb4d7`.
+
+The subsequent fresh Mem0-only LME30 run used resolved-plan hash `17279da8a80b74e0f0ddbc9b2e49a790737f2689ad7afeb9f30617c7b16220f6`, `deepseek-flash` for extraction, answer, and judge, Qwen3-Embedding 0.6B, and `top_k=150`. It finalized 30 isolated ingestion occurrences and 30 cases after 1,418 successful source-session ingestion operations. All 30 cases were judged, all returned exactly 150 native candidates, no case had an error stage, and the independently reopened capsule passed all eight validation rules. The final score is 27/30, or 90.0%. Its capsule ID is `2f51d45f071b10a3b098465bd040d5e08d6e524faa620c778acdb110c68a130c`.
+
+| Question type | Correct | Total | Accuracy |
+| --- | ---: | ---: | ---: |
+| knowledge-update | 5 | 5 | 100% |
+| multi-session | 4 | 5 | 80% |
+| single-session-assistant | 3 | 5 | 60% |
+| single-session-preference | 5 | 5 | 100% |
+| single-session-user | 5 | 5 | 100% |
+| temporal-reasoning | 5 | 5 | 100% |
+| **Overall** | **27** | **30** | **90.0%** |
+
+Compared with the timestamp-defective 22/30 diagnostic on the same questions, six old failures became correct, two remained incorrect, and one formerly correct question became incorrect, for a net gain of five. The paired result is directional evidence consistent with the timestamp correction, not a controlled causal estimate: the external model can still vary even with the same alias and zero-temperature request.
+
+The three remaining failures expose distinct non-retrieval-limit boundaries.
+
+1. `gpt4_15e38248`: the top-150 evidence contained the bookshelf, coffee table, kitchen-table repair, and Casper mattress. The answer mentioned all four but classified the mattress as bedding and returned three; the gold answer is four.
+2. `41275add`: the top-150 evidence contained the correct Mayo Clinic video title but the extracted memory omitted the required YouTube URL, so the answer could not supply the complete gold answer.
+3. `8cf51dda`: rank 2 explicitly contained “clinical and biological significance,” but the answer followed rank 1's narrower “patient outcomes and therapy response” wording and omitted biological significance; the common judge rejected the incomplete second objective.
+
+The result strongly indicates that OAMB's timestamp omission was a major source of the low diagnostic score for this Mem0 OSS configuration. It does not establish managed-platform equivalence, isolate the effect of every changed answer, or reproduce the 94.4% headline.
+
+## 10. Reporting language
 
 Approved wording:
 
@@ -153,7 +181,7 @@ Disallowed wording:
 - “Adding `created_at` alone fixes temporal extraction.”
 - “Adapter-level translation is native Mem0 OSS timestamp support.”
 
-## 10. Authoritative source map
+## 11. Authoritative source map
 
 | Concern | Source |
 | --- | --- |
