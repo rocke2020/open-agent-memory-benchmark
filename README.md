@@ -76,6 +76,8 @@ Set concurrency under `execution` in [configs/benchmark.yml](configs/benchmark.y
 | `max_parallel_history_ingestions_per_provider` | Independent histories being ingested per provider |
 | `max_parallel_questions_per_provider` | Retrieval, answer, and judge pipelines per provider |
 
+Set the shared native candidate ceiling with `retrieval.top_k` in the same configuration. The value is frozen into the resolved plan and used by every provider adapter: Mem0 sends it as `top_k`, OpenViking sends it as `limit`, and Hindsight keeps only the first N provider-ranked normalized candidates because its recall endpoint has no item-count parameter.
+
 Sessions within one history remain sequential. These limits do not cap a provider's internal embedding/model requests. Fresh runs use the prechecked plan. Each `--resume` reads the current YAML's history and question caps for unfinished work; changing those two values does not invalidate completed results. Other plan settings stay frozen, and already-running processes do not reload YAML. Do not edit `resolved-plan.json`.
 
 Retry and per-attempt timeout settings are documented alongside these controls in the configuration. They are not whole-run or spending caps. A local timeout does not prove remote processing or billing stopped.

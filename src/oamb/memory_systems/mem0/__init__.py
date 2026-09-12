@@ -26,7 +26,6 @@ from .sdk import Mem0SdkAdapter, Mem0SdkWorkerBoundary
 from .wire import (
     MEM0_REST_ROUTE_ALLOWLIST,
     MEM0_SEARCH_THRESHOLD,
-    MEM0_SEARCH_TOP_K,
     Mem0AddDisposition,
     Mem0AddEvent,
     Mem0AddResult,
@@ -47,7 +46,6 @@ __all__ = [
     "MEM0_REST_PROFILE",
     "MEM0_REST_ROUTE_ALLOWLIST",
     "MEM0_SEARCH_THRESHOLD",
-    "MEM0_SEARCH_TOP_K",
     "MEM0_SDK_PROFILE",
     "Mem0RestAdapter",
     "Mem0ReferenceNegativeAdapter",

@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import oamb.runtime.native_run as native_run_module
 from oamb.artifacts.store import ArtifactStore
 from oamb.artifacts.validation.catalog import validate_catalog_profile
 from oamb.artifacts.validation.native import validate_native_capsule
@@ -884,6 +885,38 @@ def test_compact_validation_rejects_coherent_evidence_tampering(
         ),
     )
     assert _visible_context_rule(changed), mutation
+
+
+def test_recorded_hindsight_capsule_validates_a_top_k_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from oamb.artifacts.validation.native import _load_native_capsule, _retrieval_closure_rule
+
+    monkeypatch.setattr(native_run_module, "NATIVE_FIXTURE_RETRIEVAL_TOP_K", 1)
+
+    completed = _run_recorded_hindsight(tmp_path)
+
+    case = completed.case_records[0]
+    assert case.native_candidate_count == 1
+    assert len(case.retrieval_supporting_raw_refs) == 1
+    snapshot = _load_native_capsule(completed.capsule_root)
+    policy = json.loads(snapshot.raw_payloads[case.retrieval_supporting_raw_refs[0]])
+    assert policy == {
+        "schema_name": "oamb_hindsight_candidate_limit_receipt",
+        "schema_version": 1,
+        "top_k": 1,
+        "provider_request_sha256": case.retrieval_request_raw_ref,
+        "provider_response_sha256": case.retrieval_raw_ref,
+    }
+    validation = validate_native_capsule(completed.capsule_root)
+    assert validation.disposition == ValidationDisposition.VALIDATED, validation.issues
+    changed_case = case.model_copy(update={"ordered_native_candidate_ids": ("wrong-prefix",)})
+    changed = replace(
+        snapshot,
+        contracts=tuple(changed_case if item == case else item for item in snapshot.contracts),
+    )
+    assert _retrieval_closure_rule(changed)
 
 
 def test_real_lme_hindsight_and_model_clients_seal_one_root_validatable_capsule(

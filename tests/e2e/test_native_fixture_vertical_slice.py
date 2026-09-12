@@ -67,11 +67,13 @@ from oamb.contracts.ports import (
     RuntimeResolution,
     ScopeAllocationRequest,
     ScopeReceipt,
+    SourceUnit,
     StateDigestReceipt,
     ThinkingEffort,
     VisibleEvidence,
     VisibleEvidencePolicy,
 )
+from oamb.contracts.specifications import CaseManifest
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.fake import ScriptedFakeMemorySystem
 from oamb.memory_systems.mem0 import Mem0RestAdapter
@@ -138,6 +140,45 @@ class _NativeFixtureJudgeWorkload(_NativeFixtureWorkload):
         if case_plan.judge_binding_id is not None:
             return GeneratedFakeWorkload.evaluate(self, case_plan, answer)
         return super().evaluate(case_plan, answer)
+
+
+class _Mem0PairFixtureWorkload(_NativeFixtureWorkload):
+    def iter_ingestion_plans(self, case_manifest: CaseManifest) -> tuple[IngestionPlan, ...]:
+        plans = super().iter_ingestion_plans(case_manifest)
+        paired_plans: list[IngestionPlan] = []
+        for plan in plans:
+            paired_sources: list[SourceUnit] = []
+            for source in plan.ordered_source_units:
+                messages = [
+                    {"role": "user", "content": source.payload_bytes.decode("utf-8")},
+                    {"role": "assistant", "content": "first reply"},
+                    {"role": "user", "content": "follow-up"},
+                    {"role": "assistant", "content": "second reply"},
+                ]
+                payload = json.dumps(messages, separators=(",", ":")).encode("utf-8")
+                paired_sources.append(
+                    replace(
+                        source,
+                        payload_bytes=payload,
+                        payload_sha256=hashlib.sha256(payload).hexdigest(),
+                        source_reference=f"session-{source.ordinal_1_indexed}",
+                        occurred_at="2026-01-01T00:00:00+00:00",
+                        context_text=f"LongMemEval session {source.ordinal_1_indexed}",
+                    )
+                )
+            paired_plans.append(
+                replace(
+                    plan,
+                    shared_context_sha256=canonical_sha256(
+                        [
+                            "oamb-mem0-pair-fixture-v1",
+                            tuple(item.payload_sha256 for item in paired_sources),
+                        ]
+                    ),
+                    ordered_source_units=tuple(paired_sources),
+                )
+            )
+        return tuple(paired_plans)
 
 
 class _RecordedNativeMemory(ScriptedFakeMemorySystem):
@@ -1210,7 +1251,7 @@ def test_recorded_empty_mem0_rest_capsule_validates_black_box_evidence(
         output_root=tmp_path / "capsules",
         run_id="native-mem0-recorded-empty",
         adapter_profile_id="mem0-rest-v1",
-        workload=_NativeFixtureWorkload(),
+        workload=_Mem0PairFixtureWorkload(),
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
         artifact_store_factory=ArtifactStore,
         memory_factory=memory_factory,

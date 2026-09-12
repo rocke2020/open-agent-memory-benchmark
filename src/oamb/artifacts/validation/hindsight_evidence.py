@@ -24,12 +24,52 @@ from oamb.memory_systems.hindsight.projection import (
 )
 from oamb.memory_systems.rest import parse_exact_json_object
 
+_CANDIDATE_LIMIT_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_name",
+        "schema_version",
+        "top_k",
+        "provider_request_sha256",
+        "provider_response_sha256",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class HindsightProjectionEvidence:
     state_sha256: str
     ordered_source_unit_ids: tuple[str, ...]
     document_to_source_unit: dict[str, str]
+
+
+def reconstruct_hindsight_candidate_limit(
+    *,
+    raw_payloads: Mapping[str, bytes],
+    references: tuple[str, ...],
+    expected_request_sha256: str | None,
+    expected_response_sha256: str | None,
+) -> int | None:
+    if not references:
+        return None
+    if len(references) != 1:
+        raise ValueError("Hindsight candidate-limit receipt inventory is invalid")
+    payload = _required_raw(raw_payloads, references[0])
+    document = parse_exact_json_object(
+        payload,
+        expected_fields=_CANDIDATE_LIMIT_RECEIPT_FIELDS,
+    )
+    top_k = document["top_k"]
+    if (
+        payload != canonical_json_bytes(document)
+        or document["schema_name"] != "oamb_hindsight_candidate_limit_receipt"
+        or document["schema_version"] != 1
+        or type(top_k) is not int
+        or top_k < 1
+        or document["provider_request_sha256"] != expected_request_sha256
+        or document["provider_response_sha256"] != expected_response_sha256
+    ):
+        raise ValueError("Hindsight candidate-limit receipt is invalid")
+    return top_k
 
 
 def reconstruct_hindsight_projection(
@@ -206,4 +246,8 @@ def _required_raw(raw_payloads: Mapping[str, bytes], reference: str) -> bytes:
         raise ValueError("Hindsight projection raw reference is missing") from exc
 
 
-__all__ = ["HindsightProjectionEvidence", "reconstruct_hindsight_projection"]
+__all__ = [
+    "HindsightProjectionEvidence",
+    "reconstruct_hindsight_candidate_limit",
+    "reconstruct_hindsight_projection",
+]

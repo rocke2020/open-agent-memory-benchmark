@@ -73,7 +73,6 @@ from .projection import (
     projection_state_sha256,
 )
 from .wire import (
-    MEM0_SEARCH_TOP_K,
     Mem0RestRequest,
     Mem0SourceMetadata,
     build_add_http_request,
@@ -108,7 +107,7 @@ class _ScopeBinding:
 @dataclass(frozen=True, slots=True)
 class _PlannedAdd:
     dispatch: IngestionDispatch
-    request: Mem0RestRequest
+    requests: tuple[Mem0RestRequest, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +257,7 @@ class Mem0RestAdapter:
         self._next_ingestion_dispatch_ordinal: dict[str, int] = {}
         self._attempted_dispatches: set[tuple[str, str, int]] = set()
         self._next_batch_attempt_ordinals: dict[tuple[str, str], int] = {}
+        self._completed_add_response_refs: dict[tuple[str, str], tuple[str, ...]] = {}
         self._ready_projections: dict[str, _CapturedProjection] = {}
         self._projection_capture_sequences: dict[str, int] = {}
         self._close_lock = asyncio.Lock()
@@ -357,15 +357,19 @@ class Mem0RestAdapter:
 
         planned: list[_PlannedAdd] = []
         for ordinal, source in enumerate(sources, start=1):
-            wire_request = build_add_http_request(
-                messages=_source_messages(source),
-                run_id=request.scope.scope_id,
-                metadata=Mem0SourceMetadata(
-                    ingestion_occurrence_id=binding.ingestion_occurrence_id,
-                    ingestion_plan_id=binding.ingestion_plan_id,
-                    source_unit_id=source.source_unit_id,
-                    source_ordinal=source.ordinal_1_indexed,
-                ),
+            metadata = Mem0SourceMetadata(
+                ingestion_occurrence_id=binding.ingestion_occurrence_id,
+                ingestion_plan_id=binding.ingestion_plan_id,
+                source_unit_id=source.source_unit_id,
+                source_ordinal=source.ordinal_1_indexed,
+            )
+            wire_requests = tuple(
+                build_add_http_request(
+                    messages=messages,
+                    run_id=request.scope.scope_id,
+                    metadata=metadata,
+                )
+                for messages in _source_message_pairs(source)
             )
             dispatch = IngestionDispatch(
                 dispatch_ordinal_1_indexed=ordinal,
@@ -376,12 +380,12 @@ class Mem0RestAdapter:
                         request.scope.scope_id,
                         ordinal,
                         source.source_unit_id,
-                        wire_request.body.decode("utf-8"),
+                        tuple(item.body.decode("utf-8") for item in wire_requests),
                     ]
                 ),
                 ordered_source_units=(source,),
             )
-            planned.append(_PlannedAdd(dispatch=dispatch, request=wire_request))
+            planned.append(_PlannedAdd(dispatch=dispatch, requests=wire_requests))
         result = tuple(planned)
         self._planned_adds[request.scope.scope_id] = result
         self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = 1
@@ -410,63 +414,110 @@ class Mem0RestAdapter:
             if attempt_key in self._attempted_dispatches:
                 raise ValueError("Mem0 add dispatch was already attempted and cannot replay")
             self._attempted_dispatches.add(attempt_key)
-            try:
-                response = await self._public_client.request(
-                    planned.request.method,
-                    planned.request.path,
-                    json_payload=json.loads(planned.request.body),
-                    write_intent=True,
-                )
-            except MemorySystemCallCancelledBeforeDispatch:
-                self._attempted_dispatches.remove(attempt_key)
-                raise
-            except MemorySystemCallFailure as exc:
-                if (
-                    exc.status_code is not None
-                    and exc.raw_response_bytes is not None
-                    and exc.raw_reference is not None
-                    and self._internal_retry_count is not None
-                ):
-                    reason = classify_settled_ingestion_failure(
-                        settlement_basis=MEM0_SETTLEMENT_BASIS,
-                        status_code=exc.status_code,
-                        raw_response_bytes=exc.raw_response_bytes,
-                        internal_retry_count=self._internal_retry_count,
+            responses: list[SealedRestResponse] = []
+            partial_failure: MemorySystemCallFailure | None = None
+            for wire_request in planned.requests:
+                try:
+                    response = await self._public_client.request(
+                        wire_request.method,
+                        wire_request.path,
+                        json_payload=json.loads(wire_request.body),
+                        write_intent=True,
                     )
-                    if reason is not None:
-                        self._next_batch_attempt_ordinals[dispatch_key] = (
-                            request.batch_attempt_ordinal + 1
-                        )
-                        if request.batch_attempt_ordinal == 3:
-                            self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = (
-                                expected_ordinal + 1
-                            )
-                        raise SettledTransientIngestionFailure(
-                            "Mem0 synchronous add settled with a supplier failure",
-                            failure_kind=reason,
-                            raw_reference=exc.raw_reference,
-                            raw_response_bytes=exc.raw_response_bytes,
-                            supporting_raw_references=exc.supporting_raw_references,
-                            status_code=exc.status_code,
-                            settlement_basis=MEM0_SETTLEMENT_BASIS,
-                            internal_retry_count=self._internal_retry_count,
+                except MemorySystemCallCancelledBeforeDispatch:
+                    if not responses:
+                        self._attempted_dispatches.remove(attempt_key)
+                        raise
+                    last_response = responses[-1]
+                    partial_failure = MemorySystemCallFailure(
+                        "Mem0 pair add was cancelled after an earlier pair completed",
+                        failure_kind="partial_write_cancelled",
+                        raw_reference=last_response.raw_reference,
+                        raw_response_bytes=last_response.raw_bytes,
+                        supporting_raw_references=tuple(
+                            item.raw_reference for item in responses[:-1]
+                        ),
+                        status_code=last_response.status_code,
+                    )
+                    break
+                except MemorySystemCallFailure as exc:
+                    if responses:
+                        raise link_preceding_raw_references(
+                            exc,
+                            preceding_raw_references=tuple(
+                                item.raw_reference for item in responses
+                            ),
                         ) from exc
-                raise
-            with bind_sealed_response_validation(
-                response,
-                message="Mem0 add response failed exact-profile validation",
-            ):
-                parse_add_response(response.raw_bytes)
+                    if (
+                        exc.status_code is not None
+                        and exc.raw_response_bytes is not None
+                        and exc.raw_reference is not None
+                        and self._internal_retry_count is not None
+                    ):
+                        reason = classify_settled_ingestion_failure(
+                            settlement_basis=MEM0_SETTLEMENT_BASIS,
+                            status_code=exc.status_code,
+                            raw_response_bytes=exc.raw_response_bytes,
+                            internal_retry_count=self._internal_retry_count,
+                        )
+                        if reason is not None:
+                            self._next_batch_attempt_ordinals[dispatch_key] = (
+                                request.batch_attempt_ordinal + 1
+                            )
+                            if request.batch_attempt_ordinal == 3:
+                                self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = (
+                                    expected_ordinal + 1
+                                )
+                            raise SettledTransientIngestionFailure(
+                                "Mem0 synchronous add settled with a supplier failure",
+                                failure_kind=reason,
+                                raw_reference=exc.raw_reference,
+                                raw_response_bytes=exc.raw_response_bytes,
+                                supporting_raw_references=exc.supporting_raw_references,
+                                status_code=exc.status_code,
+                                settlement_basis=MEM0_SETTLEMENT_BASIS,
+                                internal_retry_count=self._internal_retry_count,
+                            ) from exc
+                    raise
+                with bind_sealed_response_validation(
+                    response,
+                    message="Mem0 add response failed exact-profile validation",
+                    supporting_raw_references=tuple(
+                        item.raw_reference for item in responses
+                    ),
+                ):
+                    parse_add_response(response.raw_bytes)
+                responses.append(response)
+            if partial_failure is not None:
+                raise partial_failure
             self._next_ingestion_dispatch_ordinal[request.scope.scope_id] = expected_ordinal + 1
             self._next_batch_attempt_ordinals[dispatch_key] = 0
+            self._completed_add_response_refs[dispatch_key] = tuple(
+                item.raw_reference.sha256 for item in responses
+            )
             source_id = request.dispatch.ordered_source_units[0].source_unit_id
+            if len(responses) == 1:
+                receipt_bytes = responses[0].raw_bytes
+                receipt_reference = responses[0].raw_reference
+            else:
+                receipt_bytes = canonical_json_bytes(
+                    {
+                        "schema_name": "oamb_mem0_pair_add_receipt",
+                        "schema_version": 1,
+                        "source_unit_id": source_id,
+                        "ordered_response_sha256": tuple(
+                            item.raw_reference.sha256 for item in responses
+                        ),
+                    }
+                )
+                receipt_reference = self._seal_raw(receipt_bytes)
             return IngestionDispatchReceipt(
                 attempt_id=request.attempt_id,
                 dispatch=request.dispatch,
                 accepted_source_unit_ids=(source_id,),
                 rejected_source_unit_ids=(),
-                raw_reference=response.raw_reference,
-                raw_response_bytes=response.raw_bytes,
+                raw_reference=receipt_reference,
+                raw_response_bytes=receipt_bytes,
                 usage_records=(),
             )
         finally:
@@ -531,7 +582,39 @@ class Mem0RestAdapter:
             ) or set().union(*partitions) != {source_id}:
                 raise ValueError("Mem0 readiness dispatch source partition is invalid")
             if not dispatch_receipt.skipped_source_unit_ids:
-                parse_add_response(dispatch_receipt.raw_response_bytes)
+                planned_add = self._planned_add(
+                    request.scope.scope_id,
+                    dispatch_receipt.dispatch,
+                )
+                if len(planned_add.requests) == 1:
+                    parse_add_response(dispatch_receipt.raw_response_bytes)
+                else:
+                    document = parse_exact_json_object(
+                        dispatch_receipt.raw_response_bytes,
+                        expected_fields=frozenset(
+                            {
+                                "schema_name",
+                                "schema_version",
+                                "source_unit_id",
+                                "ordered_response_sha256",
+                            }
+                        ),
+                    )
+                    expected_response_refs = self._completed_add_response_refs.get(
+                        (
+                            request.scope.scope_id,
+                            dispatch_receipt.dispatch.request_fingerprint,
+                        )
+                    )
+                    if (
+                        document["schema_name"] != "oamb_mem0_pair_add_receipt"
+                        or document["schema_version"] != 1
+                        or document["source_unit_id"] != source_id
+                        or not isinstance(document["ordered_response_sha256"], list)
+                        or tuple(document["ordered_response_sha256"])
+                        != expected_response_refs
+                    ):
+                        raise ValueError("Mem0 pair-add receipt does not match its frozen plan")
 
         first = await self._capture_native_projection(request.scope.scope_id)
         second = await self._capture_native_projection(request.scope.scope_id)
@@ -592,15 +675,17 @@ class Mem0RestAdapter:
         ready = self._ready_projections.get(request.scope.scope_id)
         if ready is None:
             raise ValueError("Mem0 scope has not passed readiness")
-        if request.top_k != MEM0_SEARCH_TOP_K:
-            raise ValueError("Mem0 retrieval top_k must equal 100")
         try:
             query = request.query_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Mem0 search query must be UTF-8") from exc
         if not query:
             raise ValueError("Mem0 search query must not be empty")
-        wire_request = build_search_http_request(query=query, run_id=request.scope.scope_id)
+        wire_request = build_search_http_request(
+            query=query,
+            run_id=request.scope.scope_id,
+            top_k=request.top_k,
+        )
         response = await self._public_client.request(
             wire_request.method,
             wire_request.path,
@@ -873,6 +958,11 @@ def _source_messages(source: SourceUnit) -> tuple[tuple[str, str], ...]:
     if not content:
         raise ValueError("Mem0 source payload must not be empty")
     return (("user", content),)
+
+
+def _source_message_pairs(source: SourceUnit) -> tuple[tuple[tuple[str, str], ...], ...]:
+    messages = _source_messages(source)
+    return tuple(messages[index : index + 2] for index in range(0, len(messages), 2))
 
 
 def _validate_openapi(raw_bytes: bytes) -> None:

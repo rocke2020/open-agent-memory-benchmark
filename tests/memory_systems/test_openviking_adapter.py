@@ -1050,7 +1050,7 @@ async def test_find_hydrates_l0_l1_l2_in_provider_order_with_ordered_raw_referen
             scope=scope,
             case_occurrence_id="d" * 64,
             query_bytes=b"where is alpha?",
-            top_k=100,
+            top_k=150,
         )
     )
 
@@ -1061,7 +1061,7 @@ async def test_find_hydrates_l0_l1_l2_in_provider_order_with_ordered_raw_referen
         "query": "where is alpha?",
         "target_uri": EXPECTED_ROOT,
         "context_type": "resource",
-        "limit": 100,
+        "limit": 150,
     }
     read_calls = [request for request in calls if request.url.path == "/api/v1/content/read"][
         projection_read_count:
@@ -1102,16 +1102,17 @@ async def test_find_hydrates_l0_l1_l2_in_provider_order_with_ordered_raw_referen
     )
     assert not any(request.url.path.endswith("/overview") for request in calls)
     assert not any(request.url.path.endswith("/abstract") for request in calls)
-    with pytest.raises(Exception, match="top_k|100"):
-        await adapter.retrieve(
-            RetrievalRequest(
-                scope=scope,
-                case_occurrence_id="e" * 64,
-                query_bytes=b"where is beta?",
-                top_k=3,
-            )
+    await adapter.retrieve(
+        RetrievalRequest(
+            scope=scope,
+            case_occurrence_id="e" * 64,
+            query_bytes=b"where is beta?",
+            top_k=3,
         )
-    assert [request.url.path for request in calls].count("/api/v1/search/find") == 1
+    )
+    find_calls = [request for request in calls if request.url.path == "/api/v1/search/find"]
+    assert len(find_calls) == 2
+    assert json.loads(find_calls[-1].content)["limit"] == 3
     await adapter.close()
 
 

@@ -95,7 +95,7 @@ _MODEL_ROLE_KEYS = frozenset(
     }
 )
 _DECISION_KEYS = frozenset({"minimum_accuracy_delta", "maximum_exact_mcnemar_p_value"})
-_RETRIEVAL_KEYS = frozenset({"generation", "bindings"})
+_RETRIEVAL_KEYS = frozenset({"generation", "top_k", "bindings"})
 _RETRIEVAL_BINDING_KEYS = frozenset(
     {
         "binding_hash",
@@ -218,6 +218,7 @@ class ResolvedRetrievalBinding:
 @dataclass(frozen=True, slots=True)
 class ResolvedRetrieval:
     generation: str
+    top_k: int
     bindings: tuple[ResolvedRetrievalBinding, ...]
 
 
@@ -332,6 +333,7 @@ def build_resolved_plan(
     )
     retrieval = ResolvedRetrieval(
         generation=configuration.retrieval.generation,
+        top_k=configuration.retrieval.top_k,
         bindings=retrieval_bindings,
     )
     roles_by_id = {role.role_id: role for role in model_roles}
@@ -600,6 +602,7 @@ def _payload(
         "model_roles": [_model_binding_document(role) for role in model_roles],
         "retrieval": {
             "generation": retrieval.generation,
+            "top_k": retrieval.top_k,
             "bindings": [_retrieval_binding_document(binding) for binding in retrieval.bindings],
         },
         "execution": _execution_document(execution),
@@ -816,7 +819,11 @@ def _parse_retrieval(value: object) -> ResolvedRetrieval:
     bindings = tuple(_parse_retrieval_binding(item) for item in raw_bindings)
     if tuple(binding.binding_id for binding in bindings) != T10_RETRIEVAL_BINDING_IDS:
         raise ResolvedPlanError("resolved retrieval binding inventory or order is invalid")
-    return ResolvedRetrieval(generation="disabled", bindings=bindings)
+    return ResolvedRetrieval(
+        generation="disabled",
+        top_k=_require_positive_integer(document["top_k"], "resolved retrieval top_k"),
+        bindings=bindings,
+    )
 
 
 def _parse_retrieval_binding(value: object) -> ResolvedRetrievalBinding:

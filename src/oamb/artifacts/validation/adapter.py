@@ -11,6 +11,7 @@ from typing import Any
 
 from oamb.artifacts.validation.hindsight_evidence import (
     HindsightProjectionEvidence,
+    reconstruct_hindsight_candidate_limit,
     reconstruct_hindsight_projection,
 )
 from oamb.artifacts.validation.mem0_evidence import (
@@ -45,6 +46,7 @@ from oamb.contracts.evidence import (
     ValidationIssue,
     ValidationSeverity,
 )
+from oamb.contracts.ports import NativeEvidenceCandidate
 from oamb.contracts.specifications import CaseManifest
 from oamb.contracts.states import AttemptOutcome, CaseState, IngestionPlanState, RunState
 from oamb.memory_systems.hindsight.normalize import normalize_recall
@@ -263,6 +265,7 @@ def _hindsight_retrieval_mutation_rule(target: Any) -> tuple[ValidationIssue, ..
     for case in cases:
         plan = plans.get(case.ingestion_occurrence_id)
         raw_retrieval = snapshot.raw_payloads.get(case.retrieval_raw_ref or "")
+        candidates: tuple[NativeEvidenceCandidate, ...]
         try:
             if plan is None:
                 raise ValueError("Hindsight case has no ingestion plan")
@@ -281,14 +284,21 @@ def _hindsight_retrieval_mutation_rule(target: Any) -> tuple[ValidationIssue, ..
                 plan,
                 case.post_query_projection_raw_refs,
             )
-            candidates = (
-                normalize_recall(
+            if raw_retrieval is None:
+                candidates = ()
+            else:
+                candidates = normalize_recall(
                     raw_retrieval,
                     document_to_source_unit=projection.document_to_source_unit,
                 )
-                if raw_retrieval is not None
-                else ()
-            )
+                top_k = reconstruct_hindsight_candidate_limit(
+                    raw_payloads=snapshot.raw_payloads,
+                    references=case.retrieval_supporting_raw_refs,
+                    expected_request_sha256=case.retrieval_request_raw_ref,
+                    expected_response_sha256=case.retrieval_raw_ref,
+                )
+                if top_k is not None:
+                    candidates = candidates[:top_k]
         except ValueError:
             candidates = ()
             retrieval_valid = False

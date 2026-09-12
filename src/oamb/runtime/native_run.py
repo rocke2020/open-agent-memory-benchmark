@@ -165,7 +165,7 @@ from oamb.runtime.provider_lifecycle import (
 from oamb.runtime.source_records import seal_source_contract
 
 NATIVE_FIXTURE_STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
-NATIVE_RETRIEVAL_TOP_K = 100
+NATIVE_FIXTURE_RETRIEVAL_TOP_K = 100
 NATIVE_CLOSE_TIMEOUT_SECONDS = 5.0
 NATIVE_PROCESS_POLL_SECONDS = 0.01
 NATIVE_PROCESS_TERMINATION_SECONDS = 0.10
@@ -295,6 +295,7 @@ class NativeRunControl:
     provider_runtime_directory: Path
     wall_clock: Callable[[], datetime]
     monotonic_clock: Callable[[], float]
+    retrieval_top_k: int
     runtime_binding: MemorySystemRuntimeBindingV2 | None = None
     workload_control: WorkloadExecutionControlRecord | None = None
     runtime_measurement_control: RuntimeMeasurementControlRecord | None = None
@@ -344,6 +345,8 @@ class NativeRunControl:
             raise ValueError("live native lifecycle coordination directory must be absolute")
         if not callable(self.wall_clock) or not callable(self.monotonic_clock):
             raise ValueError("live native control requires trusted wall and monotonic clocks")
+        if type(self.retrieval_top_k) is not int or self.retrieval_top_k < 1:
+            raise ValueError("live native retrieval top_k must be a positive integer")
         if any(
             type(process_id) is not int or process_id <= 0
             for process_id in self.shutdown_owner_process_ids
@@ -3228,7 +3231,17 @@ async def _execute_cases_serial(
         query_fingerprint = canonical_sha256(
             ["oamb-native-query-v1", case_occurrence, hashlib.sha256(query).hexdigest()]
         )
-        retrieval_request = _retrieval_request(scope, case_occurrence, case_plan, query)
+        retrieval_request = _retrieval_request(
+            scope,
+            case_occurrence,
+            case_plan,
+            query,
+            top_k=(
+                state.control.retrieval_top_k
+                if state.control is not None
+                else NATIVE_FIXTURE_RETRIEVAL_TOP_K
+            ),
+        )
         if state.control is not None:
             attempted_memory = _LiveAttemptedQueryMemory(
                 state,
@@ -3560,12 +3573,14 @@ def _retrieval_request(
     case_occurrence: str,
     case_plan: CasePlan,
     query: bytes,
+    *,
+    top_k: int,
 ) -> RetrievalRequest:
     return RetrievalRequest(
         scope=scope,
         case_occurrence_id=case_occurrence,
         query_bytes=query,
-        top_k=NATIVE_RETRIEVAL_TOP_K,
+        top_k=top_k,
         query_timestamp=case_plan.query_timestamp,
     )
 

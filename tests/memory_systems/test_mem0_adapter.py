@@ -447,7 +447,7 @@ def test_rest_request_surface_allows_only_exact_nondestructive_posts() -> None:
         run_id=RUN_ID,
         metadata=metadata,
     )
-    search_request = mem0.build_search_http_request(query="query", run_id=RUN_ID)
+    search_request = mem0.build_search_http_request(query="query", run_id=RUN_ID, top_k=150)
 
     assert mem0.MEM0_REST_ROUTE_ALLOWLIST == (
         ("POST", "/memories"),
@@ -495,7 +495,7 @@ def test_wire_encoders_reject_invalid_scope_and_empty_query() -> None:
             metadata=metadata,
         )
     with pytest.raises(ValueError, match="query"):
-        mem0.encode_search_request(query="", run_id=RUN_ID)
+        mem0.encode_search_request(query="", run_id=RUN_ID, top_k=150)
 
 
 def test_add_parser_rejects_duplicate_json_fields() -> None:
@@ -509,7 +509,7 @@ def test_add_parser_rejects_duplicate_json_fields() -> None:
 def test_search_encoder_and_parser_preserve_exact_scope_and_provider_order() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
 
-    encoded = mem0.encode_search_request(query="Which tea?", run_id=RUN_ID)
+    encoded = mem0.encode_search_request(query="Which tea?", run_id=RUN_ID, top_k=150)
     parsed = mem0.parse_search_response(
         (FIXTURES / "rest" / "search-success.json").read_bytes(),
         expected_run_id=RUN_ID,
@@ -518,7 +518,7 @@ def test_search_encoder_and_parser_preserve_exact_scope_and_provider_order() -> 
     expected = (
         b'{"query":"Which tea?","filters":{"run_id":"'
         + RUN_ID.encode()
-        + b'"},"top_k":100,"threshold":0.1}'
+        + b'"},"top_k":150,"threshold":0.1}'
     )
     assert encoded == expected
     assert tuple(item.native_rank_1_indexed for item in parsed) == (1, 2)

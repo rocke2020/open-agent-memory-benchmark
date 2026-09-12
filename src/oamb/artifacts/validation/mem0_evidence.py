@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -31,6 +32,14 @@ _PROJECTION_RECEIPT_FIELDS = frozenset(
         "state_sha256",
         "capture_sequence",
         "page_raw_refs",
+    }
+)
+_PAIR_ADD_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_name",
+        "schema_version",
+        "source_unit_id",
+        "ordered_response_sha256",
     }
 )
 
@@ -195,7 +204,11 @@ def reconstruct_mem0_plan(
         payload = raw_payloads.get(attempt.raw_response_ref)
         if payload is None:
             raise ValueError("Mem0 add raw receipt is missing")
-        parse_add_response(payload)
+        _validate_add_receipt(
+            payload,
+            raw_payloads=raw_payloads,
+            expected_source_unit_id=source_ids[0],
+        )
         dispatched.extend(source_ids)
         add_raw_refs.append(attempt.raw_response_ref)
     if (
@@ -303,6 +316,36 @@ def _canonical_score(value: float) -> str:
     if not math.isfinite(value):
         raise ValueError("Mem0 native score must be finite")
     return str(value)
+
+
+def _validate_add_receipt(
+    payload: bytes,
+    *,
+    raw_payloads: dict[str, bytes],
+    expected_source_unit_id: str,
+) -> None:
+    document = _parse_unique_json(payload)
+    if not isinstance(document, dict) or document.get("schema_name") != (
+        "oamb_mem0_pair_add_receipt"
+    ):
+        parse_add_response(payload)
+        return
+    if frozenset(document) != _PAIR_ADD_RECEIPT_FIELDS:
+        raise ValueError("Mem0 pair-add receipt fields are invalid")
+    response_refs = document["ordered_response_sha256"]
+    if (
+        document["schema_version"] != 1
+        or document["source_unit_id"] != expected_source_unit_id
+        or not isinstance(response_refs, list)
+        or len(response_refs) < 2
+        or any(not isinstance(reference, str) for reference in response_refs)
+    ):
+        raise ValueError("Mem0 pair-add receipt identity is invalid")
+    for reference in response_refs:
+        response = raw_payloads.get(reference)
+        if response is None or hashlib.sha256(response).hexdigest() != reference:
+            raise ValueError("Mem0 pair-add response is missing or corrupt")
+        parse_add_response(response)
 
 
 def _summary_page_refs(raw_payloads: dict[str, bytes], summary_ref: str) -> tuple[str, ...]:

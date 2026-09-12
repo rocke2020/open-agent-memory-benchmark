@@ -1125,33 +1125,21 @@ async def test_readiness_projection_and_recall_close_the_exact_v092_lifecycle(
     assert readiness.evidence_references[0] == ingestion_receipt.raw_references[0]
     assert len(readiness.evidence_references) == 10
     assert [candidate.native_id for candidate in batch.candidates] == [
-        "22222222-2222-4222-8222-222222222222",
-        "chunk:44444444-4444-4444-8444-444444444444",
-        "11111111-1111-4111-8111-111111111111",
-        "chunk:33333333-3333-4333-8333-333333333333",
+        "22222222-2222-4222-8222-222222222222"
     ]
-    assert [candidate.native_rank_1_indexed for candidate in batch.candidates] == [1, 2, 3, 4]
+    assert [candidate.native_rank_1_indexed for candidate in batch.candidates] == [1]
     assert [candidate.source_unit_id for candidate in batch.candidates] == [
-        sources[0].source_unit_id,
-        sources[0].source_unit_id,
-        sources[0].source_unit_id,
-        sources[0].source_unit_id,
+        sources[0].source_unit_id
     ]
-    assert [candidate.evidence_kind for candidate in batch.candidates] == [
-        "experience",
-        "source_chunk",
-        "world",
-        "source_chunk",
-    ]
+    assert [candidate.evidence_kind for candidate in batch.candidates] == ["experience"]
     assert [candidate.native_reference for candidate in batch.candidates] == [
-        "44444444-4444-4444-8444-444444444444",
-        "44444444-4444-4444-8444-444444444444",
-        "33333333-3333-4333-8333-333333333333",
-        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444"
     ]
-    assert len(batch.candidates) == 4
-    assert batch.supporting_raw_references == ()
+    assert len(batch.candidates) == 1
+    assert len(batch.supporting_raw_references) == 1
+    assert batch.supporting_raw_references[0] != batch.raw_reference
     assert batch.request_raw_reference is not None
+    assert batch.supporting_raw_references[0] != batch.request_raw_reference
     assert batch.request_raw_reference != batch.raw_reference
     assert len(query_receipt.before_projection.supporting_raw_references) == 9
     assert len(query_receipt.after_projection.supporting_raw_references) == 9

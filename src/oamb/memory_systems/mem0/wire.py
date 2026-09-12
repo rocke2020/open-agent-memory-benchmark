@@ -11,7 +11,6 @@ from typing import Any
 
 from oamb.memory_systems.rest import parse_exact_json_object
 
-MEM0_SEARCH_TOP_K = 100
 MEM0_SEARCH_THRESHOLD = 0.1
 MEM0_REST_ROUTE_ALLOWLIST = (
     ("POST", "/memories"),
@@ -147,14 +146,16 @@ def encode_add_request(
     )
 
 
-def encode_search_request(*, query: str, run_id: str) -> bytes:
+def encode_search_request(*, query: str, run_id: str, top_k: int) -> bytes:
     _require_non_empty_string(query, field_name="query")
     _require_run_id(run_id)
+    if type(top_k) is not int or top_k < 1:
+        raise ValueError("top_k must be a positive integer")
     return _encode_exact_json(
         {
             "query": query,
             "filters": {"run_id": run_id},
-            "top_k": MEM0_SEARCH_TOP_K,
+            "top_k": top_k,
             "threshold": MEM0_SEARCH_THRESHOLD,
         }
     )
@@ -173,11 +174,11 @@ def build_add_http_request(
     )
 
 
-def build_search_http_request(*, query: str, run_id: str) -> Mem0RestRequest:
+def build_search_http_request(*, query: str, run_id: str, top_k: int) -> Mem0RestRequest:
     return Mem0RestRequest(
         method="POST",
         path="/search",
-        body=encode_search_request(query=query, run_id=run_id),
+        body=encode_search_request(query=query, run_id=run_id, top_k=top_k),
     )
 
 
@@ -383,7 +384,6 @@ def _require_optional_string(value: object, *, field_name: str) -> str | None:
 __all__ = [
     "MEM0_REST_ROUTE_ALLOWLIST",
     "MEM0_SEARCH_THRESHOLD",
-    "MEM0_SEARCH_TOP_K",
     "Mem0AddDisposition",
     "Mem0AddEvent",
     "Mem0AddResult",

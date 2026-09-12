@@ -318,6 +318,7 @@ def _control(
         ),
         wall_clock=lambda: NOW + timedelta(minutes=2),
         monotonic_clock=lambda: 1.0,
+        retrieval_top_k=150,
     )
 
 
@@ -562,5 +563,35 @@ def test_live_cancelled_before_dispatch_clears_the_exact_provider_attempt_pointe
     )
 
     assert terminal.outcome == AttemptOutcome.CANCELLED
+    assert not pointer.exists()
+    lifecycle.release_run(authority)
+
+
+def test_live_partial_memory_write_is_failed_and_committed_not_cancelled(
+    tmp_path: Path,
+) -> None:
+    from oamb.contracts.ports import MemorySystemCallFailure, RawReferenceHandle
+    from oamb.contracts.states import AttemptOutcome
+    from oamb.runtime.native_run import _seal_native_failure
+
+    state, prepared, lifecycle, authority, pointer = _prepared_live_provider_attempt(
+        tmp_path,
+        stage="memory_ingest",
+    )
+    state.pending_model_usage = {}
+    error = MemorySystemCallFailure(
+        "pair add stopped after one completed write",
+        failure_kind="partial_write_cancelled",
+        raw_reference=RawReferenceHandle(_sha("completed-pair-response")),
+        raw_response_bytes=b'{"results":[]}',
+        status_code=200,
+    )
+
+    terminal = _seal_native_failure(state, prepared, started_at=NOW, error=error)
+    budget = state.budget_ledger.snapshot()
+
+    assert terminal.outcome == AttemptOutcome.FAILED
+    assert budget.reserved.attempts == 0
+    assert budget.committed.attempts == 1
     assert not pointer.exists()
     lifecycle.release_run(authority)

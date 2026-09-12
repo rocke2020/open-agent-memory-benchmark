@@ -82,6 +82,20 @@ def _source(source_id: str = SOURCE_ID, ordinal: int = 1) -> SourceUnit:
     )
 
 
+def _lme_source(messages: list[dict[str, str]]) -> SourceUnit:
+    payload = json.dumps(messages, separators=(",", ":")).encode()
+    return SourceUnit(
+        source_unit_id=SOURCE_ID,
+        context_manifest_entry_id="context-1",
+        ordinal_1_indexed=1,
+        payload_sha256=hashlib.sha256(payload).hexdigest(),
+        payload_bytes=payload,
+        source_reference="session-1",
+        occurred_at="2026-01-01T00:00:00+00:00",
+        context_text="LongMemEval session session-1",
+    )
+
+
 def _openapi() -> bytes:
     return json.dumps(
         {
@@ -125,6 +139,153 @@ def _adapter(
 
 
 @pytest.mark.asyncio
+async def test_lme_session_ingestion_posts_consecutive_two_message_pairs_in_order() -> None:
+    messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+    ]
+    posted_messages: list[list[dict[str, str]]] = []
+
+    def public_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, content=_openapi())
+        if request.url.path == "/memories":
+            posted_messages.append(json.loads(request.content)["messages"])
+            return httpx.Response(200, content=b'{"results":[]}')
+        raise AssertionError(f"unexpected public request: {request.method} {request.url}")
+
+    def inspector_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, content=b'{"status":"ok","mode":"read_only_projection"}')
+        if request.url.path == "/v1/projection":
+            return httpx.Response(200, content=_empty_projection())
+        raise AssertionError(f"unexpected inspector request: {request.method} {request.url}")
+
+    adapter = _adapter(
+        public_transport=httpx.MockTransport(public_handler),
+        inspector_transport=httpx.MockTransport(inspector_handler),
+    )
+    await adapter.resolve()
+    scope = await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(ingestion_occurrence_id=RUN_ID, ingestion_plan_id=PLAN_ID)
+    )
+    dispatch = adapter.plan_ingestion(
+        IngestionRequest(scope=scope, ordered_source_units=(_lme_source(messages),))
+    )[0]
+    receipt = await adapter.ingest(
+        IngestionDispatchRequest(scope=scope, attempt_id="d" * 64, dispatch=dispatch)
+    )
+    await adapter.close()
+
+    assert posted_messages == [messages[0:2], messages[2:4], messages[4:5]]
+    assert receipt.accepted_source_unit_ids == (SOURCE_ID,)
+
+
+@pytest.mark.asyncio
+async def test_lme_pair_failure_stops_later_pairs_and_links_preceding_response() -> None:
+    messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+    ]
+    add_count = 0
+
+    def public_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal add_count
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, content=_openapi())
+        if request.url.path == "/memories":
+            add_count += 1
+            if add_count == 1:
+                return httpx.Response(200, content=b'{"results":[]}')
+            return httpx.Response(503, content=b'{"detail":"temporary failure"}')
+        raise AssertionError(f"unexpected public request: {request.method} {request.url}")
+
+    def inspector_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, content=b'{"status":"ok","mode":"read_only_projection"}')
+        if request.url.path == "/v1/projection":
+            return httpx.Response(200, content=_empty_projection())
+        raise AssertionError(f"unexpected inspector request: {request.method} {request.url}")
+
+    adapter = _adapter(
+        public_transport=httpx.MockTransport(public_handler),
+        inspector_transport=httpx.MockTransport(inspector_handler),
+    )
+    await adapter.resolve()
+    scope = await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(ingestion_occurrence_id=RUN_ID, ingestion_plan_id=PLAN_ID)
+    )
+    dispatch = adapter.plan_ingestion(
+        IngestionRequest(scope=scope, ordered_source_units=(_lme_source(messages),))
+    )[0]
+    with pytest.raises(MemorySystemCallFailure) as error:
+        await adapter.ingest(
+            IngestionDispatchRequest(scope=scope, attempt_id="d" * 64, dispatch=dispatch)
+        )
+    await adapter.close()
+
+    assert add_count == 2
+    assert len(error.value.supporting_raw_references) == 1
+
+
+@pytest.mark.asyncio
+async def test_lme_pair_before_dispatch_cancellation_links_preceding_response() -> None:
+    messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    add_count = 0
+    adapter: Mem0RestAdapter
+
+    def public_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal add_count
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, content=_openapi())
+        if request.url.path == "/memories":
+            add_count += 1
+            adapter._public_client.stop_accepting()
+            return httpx.Response(200, content=b'{"results":[]}')
+        raise AssertionError(f"unexpected public request: {request.method} {request.url}")
+
+    def inspector_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, content=b'{"status":"ok","mode":"read_only_projection"}')
+        if request.url.path == "/v1/projection":
+            return httpx.Response(200, content=_empty_projection())
+        raise AssertionError(f"unexpected inspector request: {request.method} {request.url}")
+
+    adapter = _adapter(
+        public_transport=httpx.MockTransport(public_handler),
+        inspector_transport=httpx.MockTransport(inspector_handler),
+    )
+    await adapter.resolve()
+    scope = await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(ingestion_occurrence_id=RUN_ID, ingestion_plan_id=PLAN_ID)
+    )
+    dispatch = adapter.plan_ingestion(
+        IngestionRequest(scope=scope, ordered_source_units=(_lme_source(messages),))
+    )[0]
+    with pytest.raises(MemorySystemCallFailure) as error:
+        await adapter.ingest(
+            IngestionDispatchRequest(scope=scope, attempt_id="d" * 64, dispatch=dispatch)
+        )
+    await adapter.close()
+
+    assert add_count == 1
+    assert error.value.failure_kind == "partial_write_cancelled"
+    assert error.value.raw_reference is not None
+    assert error.value.__context__ is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "lme_messages",
     (
@@ -147,6 +308,12 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
         {"role": role, "content": content}
         for role, content in lme_messages or (("user", "source 1"),)
     ]
+    expected_add_messages = (
+        [messages]
+        if lme_messages is None
+        else [messages[index : index + 2] for index in range(0, len(messages), 2)]
+    )
+    add_call = 0
     source = _source()
     if lme_messages is not None:
         payload = json.dumps(messages, separators=(",", ":")).encode()
@@ -160,14 +327,17 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
         )
 
     def public_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal add_call
         public_requests.append(request)
         assert request.headers["X-API-Key"] == "mem0-secret"
         if request.url.path == "/openapi.json":
             return httpx.Response(200, content=_openapi())
         if request.url.path == "/memories":
             assert request.method == "POST"
+            expected_messages = expected_add_messages[add_call]
+            add_call += 1
             assert json.loads(request.content) == {
-                "messages": messages,
+                "messages": expected_messages,
                 "run_id": RUN_ID,
                 "metadata": {
                     "oamb_ingestion_occurrence_id": RUN_ID,
@@ -183,7 +353,7 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
             assert body == {
                 "query": "What should I remember?",
                 "filters": {"run_id": RUN_ID},
-                "top_k": 100,
+                "top_k": 150,
                 "threshold": 0.1,
             }
             assert "rerank" not in body
@@ -247,7 +417,7 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
             scope=scope,
             case_occurrence_id="e" * 64,
             query_bytes=b"What should I remember?",
-            top_k=100,
+            top_k=150,
         )
     )
     await adapter.close()
@@ -262,7 +432,7 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
     assert retrieval.candidates == ()
     assert [request.url.path for request in public_requests] == [
         "/openapi.json",
-        "/memories",
+        *("/memories" for _ in expected_add_messages),
         "/search",
     ]
     assert sum(request.url.path == "/v1/projection" for request in inspector_requests) >= 4
@@ -350,7 +520,7 @@ async def test_search_candidates_must_match_the_readiness_sealed_projection() ->
                 scope=scope,
                 case_occurrence_id="e" * 64,
                 query_bytes=b"Which tea?",
-                top_k=100,
+                top_k=150,
             )
         )
     await adapter.close()

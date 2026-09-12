@@ -66,7 +66,6 @@ MAX_MESSAGES_PER_BATCH = 100
 DEFAULT_MAXIMUM_TASK_POLLS = 1_800
 DEFAULT_TASK_POLL_INTERVAL_SECONDS = 0.1
 DEFAULT_TASK_POLL_TIMEOUT_SECONDS = 180.0
-NATIVE_RETRIEVAL_TOP_K = 100
 _ACTIVE_TASK_STATUSES = frozenset({"pending", "running", "cancelling"})
 _TERMINAL_FAILURE_TASK_STATUSES = frozenset({"failed", "cancelled"})
 _MESSAGE_FIELDS = frozenset({"role", "content"})
@@ -737,8 +736,6 @@ class OpenVikingSessionAdapter:
             raise OpenVikingSessionProfileError(
                 "OpenViking session scope is not ready for retrieval"
             )
-        if request.top_k != NATIVE_RETRIEVAL_TOP_K:
-            raise OpenVikingSessionProfileError("OpenViking session find top_k must equal 100")
         try:
             query = request.query_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -752,7 +749,7 @@ class OpenVikingSessionAdapter:
                 "query": query,
                 "target_uri": binding.memory_root,
                 "context_type": "memory",
-                "limit": NATIVE_RETRIEVAL_TOP_K,
+                "limit": request.top_k,
             },
             request_headers={ACTOR_PEER_HEADER: binding.actor_peer_id},
             request_evidence=True,
