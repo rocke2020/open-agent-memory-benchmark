@@ -16,8 +16,6 @@ OAMB fixes questions, model roles, answer/judge policy, and comparison settings 
 
 ## Quick start
 
-The supported public product interface is `./precheck.sh` followed by `./run.sh`. Package-internal command entry points used by these scripts are implementation details, not a supported public interface, and should not be invoked or documented as an alternative workflow.
-
 You need Git, Python 3.11+, `uv`, Docker with Compose, `curl`, `jq`, `shasum`, and credentials for an OpenAI-compatible model endpoint. Preparation and evaluation can make billable model calls. They create isolated provider state and preserve existing provider/database data.
 
 ### 1. Configure
