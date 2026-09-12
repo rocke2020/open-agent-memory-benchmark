@@ -312,6 +312,8 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         (source_models["embedding"].model, "not_applicable", None, None),
     )
     assert document["retrieval"]["generation"] == "disabled"
+    assert document["retrieval"]["top_k"] == 150
+    assert "retrieval top_k: 150" in result.output
     assert tuple(
         (item["binding_id"], item["route"], item["request_constraint"])
         for item in document["retrieval"]["bindings"]

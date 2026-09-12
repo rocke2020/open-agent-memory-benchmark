@@ -97,6 +97,7 @@ def doctor_command(
     typer.echo(f"comparison: {plan.comparison_id}")
     typer.echo(f"cells: {len(plan.cells)}")
     typer.echo(f"retrieval generation: {plan.retrieval.generation}")
+    typer.echo(f"retrieval top_k: {plan.retrieval.top_k}")
     typer.echo(
         "evaluation controls: "
         f"retries={plan.execution.max_retries_per_operation}; "

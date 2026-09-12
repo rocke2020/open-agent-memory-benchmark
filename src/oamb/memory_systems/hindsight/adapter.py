@@ -9,7 +9,7 @@ import re
 import httpx
 
 from oamb.config.provider_services import HINDSIGHT_RETAIN_BATCH_LIMIT
-from oamb.contracts.ids import canonical_sha256
+from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.ingestion_failures import (
     HINDSIGHT_SETTLEMENT_BASIS,
     classify_settled_ingestion_failure,
@@ -653,15 +653,35 @@ class HindsightAdapter:
             candidates = normalize_recall(
                 response.raw_bytes,
                 document_to_source_unit=self._ready_document_sources[request.scope.scope_id],
-            )
+            )[: request.top_k]
         except ValueError as exc:
             raise sealed_response_validation_failure(
                 response,
                 message="Hindsight recall response failed exact-profile validation",
             ) from exc
+        if response.request_reference is None:
+            raise ValueError("Hindsight recall did not seal its request proof")
+        policy_bytes = canonical_json_bytes(
+            {
+                "schema_name": "oamb_hindsight_candidate_limit_receipt",
+                "schema_version": 1,
+                "top_k": request.top_k,
+                "provider_request_sha256": response.request_reference.sha256,
+                "provider_response_sha256": response.raw_reference.sha256,
+            }
+        )
+        policy_reference = self._store.seal_raw(
+            RawPayloadSealRequest(
+                sha256=hashlib.sha256(policy_bytes).hexdigest(),
+                media_type="application/vnd.oamb.hindsight-candidate-limit+json",
+                compression="gzip",
+                payload_bytes=policy_bytes,
+            )
+        )
         return NativeEvidenceBatch(
             raw_reference=response.raw_reference,
             candidates=candidates,
+            supporting_raw_references=(policy_reference,),
             request_raw_reference=response.request_reference,
         )
 

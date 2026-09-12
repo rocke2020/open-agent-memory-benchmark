@@ -57,7 +57,7 @@ OPENVIKING_BATCH_OPERATION = "openviking_batch_write"
 MAX_BATCH_OPERATIONS = 256
 MAX_BATCH_FILE_BYTES = 8 * 1024 * 1024
 MAX_BATCH_TOTAL_BYTES = 16 * 1024 * 1024
-NATIVE_RETRIEVAL_TOP_K = 100
+_ISOLATION_PROBE_LIMIT = 100
 
 
 class OpenVikingProfileError(ValueError):
@@ -469,8 +469,6 @@ class OpenVikingRestAdapter:
             raise OpenVikingProfileError("OpenViking retrieval has no frozen batch plan")
         if binding.root_uri not in self._ready_scopes:
             raise OpenVikingProfileError("OpenViking scope has not passed readiness")
-        if request.top_k != NATIVE_RETRIEVAL_TOP_K:
-            raise OpenVikingProfileError("OpenViking retrieval top_k must equal 100")
         try:
             query = request.query_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -483,7 +481,7 @@ class OpenVikingRestAdapter:
                 "query": query,
                 "target_uri": binding.root_uri,
                 "context_type": "resource",
-                "limit": NATIVE_RETRIEVAL_TOP_K,
+                "limit": request.top_k,
             },
             request_headers=headers,
         )
@@ -592,7 +590,7 @@ class OpenVikingRestAdapter:
                 "query": "oamb wrong-peer isolation probe",
                 "target_uri": binding.root_uri,
                 "context_type": "resource",
-                "limit": NATIVE_RETRIEVAL_TOP_K,
+                "limit": _ISOLATION_PROBE_LIMIT,
             },
             probe_lock_key=(binding.root_uri, wrong_actor_peer_id),
         )

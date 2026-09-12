@@ -137,6 +137,7 @@ def test_preserved_lme6_configuration_keeps_original_selection_and_concurrency()
         "openviking-lme6",
     )
     assert configuration.evaluation_controls.as_tuple() == (2, 10, 6, 2, 900)
+    assert configuration.retrieval.top_k == 150
     assert configuration.decision is None
 
 
@@ -287,6 +288,7 @@ def test_checked_in_configuration_freezes_generation_free_retrieval_bindings() -
     retrieval = _load(BENCHMARK_CONFIG_PATH).retrieval
 
     assert retrieval.generation == "disabled"
+    assert retrieval.top_k == 150
     assert tuple(
         (
             item.binding_id,

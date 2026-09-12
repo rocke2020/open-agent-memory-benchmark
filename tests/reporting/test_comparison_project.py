@@ -2812,7 +2812,7 @@ def test_visible_context_parser_accepts_an_empty_evidence_sequence() -> None:
             {
                 "query": "question",
                 "filters": {"run_id": SHA_A},
-                "top_k": 100,
+                "top_k": 150,
                 "threshold": 0.1,
             },
         ),
@@ -2823,7 +2823,7 @@ def test_visible_context_parser_accepts_an_empty_evidence_sequence() -> None:
                 "query": "question",
                 "target_uri": "viking://user/u/peers/p/memories",
                 "context_type": "memory",
-                "limit": 100,
+                "limit": 150,
             },
         ),
     ),

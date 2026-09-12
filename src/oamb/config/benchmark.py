@@ -190,7 +190,7 @@ _MODEL_KEYS = frozenset(
 _LLM_PROFILE_KEYS = frozenset({"light_model", "deep_model"})
 _MODEL_REFERENCE_KEYS = frozenset({"env"})
 _DECISION_KEYS = frozenset({"minimum_accuracy_delta", "maximum_exact_mcnemar_p_value"})
-_RETRIEVAL_KEYS = frozenset({"generation", "bindings"})
+_RETRIEVAL_KEYS = frozenset({"generation", "top_k", "bindings"})
 _RETRIEVAL_BINDING_KEYS = frozenset(
     {
         "binding_id",
@@ -354,6 +354,7 @@ class RetrievalBindingConfiguration:
 @dataclass(frozen=True, slots=True)
 class RetrievalConfiguration:
     generation: Literal["disabled"]
+    top_k: int
     bindings: tuple[RetrievalBindingConfiguration, ...]
 
 
@@ -717,6 +718,7 @@ def _parse_retrieval(value: object) -> RetrievalConfiguration:
     document = _require_exact_mapping(value, _RETRIEVAL_KEYS, "retrieval")
     if document["generation"] != "disabled":
         raise BenchmarkConfigurationError("retrieval generation must be disabled")
+    top_k = _require_positive_integer(document["top_k"], "retrieval top_k")
     raw_bindings = _require_sequence(document["bindings"], "retrieval bindings")
     bindings: list[RetrievalBindingConfiguration] = []
     for ordinal, item in enumerate(raw_bindings, start=1):
@@ -754,7 +756,11 @@ def _parse_retrieval(value: object) -> RetrievalConfiguration:
     )
     if actual != _EXPECTED_RETRIEVAL_BINDINGS:
         raise BenchmarkConfigurationError("retrieval bindings do not match the exact T10 profile")
-    return RetrievalConfiguration(generation="disabled", bindings=tuple(bindings))
+    return RetrievalConfiguration(
+        generation="disabled",
+        top_k=top_k,
+        bindings=tuple(bindings),
+    )
 
 
 def _parse_evaluation_controls(value: object) -> EvaluationControls:

@@ -698,7 +698,7 @@ async def test_mem0_fresh_occurrence_binds_add_projection_and_search_requests() 
     )
     result = await adapter.retrieve(
         RetrievalRequest(
-            scope=scope, case_occurrence_id="e" * 64, query_bytes=b"shared name", top_k=100
+            scope=scope, case_occurrence_id="e" * 64, query_bytes=b"shared name", top_k=150
         )
     )
     assert ready.ready and projections == 3

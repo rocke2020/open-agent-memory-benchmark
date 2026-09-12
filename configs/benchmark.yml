@@ -125,6 +125,7 @@ models:
 
 retrieval:
   generation: disabled
+  top_k: 150
   bindings:
     - binding_id: hindsight
       provider_id: hindsight

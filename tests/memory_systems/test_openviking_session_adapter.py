@@ -565,7 +565,7 @@ async def test_ready_requires_every_planned_session_commit_and_retrieval_never_w
     )
     assert readiness.ready is False
     with pytest.raises(Exception, match="ready"):
-        await adapter.retrieve(RetrievalRequest(scope, "c" * 64, b"What coffee do I like?", 100))
+        await adapter.retrieve(RetrievalRequest(scope, "c" * 64, b"What coffee do I like?", 150))
 
     second = await adapter.ingest(
         IngestionDispatchRequest(scope=scope, attempt_id="c" * 64, dispatch=dispatches[1])
@@ -584,7 +584,7 @@ async def test_ready_requires_every_planned_session_commit_and_retrieval_never_w
         request.url.path.endswith("/messages/batch") for request in service.calls
     )
     evidence = await adapter.retrieve(
-        RetrievalRequest(scope, "d" * 64, b"What coffee do I like?", 100)
+        RetrievalRequest(scope, "d" * 64, b"What coffee do I like?", 150)
     )
     capabilities = await adapter.capabilities()
     find_call = service.calls[-1]
@@ -593,7 +593,7 @@ async def test_ready_requires_every_planned_session_commit_and_retrieval_never_w
         "query": "What coffee do I like?",
         "target_uri": EXPECTED_MEMORY_ROOT,
         "context_type": "memory",
-        "limit": 100,
+        "limit": 150,
     }
     assert "intent-free-peer-memory-find" in capabilities.capability_ids
     assert (

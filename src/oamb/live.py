@@ -1390,6 +1390,7 @@ def build_live_cell(
         provider_runtime_directory=lifecycle_domain,
         wall_clock=lambda: datetime.now(UTC),
         monotonic_clock=time.monotonic,
+        retrieval_top_k=plan.retrieval.top_k,
         max_parallel_history_ingestions=(concurrency.max_parallel_history_ingestions_per_provider),
         max_parallel_questions=concurrency.max_parallel_questions_per_provider,
         max_retries_per_operation=plan.execution.max_retries_per_operation,

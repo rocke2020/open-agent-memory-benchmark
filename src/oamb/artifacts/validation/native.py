@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from oamb.artifacts.atomic import ArtifactCollisionError, read_regular_file, sha256_file
 from oamb.artifacts.validation.hindsight_evidence import (
     HindsightProjectionEvidence,
+    reconstruct_hindsight_candidate_limit,
     reconstruct_hindsight_projection,
 )
 from oamb.artifacts.validation.mem0_evidence import (
@@ -1962,15 +1963,6 @@ def _retrieval_closure_rule(snapshot: _NativeCapsuleSnapshot) -> tuple[Validatio
                     ordered_native_ids=list(case.ordered_native_candidate_ids),
                 ):
                     issues.append(_issue(rule_id, reference, "retrieval-support-mismatch"))
-        elif case.adapter_profile_id == HINDSIGHT_PROFILE_ID and case.retrieval_supporting_raw_refs:
-            issues.append(
-                _issue(
-                    rule_id,
-                    case.case_occurrence_id,
-                    "retrieval-support-inventory-mismatch",
-                )
-            )
-
         case_attempts = [attempts.get(attempt_id) for attempt_id in case.attempt_ids]
         query_attempts = [
             item for item in case_attempts if item is not None and item.stage == "memory_query"
@@ -2528,9 +2520,20 @@ def _normalized_native_candidates(
                 plan,
                 plan.projection_raw_refs,
             )
-            return normalize_recall(
+            hindsight_candidates = normalize_recall(
                 payload,
                 document_to_source_unit=projection.document_to_source_unit,
+            )
+            top_k = reconstruct_hindsight_candidate_limit(
+                raw_payloads=snapshot.raw_payloads,
+                references=case.retrieval_supporting_raw_refs,
+                expected_request_sha256=case.retrieval_request_raw_ref,
+                expected_response_sha256=case.retrieval_raw_ref,
+            )
+            return (
+                hindsight_candidates
+                if top_k is None
+                else hindsight_candidates[:top_k]
             )
         except ValueError:
             return None
