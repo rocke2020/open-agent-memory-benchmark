@@ -294,6 +294,8 @@ def reconstruct_mem0_candidates(
             or item.metadata != point.metadata
             or (item.memory_hash is not None and item.memory_hash != point.memory_hash)
             or item.attributed_to != point.attributed_to
+            or item.created_at != point.created_at
+            or item.updated_at != point.updated_at
         ):
             raise ValueError("Mem0 search candidate is outside the sealed projection")
         candidates.append(

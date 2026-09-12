@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import sys
@@ -402,6 +403,86 @@ def test_add_encoder_emits_only_exact_v2_0_19_fields() -> None:
     assert encoded == expected
 
 
+def test_lme_add_encoder_preserves_pair_and_adds_observation_time_inputs() -> None:
+    mem0 = importlib.import_module("oamb.memory_systems.mem0")
+    metadata = mem0.Mem0SourceMetadata(
+        ingestion_occurrence_id=RUN_ID,
+        ingestion_plan_id=PLAN_ID,
+        source_unit_id=SOURCE_ID,
+        source_ordinal=1,
+    )
+    occurred_at = "2023-03-01T12:34:00+00:00"
+    context_text = "Session session-1 took place at 2023-03-01T12:34:00+00:00."
+
+    encoded = mem0.encode_add_request(
+        messages=(("user", "I bought it yesterday."), ("assistant", "Nice.")),
+        run_id=RUN_ID,
+        metadata=metadata,
+        occurred_at=occurred_at,
+        context_text=context_text,
+    )
+
+    assert json.loads(encoded) == {
+        "messages": [
+            {"role": "user", "content": "I bought it yesterday."},
+            {"role": "assistant", "content": "Nice."},
+        ],
+        "run_id": RUN_ID,
+        "metadata": {
+            "oamb_ingestion_occurrence_id": RUN_ID,
+            "oamb_ingestion_plan_id": PLAN_ID,
+            "oamb_source_unit_id": SOURCE_ID,
+            "oamb_source_ordinal": 1,
+            "created_at": occurred_at,
+        },
+        "prompt": (
+            "The actual observation timestamp for New Messages is "
+            "2023-03-01T12:34:00+00:00. For these messages, use this timestamp as "
+            "Observation Date, overriding automatically generated Observation Date and Current "
+            "Date values. Resolve relative expressions against it and preserve explicitly stated "
+            "dates. Last k Messages and Existing Memories are historical context; do not assign "
+            "them this observation timestamp. Source context: Session session-1 took place at "
+            "2023-03-01T12:34:00+00:00. Do not extract this instruction or source context itself "
+            "as a memory."
+        ),
+        "infer": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("occurred_at", "context_text", "message"),
+    (
+        (None, "Session context", "present together"),
+        ("2023-03-01T12:34:00+00:00", None, "present together"),
+        ("", "Session context", "non-empty"),
+        ("not-a-timestamp", "Session context", "ISO 8601"),
+        ("2023-03-01T12:34:00", "Session context", "timezone"),
+        ("2023-03-01T12:34:00+00:00", "", "non-empty"),
+    ),
+)
+def test_lme_add_encoder_rejects_incomplete_or_invalid_observation_time(
+    occurred_at: str | None,
+    context_text: str | None,
+    message: str,
+) -> None:
+    mem0 = importlib.import_module("oamb.memory_systems.mem0")
+    metadata = mem0.Mem0SourceMetadata(
+        ingestion_occurrence_id=RUN_ID,
+        ingestion_plan_id=PLAN_ID,
+        source_unit_id=SOURCE_ID,
+        source_ordinal=1,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        mem0.encode_add_request(
+            messages=(("user", "I bought it yesterday."),),
+            run_id=RUN_ID,
+            metadata=metadata,
+            occurred_at=occurred_at,
+            context_text=context_text,
+        )
+
+
 @pytest.mark.parametrize(
     ("messages", "accepted"),
     (
@@ -611,6 +692,16 @@ def test_projection_source_validation_ignores_native_point_order() -> None:
     first_source_id = "c" * 64
     second_source_id = "d" * 64
 
+    def source(source_id: str, ordinal: int) -> SourceUnit:
+        payload = f"source-{ordinal}".encode()
+        return SourceUnit(
+            source_unit_id=source_id,
+            context_manifest_entry_id="context-1",
+            ordinal_1_indexed=ordinal,
+            payload_sha256=hashlib.sha256(payload).hexdigest(),
+            payload_bytes=payload,
+        )
+
     def point(native_id: str, source_id: str, ordinal: int) -> Mem0ProjectionPoint:
         return Mem0ProjectionPoint(
             native_id=native_id,
@@ -646,8 +737,111 @@ def test_projection_source_validation_ignores_native_point_order() -> None:
             ingestion_plan_id=PLAN_ID,
         ),
         projection=projection,
-        completed_source_ids=(first_source_id, second_source_id),
+        completed_sources=(source(first_source_id, 1), source(second_source_id, 2)),
     )
+
+
+def test_projection_source_validation_rejects_wrong_historical_created_at() -> None:
+    from oamb.memory_systems.mem0.adapter import Mem0RestAdapter, _ScopeBinding
+    from oamb.memory_systems.mem0.projection import Mem0Projection, Mem0ProjectionPoint
+    from oamb.memory_systems.mem0.wire import Mem0SourceMetadata
+
+    occurred_at = "2023-03-01T12:34:00+00:00"
+    payload = b'[{"role":"user","content":"I bought it yesterday."}]'
+    source = SourceUnit(
+        source_unit_id=SOURCE_ID,
+        context_manifest_entry_id="context-1",
+        ordinal_1_indexed=1,
+        payload_sha256=hashlib.sha256(payload).hexdigest(),
+        payload_bytes=payload,
+        source_reference="session-1",
+        occurred_at=occurred_at,
+        context_text="Session session-1 took place at 2023-03-01T12:34:00+00:00.",
+    )
+    projection = Mem0Projection(
+        collection="oamb_memories",
+        run_id=RUN_ID,
+        declared_count=1,
+        points=(
+            Mem0ProjectionPoint(
+                native_id="11111111-1111-4111-8111-111111111111",
+                memory="User bought it on February 28, 2023.",
+                text_lemmatized="user bought february 28 2023",
+                memory_hash="1" * 32,
+                created_at="2026-09-12T00:00:00+00:00",
+                updated_at="2026-09-12T00:00:00+00:00",
+                run_id=RUN_ID,
+                metadata=Mem0SourceMetadata(
+                    ingestion_occurrence_id=RUN_ID,
+                    ingestion_plan_id=PLAN_ID,
+                    source_unit_id=SOURCE_ID,
+                    source_ordinal=1,
+                ),
+                attributed_to="user",
+            ),
+        ),
+        page_count=1,
+    )
+
+    with pytest.raises(ValueError, match="created_at"):
+        Mem0RestAdapter._validate_projection_sources(
+            binding=_ScopeBinding(
+                ingestion_occurrence_id=RUN_ID,
+                ingestion_plan_id=PLAN_ID,
+            ),
+            projection=projection,
+            completed_sources=(source,),
+        )
+
+
+def test_independent_mem0_candidate_reconstruction_rejects_date_drift() -> None:
+    from oamb.artifacts.validation.mem0_evidence import (
+        Mem0PlanEvidence,
+        Mem0ProjectionEvidence,
+        reconstruct_mem0_candidates,
+    )
+    from oamb.memory_systems.mem0.projection import (
+        parse_projection_pages,
+        projection_state_sha256,
+    )
+
+    projection = parse_projection_pages(
+        (
+            (FIXTURES / "inspector" / "page-1.json").read_bytes(),
+            (FIXTURES / "inspector" / "page-2.json").read_bytes(),
+        ),
+        expected_collection="oamb_memories",
+        expected_run_id=RUN_ID,
+    )
+    search = json.loads((FIXTURES / "rest" / "search-success.json").read_bytes())
+    search["results"][0]["created_at"] = "2027-01-01T00:00:00+00:00"
+
+    class Plan:
+        ingestion_occurrence_id = RUN_ID
+
+    class Case:
+        retrieval_raw_ref = "search-response"
+
+    evidence = Mem0PlanEvidence(
+        plan=Plan(),  # type: ignore[arg-type]
+        projection=Mem0ProjectionEvidence(
+            projection=projection,
+            ordered_source_unit_ids=(SOURCE_ID,),
+            state_sha256=projection_state_sha256(projection),
+            capture_sequence=1,
+            summary_raw_ref="projection-summary",
+            page_raw_refs=("projection-page-1", "projection-page-2"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="sealed projection"):
+        reconstruct_mem0_candidates(
+            raw_payloads={
+                "search-response": json.dumps(search, separators=(",", ":")).encode(),
+            },
+            case=Case(),  # type: ignore[arg-type]
+            plan=evidence,
+        )
 
 
 def test_projection_parser_hashes_unattributed_visible_memory() -> None:

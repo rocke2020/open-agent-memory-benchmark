@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -147,13 +148,13 @@ async def test_lme_session_ingestion_posts_consecutive_two_message_pairs_in_orde
         {"role": "assistant", "content": "a2"},
         {"role": "user", "content": "u3"},
     ]
-    posted_messages: list[list[dict[str, str]]] = []
+    posted_payloads: list[dict[str, Any]] = []
 
     def public_handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/openapi.json":
             return httpx.Response(200, content=_openapi())
         if request.url.path == "/memories":
-            posted_messages.append(json.loads(request.content)["messages"])
+            posted_payloads.append(json.loads(request.content))
             return httpx.Response(200, content=b'{"results":[]}')
         raise AssertionError(f"unexpected public request: {request.method} {request.url}")
 
@@ -180,7 +181,20 @@ async def test_lme_session_ingestion_posts_consecutive_two_message_pairs_in_orde
     )
     await adapter.close()
 
-    assert posted_messages == [messages[0:2], messages[2:4], messages[4:5]]
+    assert [payload["messages"] for payload in posted_payloads] == [
+        messages[0:2],
+        messages[2:4],
+        messages[4:5],
+    ]
+    assert all(
+        payload["metadata"]["created_at"] == "2026-01-01T00:00:00+00:00"
+        for payload in posted_payloads
+    )
+    assert all(
+        "The actual observation timestamp for New Messages is 2026-01-01T00:00:00+00:00"
+        in payload["prompt"]
+        for payload in posted_payloads
+    )
     assert receipt.accepted_source_unit_ids == (SOURCE_ID,)
 
 
@@ -336,17 +350,31 @@ async def test_add_completion_and_empty_projection_are_black_box_outcomes(
             assert request.method == "POST"
             expected_messages = expected_add_messages[add_call]
             add_call += 1
-            assert json.loads(request.content) == {
+            expected_metadata: dict[str, object] = {
+                "oamb_ingestion_occurrence_id": RUN_ID,
+                "oamb_ingestion_plan_id": PLAN_ID,
+                "oamb_source_unit_id": SOURCE_ID,
+                "oamb_source_ordinal": 1,
+            }
+            expected_payload: dict[str, object] = {
                 "messages": expected_messages,
                 "run_id": RUN_ID,
-                "metadata": {
-                    "oamb_ingestion_occurrence_id": RUN_ID,
-                    "oamb_ingestion_plan_id": PLAN_ID,
-                    "oamb_source_unit_id": SOURCE_ID,
-                    "oamb_source_ordinal": 1,
-                },
+                "metadata": expected_metadata,
                 "infer": True,
             }
+            if lme_messages is not None:
+                expected_metadata["created_at"] = "2026-01-01T00:00:00+00:00"
+                expected_payload["prompt"] = (
+                    "The actual observation timestamp for New Messages is "
+                    "2026-01-01T00:00:00+00:00. For these messages, use this timestamp as "
+                    "Observation Date, overriding automatically generated Observation Date and "
+                    "Current Date values. Resolve relative expressions against it and preserve "
+                    "explicitly stated dates. Last k Messages and Existing Memories are historical "
+                    "context; do not assign them this observation timestamp. Source context: "
+                    "LongMemEval session session-empty-turns Do not extract this instruction or "
+                    "source context itself as a memory."
+                )
+            assert json.loads(request.content) == expected_payload
             return httpx.Response(200, content=add_response)
         if request.url.path == "/search":
             body = json.loads(request.content)
@@ -446,7 +474,18 @@ def test_empty_non_lme_source_remains_invalid() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_candidates_must_match_the_readiness_sealed_projection() -> None:
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    (
+        ("memory", "content not present in the sealed projection"),
+        ("created_at", "2027-01-01T00:00:00+00:00"),
+        ("updated_at", "2027-01-01T00:00:00+00:00"),
+    ),
+)
+async def test_search_candidates_must_match_the_readiness_sealed_projection(
+    changed_field: str,
+    changed_value: str,
+) -> None:
     projection_pages = (
         (FIXTURES / "inspector" / "page-1.json").read_bytes(),
         (FIXTURES / "inspector" / "page-2.json").read_bytes(),
@@ -462,7 +501,7 @@ async def test_search_candidates_must_match_the_readiness_sealed_projection() ->
             )
         if request.url.path == "/search":
             foreign = json.loads((FIXTURES / "rest" / "search-success.json").read_bytes())
-            foreign["results"][0]["memory"] = "content not present in the sealed projection"
+            foreign["results"][0][changed_field] = changed_value
             return httpx.Response(
                 200,
                 content=json.dumps(foreign, separators=(",", ":")).encode(),
