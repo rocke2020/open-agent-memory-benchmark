@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Never
@@ -99,6 +99,7 @@ class SealedRestClient:
         request_headers: Mapping[str, str] | None = None,
         write_intent: bool = False,
         request_evidence: bool = False,
+        response_sanitizer: Callable[[bytes], bytes] | None = None,
         total_timeout_seconds: float | None = None,
     ) -> SealedRestResponse:
         request_headers = request_headers or {}
@@ -118,6 +119,7 @@ class SealedRestClient:
                 request_headers=request_headers,
                 write_intent=write_intent,
                 request_evidence=request_evidence,
+                response_sanitizer=response_sanitizer,
                 total_timeout_seconds=total_timeout_seconds,
             )
         finally:
@@ -133,6 +135,7 @@ class SealedRestClient:
         request_headers: Mapping[str, str],
         write_intent: bool,
         request_evidence: bool,
+        response_sanitizer: Callable[[bytes], bytes] | None,
         total_timeout_seconds: float | None,
     ) -> SealedRestResponse:
         url = f"{self._base_url}/{path.lstrip('/')}"
@@ -203,7 +206,12 @@ class SealedRestClient:
             ) from exc
 
         try:
-            raw_reference = self._seal_raw(response.content)
+            response_bytes = (
+                response.content
+                if response_sanitizer is None
+                else response_sanitizer(response.content)
+            )
+            raw_reference = self._seal_raw(response_bytes)
         except Exception as exc:
             if write_intent:
                 raise MemorySystemCallUnknownOutcome(
@@ -216,7 +224,7 @@ class SealedRestClient:
             ) from exc
         sealed = SealedRestResponse(
             status_code=response.status_code,
-            raw_bytes=response.content,
+            raw_bytes=response_bytes,
             raw_reference=raw_reference,
             request_reference=request_reference,
         )
@@ -225,7 +233,7 @@ class SealedRestClient:
                 f"memory-system returned HTTP {response.status_code}",
                 failure_kind="http_status",
                 raw_reference=raw_reference,
-                raw_response_bytes=response.content,
+                raw_response_bytes=response_bytes,
                 status_code=response.status_code,
             )
         return sealed

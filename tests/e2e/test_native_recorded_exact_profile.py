@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -587,20 +588,39 @@ def _run_recorded_hindsight_lme6(
 
 
 class _RecordedOpenVikingSessionService:
+    def __init__(self) -> None:
+        self.question_user: str | None = None
+        self.memory_populated = False
+
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/health":
+            is_admin = request.headers.get("X-API-Key") == "fixture-secret"
             return httpx.Response(
                 200,
                 json={
                     "status": "ok",
                     "healthy": True,
-                    "version": "v0.4.16",
+                    "version": "v0.4.19",
                     "auth_mode": "api_key",
                     "account_id": "oamb-benchmark",
-                    "user_id": OPENVIKING_USER,
-                    "role": "admin",
+                    "user_id": OPENVIKING_USER if is_admin else self.question_user,
+                    "role": "admin" if is_admin else "user",
                 },
+            )
+        if path == "/api/v1/admin/accounts/oamb-benchmark/users":
+            if request.method == "GET":
+                return httpx.Response(200, json=_openviking_success([]))
+            self.question_user = json.loads(request.content)["user_id"]
+            return httpx.Response(
+                200,
+                json=_openviking_success(
+                    {
+                        "account_id": "oamb-benchmark",
+                        "user_id": self.question_user,
+                        "user_key": "fixture-returned-user-secret",
+                    }
+                ),
             )
         if path == "/api/v1/fs/stat":
             resource = request.url.params["uri"]
@@ -656,7 +676,7 @@ class _RecordedOpenVikingSessionService:
             )
         if path.endswith("/commit"):
             session_id = path.split("/")[4]
-            archive_uri = f"viking://user/{OPENVIKING_USER}/sessions/{session_id}/archive/a1"
+            archive_uri = f"viking://user/{self.question_user}/sessions/{session_id}/archive/a1"
             return httpx.Response(
                 200,
                 json={
@@ -673,7 +693,8 @@ class _RecordedOpenVikingSessionService:
         if path.startswith("/api/v1/tasks/"):
             task_id = path.rsplit("/", 1)[-1]
             session_id = task_id.removeprefix("task-")
-            archive_uri = f"viking://user/{OPENVIKING_USER}/sessions/{session_id}/archive/a1"
+            archive_uri = f"viking://user/{self.question_user}/sessions/{session_id}/archive/a1"
+            self.memory_populated = True
             return httpx.Response(
                 200,
                 json={
@@ -712,11 +733,19 @@ class _RecordedOpenVikingSessionService:
             )
         if path == "/api/v1/fs/ls":
             memory_root = request.url.params["uri"]
+            pristine = [
+                f"{memory_root}/.abstract.md",
+                f"{memory_root}/.overview.md",
+            ]
             return httpx.Response(
                 200,
                 json={
                     "status": "ok",
-                    "result": [f"{memory_root}/events/event-1.md"],
+                    "result": (
+                        [*pristine, f"{memory_root}/events/event-1.md"]
+                        if self.memory_populated
+                        else pristine
+                    ),
                     "error": None,
                     "telemetry": None,
                     "profile": None,
@@ -834,6 +863,69 @@ def test_openviking_session_capsule_rejects_a_resealed_generating_retrieval_requ
 
     assert validation.disposition == ValidationDisposition.INVALID
     assert "retrieval-request-proof-invalid" in {issue.code for issue in validation.issues}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["wrong_question_user", "message_peer_id", "extra_pristine_item"],
+)
+def test_openviking_session_capsule_rejects_identity_or_speaker_tampering(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    completed = _run_recorded_openviking_session(tmp_path)
+    manifest = CapsuleManifest.model_validate_json(
+        (completed.capsule_root / "capsule-manifest.json").read_bytes()
+    )
+    target_reference: str | None = None
+    target_payload: dict[str, Any] | None = None
+    for entry in manifest.source_entries:
+        if entry.record_kind != "raw_payload":
+            continue
+        try:
+            payload = json.loads(
+                gzip.decompress((completed.capsule_root / entry.relative_path).read_bytes())
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if mutation == "wrong_question_user" and payload.get("role") == "user":
+            target_reference = entry.record_id
+            target_payload = payload
+            target_payload["user_id"] = "another-question-user"
+            break
+        if mutation == "message_peer_id" and str(payload.get("path", "")).endswith(
+            "/messages/batch"
+        ):
+            target_reference = entry.record_id
+            target_payload = payload
+            target_payload["json_payload"]["messages"][0]["peer_id"] = "shared-peer"
+            break
+        result = payload.get("result")
+        if (
+            mutation == "extra_pristine_item"
+            and isinstance(result, list)
+            and len(result) == 2
+            and {str(item).rsplit("/", 1)[-1] for item in result}
+            == {".abstract.md", ".overview.md"}
+        ):
+            target_reference = entry.record_id
+            target_payload = payload
+            memory_root = str(result[0]).rsplit("/", 1)[0]
+            target_payload["result"].append(f"{memory_root}/events/contaminated.md")
+            break
+    assert target_reference is not None and target_payload is not None
+    _replace_raw_payload(
+        completed.capsule_root,
+        target_reference,
+        json.dumps(target_payload, sort_keys=True, separators=(",", ":")).encode(),
+    )
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "openviking-session-plan-evidence-mismatch" in {
+        issue.code for issue in validation.issues
+    }
 
 
 @pytest.mark.parametrize("mutation", ["omit_chunk", "reorder", "label", "text", "truncation"])
@@ -1134,7 +1226,7 @@ class _RecordedOpenVikingService:
                 json={
                     "status": "ok",
                     "healthy": True,
-                    "version": "v0.4.16",
+                    "version": "v0.4.19",
                     "auth_mode": "api_key",
                     "account_id": "oamb-benchmark",
                     "user_id": OPENVIKING_USER,

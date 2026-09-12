@@ -71,9 +71,9 @@ MEM0_REST_PROFILE = ExactAdapterProfile(
 OPENVIKING_REST_PROFILE = ExactAdapterProfile(
     profile_id="openviking-rest-v1",
     memory_system_id="openviking",
-    release_version="0.4.16",
-    source_revision="499995f3ed2e7f551a715179c4053772c51ff819",
-    build_artifact_sha256="46f9e34cd37238c28cbd9535033773d179006bdf7f3e528dd1c46567abce7701",
+    release_version="0.4.19",
+    source_revision="f3afef11637f2d7c11e4b1f36ed2f90630737cdc",
+    build_artifact_sha256="49e20c09ec7ea2f16c116d9ddb2ea90b4c24bf3f5a83078609e52399487dbec1",
     transport_kind=TransportKind.REST_API,
 )
 MEM0_SDK_PROFILE = ExactAdapterProfile(
@@ -606,7 +606,7 @@ def _validate_proof_semantics(
         valid = (
             value.get("status") == "ok"
             and value.get("healthy") is True
-            and value.get("version") == "v0.4.16"
+            and value.get("version") == "v0.4.19"
             and value.get("auth_mode") == "api_key"
         )
     elif filename == "openviking-auth-identity.json":
@@ -622,7 +622,7 @@ def _validate_proof_semantics(
     elif filename == "openviking-storage.json":
         valid = (
             value.get("status") == "ok"
-            and value.get("openviking_version") == "0.4.16"
+            and value.get("openviking_version") == "0.4.19"
             and value.get("mode") == "read_only_storage"
             and value.get("dimension") == 1024
             and value.get("collection") == "context"

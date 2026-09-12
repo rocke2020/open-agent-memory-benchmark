@@ -1,4 +1,4 @@
-"""OpenViking v0.4.16 native resource/find profile."""
+"""OpenViking v0.4.19 native resource/find profile."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ from oamb.memory_systems.rest import (
     sealed_response_validation_failure,
 )
 
-OPENVIKING_VERSION = "v0.4.16"
+OPENVIKING_VERSION = "v0.4.19"
 OPENVIKING_MEMORY_SYSTEM_ID = "openviking"
 OPENVIKING_AUTH_MODE = "api_key"
 OPENVIKING_USER_ROLE = "admin"
@@ -61,7 +61,7 @@ _ISOLATION_PROBE_LIMIT = 100
 
 
 class OpenVikingProfileError(ValueError):
-    """The exact OpenViking runtime or wire profile did not match v0.4.16."""
+    """The exact OpenViking runtime or wire profile did not match v0.4.19."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +81,7 @@ class _PlannedBatch:
 
 
 class OpenVikingRestAdapter:
-    """Original REST adapter for the exact OpenViking v0.4.16 profile."""
+    """Original REST adapter for the exact OpenViking v0.4.19 profile."""
 
     def __init__(
         self,

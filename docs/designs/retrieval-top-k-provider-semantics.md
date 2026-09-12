@@ -14,9 +14,9 @@ This analysis is frozen on 2026-09-12 against OAMB base commit `fb35c8a38a85b67a
 | --- | --- | --- | --- |
 | Hindsight | `0.9.2` | `ebad478240d3171bb88201ececda5e8d9883d22d` | `ghcr.io/vectorize-io/hindsight-api:0.9.2-slim@sha256:7635a15739361dbdf221ba796ad25a813f876144fe113022eea8e26cb6ee75e7` |
 | Mem0 | `2.0.19` | `dc82354e143c2581d505d581a00286d6ef8c3605` | Source archive SHA-256 `5443d9dd99196e33fdde31ef663518c022a8f4a86ef032e7b4bd7b00285705c2` |
-| OpenViking | `0.4.16` | `499995f3ed2e7f551a715179c4053772c51ff819` | `ghcr.io/volcengine/openviking:v0.4.16@sha256:46f9e34cd37238c28cbd9535033773d179006bdf7f3e528dd1c46567abce7701` |
+| OpenViking | `0.4.19` | `f3afef11637f2d7c11e4b1f36ed2f90630737cdc` | `ghcr.io/volcengine/openviking:v0.4.19@sha256:49e20c09ec7ea2f16c116d9ddb2ea90b4c24bf3f5a83078609e52399487dbec1` |
 
-The formal provider release cutoff recorded by OAMB is 2026-08-27. The authoritative pins are [`provider-services/versions.env`](../../provider-services/versions.env), and the Compose image identities are frozen in [`provider-services/compose.yaml`](../../provider-services/compose.yaml).
+The formal provider release cutoff recorded by OAMB is 2026-09-08. The authoritative pins are [`provider-services/versions.env`](../../provider-services/versions.env), and the Compose image identities are frozen in [`provider-services/compose.yaml`](../../provider-services/compose.yaml).
 
 ## 2. Shared OAMB configuration and propagation
 
@@ -83,9 +83,11 @@ The active LongMemEval cell uses the OpenViking session REST profile and sends:
 }
 ```
 
+Each LongMemEval ingestion occurrence owns a deterministic OpenViking user inside the dedicated benchmark account. The benchmark admin identity is control-plane only: it registers or finds that question user, sanitizes credential fields before sealing the administrative response, and then probes the derived user credential. All session ingestion and retrieval calls use the question user's credential, messages preserve their original `user` or `assistant` role without a synthetic peer identity, and retrieval targets `viking://user/{question_user_id}/memories`. Fresh allocation accepts only the two preset `.abstract.md` and `.overview.md` sidecars created by OpenViking v0.4.19, while continuation requires the existing deterministic user and separately validates the retained task/session evidence. OpenViking may embed those preset directories during user registration; OAMB's indexing-token metric deliberately excludes embedding and provider user-provisioning setup, and the current initial-v1 budget does not separately meter that setup embedding. The authoritative implementation is [`src/oamb/memory_systems/openviking/session_adapter.py`](../../src/oamb/memory_systems/openviking/session_adapter.py).
+
 The adapter sends `request.top_k` as `limit` in [`src/oamb/memory_systems/openviking/session_adapter.py`](../../src/oamb/memory_systems/openviking/session_adapter.py). The separate resource adapter follows the same provider-side limit rule in [`src/oamb/memory_systems/openviking/adapter.py`](../../src/oamb/memory_systems/openviking/adapter.py).
 
-At OpenViking commit `499995f3ed2e7f551a715179c4053772c51ff819`, `openviking/server/routers/search.py:121-140` declares `FindRequest.limit`, and the `/find` handler resolves it and passes it to `service.search.find(..., limit=actual_limit)` at lines 289-319. `openviking/service/search_service.py:125-161` describes and forwards this value as the maximum result count.
+At OpenViking commit `f3afef11637f2d7c11e4b1f36ed2f90630737cdc`, `openviking/server/routers/search.py:121-141` declares `FindRequest.limit`, and the `/find` handler resolves it and passes it to `service.search.find(..., limit=actual_limit)` at lines 327-369. `openviking/service/search_service.py:139-175` describes and forwards this value as the maximum result count.
 
 If OpenViking returns 63 hits, OAMB exposes 63. If more matches exist, OpenViking is expected to return its native top 150 in provider order. As with Mem0, OAMB currently relies on the provider limit contract instead of adding another local slice.
 
@@ -127,7 +129,7 @@ The current design aligns one specific target boundary: a conforming provider re
 Use these claims:
 
 - `retrieval.top_k=150` is the configured target for the common OAMB-visible native evidence ceiling.
-- Mem0 2.0.19 and OpenViking 0.4.16 receive the requested ceiling as a native provider request parameter.
+- Mem0 2.0.19 and OpenViking 0.4.19 receive the requested ceiling as a native provider request parameter.
 - Hindsight 0.9.2 has no native recall count parameter, so OAMB clamps the normalized response to 150 candidates without re-sorting it.
 - Hindsight facts and separately hydrated chunks each count as candidates under the current adapter contract.
 
@@ -160,6 +162,6 @@ The provider conclusions can be reproduced from checkouts containing the pinned 
 git -C hindsight show ebad478240d3171bb88201ececda5e8d9883d22d:hindsight-api-slim/hindsight_api/api/http.py
 git -C hindsight show ebad478240d3171bb88201ececda5e8d9883d22d:hindsight-api-slim/hindsight_api/engine/memory_engine.py
 git -C mem0 show dc82354e143c2581d505d581a00286d6ef8c3605:mem0/memory/main.py
-git -C OpenViking show 499995f3ed2e7f551a715179c4053772c51ff819:openviking/server/routers/search.py
-git -C OpenViking show 499995f3ed2e7f551a715179c4053772c51ff819:openviking/service/search_service.py
+git -C OpenViking show f3afef11637f2d7c11e4b1f36ed2f90630737cdc:openviking/server/routers/search.py
+git -C OpenViking show f3afef11637f2d7c11e4b1f36ed2f90630737cdc:openviking/service/search_service.py
 ```

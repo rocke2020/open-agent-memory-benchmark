@@ -142,7 +142,7 @@ def _proof_bytes(filename: str) -> bytes:
             "auth_mode": "api_key",
             "healthy": True,
             "status": "ok",
-            "version": "v0.4.16",
+            "version": "v0.4.19",
         },
         "openviking-auth-identity.json": {
             "account_id": "oamb-benchmark",
@@ -157,7 +157,7 @@ def _proof_bytes(filename: str) -> bytes:
             "dimension": 1024,
             "files_verified": 1,
             "mode": "read_only_storage",
-            "openviking_version": "0.4.16",
+            "openviking_version": "0.4.19",
             "status": "ok",
         },
         "openviking-model-config.json": {
@@ -394,13 +394,13 @@ def test_exact_profiles_build_preflight_descriptors_and_keep_sdk_separate() -> N
     assert tuple(profile.release_version for profile in exact_profiles) == (
         "0.9.2",
         "2.0.19",
-        "0.4.16",
+        "0.4.19",
         "2.0.19",
     )
     assert tuple(profile.source_revision for profile in exact_profiles) == (
         "ebad478240d3171bb88201ececda5e8d9883d22d",
         "dc82354e143c2581d505d581a00286d6ef8c3605",
-        "499995f3ed2e7f551a715179c4053772c51ff819",
+        "f3afef11637f2d7c11e4b1f36ed2f90630737cdc",
         "dc82354e143c2581d505d581a00286d6ef8c3605",
     )
     assert tuple(profile.transport_kind for profile in exact_profiles) == (

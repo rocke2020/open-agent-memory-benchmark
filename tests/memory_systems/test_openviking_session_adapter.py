@@ -16,6 +16,7 @@ from oamb.contracts.ports import (
     IngestionDispatchRequest,
     IngestionReceipt,
     IngestionRequest,
+    MemorySystemCallFailure,
     MemorySystemCallUnknownOutcome,
     RawPayloadSealRequest,
     RawReferenceHandle,
@@ -28,11 +29,20 @@ from oamb.contracts.ports import (
 INGESTION_OCCURRENCE_ID = "a" * 64
 INGESTION_PLAN_ID = "lme-plan-1"
 BENCHMARK_USER = "oamb-admin"
-EXPECTED_PEER_ID = (
-    "oamb-" + hashlib.sha256(b"peer\0" + INGESTION_OCCURRENCE_ID.encode("utf-8")).hexdigest()
+EXPECTED_OCCURRENCE_USER = "oamb-df9280ae264f68b9ea2866df3312890168543ddb41eb5496fbcea95e64536818"
+EXPECTED_OCCURRENCE_USER_KEY = (
+    "b2FtYi1iZW5jaG1hcms."
+    "b2FtYi1kZjkyODBhZTI2NGY2OGI5ZWEyODY2ZGYzMzEyODkwMTY4NTQzZGRiNDFlYjU0OTZmYmNlYTk1ZTY0NTM2ODE4."
+    "ODRhY2FlYjJjY2I5MGU0NDRjZTE5YTFlYzUxMmU2YzZiNDNmM2IzM2UyZDhhZjBhYzAwOWQ1Y2E0NDQzZjExMQ"
 )
-EXPECTED_PEER_ROOT = f"viking://user/{BENCHMARK_USER}/peers/{EXPECTED_PEER_ID}"
-EXPECTED_MEMORY_ROOT = f"{EXPECTED_PEER_ROOT}/memories"
+EXPECTED_OCCURRENCE_USER_SEED = "68bc2689a37d0a19749291d845372ef46dcbf6af9f39644e716634eb31f8ed09"
+EXPECTED_USER_ROOT = f"viking://user/{EXPECTED_OCCURRENCE_USER}"
+EXPECTED_USER_MEMORY_ROOT = f"viking://user/{EXPECTED_OCCURRENCE_USER}/memories"
+EXPECTED_MEMORY_ROOT = EXPECTED_USER_MEMORY_ROOT
+EXPECTED_PRISTINE_MEMORY_URIS = (
+    f"{EXPECTED_MEMORY_ROOT}/.abstract.md",
+    f"{EXPECTED_MEMORY_ROOT}/.overview.md",
+)
 CANONICAL_TIME = "2024-02-28T01:02:00+00:00"
 
 
@@ -99,7 +109,7 @@ def _health() -> bytes:
         {
             "status": "ok",
             "healthy": True,
-            "version": "v0.4.16",
+            "version": "v0.4.19",
             "auth_mode": "api_key",
             "account_id": "oamb-benchmark",
             "user_id": BENCHMARK_USER,
@@ -147,7 +157,9 @@ def test_session_id_is_namespaced_by_ingestion_occurrence() -> None:
 @dataclass
 class SessionService:
     sources: tuple[SourceUnit, ...]
-    peer_exists: bool = False
+    question_user_exists: bool = False
+    memory_populated: bool = False
+    question_health_user: str = EXPECTED_OCCURRENCE_USER
     existing_session_ids: frozenset[str] = frozenset()
     empty_projection: bool = False
     task_never_completes: bool = False
@@ -162,21 +174,46 @@ class SessionService:
         self.calls.append(request)
         path = request.url.path
         if path == "/health":
-            return httpx.Response(200, content=_health())
-        if path == "/api/v1/fs/stat":
-            if self.peer_exists:
-                return httpx.Response(
-                    200,
-                    content=_ok(
-                        {
-                            "uri": EXPECTED_MEMORY_ROOT,
-                            "context_type": "memory",
-                        }
-                    ),
-                )
+            if request.headers.get("X-API-Key") == "user-secret":
+                return httpx.Response(200, content=_health())
             return httpx.Response(
-                404,
-                content=_not_found(EXPECTED_MEMORY_ROOT, "file"),
+                200,
+                content=_json_bytes(
+                    {
+                        "status": "ok",
+                        "healthy": True,
+                        "version": "v0.4.19",
+                        "auth_mode": "api_key",
+                        "account_id": "oamb-benchmark",
+                        "user_id": self.question_health_user,
+                        "role": "user",
+                    }
+                ),
+            )
+        if path == "/api/v1/admin/accounts/oamb-benchmark/users":
+            if request.method == "GET":
+                users = (
+                    [
+                        {
+                            "user_id": EXPECTED_OCCURRENCE_USER,
+                            "role": "user",
+                            "api_key": "listed-secret",
+                        }
+                    ]
+                    if self.question_user_exists
+                    else []
+                )
+                return httpx.Response(200, content=_ok(users))
+            self.question_user_exists = True
+            return httpx.Response(
+                200,
+                content=_ok(
+                    {
+                        "account_id": "oamb-benchmark",
+                        "user_id": EXPECTED_OCCURRENCE_USER,
+                        "user_key": "registered-secret",
+                    }
+                ),
             )
         if path.startswith("/api/v1/sessions/") and path.count("/") == 4:
             session_id = path.rsplit("/", 1)[-1]
@@ -195,8 +232,8 @@ class SessionService:
                 content=_ok(
                     {
                         "session_id": session_id,
-                        "uri": f"viking://user/{BENCHMARK_USER}/sessions/{session_id}",
-                        "user": {"user_id": BENCHMARK_USER},
+                        "uri": f"{EXPECTED_USER_ROOT}/sessions/{session_id}",
+                        "user": {"user_id": EXPECTED_OCCURRENCE_USER},
                         "auto_commit_policy": None,
                         "memory_extraction_config": {},
                     }
@@ -218,9 +255,7 @@ class SessionService:
         if path.endswith("/commit"):
             session_id = path.split("/")[4]
             task_id = f"task-{session_id}"
-            archive_uri = (
-                f"viking://user/{BENCHMARK_USER}/sessions/{session_id}/history/archive_001"
-            )
+            archive_uri = f"{EXPECTED_USER_ROOT}/sessions/{session_id}/history/archive_001"
             return httpx.Response(
                 200,
                 content=_ok(
@@ -250,10 +285,11 @@ class SessionService:
             status = "running" if self.task_never_completes or poll_count == 1 else "completed"
             result = None
             if status == "completed":
+                self.memory_populated = True
                 result = {
                     "session_id": session_id,
                     "archive_uri": (
-                        f"viking://user/{BENCHMARK_USER}/sessions/{session_id}/history/archive_001"
+                        f"{EXPECTED_USER_ROOT}/sessions/{session_id}/history/archive_001"
                     ),
                     "memories_extracted": 1,
                     "usage_events_extracted": 0,
@@ -290,24 +326,19 @@ class SessionService:
                     {
                         "archive_id": "archive_001",
                         "session_id": session_id,
-                        "uri": (
-                            f"viking://user/{BENCHMARK_USER}/sessions/{session_id}"
-                            "/history/archive_001"
-                        ),
+                        "uri": (f"{EXPECTED_USER_ROOT}/sessions/{session_id}/history/archive_001"),
                         "message_count": len(self.sources[0].payload_bytes),
                     }
                 ),
             )
         if path == "/api/v1/fs/ls":
-            if self.empty_projection:
-                return httpx.Response(
-                    404,
-                    content=_not_found(EXPECTED_MEMORY_ROOT, "directory"),
-                )
+            if self.empty_projection or not self.memory_populated:
+                return httpx.Response(200, content=_ok(list(EXPECTED_PRISTINE_MEMORY_URIS)))
             return httpx.Response(
                 200,
                 content=_ok(
                     [
+                        *EXPECTED_PRISTINE_MEMORY_URIS,
                         f"{EXPECTED_MEMORY_ROOT}/events/event-1.md",
                         f"{EXPECTED_MEMORY_ROOT}/preferences/preference-1.md",
                     ]
@@ -360,6 +391,140 @@ def test_task_poll_limit_matches_the_outer_call_timeout() -> None:
     )
 
     assert maximum_task_polls_for_timeout(900, poll_interval_seconds=0.1) == 9_000
+
+
+@pytest.mark.asyncio
+async def test_scope_provisions_one_occurrence_user_and_uses_its_memory_root() -> None:
+    from oamb.memory_systems.openviking import OpenVikingSessionAdapter
+    from oamb.memory_systems.openviking.adapter import OPENVIKING_VERSION
+
+    calls: list[httpx.Request] = []
+    store = CapturingStore()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        api_key = request.headers.get("X-API-Key")
+        if request.url.path == "/health":
+            user_id = BENCHMARK_USER if api_key == "user-secret" else EXPECTED_OCCURRENCE_USER
+            role = "admin" if api_key == "user-secret" else "user"
+            return httpx.Response(
+                200,
+                content=_json_bytes(
+                    {
+                        "status": "ok",
+                        "healthy": True,
+                        "version": OPENVIKING_VERSION,
+                        "auth_mode": "api_key",
+                        "account_id": "oamb-benchmark",
+                        "user_id": user_id,
+                        "role": role,
+                    }
+                ),
+            )
+        if request.url.path == "/api/v1/admin/accounts/oamb-benchmark/users":
+            if request.method == "GET":
+                return httpx.Response(200, content=_ok([]))
+            return httpx.Response(
+                200,
+                content=_ok(
+                    {
+                        "account_id": "oamb-benchmark",
+                        "user_id": EXPECTED_OCCURRENCE_USER,
+                        "user_key": "server-returned-secret",
+                        "seed": "server-echoed-secret",
+                    }
+                ),
+            )
+        if request.url.path == "/api/v1/fs/ls":
+            return httpx.Response(
+                200,
+                content=_ok(list(EXPECTED_PRISTINE_MEMORY_URIS)),
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    adapter = OpenVikingSessionAdapter(
+        store=store,
+        base_url="https://openviking.example",
+        api_key="user-secret",
+        benchmark_account="oamb-benchmark",
+        benchmark_user=BENCHMARK_USER,
+        runtime_binding_hash="f" * 64,
+        transport=httpx.MockTransport(handler),
+        task_poll_interval_seconds=0,
+        maximum_task_polls=3,
+    )
+    await adapter.resolve()
+    scope = await adapter.allocate_ingestion_scope(
+        ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID)
+    )
+
+    assert scope.scope_id == EXPECTED_USER_MEMORY_ROOT
+    list_call, register_call = calls[1:3]
+    assert list_call.method == "GET"
+    assert list_call.url.params["name"] == EXPECTED_OCCURRENCE_USER
+    assert _request_payload(register_call) == {
+        "user_id": EXPECTED_OCCURRENCE_USER,
+        "role": "user",
+        "seed": EXPECTED_OCCURRENCE_USER_SEED,
+    }
+    assert calls[3].headers["X-API-Key"] == EXPECTED_OCCURRENCE_USER_KEY
+    assert calls[4].headers["X-API-Key"] == EXPECTED_OCCURRENCE_USER_KEY
+    assert all("X-OpenViking-Actor-Peer" not in request.headers for request in calls)
+    assert scope.raw_reference == RawReferenceHandle(store.raw[4].sha256)
+    assert scope.supporting_raw_references == tuple(
+        RawReferenceHandle(item.sha256) for item in store.raw[1:4]
+    )
+    sealed = b"\n".join(item.payload_bytes for item in store.raw)
+    assert b"server-returned-secret" not in sealed
+    assert b"server-echoed-secret" not in sealed
+    assert b"user_key" not in sealed
+    assert b'"seed"' not in sealed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_question_user_with_memory_is_not_reused_as_a_fresh_scope() -> None:
+    from oamb.memory_systems.openviking import OpenVikingSessionProfileError
+
+    source = _source("source-1", 1, _messages(1))
+    service = SessionService(
+        (source,),
+        question_user_exists=True,
+        memory_populated=True,
+    )
+    adapter = _adapter(service)
+    await adapter.resolve()
+
+    with pytest.raises(OpenVikingSessionProfileError, match="pristine"):
+        await adapter.allocate_ingestion_scope(
+            ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID)
+        )
+
+    assert not any(request.method == "POST" for request in service.calls)
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_question_user_with_the_wrong_derived_key_fails_closed() -> None:
+    service = SessionService(
+        (),
+        question_user_exists=True,
+        question_health_user="collision-user",
+    )
+    adapter = _adapter(service)
+    await adapter.resolve()
+
+    with pytest.raises(
+        MemorySystemCallFailure,
+        match="question-user identity probe failed validation",
+    ):
+        await adapter.allocate_ingestion_scope(
+            ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID)
+        )
+
+    assert not any(request.method == "POST" for request in service.calls)
+    assert not any(request.url.path == "/api/v1/fs/ls" for request in service.calls)
+    await adapter.close()
 
 
 @pytest.mark.asyncio
@@ -471,7 +636,7 @@ async def test_ingest_disables_auto_commit_preserves_messages_and_closes_commit_
     first_task = paths.index(f"/api/v1/tasks/task-{session_id}")
     last_task = len(paths) - 1 - paths[::-1].index(f"/api/v1/tasks/task-{session_id}")
     archive = paths.index(f"/api/v1/sessions/{session_id}/archives/archive_001")
-    projection = paths.index("/api/v1/fs/ls")
+    projection = len(paths) - 1 - paths[::-1].index("/api/v1/fs/ls")
     assert (
         session_get
         < session_create
@@ -494,13 +659,11 @@ async def test_ingest_disables_auto_commit_preserves_messages_and_closes_commit_
             {
                 "role": "user",
                 "content": "message-1",
-                "peer_id": EXPECTED_PEER_ID,
                 "created_at": CANONICAL_TIME,
             },
             {
                 "role": "assistant",
                 "content": "message-2",
-                "peer_id": EXPECTED_PEER_ID,
                 "created_at": CANONICAL_TIME,
             },
         ]
@@ -511,7 +674,16 @@ async def test_ingest_disables_auto_commit_preserves_messages_and_closes_commit_
     assert receipt.rejected_source_unit_ids == ()
     assert receipt.raw_response_bytes == store.raw[-1].payload_bytes
     assert all(request.method != "DELETE" for request in service.calls)
-    assert len(store.raw) == len(service.calls)
+    message_request_proofs = [
+        item.payload_bytes
+        for item in store.raw
+        if b'"path":"/api/v1/sessions/' in item.payload_bytes
+        and b'/messages/batch"' in item.payload_bytes
+    ]
+    assert len(message_request_proofs) == 1
+    assert b'"peer_id"' not in message_request_proofs[0]
+    assert b'"request_header_names":[]' in message_request_proofs[0]
+    assert len(store.raw) == len(service.calls) + 1
     await adapter.close()
 
 
@@ -595,7 +767,7 @@ async def test_ready_requires_every_planned_session_commit_and_retrieval_never_w
         "context_type": "memory",
         "limit": 150,
     }
-    assert "intent-free-peer-memory-find" in capabilities.capability_ids
+    assert "intent-free-user-memory-find" in capabilities.capability_ids
     assert (
         sum(request.url.path.endswith("/messages/batch") for request in service.calls)
         == history_write_count
@@ -608,19 +780,26 @@ async def test_ready_requires_every_planned_session_commit_and_retrieval_never_w
 
 
 @pytest.mark.asyncio
-async def test_existing_peer_or_session_stops_before_any_provider_write_and_is_never_reused() -> (
+async def test_existing_question_user_is_reused_without_rotation_and_session_is_never_reused() -> (
     None
 ):
     source = _source("source-1", 1, _messages(1))
-    peer_service = SessionService((source,), peer_exists=True)
-    peer_adapter = _adapter(peer_service)
-    await peer_adapter.resolve()
+    user_service = SessionService((source,), question_user_exists=True)
+    user_adapter = _adapter(user_service)
+    scope = await _resolved_scope(user_adapter)
+    calls_after_first_allocation = len(user_service.calls)
     with pytest.raises(Exception, match="already exists|create-only"):
-        await peer_adapter.allocate_ingestion_scope(
+        await user_adapter.allocate_ingestion_scope(
             ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID)
         )
-    assert all(request.method in {"GET", "HEAD"} for request in peer_service.calls)
-    await peer_adapter.close()
+    assert len(user_service.calls) == calls_after_first_allocation
+    assert not any(
+        request.method == "POST"
+        and request.url.path == "/api/v1/admin/accounts/oamb-benchmark/users"
+        for request in user_service.calls
+    )
+    assert scope.scope_id == EXPECTED_MEMORY_ROOT
+    await user_adapter.close()
 
     session_id = _session_id(source)
     session_service = SessionService((source,), existing_session_ids=frozenset({session_id}))
@@ -661,9 +840,7 @@ async def test_adoption_rejects_zero_counters_without_task_no_mutation_proof() -
             "stage": "completed",
             "result": {
                 "session_id": session_id,
-                "archive_uri": (
-                    f"viking://user/{BENCHMARK_USER}/sessions/{session_id}/history/archive_001"
-                ),
+                "archive_uri": (f"{EXPECTED_USER_ROOT}/sessions/{session_id}/history/archive_001"),
                 "memories_extracted": 1,
                 "usage_events_extracted": 0,
                 "token_usage": {
@@ -692,7 +869,7 @@ async def test_adoption_rejects_zero_counters_without_task_no_mutation_proof() -
     }
     service = SessionService(
         sources,
-        peer_exists=True,
+        question_user_exists=True,
         existing_session_ids=frozenset(session_ids),
         continuation_tasks=continuation_tasks,
         existing_session_details={
@@ -741,7 +918,7 @@ async def test_adoption_never_replays_unknown_or_partial_failed_session(
     failed_task_id = "failed-task-1"
     service = SessionService(
         (source,),
-        peer_exists=True,
+        question_user_exists=True,
         existing_session_ids=frozenset({session_id}),
         continuation_tasks={
             failed_task_id: {
@@ -801,7 +978,7 @@ async def test_adoption_rejects_partial_memory_even_when_session_counters_are_ze
     }
     service = SessionService(
         (source,),
-        peer_exists=True,
+        question_user_exists=True,
         existing_session_ids=frozenset({session_id}),
         continuation_tasks={
             failed_task_id: {
@@ -820,7 +997,7 @@ async def test_adoption_rejects_partial_memory_even_when_session_counters_are_ze
     adapter = _adapter(service)
     await adapter.resolve()
     # The peer has memory, but failed-task counters have not merged into the session.
-    assert service.peer_exists and not service.empty_projection
+    assert service.question_user_exists and not service.empty_projection
     with pytest.raises(Exception, match="no-mutation.*proof"):
         await adapter.adopt_ingestion_scope(
             ScopeAllocationRequest(INGESTION_OCCURRENCE_ID, INGESTION_PLAN_ID),

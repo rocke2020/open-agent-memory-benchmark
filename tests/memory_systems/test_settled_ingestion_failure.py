@@ -524,7 +524,7 @@ async def test_openviking_terminal_failure_retains_commit_and_all_poll_evidence(
     adapter = OpenVikingSessionAdapter(
         store=store,
         base_url="https://openviking.example",
-        api_key="fixture",
+        api_key="user-secret",
         benchmark_account="oamb-benchmark",
         benchmark_user=BENCHMARK_USER,
         runtime_binding_hash="f" * 64,

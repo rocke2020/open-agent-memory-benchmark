@@ -36,9 +36,9 @@ class ServiceBundleContractTests(unittest.TestCase):
             "HINDSIGHT_IMAGE_DIGEST": "sha256:7635a15739361dbdf221ba796ad25a813f876144fe113022eea8e26cb6ee75e7",
             "MEM0_VERSION": "2.0.19",
             "MEM0_COMMIT": "dc82354e143c2581d505d581a00286d6ef8c3605",
-            "OPENVIKING_VERSION": "0.4.16",
-            "OPENVIKING_COMMIT": "499995f3ed2e7f551a715179c4053772c51ff819",
-            "OPENVIKING_IMAGE_DIGEST": "sha256:46f9e34cd37238c28cbd9535033773d179006bdf7f3e528dd1c46567abce7701",
+            "OPENVIKING_VERSION": "0.4.19",
+            "OPENVIKING_COMMIT": "f3afef11637f2d7c11e4b1f36ed2f90630737cdc",
+            "OPENVIKING_IMAGE_DIGEST": "sha256:49e20c09ec7ea2f16c116d9ddb2ea90b4c24bf3f5a83078609e52399487dbec1",
         }
         parsed = dict(
             line.split("=", 1)
@@ -157,7 +157,7 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn("/embeddings", embedding_transport)
         self.assertIn("dimensions: 1024", command)
         self.assertIn("/ready", command)
-        self.assertIn('.version == "v0.4.16"', command)
+        self.assertIn('.version == "v0.4.19"', command)
         self.assertIn("openviking-storage-probe", command)
         self.assertIn("compose stop openviking", command)
         self.assertIn("compose start openviking", command)
@@ -227,6 +227,8 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn('"workspace": "/var/lib/openviking"', config)
         self.assertIn('"provider": "openai"', config)
         self.assertIn('"model": "${OAMB_EMBEDDING_MODEL}"', config)
+        self.assertIn('"version": "v3"', config)
+        self.assertIn('"extraction_output_format": "python"', config)
         self.assertNotIn('"rerank"', config)
         self.assertNotIn("~/.openviking", compose)
 

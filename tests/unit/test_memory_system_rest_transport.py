@@ -148,6 +148,34 @@ async def test_rest_transport_dispatches_once_and_seals_exact_raw_response() -> 
 
 
 @pytest.mark.asyncio
+async def test_response_sanitizer_runs_before_evidence_sealing_and_consumer_parsing() -> None:
+    rest = _rest_module()
+    store = CapturingStore()
+    secret_response = b'{"status":"ok","result":{"user_id":"case-user","user_key":"secret"}}'
+    sanitized_response = b'{"status":"ok","result":{"user_id":"case-user"}}'
+    client = rest.SealedRestClient(
+        store=store,
+        base_url="https://memory.example",
+        headers={"X-API-Key": "admin-secret"},
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=secret_response)),
+    )
+
+    response = await client.request(
+        "POST",
+        "/users",
+        json_payload={"user_id": "case-user"},
+        write_intent=True,
+        response_sanitizer=lambda payload: sanitized_response,
+    )
+
+    assert response.raw_bytes == sanitized_response
+    assert store.raw[-1].payload_bytes == sanitized_response
+    assert b"secret" not in response.raw_bytes
+    assert b"secret" not in store.raw[-1].payload_bytes
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_request_headers_add_scope_without_replacing_client_authority() -> None:
     rest = _rest_module()
     calls: list[httpx.Request] = []
@@ -201,6 +229,38 @@ async def test_rest_transport_preserves_http_failure_receipt() -> None:
     assert failure.value.status_code == 409
     assert failure.value.raw_reference == RawReferenceHandle(store.raw[0].sha256)
     assert failure.value.raw_response_bytes == store.raw[0].payload_bytes
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_response_sanitizer_also_redacts_http_failure_for_the_consumer() -> None:
+    rest = _rest_module()
+    store = CapturingStore()
+    sanitized_response = b'{"status":"error","error":{"code":"ALREADY_EXISTS"}}'
+    client = rest.SealedRestClient(
+        store=store,
+        base_url="https://memory.example",
+        headers={"X-API-Key": "admin-secret"},
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                409,
+                content=b'{"status":"error","seed":"secret","error":{"code":"ALREADY_EXISTS"}}',
+            )
+        ),
+    )
+
+    with pytest.raises(rest.MemorySystemCallFailure) as failure:
+        await client.request(
+            "POST",
+            "/users",
+            json_payload={"user_id": "case-user"},
+            write_intent=True,
+            response_sanitizer=lambda payload: sanitized_response,
+        )
+
+    assert failure.value.raw_response_bytes == sanitized_response
+    assert store.raw[-1].payload_bytes == sanitized_response
+    assert b"secret" not in failure.value.raw_response_bytes
     await client.close()
 
 

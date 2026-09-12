@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only OpenViking v0.4.16 local-storage acceptance probe."""
+"""Read-only OpenViking v0.4.19 local-storage acceptance probe."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_OPENVIKING_VERSION = "0.4.16"
+EXPECTED_OPENVIKING_VERSION = "0.4.19"
 EXPECTED_COLLECTION = "context"
 EXPECTED_DIMENSION = 1024
 MAX_METADATA_BYTES = 1024 * 1024
@@ -104,7 +104,7 @@ def _validate_with_exact_release(
     installed_version = importlib.metadata.version("openviking")
     normalized_version = installed_version.removeprefix("v").split("+", 1)[0]
     if normalized_version != EXPECTED_OPENVIKING_VERSION:
-        raise ProbeError("storage probe is not running in OpenViking v0.4.16")
+        raise ProbeError("storage probe is not running in OpenViking v0.4.19")
 
     from openviking.pyagfs import get_binding_client
     from openviking.storage.vectordb.store.file_store import FileStore

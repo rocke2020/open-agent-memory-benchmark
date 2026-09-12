@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""OpenViking v0.4.16 pinned phase-2 retry boundary fixture.
+"""OpenViking v0.4.19 pinned phase-2 retry boundary fixture.
 
-Source commit: 499995f3ed2e7f551a715179c4053772c51ff819
-Sources: openviking/session/session.py lines 2510-2527 and
-openviking/utils/model_retry.py lines 368-405.
+Source commit: f3afef11637f2d7c11e4b1f36ed2f90630737cdc
+Sources: openviking/session/session.py lines 2676-2693 and
+openviking/utils/model_retry.py lines 419-456.
 Modified: lifted the nested phase-2 function to module scope and removed logging;
 the retry loop and classifier argument binding are unchanged.
 """

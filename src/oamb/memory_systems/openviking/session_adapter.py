@@ -1,13 +1,15 @@
-"""OpenViking v0.4.16 LongMemEval session/message/commit profile."""
+"""OpenViking v0.4.19 LongMemEval session/message/commit profile."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import hmac
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -53,7 +55,6 @@ from oamb.memory_systems.rest import (
 )
 
 from .adapter import (
-    ACTOR_PEER_HEADER,
     OPENVIKING_AUTH_MODE,
     OPENVIKING_MEMORY_SYSTEM_ID,
     OPENVIKING_USER_ROLE,
@@ -69,6 +70,9 @@ DEFAULT_TASK_POLL_TIMEOUT_SECONDS = 180.0
 _ACTIVE_TASK_STATUSES = frozenset({"pending", "running", "cancelling"})
 _TERMINAL_FAILURE_TASK_STATUSES = frozenset({"failed", "cancelled"})
 _MESSAGE_FIELDS = frozenset({"role", "content"})
+_QUESTION_USER_ID_DOMAIN = b"oamb-openviking-lme-user-id-v1\0"
+_QUESTION_USER_SEED_DOMAIN = b"oamb-openviking-lme-user-seed-v1\0"
+_ADMIN_SECRET_FIELDS = frozenset({"api_key", "key", "key_prefix", "seed", "user_key"})
 
 
 def maximum_task_polls_for_timeout(
@@ -89,9 +93,9 @@ class OpenVikingSessionProfileError(ValueError):
 class _ScopeBinding:
     ingestion_occurrence_id: str
     ingestion_plan_id: str
-    actor_peer_id: str
-    peer_root: str
+    user_id: str
     memory_root: str
+    user_api_key: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +158,13 @@ class OpenVikingSessionAdapter:
         if not math.isfinite(task_poll_timeout_seconds) or task_poll_timeout_seconds <= 0:
             raise ValueError("OpenViking task poll timeout must be finite positive")
         self._benchmark_account = benchmark_account
-        self._benchmark_user = benchmark_user
+        self._benchmark_admin_user = benchmark_user
+        self._admin_api_key = api_key
+        self._store = store
+        self._base_url = base_url
+        self._transport = transport
+        self._read_timeout_seconds = read_timeout_seconds
+        self._total_timeout_seconds = total_timeout_seconds
         self._runtime_binding_hash = runtime_binding_hash
         self._internal_retry_count = internal_retry_count
         self._task_poll_interval_seconds = task_poll_interval_seconds
@@ -178,6 +188,7 @@ class OpenVikingSessionAdapter:
         self._next_batch_attempt_ordinals: dict[str, int] = {}
         self._continuations: dict[str, _ScopeContinuation] = {}
         self._ready_scopes: set[str] = set()
+        self._user_clients: dict[str, SealedRestClient] = {}
 
     async def resolve(self) -> RuntimeResolution:
         response = await self._client.request("GET", "/health")
@@ -206,7 +217,7 @@ class OpenVikingSessionAdapter:
                 "version": OPENVIKING_VERSION,
                 "auth_mode": OPENVIKING_AUTH_MODE,
                 "account_id": self._benchmark_account,
-                "user_id": self._benchmark_user,
+                "user_id": self._benchmark_admin_user,
                 "role": OPENVIKING_USER_ROLE,
             }:
                 raise OpenVikingSessionProfileError(
@@ -222,9 +233,9 @@ class OpenVikingSessionAdapter:
     async def capabilities(self) -> CapabilitySet:
         return CapabilitySet(
             capability_ids=(
-                "create-only-peer-session",
+                "create-only-user-session",
                 "native-session-message-commit",
-                "intent-free-peer-memory-find",
+                "intent-free-user-memory-find",
             ),
             provider_order_preserved=True,
             native_reranking_disabled=True,
@@ -239,21 +250,24 @@ class OpenVikingSessionAdapter:
         binding = self._scope_binding(request)
         if binding.memory_root in self._attempted_allocations:
             raise OpenVikingSessionProfileError(
-                "OpenViking create-only peer scope was already attempted and cannot be reused"
+                "OpenViking create-only user scope was already attempted and cannot be reused"
             )
-        absence = await self._require_absent(
-            path="/api/v1/fs/stat",
-            expected_resource=binding.memory_root,
-            expected_type="file",
-            params={"uri": binding.memory_root},
-            headers={ACTOR_PEER_HEADER: binding.actor_peer_id},
+        identity_references = await self._bind_question_user(
+            binding,
+            create_if_missing=True,
         )
+        projection, memory_uris = await self._capture_memory_projection(binding)
+        if not _is_pristine_user_memory_projection(binding.memory_root, memory_uris):
+            raise OpenVikingSessionProfileError(
+                "OpenViking existing question user is not a pristine ingestion scope"
+            )
         self._attempted_allocations.add(binding.memory_root)
         self._scopes[binding.memory_root] = binding
         return ScopeReceipt(
             ingestion_occurrence_id=request.ingestion_occurrence_id,
             scope_id=binding.memory_root,
-            raw_reference=absence,
+            raw_reference=projection.raw_reference,
+            supporting_raw_references=identity_references,
         )
 
     async def adopt_ingestion_scope(
@@ -279,13 +293,17 @@ class OpenVikingSessionAdapter:
             )
         if binding.memory_root in self._attempted_allocations:
             raise OpenVikingSessionProfileError(
-                "OpenViking peer scope was already attempted and cannot be reused"
+                "OpenViking user scope was already attempted and cannot be reused"
             )
 
-        headers = {ACTOR_PEER_HEADER: binding.actor_peer_id}
+        await self._bind_question_user(
+            binding,
+            create_if_missing=False,
+        )
+        client = self._client_for_binding(binding)
         completed: list[_CompletedSession] = []
         for task_id in completed_session_task_ids:
-            task, task_reference = await self._read_task(task_id=task_id, headers=headers)
+            task, task_reference = await self._read_task(client=client, task_id=task_id)
             session_id = _task_session_id(task, task_id)
             result = task.get("result")
             if task.get("status") != "completed" or task.get("error") is not None:
@@ -299,10 +317,9 @@ class OpenVikingSessionAdapter:
             archive_uri = _task_archive_uri(result, session_id)
             _require_usage_snapshot(result)
             archive_id = archive_uri.rstrip("/").rsplit("/", 1)[-1]
-            archive = await self._client.request(
+            archive = await client.request(
                 "GET",
                 f"/api/v1/sessions/{session_id}/archives/{archive_id}",
-                request_headers=headers,
             )
             archive_result = _clean_result(archive, "continued session archive")
             if not isinstance(archive_result, dict) or archive_result.get("session_id") not in {
@@ -322,8 +339,8 @@ class OpenVikingSessionAdapter:
             )
 
         failed_task, _failed_task_reference = await self._read_task(
+            client=client,
             task_id=failed_session_task_id,
-            headers=headers,
         )
         failed_session_id = _task_session_id(failed_task, failed_session_task_id)
         if (
@@ -340,8 +357,8 @@ class OpenVikingSessionAdapter:
                 "OpenViking failed continuation session overlaps its completed prefix"
             )
         await self._require_zero_failed_session(
+            client=client,
             session_id=failed_session_id,
-            headers=headers,
         )
         # Failed Phase 2 work may have changed memory before session counters merge.
         raise OpenVikingSessionProfileError(
@@ -448,7 +465,7 @@ class OpenVikingSessionAdapter:
                 "OpenViking source sessions must be ingested in frozen chronological order"
             )
 
-        headers = {ACTOR_PEER_HEADER: binding.actor_peer_id}
+        client = self._client_for_binding(binding)
         self._attempted_sessions.add(session_id)
         continuation = self._continuations.get(binding.memory_root)
         if (
@@ -460,8 +477,8 @@ class OpenVikingSessionAdapter:
             evidence_references = list(continuation.failed_evidence_references)
             evidence_references.append(
                 await self._require_zero_failed_session(
+                    client=client,
                     session_id=session_id,
-                    headers=headers,
                 )
             )
         else:
@@ -471,18 +488,17 @@ class OpenVikingSessionAdapter:
                 expected_resource=session_id,
                 expected_type="session",
                 params={"auto_create": False},
-                headers=headers,
+                client=client,
             )
             evidence_references = [session_absence]
 
-            create = await self._client.request(
+            create = await client.request(
                 "POST",
                 "/api/v1/sessions",
                 json_payload={
                     "session_id": session_id,
                     "auto_commit_policy": None,
                 },
-                request_headers=headers,
                 write_intent=True,
             )
             evidence_references.append(create.raw_reference)
@@ -501,20 +517,24 @@ class OpenVikingSessionAdapter:
             {
                 "role": message["role"],
                 "content": message["content"],
-                "peer_id": binding.actor_peer_id,
                 "created_at": timestamp,
             }
             for message in planned.messages
         )
         for start in range(0, len(message_payloads), MAX_MESSAGES_PER_BATCH):
             batch = message_payloads[start : start + MAX_MESSAGES_PER_BATCH]
-            message_response = await self._client.request(
+            message_response = await client.request(
                 "POST",
                 f"/api/v1/sessions/{session_id}/messages/batch",
                 json_payload={"messages": batch},
-                request_headers=headers,
                 write_intent=True,
+                request_evidence=True,
             )
+            if message_response.request_reference is None:
+                raise OpenVikingSessionProfileError(
+                    "OpenViking session message request evidence is absent"
+                )
+            evidence_references.append(message_response.request_reference)
             evidence_references.append(message_response.raw_reference)
             message_result = _clean_result(message_response, "session messages")
             if (
@@ -525,11 +545,10 @@ class OpenVikingSessionAdapter:
                     "OpenViking session message response has the wrong session"
                 )
 
-        commit = await self._client.request(
+        commit = await client.request(
             "POST",
             f"/api/v1/sessions/{session_id}/commit",
             json_payload={"keep_recent_count": 0},
-            request_headers=headers,
             write_intent=True,
         )
         evidence_references.append(commit.raw_reference)
@@ -538,10 +557,10 @@ class OpenVikingSessionAdapter:
 
         try:
             task_result, task_references = await self._poll_terminal_task(
+                client=client,
                 task_id=task_id,
                 session_id=session_id,
                 archive_uri=archive_uri,
-                headers=headers,
                 preceding_raw_references=tuple(evidence_references),
             )
         except SettledTransientIngestionFailure:
@@ -555,10 +574,9 @@ class OpenVikingSessionAdapter:
         _require_usage_snapshot(task_result)
 
         archive_id = archive_uri.rstrip("/").rsplit("/", 1)[-1]
-        archive = await self._client.request(
+        archive = await client.request(
             "GET",
             f"/api/v1/sessions/{session_id}/archives/{archive_id}",
-            request_headers=headers,
         )
         evidence_references.append(archive.raw_reference)
         archive_result = _clean_result(archive, "session archive")
@@ -742,7 +760,8 @@ class OpenVikingSessionAdapter:
             raise OpenVikingSessionProfileError(
                 "OpenViking session find query must be UTF-8"
             ) from exc
-        response = await self._client.request(
+        client = self._client_for_binding(binding)
+        response = await client.request(
             "POST",
             "/api/v1/search/find",
             json_payload={
@@ -751,10 +770,9 @@ class OpenVikingSessionAdapter:
                 "context_type": "memory",
                 "limit": request.top_k,
             },
-            request_headers={ACTOR_PEER_HEADER: binding.actor_peer_id},
             request_evidence=True,
         )
-        result = _clean_result(response, "peer-memory find")
+        result = _clean_result(response, "user-memory find")
         hits = _memory_hits(result, binding.memory_root)
         return NativeEvidenceBatch(
             raw_reference=response.raw_reference,
@@ -776,15 +794,17 @@ class OpenVikingSessionAdapter:
         )
 
     async def close(self) -> None:
+        for client in self._user_clients.values():
+            await client.close()
         await self._client.close()
 
     async def _poll_terminal_task(
         self,
         *,
+        client: SealedRestClient,
         task_id: str,
         session_id: str,
         archive_uri: str,
-        headers: dict[str, str],
         preceding_raw_references: tuple[RawReferenceHandle, ...],
     ) -> tuple[dict[str, Any], tuple[RawReferenceHandle, ...]]:
         references: list[RawReferenceHandle] = []
@@ -795,10 +815,9 @@ class OpenVikingSessionAdapter:
             if remaining_seconds <= 0:
                 break
             try:
-                response = await self._client.request(
+                response = await client.request(
                     "GET",
                     f"/api/v1/tasks/{task_id}",
-                    request_headers=headers,
                     total_timeout_seconds=remaining_seconds,
                 )
             except MemorySystemCallFailure as exc:
@@ -878,13 +897,12 @@ class OpenVikingSessionAdapter:
     async def _read_task(
         self,
         *,
+        client: SealedRestClient,
         task_id: str,
-        headers: dict[str, str],
     ) -> tuple[dict[str, Any], RawReferenceHandle]:
-        response = await self._client.request(
+        response = await client.request(
             "GET",
             f"/api/v1/tasks/{task_id}",
-            request_headers=headers,
         )
         result = _clean_result(response, "continuation task")
         if not isinstance(result, dict):
@@ -898,14 +916,13 @@ class OpenVikingSessionAdapter:
     async def _require_zero_failed_session(
         self,
         *,
+        client: SealedRestClient,
         session_id: str,
-        headers: dict[str, str],
     ) -> RawReferenceHandle:
-        session = await self._client.request(
+        session = await client.request(
             "GET",
             f"/api/v1/sessions/{session_id}",
             params={"auto_create": False},
-            request_headers=headers,
         )
         result = _clean_result(session, "failed continuation session")
         _require_zero_failed_session(result, session_id)
@@ -915,8 +932,9 @@ class OpenVikingSessionAdapter:
         self,
         binding: _ScopeBinding,
     ) -> tuple[SealedRestResponse, tuple[str, ...]]:
+        client = self._client_for_binding(binding)
         try:
-            response = await self._client.request(
+            response = await client.request(
                 "GET",
                 "/api/v1/fs/ls",
                 params={
@@ -926,7 +944,6 @@ class OpenVikingSessionAdapter:
                     "output": "original",
                     "show_all_hidden": True,
                 },
-                request_headers={ACTOR_PEER_HEADER: binding.actor_peer_id},
             )
         except MemorySystemCallFailure as exc:
             if (
@@ -949,7 +966,7 @@ class OpenVikingSessionAdapter:
                 ),
                 (),
             )
-        result = _clean_result(response, "peer-memory projection")
+        result = _clean_result(response, "user-memory projection")
         if (
             not isinstance(result, list)
             or any(not isinstance(item, str) for item in result)
@@ -957,7 +974,7 @@ class OpenVikingSessionAdapter:
             or any(not item.startswith(f"{binding.memory_root}/") for item in result)
         ):
             raise OpenVikingSessionProfileError(
-                "OpenViking peer-memory projection is incomplete or outside the root"
+                "OpenViking user-memory projection is incomplete or outside the root"
             )
         return response, tuple(result)
 
@@ -968,14 +985,13 @@ class OpenVikingSessionAdapter:
         expected_resource: str,
         expected_type: str,
         params: dict[str, str | bool],
-        headers: dict[str, str],
+        client: SealedRestClient,
     ) -> RawReferenceHandle:
         try:
-            await self._client.request(
+            await client.request(
                 "GET",
                 path,
                 params=params,
-                request_headers=headers,
             )
         except MemorySystemCallFailure as exc:
             if (
@@ -1008,20 +1024,133 @@ class OpenVikingSessionAdapter:
         )
 
     def _scope_binding(self, request: ScopeAllocationRequest) -> _ScopeBinding:
-        actor_peer_id = (
-            "oamb-"
-            + hashlib.sha256(
-                b"peer\0" + request.ingestion_occurrence_id.encode("utf-8")
-            ).hexdigest()
+        user_id = openviking_question_user_id(request.ingestion_occurrence_id)
+        seed = _question_user_seed(
+            admin_api_key=self._admin_api_key,
+            account_id=self._benchmark_account,
+            user_id=user_id,
         )
-        peer_root = f"viking://user/{self._benchmark_user}/peers/{actor_peer_id}"
+        user_key_secret = hashlib.sha256(f"{user_id}\0{seed}".encode()).hexdigest()
+        user_api_key = ".".join(
+            _base64url(value) for value in (self._benchmark_account, user_id, user_key_secret)
+        )
         return _ScopeBinding(
             ingestion_occurrence_id=request.ingestion_occurrence_id,
             ingestion_plan_id=request.ingestion_plan_id,
-            actor_peer_id=actor_peer_id,
-            peer_root=peer_root,
-            memory_root=f"{peer_root}/memories",
+            user_id=user_id,
+            memory_root=f"viking://user/{user_id}/memories",
+            user_api_key=user_api_key,
         )
+
+    async def _bind_question_user(
+        self,
+        binding: _ScopeBinding,
+        *,
+        create_if_missing: bool,
+    ) -> tuple[RawReferenceHandle, ...]:
+        references: list[RawReferenceHandle] = []
+        users = await self._client.request(
+            "GET",
+            f"/api/v1/admin/accounts/{self._benchmark_account}/users",
+            params={"name": binding.user_id},
+            response_sanitizer=_sanitize_admin_response,
+        )
+        references.append(users.raw_reference)
+        listed = _clean_result(users, "question-user list")
+        if not isinstance(listed, list) or len(listed) > 1:
+            raise OpenVikingSessionProfileError(
+                "OpenViking question-user lookup did not return zero or one user"
+            )
+        if listed:
+            if listed[0] != {"user_id": binding.user_id, "role": "user"}:
+                raise OpenVikingSessionProfileError(
+                    "OpenViking question-user lookup returned the wrong identity"
+                )
+        else:
+            if not create_if_missing:
+                raise OpenVikingSessionProfileError(
+                    "OpenViking continuation question user does not exist"
+                )
+            seed = _question_user_seed(
+                admin_api_key=self._admin_api_key,
+                account_id=self._benchmark_account,
+                user_id=binding.user_id,
+            )
+            registered = await self._client.request(
+                "POST",
+                f"/api/v1/admin/accounts/{self._benchmark_account}/users",
+                json_payload={
+                    "user_id": binding.user_id,
+                    "role": "user",
+                    "seed": seed,
+                },
+                write_intent=True,
+                response_sanitizer=_sanitize_admin_response,
+            )
+            references.append(registered.raw_reference)
+            if _clean_result(registered, "question-user registration") != {
+                "account_id": self._benchmark_account,
+                "user_id": binding.user_id,
+            }:
+                raise OpenVikingSessionProfileError(
+                    "OpenViking question-user registration returned the wrong identity"
+                )
+
+        client = SealedRestClient(
+            store=self._store,
+            base_url=self._base_url,
+            headers={"X-API-Key": binding.user_api_key},
+            transport=self._transport,
+            read_timeout_seconds=self._read_timeout_seconds,
+            total_timeout_seconds=self._total_timeout_seconds,
+        )
+        try:
+            health = await client.request("GET", "/health")
+            with bind_sealed_response_validation(
+                health,
+                message="OpenViking question-user identity probe failed validation",
+            ):
+                document = _exact_object(
+                    health.raw_bytes,
+                    frozenset(
+                        {
+                            "status",
+                            "healthy",
+                            "version",
+                            "auth_mode",
+                            "account_id",
+                            "user_id",
+                            "role",
+                        }
+                    ),
+                    "question-user health",
+                )
+                if document != {
+                    "status": "ok",
+                    "healthy": True,
+                    "version": OPENVIKING_VERSION,
+                    "auth_mode": OPENVIKING_AUTH_MODE,
+                    "account_id": self._benchmark_account,
+                    "user_id": binding.user_id,
+                    "role": "user",
+                }:
+                    raise OpenVikingSessionProfileError(
+                        "OpenViking question-user key resolved to the wrong identity"
+                    )
+        except BaseException:
+            await client.close()
+            raise
+        self._user_clients[binding.memory_root] = client
+        references.append(health.raw_reference)
+        return tuple(references)
+
+    def _client_for_binding(self, binding: _ScopeBinding) -> SealedRestClient:
+        client = self._user_clients.get(binding.memory_root)
+        if client is None:
+            raise OpenVikingSessionProfileError(
+                "OpenViking question-user authority is not bound to this scope"
+            )
+        return client
 
     def _require_scope(self, scope: ScopeReceipt) -> _ScopeBinding:
         binding = self._scopes.get(scope.scope_id)
@@ -1030,6 +1159,72 @@ class OpenVikingSessionAdapter:
                 "OpenViking session scope is not allocated by this adapter"
             )
         return binding
+
+
+def _base64url(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def openviking_question_user_id(ingestion_occurrence_id: str) -> str:
+    return (
+        "oamb-"
+        + hashlib.sha256(
+            _QUESTION_USER_ID_DOMAIN + ingestion_occurrence_id.encode("utf-8")
+        ).hexdigest()
+    )
+
+
+def openviking_pristine_user_memory_uris(memory_root: str) -> tuple[str, str]:
+    return (
+        f"{memory_root}/.abstract.md",
+        f"{memory_root}/.overview.md",
+    )
+
+
+def _is_pristine_user_memory_projection(memory_root: str, memory_uris: tuple[str, ...]) -> bool:
+    expected = openviking_pristine_user_memory_uris(memory_root)
+    return len(memory_uris) == len(expected) and frozenset(memory_uris) == frozenset(expected)
+
+
+def _question_user_seed(*, admin_api_key: str, account_id: str, user_id: str) -> str:
+    return hmac.new(
+        admin_api_key.encode("utf-8"),
+        _QUESTION_USER_SEED_DOMAIN + account_id.encode("utf-8") + b"\0" + user_id.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _sanitize_admin_response(raw_bytes: bytes) -> bytes:
+    def reject_constant(value: str) -> object:
+        raise OpenVikingSessionProfileError(f"non-finite JSON constant: {value}")
+
+    try:
+        document = json.loads(
+            raw_bytes,
+            object_pairs_hook=_unique_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OpenVikingSessionProfileError("OpenViking admin response is not valid JSON") from exc
+
+    def without_secrets(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: without_secrets(item)
+                for key, item in value.items()
+                if key.lower() not in _ADMIN_SECRET_FIELDS
+            }
+        if isinstance(value, list):
+            return [without_secrets(item) for item in value]
+        return value
+
+    return json.dumps(
+        without_secrets(document),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def _canonical_timestamp(value: str | None) -> str:
@@ -1311,4 +1506,6 @@ __all__ = [
     "OpenVikingSessionAdapter",
     "OpenVikingSessionProfileError",
     "OPENVIKING_SESSION_PROFILE_ID",
+    "openviking_pristine_user_memory_uris",
+    "openviking_question_user_id",
 ]

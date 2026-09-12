@@ -49,6 +49,7 @@ def retrieval_request_proves_generation_free(profile_id: str, payload: bytes) ->
     if profile_id == OPENVIKING_SESSION_PROFILE_ID:
         return (
             path == "/api/v1/search/find"
+            and proof.get("request_header_names") == []
             and set(body) == {"query", "target_uri", "context_type", "limit"}
             and body.get("context_type") == "memory"
             and "session_id" not in body

@@ -124,7 +124,7 @@ services:
     stop_grace_period: 15s
 
   openviking:
-    image: ghcr.io/volcengine/openviking:v0.4.16@sha256:46f9e34cd37238c28cbd9535033773d179006bdf7f3e528dd1c46567abce7701
+    image: ghcr.io/volcengine/openviking:v0.4.19@sha256:49e20c09ec7ea2f16c116d9ddb2ea90b4c24bf3f5a83078609e52399487dbec1
     ports:
       - "127.0.0.1:${OAMB_OPENVIKING_PORT:-19330}:1933"
     environment:
@@ -160,7 +160,7 @@ services:
 
   openviking-storage-probe:
     profiles: ["verification"]
-    image: ghcr.io/volcengine/openviking:v0.4.16@sha256:46f9e34cd37238c28cbd9535033773d179006bdf7f3e528dd1c46567abce7701
+    image: ghcr.io/volcengine/openviking:v0.4.19@sha256:49e20c09ec7ea2f16c116d9ddb2ea90b4c24bf3f5a83078609e52399487dbec1
     entrypoint: ["python", "/opt/oamb/storage_probe.py"]
     command: []
     user: "0:0"

@@ -310,7 +310,7 @@ build_images() {
     docker run --rm --entrypoint python "$MEM0_IMAGE" -c \
         "import importlib.metadata as m; expected={'mem0ai':'2.0.19','fastapi':'0.115.8','pydantic':'2.10.4','uvicorn':'0.34.0','python-dotenv':'1.2.2','bcrypt':'4.0.1'}; assert {k:m.version(k) for k in expected} == expected"
     hindsight_image="ghcr.io/vectorize-io/hindsight-api:0.9.2-slim@${HINDSIGHT_IMAGE_DIGEST}"
-    openviking_image="ghcr.io/volcengine/openviking:v0.4.16@${OPENVIKING_IMAGE_DIGEST}"
+    openviking_image="ghcr.io/volcengine/openviking:v0.4.19@${OPENVIKING_IMAGE_DIGEST}"
     ensure_image "$hindsight_image"
     ensure_image "pgvector/pgvector:0.8.6-pg17@${MEM0_POSTGRES_IMAGE_DIGEST}"
     ensure_image "$openviking_image"
@@ -319,8 +319,8 @@ build_images() {
          .[0].Config.Labels["org.opencontainers.image.revision"] == "ebad478240d3171bb88201ececda5e8d9883d22d"' \
         >/dev/null
     docker image inspect "$openviking_image" | jq -e \
-        '.[0].Config.Labels["org.opencontainers.image.version"] == "v0.4.16" and
-         .[0].Config.Labels["org.opencontainers.image.revision"] == "499995f3ed2e7f551a715179c4053772c51ff819"' \
+        '.[0].Config.Labels["org.opencontainers.image.version"] == "v0.4.19" and
+         .[0].Config.Labels["org.opencontainers.image.revision"] == "f3afef11637f2d7c11e4b1f36ed2f90630737cdc"' \
         >/dev/null
     printf 'build: PASS (Mem0 fixed-source image and official digest-pinned images validated)\n'
 }
@@ -412,7 +412,7 @@ verify_services() {
         "$proof_dir/mem0-openapi.json" >/dev/null
     curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
         "http://127.0.0.1:$openviking_port/health" > "$proof_dir/openviking-health.json"
-    jq -e '.status == "ok" and .healthy == true and .version == "v0.4.16" and .auth_mode == "api_key"' \
+    jq -e '.status == "ok" and .healthy == true and .version == "v0.4.19" and .auth_mode == "api_key"' \
         "$proof_dir/openviking-health.json" >/dev/null
     "$ROOT/mem0/bootstrap.sh" "$ROOT" "$ENV_FILE"
     mkdir -p "$RUNTIME_DIR"

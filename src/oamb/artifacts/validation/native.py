@@ -1782,7 +1782,8 @@ def _openviking_session_native_plan_evidence(
         raw_payloads=snapshot.raw_payloads,
         plan=plan,
         attempts=attempts,
-        runtime_user_id=runtime_identity.user_id,
+        runtime_account_id=runtime_identity.account_id,
+        runtime_admin_user_id=runtime_identity.user_id,
     )
 
 

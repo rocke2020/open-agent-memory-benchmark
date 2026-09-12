@@ -7,6 +7,7 @@ import pytest
 
 from oamb.artifacts.validation.retrieval_request import retrieval_request_proves_generation_free
 from oamb.memory_systems.hindsight.profiles import PROFILE_ID
+from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
 
 
 def _hindsight_proof() -> dict[str, Any]:
@@ -50,3 +51,26 @@ def test_hindsight_request_proof_rejects_size_or_evidence_route_drift(
     proof = _hindsight_proof()
     proof["json_payload"].update(changes)
     assert not retrieval_request_proves_generation_free(PROFILE_ID, json.dumps(proof).encode())
+
+
+def test_openviking_session_request_proof_rejects_actor_peer_header() -> None:
+    proof = {
+        "schema_name": "oamb_rest_request_proof",
+        "schema_version": 1,
+        "method": "POST",
+        "path": "/api/v1/search/find",
+        "params": {},
+        "write_intent": False,
+        "request_header_names": ["x-openviking-actor-peer"],
+        "json_payload": {
+            "query": "How long?",
+            "target_uri": "viking://user/oamb-case/memories",
+            "context_type": "memory",
+            "limit": 150,
+        },
+    }
+
+    assert not retrieval_request_proves_generation_free(
+        OPENVIKING_SESSION_PROFILE_ID,
+        json.dumps(proof).encode(),
+    )
