@@ -165,6 +165,8 @@ class SessionService:
     task_never_completes: bool = False
     continuation_tasks: dict[str, dict[str, Any]] | None = None
     existing_session_details: dict[str, dict[str, Any]] | None = None
+    find_memories: tuple[dict[str, Any], ...] | None = None
+    memory_contents: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         self.calls: list[httpx.Request] = []
@@ -345,27 +347,38 @@ class SessionService:
                 ),
             )
         if path == "/api/v1/search/find":
+            memories = self.find_memories
+            if memories is None:
+                memories = (
+                    {
+                        "context_type": "memory",
+                        "uri": f"{EXPECTED_MEMORY_ROOT}/events/event-1.md",
+                        "level": 2,
+                        "score": 0.9,
+                        "abstract": "The user likes coffee.",
+                        "tags": [],
+                    },
+                )
             return httpx.Response(
                 200,
                 content=_ok(
                     {
-                        "memories": [
-                            {
-                                "context_type": "memory",
-                                "uri": f"{EXPECTED_MEMORY_ROOT}/events/event-1.md",
-                                "level": 2,
-                                "score": 0.9,
-                                "abstract": "The user likes coffee.",
-                                "tags": [],
-                            }
-                        ],
+                        "memories": list(memories),
                         "resources": [],
                         "skills": [],
-                        "total": 1,
+                        "total": len(memories),
                     },
                     compact=True,
                 ),
             )
+        if path == "/api/v1/content/read":
+            uri = request.url.params["uri"]
+            contents = self.memory_contents
+            if contents is None:
+                contents = {f"{EXPECTED_MEMORY_ROOT}/events/event-1.md": "The user likes coffee."}
+            if uri not in contents:
+                raise AssertionError(f"unexpected content read: {uri}")
+            return httpx.Response(200, content=_ok(contents[uri], compact=True))
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
 
@@ -759,7 +772,9 @@ async def test_ready_requires_every_planned_session_commit_and_retrieval_never_w
         RetrievalRequest(scope, "d" * 64, b"What coffee do I like?", 150)
     )
     capabilities = await adapter.capabilities()
-    find_call = service.calls[-1]
+    find_call = next(
+        request for request in service.calls if request.url.path == "/api/v1/search/find"
+    )
     assert find_call.url.path == "/api/v1/search/find"
     assert _request_payload(find_call) == {
         "query": "What coffee do I like?",
@@ -775,7 +790,101 @@ async def test_ready_requires_every_planned_session_commit_and_retrieval_never_w
     assert tuple(candidate.content for candidate in evidence.candidates) == (
         "The user likes coffee.",
     )
+    read_call = service.calls[-1]
+    assert read_call.url.path == "/api/v1/content/read"
+    assert dict(read_call.url.params) == {
+        "uri": f"{EXPECTED_MEMORY_ROOT}/events/event-1.md",
+        "offset": "0",
+        "limit": "-1",
+    }
     assert all(request.method != "DELETE" for request in service.calls)
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_filters_sidecars_and_reads_visible_memory_contents_in_find_order() -> None:
+    source = _source("source-1", 1, _messages(1))
+    event_uri = f"{EXPECTED_MEMORY_ROOT}/events/event-1.md"
+    preference_uri = f"{EXPECTED_MEMORY_ROOT}/preferences/preference-1.md"
+    service = SessionService(
+        (source,),
+        find_memories=(
+            {
+                "context_type": "memory",
+                "uri": f"{EXPECTED_MEMORY_ROOT}/events/.abstract.md",
+                "level": 0,
+                "score": 0.99,
+                "abstract": "Generated event abstract sidecar.",
+                "tags": [],
+            },
+            {
+                "context_type": "memory",
+                "uri": event_uri,
+                "level": 2,
+                "score": 0.9,
+                "abstract": "Receipt without its link target.",
+                "tags": [],
+            },
+            {
+                "context_type": "memory",
+                "uri": f"{EXPECTED_MEMORY_ROOT}/preferences/.overview.md",
+                "level": 1,
+                "score": 0.85,
+                "abstract": "Generated preference overview sidecar.",
+                "tags": [],
+            },
+            {
+                "context_type": "memory",
+                "uri": preference_uri,
+                "level": 2,
+                "score": 0.8,
+                "abstract": "The user likes coffee.",
+                "tags": [],
+            },
+        ),
+        memory_contents={
+            event_uri: "Receipt: [order 42](https://example.test/orders/42)",
+            preference_uri: "The user prefers Ethiopian coffee.",
+        },
+    )
+    adapter = _adapter(service)
+    scope = await _resolved_scope(adapter)
+    dispatch = adapter.plan_ingestion(IngestionRequest(scope, (source,)))[0]
+    receipt = await adapter.ingest(
+        IngestionDispatchRequest(scope=scope, attempt_id="b" * 64, dispatch=dispatch)
+    )
+    readiness = await adapter.wait_ready(
+        ReadinessRequest(
+            scope=scope,
+            expected_source_unit_ids=(source.source_unit_id,),
+            ingestion_receipt=_ingestion_receipt(scope, (receipt,)),
+        )
+    )
+    assert readiness.ready is True
+
+    evidence = await adapter.retrieve(
+        RetrievalRequest(scope, "d" * 64, b"Which receipt and coffee?", 150)
+    )
+
+    assert tuple(candidate.native_reference for candidate in evidence.candidates) == (
+        event_uri,
+        preference_uri,
+    )
+    assert tuple(candidate.content for candidate in evidence.candidates) == (
+        "Receipt: [order 42](https://example.test/orders/42)",
+        "The user prefers Ethiopian coffee.",
+    )
+    read_calls = [
+        request for request in service.calls if request.url.path == "/api/v1/content/read"
+    ]
+    assert tuple(request.url.params["uri"] for request in read_calls) == (
+        event_uri,
+        preference_uri,
+    )
+    assert all(request.url.params["offset"] == "0" for request in read_calls)
+    assert all(request.url.params["limit"] == "-1" for request in read_calls)
+    assert all("raw" not in request.url.params for request in read_calls)
+    assert len(evidence.supporting_raw_references) == 4
     await adapter.close()
 
 

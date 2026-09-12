@@ -31,6 +31,7 @@ from oamb.contracts.ports import (
     InventoryReceipt,
     MemorySystemCallFailure,
     MemorySystemCallUnknownOutcome,
+    MemorySystemReadCancelled,
     NativeEvidenceBatch,
     NativeEvidenceCandidate,
     ProjectionReceipt,
@@ -51,7 +52,10 @@ from oamb.memory_systems.rest import (
     SealedRestClient,
     SealedRestResponse,
     bind_sealed_response_validation,
+    link_preceding_raw_references,
+    link_preceding_read_cancellation,
     parse_exact_json_object,
+    sealed_response_validation_failure,
 )
 
 from .adapter import (
@@ -774,23 +778,75 @@ class OpenVikingSessionAdapter:
         )
         result = _clean_result(response, "user-memory find")
         hits = _memory_hits(result, binding.memory_root)
+        candidates: list[NativeEvidenceCandidate] = []
+        supporting_references: list[RawReferenceHandle] = []
+        for hit in hits:
+            uri = hit["uri"]
+            if _is_memory_sidecar(uri):
+                continue
+            preceding_references = (
+                response.raw_reference,
+                *supporting_references,
+            )
+            try:
+                read_response = await client.request(
+                    "GET",
+                    "/api/v1/content/read",
+                    params={"uri": uri, "offset": 0, "limit": -1},
+                    request_evidence=True,
+                )
+            except MemorySystemReadCancelled as exc:
+                raise link_preceding_read_cancellation(
+                    exc,
+                    preceding_raw_references=preceding_references,
+                ) from exc
+            except MemorySystemCallFailure as exc:
+                raise link_preceding_raw_references(
+                    exc,
+                    preceding_raw_references=preceding_references,
+                ) from exc
+            try:
+                content = _clean_result(read_response, "user-memory content read")
+                if not isinstance(content, str):
+                    raise OpenVikingSessionProfileError(
+                        "OpenViking user-memory content read is not visible text"
+                    )
+            except MemorySystemCallFailure as exc:
+                raise link_preceding_raw_references(
+                    exc,
+                    preceding_raw_references=preceding_references,
+                ) from exc
+            except ValueError as exc:
+                raise sealed_response_validation_failure(
+                    read_response,
+                    message="OpenViking user-memory content read failed exact-profile validation",
+                    supporting_raw_references=preceding_references,
+                ) from exc
+            if read_response.request_reference is None:
+                raise OpenVikingSessionProfileError(
+                    "OpenViking user-memory content read request evidence is absent"
+                )
+            supporting_references.append(read_response.request_reference)
+            supporting_references.append(read_response.raw_reference)
+            rank = len(candidates) + 1
+            candidates.append(
+                NativeEvidenceCandidate(
+                    native_id=f"{uri}#level={hit['level']}",
+                    native_rank_1_indexed=rank,
+                    content=content,
+                    native_score=_canonical_score(hit["score"]),
+                    provider_evidence_identity=f"{uri}#level={hit['level']}",
+                    source_unit_id=None,
+                    evidence_kind="native_memory",
+                    native_reference=uri,
+                    native_truncated=False,
+                )
+            )
         return NativeEvidenceBatch(
             raw_reference=response.raw_reference,
             request_raw_reference=response.request_reference,
-            candidates=tuple(
-                NativeEvidenceCandidate(
-                    native_id=f"{hit['uri']}#level={hit['level']}",
-                    native_rank_1_indexed=rank,
-                    content=hit["abstract"],
-                    native_score=_canonical_score(hit["score"]),
-                    provider_evidence_identity=f"{hit['uri']}#level={hit['level']}",
-                    source_unit_id=None,
-                    evidence_kind="native_memory",
-                    native_reference=hit["uri"],
-                    native_truncated=False,
-                )
-                for rank, hit in enumerate(hits, start=1)
-            ),
+            candidates=tuple(candidates),
+            supporting_raw_references=tuple(supporting_references),
         )
 
     async def close(self) -> None:
@@ -1492,6 +1548,10 @@ def _memory_hits(result: object, memory_root: str) -> tuple[dict[str, Any], ...]
         seen.add(identity)
         hits.append(value)
     return tuple(hits)
+
+
+def _is_memory_sidecar(uri: str) -> bool:
+    return uri.rstrip("/").rsplit("/", 1)[-1] in {".abstract.md", ".overview.md"}
 
 
 def _canonical_score(value: int | float) -> str:

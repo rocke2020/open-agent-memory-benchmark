@@ -16,6 +16,7 @@ from oamb.memory_systems.openviking.adapter import OPENVIKING_AUTH_MODE, OPENVIK
 from oamb.memory_systems.openviking.session_adapter import (
     OPENVIKING_SESSION_PROFILE_ID,
     _canonical_score,
+    _is_memory_sidecar,
     _memory_hits,
     _parse_not_found,
     openviking_pristine_user_memory_uris,
@@ -313,31 +314,65 @@ def reconstruct_openviking_session_candidates(
     request_proof = _object(request_payload)
     request_body = request_proof.get("json_payload")
     if (
-        request_proof.get("path") != "/api/v1/search/find"
+        request_proof.get("schema_name") != "oamb_rest_request_proof"
+        or request_proof.get("schema_version") != 1
+        or request_proof.get("method") != "POST"
+        or request_proof.get("path") != "/api/v1/search/find"
+        or request_proof.get("params") != {}
         or request_proof.get("request_header_names") != []
+        or request_proof.get("write_intent") is not False
         or not isinstance(request_body, dict)
+        or set(request_body) != {"query", "target_uri", "context_type", "limit"}
+        or not isinstance(request_body.get("query"), str)
         or request_body.get("target_uri") != memory_root
+        or request_body.get("context_type") != "memory"
+        or isinstance(request_body.get("limit"), bool)
+        or not isinstance(request_body.get("limit"), int)
+        or request_body["limit"] < 1
     ):
         raise ValueError("OpenViking session find request is outside its question user")
     payload = _payload(raw_payloads, case.retrieval_raw_ref)
-    document = _object(payload)
-    if document.get("status") != "ok":
-        raise ValueError("OpenViking session find response is not successful")
-    hits = _memory_hits(document.get("result"), memory_root)
-    return tuple(
-        NativeEvidenceCandidate(
-            native_id=f"{hit['uri']}#level={hit['level']}",
-            native_rank_1_indexed=rank,
-            content=hit["abstract"],
-            native_score=_canonical_score(hit["score"]),
-            provider_evidence_identity=f"{hit['uri']}#level={hit['level']}",
-            source_unit_id=None,
-            evidence_kind="native_memory",
-            native_reference=hit["uri"],
-            native_truncated=False,
+    hits = _memory_hits(_success_result(payload, "find response"), memory_root)
+    visible_hits = tuple(hit for hit in hits if not _is_memory_sidecar(hit["uri"]))
+    references = case.retrieval_supporting_raw_refs
+    if len(references) != 2 * len(visible_hits):
+        raise ValueError("OpenViking session content-read evidence is incomplete")
+    candidates: list[NativeEvidenceCandidate] = []
+    for rank, hit in enumerate(visible_hits, start=1):
+        uri = hit["uri"]
+        request_reference, response_reference = references[(rank - 1) * 2 : rank * 2]
+        read_request = _object(_payload(raw_payloads, request_reference))
+        if read_request != {
+            "schema_name": "oamb_rest_request_proof",
+            "schema_version": 1,
+            "method": "GET",
+            "path": "/api/v1/content/read",
+            "params": {"limit": -1, "offset": 0, "uri": uri},
+            "json_payload": None,
+            "request_header_names": [],
+            "write_intent": False,
+        }:
+            raise ValueError("OpenViking session content-read request is invalid")
+        content = _success_result(
+            _payload(raw_payloads, response_reference),
+            "content-read response",
         )
-        for rank, hit in enumerate(hits, start=1)
-    )
+        if not isinstance(content, str):
+            raise ValueError("OpenViking session content-read response is not visible text")
+        candidates.append(
+            NativeEvidenceCandidate(
+                native_id=f"{uri}#level={hit['level']}",
+                native_rank_1_indexed=rank,
+                content=content,
+                native_score=_canonical_score(hit["score"]),
+                provider_evidence_identity=f"{uri}#level={hit['level']}",
+                source_unit_id=None,
+                evidence_kind="native_memory",
+                native_reference=uri,
+                native_truncated=False,
+            )
+        )
+    return tuple(candidates)
 
 
 def _validate_question_user_scope(

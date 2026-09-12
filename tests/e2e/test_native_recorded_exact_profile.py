@@ -774,6 +774,17 @@ class _RecordedOpenVikingSessionService:
                     },
                 },
             )
+        if path == "/api/v1/content/read":
+            uri = request.url.params["uri"]
+            expected_uri = f"viking://user/{self.question_user}/memories/events/event-1.md"
+            if uri != expected_uri:
+                raise AssertionError(f"unexpected OpenViking session content read: {uri}")
+            return httpx.Response(
+                200,
+                json=_openviking_success(
+                    "Alice prefers exact evidence with [source](https://example.test/evidence)."
+                ),
+            )
         raise AssertionError(f"unexpected OpenViking session request: {request.method} {path}")
 
 
@@ -865,6 +876,25 @@ def test_openviking_session_capsule_rejects_a_resealed_generating_retrieval_requ
     assert "retrieval-request-proof-invalid" in {issue.code for issue in validation.issues}
 
 
+def test_openviking_session_capsule_rejects_resealed_content_read_tampering(
+    tmp_path: Path,
+) -> None:
+    completed = _run_recorded_openviking_session(tmp_path)
+    case = completed.case_records[0]
+    assert len(case.retrieval_supporting_raw_refs) == 2
+    response_reference = case.retrieval_supporting_raw_refs[1]
+    _replace_raw_payload(
+        completed.capsule_root,
+        response_reference,
+        json.dumps(_openviking_success("planted different visible memory")).encode(),
+    )
+
+    validation = validate_native_capsule(completed.capsule_root)
+
+    assert validation.disposition == ValidationDisposition.INVALID
+    assert "retrieval-order-mismatch" in {issue.code for issue in validation.issues}
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["wrong_question_user", "message_peer_id", "extra_pristine_item"],
@@ -887,6 +917,8 @@ def test_openviking_session_capsule_rejects_identity_or_speaker_tampering(
                 gzip.decompress((completed.capsule_root / entry.relative_path).read_bytes())
             )
         except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
             continue
         if mutation == "wrong_question_user" and payload.get("role") == "user":
             target_reference = entry.record_id
