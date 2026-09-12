@@ -108,6 +108,24 @@ Stopping preserves Docker volumes, provider/database data, saved results, logs, 
 
 Full reports are written under `outputs/full-test/<run-label>/`; smoke reports use `outputs/smoke-test/<run-label>/`. The self-contained HTML opens automatically. Set `OAMB_NO_OPEN=1` for headless use; the report is still generated and its path printed.
 
+### Check saved accuracy
+
+Answer accuracy is the primary result. For a complete or interrupted full run, use the saved result map to calculate `correct / judged`; report `saved / 60` separately as completion coverage. Set `provider` to `hindsight`, `mem0`, or `openviking`:
+
+```bash
+provider=openviking
+run_label=$(sed -n '1p' outputs/tmp/full-test-current)
+result_file="outputs/full-test/$run_label/results/$provider.json"
+jq -r '
+  [.[] | select(.evaluation.disposition == "judged")] as $judged
+  | ($judged | map(.evaluation.numerator) | add // 0) as $correct
+  | ($judged | map(.evaluation.denominator) | add // 0) as $total
+  | if $total == 0 then "accuracy: unavailable; completion: \(length)/60"
+    else "accuracy: \($correct)/\($total) = \(((10000 * $correct / $total | round) / 100))%; completion: \(length)/60"
+    end
+' "$result_file"
+```
+
 Every run prints `run: log=<path>` and saves terminal output under `outputs/tmp/`. Follow it with `tail -f <path>`. Full-run progress comes from saved `results/{hindsight,mem0,openviking}.json`; resume counts include earlier completed questions.
 
 If a run fails, retain its outputs, provider volumes, and `provider-services/.runtime`. Inspect the printed log before retrying. Service preparation and recovery details are in the [provider-service guide](provider-services/README.md); observed performance differences and root-cause analyses are in [Investigations](docs/investigations/README.md).

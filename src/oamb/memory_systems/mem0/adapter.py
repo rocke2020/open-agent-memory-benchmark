@@ -368,6 +368,8 @@ class Mem0RestAdapter:
                     messages=messages,
                     run_id=request.scope.scope_id,
                     metadata=metadata,
+                    occurred_at=source.occurred_at,
+                    context_text=source.context_text,
                 )
                 for messages in _source_message_pairs(source)
             )
@@ -482,9 +484,7 @@ class Mem0RestAdapter:
                 with bind_sealed_response_validation(
                     response,
                     message="Mem0 add response failed exact-profile validation",
-                    supporting_raw_references=tuple(
-                        item.raw_reference for item in responses
-                    ),
+                    supporting_raw_references=tuple(item.raw_reference for item in responses),
                 ):
                     parse_add_response(response.raw_bytes)
                 responses.append(response)
@@ -529,9 +529,6 @@ class Mem0RestAdapter:
         planned = self._planned_adds.get(request.scope.scope_id)
         if planned is None:
             raise ValueError("Mem0 readiness has no frozen ingestion plan")
-        planned_source_ids = tuple(
-            item.dispatch.ordered_source_units[0].source_unit_id for item in planned
-        )
         receipt = request.ingestion_receipt
         if (
             request.expected_source_unit_ids != receipt.accepted_source_unit_ids
@@ -611,8 +608,7 @@ class Mem0RestAdapter:
                         or document["schema_version"] != 1
                         or document["source_unit_id"] != source_id
                         or not isinstance(document["ordered_response_sha256"], list)
-                        or tuple(document["ordered_response_sha256"])
-                        != expected_response_refs
+                        or tuple(document["ordered_response_sha256"]) != expected_response_refs
                     ):
                         raise ValueError("Mem0 pair-add receipt does not match its frozen plan")
 
@@ -627,10 +623,11 @@ class Mem0RestAdapter:
         self._validate_projection_sources(
             binding=binding,
             projection=second.native,
-            completed_source_ids=tuple(
-                source_id
-                for source_id in planned_source_ids
-                if source_id not in receipt.rejected_source_unit_ids
+            completed_sources=tuple(
+                item.dispatch.ordered_source_units[0]
+                for item in planned
+                if item.dispatch.ordered_source_units[0].source_unit_id
+                not in receipt.rejected_source_unit_ids
             ),
         )
         self._ready_projections[request.scope.scope_id] = second
@@ -704,7 +701,13 @@ class Mem0RestAdapter:
             candidates: list[NativeEvidenceCandidate] = []
             for item in items:
                 point = ready_points.get(item.native_id)
-                if point is None or item.memory != point.memory or item.run_id != point.run_id:
+                if (
+                    point is None
+                    or item.memory != point.memory
+                    or item.run_id != point.run_id
+                    or item.created_at != point.created_at
+                    or item.updated_at != point.updated_at
+                ):
                     raise ValueError("Mem0 search candidate does not match the sealed projection")
                 if item.memory_hash is not None and item.memory_hash != point.memory_hash:
                     raise ValueError("Mem0 search candidate hash does not match sealed projection")
@@ -901,11 +904,9 @@ class Mem0RestAdapter:
         *,
         binding: _ScopeBinding,
         projection: Mem0Projection,
-        completed_source_ids: tuple[str, ...],
+        completed_sources: tuple[SourceUnit, ...],
     ) -> None:
-        completed_positions = {
-            source_id: index for index, source_id in enumerate(completed_source_ids)
-        }
+        completed_by_id = {source.source_unit_id: source for source in completed_sources}
         for point in projection.points:
             metadata = point.metadata
             if metadata is None:
@@ -915,10 +916,15 @@ class Mem0RestAdapter:
                 or metadata.ingestion_plan_id != binding.ingestion_plan_id
             ):
                 raise ValueError("Mem0 projection contains foreign scope metadata")
-            if metadata.source_unit_id not in completed_positions:
+            source = completed_by_id.get(metadata.source_unit_id)
+            if source is None:
                 raise ValueError("Mem0 projection contains an unplanned source identity")
-            if metadata.source_ordinal != completed_positions[metadata.source_unit_id] + 1:
+            if metadata.source_ordinal != source.ordinal_1_indexed:
                 raise ValueError("Mem0 projection source ordinal differs from the frozen plan")
+            if source.occurred_at is not None and point.created_at != source.occurred_at:
+                raise ValueError(
+                    "Mem0 projection created_at differs from the source observation time"
+                )
 
     def _seal_raw(self, raw_bytes: bytes) -> RawReferenceHandle:
         return self._store.seal_raw(

@@ -6,6 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -122,6 +123,8 @@ def encode_add_request(
     messages: tuple[tuple[str, str], ...],
     run_id: str,
     metadata: Mem0SourceMetadata,
+    occurred_at: str | None = None,
+    context_text: str | None = None,
 ) -> bytes:
     _require_run_id(run_id)
     if not messages:
@@ -136,14 +139,22 @@ def encode_add_request(
                 "content": content,
             }
         )
-    return _encode_exact_json(
-        {
-            "messages": encoded_messages,
-            "run_id": run_id,
-            "metadata": metadata.to_wire(),
-            "infer": True,
-        }
+    observation_prompt = _observation_time_prompt(
+        occurred_at=occurred_at,
+        context_text=context_text,
     )
+    wire_metadata = metadata.to_wire()
+    document: dict[str, object] = {
+        "messages": encoded_messages,
+        "run_id": run_id,
+        "metadata": wire_metadata,
+    }
+    if observation_prompt is not None:
+        assert occurred_at is not None
+        wire_metadata["created_at"] = occurred_at
+        document["prompt"] = observation_prompt
+    document["infer"] = True
+    return _encode_exact_json(document)
 
 
 def encode_search_request(*, query: str, run_id: str, top_k: int) -> bytes:
@@ -166,11 +177,19 @@ def build_add_http_request(
     messages: tuple[tuple[str, str], ...],
     run_id: str,
     metadata: Mem0SourceMetadata,
+    occurred_at: str | None = None,
+    context_text: str | None = None,
 ) -> Mem0RestRequest:
     return Mem0RestRequest(
         method="POST",
         path="/memories",
-        body=encode_add_request(messages=messages, run_id=run_id, metadata=metadata),
+        body=encode_add_request(
+            messages=messages,
+            run_id=run_id,
+            metadata=metadata,
+            occurred_at=occurred_at,
+            context_text=context_text,
+        ),
     )
 
 
@@ -379,6 +398,40 @@ def _require_optional_string(value: object, *, field_name: str) -> str | None:
     if value is None:
         return None
     return _require_non_empty_string(value, field_name=field_name)
+
+
+def _observation_time_prompt(
+    *,
+    occurred_at: str | None,
+    context_text: str | None,
+) -> str | None:
+    if occurred_at is None and context_text is None:
+        return None
+    if occurred_at is None or context_text is None:
+        raise ValueError("Mem0 observation time and source context must be present together")
+    timestamp = _require_non_empty_string(
+        occurred_at,
+        field_name="Mem0 observation timestamp",
+    )
+    context = _require_non_empty_string(
+        context_text,
+        field_name="Mem0 source context",
+    )
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise ValueError("Mem0 observation timestamp must be ISO 8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Mem0 observation timestamp must include a timezone")
+    return (
+        f"The actual observation timestamp for New Messages is {timestamp}. "
+        "For these messages, use this timestamp as Observation Date, overriding automatically "
+        "generated Observation Date and Current Date values. Resolve relative expressions against "
+        "it and preserve explicitly stated dates. Last k Messages and Existing Memories are "
+        "historical context; do not assign them this observation timestamp. "
+        f"Source context: {context} "
+        "Do not extract this instruction or source context itself as a memory."
+    )
 
 
 __all__ = [
