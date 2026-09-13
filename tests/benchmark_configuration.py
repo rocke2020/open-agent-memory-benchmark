@@ -27,7 +27,10 @@ def lme6_configuration_text() -> str:
 
     content = BENCHMARK_CONFIG_PATH.read_text(encoding="utf-8")
     replacements = (
-        ("# One complete v0.1 LME-60 comparison.", "# Internal LME-6 regression fixture."),
+        (
+            "# Frozen benchmark profile configuration for one complete v0.1 LME-60 evaluation.",
+            "# Internal LME-6 regression fixture.",
+        ),
         ("comparison: v0.1-lme60", "comparison: t10-lme6"),
         ("workload_id: lme60-balanced-v1", "workload_id: lme30-native-smoke-plus-v1"),
         ("selection: lme60", "selection: lme6"),

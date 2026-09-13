@@ -24,7 +24,7 @@ label alone is insufficient.**
 |---|---|---|
 | Hindsight | `v0.9.2` | official API-only slim image by multi-arch digest |
 | Mem0 | `v2.0.19` | exact source commit, archive hash, hash-locked dependencies, pinned Python base, and complete build-input fingerprint |
-| OpenViking | `v0.4.16` | official image by multi-arch digest |
+| OpenViking | `v0.4.19` | official image by multi-arch digest |
 
 The exact commits and digests are in `versions.env`. The Mem0 build accepts
 only an official local checkout whose `v2.0.19` tag resolves to the recorded

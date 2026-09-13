@@ -25,6 +25,8 @@ The product promise is:
 > providers on relevant datasets and produce a report that both an engineer and
 > a manager can understand and audit.
 
+The supported public product interface is `./precheck.sh` followed by `./run.sh`. Package-internal command entry points used by these scripts are implementation details, not a supported public interface, and should not be invoked or documented as an alternative workflow.
+
 Derive data flow from this promise and the minimum true dependency between
 operations, not from existing function, module, phase, contract, or evidence
 boundaries. For example, a question depends on its own history becoming ready;
