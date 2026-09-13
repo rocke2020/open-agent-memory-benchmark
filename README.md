@@ -110,12 +110,10 @@ Full reports are written under `outputs/full-test/<run-label>/`; smoke reports u
 
 ### Check saved accuracy
 
-Answer accuracy is the primary result. For a complete or interrupted full run, use the saved result map to calculate `correct / judged`; report `saved / 60` separately as completion coverage. Set `provider` to `hindsight`, `mem0`, or `openviking`:
+Answer accuracy is one of the primary metrics. For a complete or interrupted full run, use the saved result map to calculate `correct / judged`; report `saved / 60` separately as completion coverage.
 
 ```bash
-provider=openviking
-run_label=$(sed -n '1p' outputs/tmp/full-test-current)
-result_file="outputs/full-test/$run_label/results/$provider.json"
+result_file=".../$provider.json"
 jq -r '
   [.[] | select(.evaluation.disposition == "judged")] as $judged
   | ($judged | map(.evaluation.numerator) | add // 0) as $correct
@@ -128,7 +126,7 @@ jq -r '
 
 Every run prints `run: log=<path>` and saves terminal output under `outputs/tmp/`. Follow it with `tail -f <path>`. Full-run progress comes from saved `results/{hindsight,mem0,openviking}.json`; resume counts include earlier completed questions.
 
-If a run fails, retain its outputs, provider volumes, and `provider-services/.runtime`. Inspect the printed log before retrying. Service preparation and recovery details are in the [provider-service guide](provider-services/README.md); observed performance differences and root-cause analyses are in [Investigations](docs/investigations/README.md).
+See the [Investigations](docs/investigations/README.md) for observed provider behavior and failures.
 
 ## Acknowledgments
 

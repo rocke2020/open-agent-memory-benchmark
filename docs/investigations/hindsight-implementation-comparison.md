@@ -4,8 +4,8 @@
 
 1. At the mainflow level, the current OAMB Hindsight path and the reference AMB path are mostly the same: one isolated history per LongMemEval question, Hindsight retain and recall, a separate answer model, and a category-sensitive judge.
 2. OAMB uses a digest-pinned Hindsight 0.9.2 REST service, create-only banks, strict input and response validation, the API-default `mid` recall level, the first configured number of provider-ranked normalized facts-and-chunks, explicit model-role bindings, and independently reconstructable evidence. The reference AMB checkout uses an embedded Hindsight 0.4.x daemon, delete-and-recreate banks, an explicit `high` recall level, raw recall JSON in the answer prompt, environment-selected models, and a compact score-oriented result file.
-3. The differences affect extraction, retrieval, answer generation, judging, failure inclusion, and resume behavior. A score difference between these two implementations cannot be attributed to Hindsight retrieval quality alone.
-4. The comparison was traced from OAMB base commit `fb35c8a38a85b67a2af2c9e6928c72e3c7aadb4d` and reference AMB commit `f0edfb9fe44ebd1ec9bba8e1737319a29ee0d696`; its OAMB top-k descriptions include the configuration change shipped with this document. It does not claim a fresh live run, a completed 60-question result, or reproduction of AMB's published 94.6% Hindsight result.
+3. Accuracy is the headline difference: the saved OAMB Hindsight LME-60 result is 57/60, or 95.00%, while the published reference AMB result is 473/500, or 94.60%. OAMB is 0.40 percentage points higher by arithmetic comparison, but the differing question sets and end-to-end protocols prevent interpreting that difference as a Hindsight-only effect.
+4. The implementation comparison was traced from OAMB base commit `fb35c8a38a85b67a2af2c9e6928c72e3c7aadb4d` and reference AMB commit `f0edfb9fe44ebd1ec9bba8e1737319a29ee0d696`. The OAMB accuracy comes from the later saved 60-record result map with SHA-256 `e63576615d3b8a31e8ea112e8025181db1628c3353cd5d4709770b92bfe45d3f`; the AMB accuracy comes from the pinned 500-record results manifest. Neither result is presented as a reproduction of the other.
 
 ## 1. Scope and terminology
 
@@ -47,18 +47,21 @@ These shared choices do not make the runs interchangeable because the bytes reta
 
 ## 3. Concise differences
 
+Accuracy is the largest visible outcome difference: OAMB reports 95.00% and reference AMB reports 94.60%, an arithmetic difference of 0.40 percentage points in OAMB's favor. This compares 60 balanced questions with 500 questions under different Hindsight versions, retrieval settings, answer inputs, models, prompts, and completion rules, so it is descriptive rather than controlled.
+
 The implementations share a semantic stage graph, but they are not protocol-equivalent benchmark cells. The most important differences are the evidence shown to the answer model, the Hindsight retrieval/runtime configuration that produces it, and the rules that decide whether a question is complete and scoreable.
 
 | Priority | Comparison point | OAMB | Reference AMB | Why it matters |
 |---:|---|---|---|---|
-| 1 | Answer-visible evidence | Sends the first configured number of provider-ranked normalized facts and hydrated chunks as deterministic compact `F#`/`S#` blocks. | Sends serialized raw recall JSON; its saved formatted context is not the actual answer context. | The answer models reason over substantially different content and markup even if recall returned the same native candidates. |
-| 2 | Recall breadth | Uses the Hindsight 0.9.2 API-default `mid` level, 4,096 fact tokens, and 8,192 chunk tokens, then keeps the first configured 150 normalized candidates. | Explicitly uses `high` with 32,768 fact tokens and 32,768 chunk tokens; the adapter does not forward its nominal `k=10`. | Search work, returned evidence volume, and truncation behavior are not aligned. |
-| 3 | Hindsight runtime | Uses a digest-pinned Hindsight 0.9.2 REST service with pinned embedding configuration and native reranking disabled. | Uses an embedded 0.4.x daemon profile whose embedding and cross-encoder choices remain daemon-owned. | Extraction, indexing, retrieval, response shape, and ranking come from different Hindsight generations and configurations. |
-| 4 | Dataset and retained input | Uses the pinned balanced LME-60 selection, validates the source file and schema, canonicalizes chronology, and retains compact role/content JSON. | Loads all 500 questions by default from an environment path or unpinned download, preserves source order, and retains default `json.dumps` bytes. | Question membership, ordering, validation, and extraction input bytes differ. |
-| 5 | Bank lifecycle and readiness | Creates a fresh bank per ingestion occurrence without deleting or reusing provider state, then reconstructs and validates the complete provider projection before recall. | Deletes and recreates a deterministic per-question bank, then proceeds after retain returns or a failed batch is logged and skipped. | Freshness, destructive behavior, and completeness guarantees differ. |
-| 6 | Answer and judge protocol | Uses OAMB-authored answer instructions, plain-text answers, exact `yes`/`no` judge output, and artifact-bound model roles and attempts. | Uses AMB prompts, structured reasoning plus answer, a structured judge verdict/reason, and environment-selected model clients. | Generation, parsing, correction, retry, and judging can change verdicts independently of retrieval. |
-| 7 | Failure and resume semantics | Records intended, accepted, and skipped sources; preserves attempts and partial evidence; resumes only an identity-matched frozen result map into fresh scopes. | Logs and may skip failed retain batches; resumes from path-local JSON without dataset, configuration, model, or profile identity checks. | The two runners can include different questions in the denominator and make different completeness claims. |
-| 8 | Result purpose | Produces independently validated capsules with requests, raw receipts, projections, attempts, accounting, and a report-facing result subset. | Produces a compact score-oriented JSON result with answer, context, raw recall, verdict, timing, and aggregate accuracy. | OAMB proves more about how a result was produced; reference AMB is simpler but cannot support the same audit claims. |
+| 1 | Accuracy | Saved OAMB result map: 57/60, or 95.00%, with 60 unique terminal judged records. | Published AMB results manifest: 473/500, or 94.60%. | OAMB is 0.40 percentage points higher arithmetically; different samples and protocols prevent a Hindsight-only attribution. |
+| 2 | Answer-visible evidence | Sends the first configured number of provider-ranked normalized facts and hydrated chunks as deterministic compact `F#`/`S#` blocks. | Sends serialized raw recall JSON; its saved formatted context is not the actual answer context. | The answer models reason over substantially different content and markup even if recall returned the same native candidates. |
+| 3 | Recall breadth | Uses the Hindsight 0.9.2 API-default `mid` level, 4,096 fact tokens, and 8,192 chunk tokens, then keeps the first configured 150 normalized candidates. | Explicitly uses `high` with 32,768 fact tokens and 32,768 chunk tokens; the adapter does not forward its nominal `k=10`. | Search work, returned evidence volume, and truncation behavior are not aligned. |
+| 4 | Hindsight runtime | Uses a digest-pinned Hindsight 0.9.2 REST service with pinned embedding configuration and native reranking disabled. | Uses an embedded 0.4.x daemon profile whose embedding and cross-encoder choices remain daemon-owned. | Extraction, indexing, retrieval, response shape, and ranking come from different Hindsight generations and configurations. |
+| 5 | Dataset and retained input | Uses the pinned balanced LME-60 selection, validates the source file and schema, canonicalizes chronology, and retains compact role/content JSON. | Loads all 500 questions by default from an environment path or unpinned download, preserves source order, and retains default `json.dumps` bytes. | Question membership, ordering, validation, and extraction input bytes differ. |
+| 6 | Bank lifecycle and readiness | Creates a fresh bank per ingestion occurrence without deleting or reusing provider state, then reconstructs and validates the complete provider projection before recall. | Deletes and recreates a deterministic per-question bank, then proceeds after retain returns or a failed batch is logged and skipped. | Freshness, destructive behavior, and completeness guarantees differ. |
+| 7 | Answer and judge protocol | Uses OAMB-authored answer instructions, plain-text answers, exact `yes`/`no` judge output, and artifact-bound model roles and attempts. | Uses AMB prompts, structured reasoning plus answer, a structured judge verdict/reason, and environment-selected model clients. | Generation, parsing, correction, retry, and judging can change verdicts independently of retrieval. |
+| 8 | Failure and completeness semantics | Records intended, accepted, and skipped sources and preserves attempts and partial evidence. | Logs and may skip failed retain batches without representing partial ingestion as structured result state. | The two runners can include different histories in scored results and make different completeness claims. |
+| 9 | Result purpose | Produces independently validated capsules with requests, raw receipts, projections, attempts, accounting, and a report-facing result subset. | Produces a compact score-oriented JSON result with answer, context, raw recall, verdict, timing, and aggregate accuracy. | The formats support different evidence claims even when both contain an accuracy number. |
 
 The practical conclusion is that a score delta is a combined pipeline difference, not evidence of a Hindsight version improvement or regression. An apples-to-apples experiment would need to freeze the dataset, retained bytes, runtime and bank configuration, recall request and normalization, answer-visible context, answer and judge models/prompts, retry behavior, and score denominator.
 
@@ -100,7 +103,7 @@ CLI plus environment
   → serialize raw recall JSON into the LongMemEval answer prompt
   → answer model returns structured reasoning plus answer
   → category-sensitive judge returns structured reason plus verdict
-  → merge the question into one JSON result file
+  → write the question into one JSON result file
 ```
 
 Reference AMB has no resolved-plan, provider-projection, raw-attempt capsule, or independent validation stage. Its result is directly useful as a benchmark summary, but it does not prove the same properties as an OAMB capsule.
@@ -131,7 +134,6 @@ The largest differences are outcome-affecting protocol choices, not naming or pa
 | Model binding | Resolved plan binds extraction, embedding, answer, and judge roles, endpoints, model names, ownership, and thinking effort; runtime evidence checks those bindings. Tracked config intentionally leaves concrete light/deep model strings to the environment. | Extraction, answer, and judge are independently selected through environment variables; the result records configured answer/judge IDs but not extraction, embedding, reranker, reasoning effort, effective runtime model, or usage. | A source checkout alone does not prove either run's concrete external models, but OAMB is designed to close them in the run artifact. |
 | Model retries | Answer and judge each allow six outer attempts and two transport retries per outer attempt, with separate evidence for every physical call and correction prompts for invalid output. | Retries live inside each LLM client. The OpenAI path shares six attempts across rate errors and DeepSeek JSON correction; the Gemini structured-output path can nest two six-attempt loops. | Retry count and model conversation history can differ, affecting both cost and outputs. |
 | Parallelism | Current checked-in limits are three provider cells, three histories per provider, and three question pipelines per provider. A Hindsight-only run can overlap three histories and three retrieve→answer→judge pipelines; all three providers can theoretically reach nine of each. Sources within one history remain serial. | One CLI process evaluates one provider. It prefetches the current plus four future bank ingestions, while LongMemEval's one-query-per-unit loop makes question pipelines effectively serial. | OAMB overlaps complete question work more aggressively; reference AMB overlaps more bank ingestion chains. |
-| Resume | Loads a strict per-provider map, validates every key and terminal result against the frozen 60-question manifest, atomically adds without overwrite, and runs only missing questions in fresh scopes. | `--skip-ingested` trusts any prior result at the same output path as completed, has no dataset/config/model/profile identity check, and performs a non-atomic read/merge/write where new query IDs replace old values. | OAMB resume is identity-bound and fail-closed; AMB resume is simpler but can mix incompatible state or lose a concurrent update. |
 | Shutdown and partial failure | Stops admission, drains admitted operations, closes clients after active calls settle, and preserves aborted or partial evidence. | A recall, answer, or judge exception aborts the runner; there is no explicit drain of prefetched ingestion tasks and cleanup is reached only after the final save. | OAMB has stronger interrupted-run semantics; AMB relies primarily on per-unit checkpoints. |
 | Results and metrics | Seals requests, raw responses, prompts, projections, attempts, latency, token/resource/cost records, and native/visible candidate counts; ordinary result files retain the report-facing subset. | Stores answer, reasoning, formatted context, raw recall object, verdict/reason, recall time, aggregate accuracy, and local context tokens, but no attempt ledger, extraction/model usage, cost, or completeness proof. | The two outputs answer different evidence questions even when they both contain an accuracy number. |
 
@@ -154,7 +156,7 @@ OAMB counts the exact compact visible-evidence bytes with a pinned `tiktoken` 0.
 
 ### 5.3 Ingestion counters are not comparable
 
-OAMB distinguishes intended, accepted, and skipped source units and binds extraction usage to physical retain attempts. Reference `ingested_docs` counts source document occurrences presented by the runner; it does not account for duplicate-ID removal, skipped batches, extracted facts, or confirmed provider writes. On resume, reference result rows are cumulative after merge while its ingestion time and document counter describe the current invocation.
+OAMB distinguishes intended, accepted, and skipped source units and binds extraction usage to physical retain attempts. Reference `ingested_docs` counts source document occurrences presented by the runner; it does not account for duplicate-ID removal, skipped batches, extracted facts, or confirmed provider writes.
 
 ## 6. Consequences for benchmark interpretation
 
@@ -163,13 +165,13 @@ The two implementations can be compared as benchmark-system designs, but their a
 ### 6.1 Claims that are supported
 
 1. Both implement a one-bank-per-question LongMemEval RAG evaluation with observations disabled, a question-time recall, a separate answer model, and a category-sensitive judge.
-2. OAMB provides stronger freshness, completeness, request, mutation, retry, accounting, and resume evidence than the reference AMB result format.
+2. OAMB provides stronger freshness, completeness, request, mutation, retry, and accounting evidence than the reference AMB result format.
 3. Reference AMB explicitly uses `high` recall with 32,768-token fact and chunk limits and sends the raw recall object to the answer model, while OAMB implicitly uses the 0.9.2 API-default `mid` level with 4,096 fact tokens, 8,192 chunk tokens, and a compact facts-and-chunks projection.
 4. Each implementation can compare Hindsight with other providers only within its own frozen harness, model stack, dataset selection, and completion rules.
 
 ### 6.2 Claims that are not supported
 
-1. An OAMB LME-60 score is not a reproduction, subset score, or directly scaled estimate of AMB's published 500-question 94.6% result.
+1. The arithmetic 0.40 percentage-point difference is not a reproduction, subset estimate, or controlled comparison with AMB's published 500-question 94.60% result.
 2. A score delta between the two paths cannot be labeled a Hindsight version improvement or regression because embedding, reranking, retained bytes, recall volume, answer context, prompts, models, and judge contracts all move together.
 3. Matching the aggregate score would not establish protocol equivalence or a matching per-question verdict vector.
 4. A healthy service, nonempty recall, or complete-looking JSON result alone does not establish that every intended session was successfully indexed.
@@ -196,16 +198,14 @@ The stronger OAMB evidence model still has explicit current boundaries, and the 
 1. The resolved retrieval configuration sets `top_k=150`. Because Hindsight's recall endpoint has no item-count field, the adapter applies this as a post-normalization prefix over provider-ranked facts and chunks; the provider request itself still uses API-default `mid` with 4,096 fact tokens and 8,192 chunk tokens. Reports may describe a 150 normalized-candidate ceiling, but must not call it provider-side top-k, high-budget recall, or the separately validated 2,048/1,000 bank values.
 2. Concrete light and deep model names come from the run environment. Tracked source proves role ownership and low/high thinking-effort policy, while a resolved plan plus runtime receipts are required to prove the actual model names used by a run.
 3. Native capsules retain and independently validate the full request/projection/attempt chain. The current full-study comparison, however, is reduced from ordinary per-provider question-result files; its report intentionally marks run ID, source-root hash, validation hash, code revisions, and accounting outside the retained subset as unavailable.
-4. A normal fresh full run validates each new capsule before building the flat-results comparison. The current resume wrapper executes missing cases and then builds that comparison directly; it does not separately revalidate each new resume capsule in the shell workflow. Completion of the flat result map is therefore stronger than no checkpoint, but weaker than a report built directly from freshly validated capsules.
-5. This document does not convert local status prose into live proof. A completed Hindsight LME-60 result requires the actual 60 terminal results and their applicable validation evidence.
+4. The saved Hindsight result map contains 60 terminal judged records and supports the reported 57/60 arithmetic. The saved bundle does not include native capsule validation files, so this document does not claim capsule-level validation for that score.
 
 ### 7.2 Reference AMB boundaries
 
 1. The inspected snapshot is a development branch state, not the historical AMB commit that first published 473/500. Current code behavior must not be back-projected onto that historical run.
 2. Default Hindsight setup deletes deterministic banks. Running it against valuable provider state requires an intentionally disposable or backed-up scope.
 3. Logged skipped retain batches are not represented as structured partial-ingestion state, and the output cannot independently prove that every intended source reached Hindsight.
-4. Resume trusts path-local prior JSON without a source/config/model identity check, and result replacement is not atomic or locked.
-5. The stored Hindsight context and `context_tokens` do not reconstruct the actual raw-JSON answer prompt. The raw recall object helps diagnosis, but answer/judge requests, responses, usage, retries, and effective provider identities are not a closed evidence chain.
+4. The stored Hindsight context and `context_tokens` do not reconstruct the actual raw-JSON answer prompt. The raw recall object helps diagnosis, but answer/judge requests, responses, usage, retries, and effective provider identities are not a closed evidence chain.
 
 ## 8. Hindsight's three recall levels and three independent limits
 
@@ -308,9 +308,7 @@ The comparison above was traced from implementation entrypoints rather than infe
 | Exact visible-evidence formatting and token counting | [`src/oamb/workloads/visible_evidence.py`](../../src/oamb/workloads/visible_evidence.py), lines 23–194 |
 | History/question scheduling, retry, answer, judge, and case sealing | [`src/oamb/runtime/native_run.py`](../../src/oamb/runtime/native_run.py), lines 2087–2267, 2542–2657, 2670–2898, and 2983–3570 |
 | Read-only pre/post-recall mutation guard | [`src/oamb/runtime/memory_query.py`](../../src/oamb/runtime/memory_query.py), lines 70–155 |
-| Strict atomic question-result resume state | [`src/oamb/runtime/question_results.py`](../../src/oamb/runtime/question_results.py), lines 258–343 |
 | Live factories and missing-question selection | [`src/oamb/live.py`](../../src/oamb/live.py), lines 657–868 |
-| Full and resume shell flow | [`run.sh`](../../run.sh), lines 565–686 |
 
 ### 9.2 Reference AMB sources at `f0edfb9fe44ebd1ec9bba8e1737319a29ee0d696`
 
@@ -322,7 +320,8 @@ The comparison above was traced from implementation entrypoints rather than infe
 | Hindsight variants, daemon profile, bank lifecycle, retain, recall, and formatting | `src/memory_bench/memory/hindsight.py`, lines 15–216 and 219–830 |
 | Embedded-daemon extraction patch | `src/memory_bench/memory/_hindsight_daemon.py`, lines 1–64 |
 | RAG retrieval and answer path | `src/memory_bench/modes/rag.py`, lines 29–96 |
-| Scheduling, checkpoint, resume, judge dispatch, and result writing | `src/memory_bench/runner.py`, lines 46–444 |
+| Scheduling, checkpoint, judge dispatch, and result writing | `src/memory_bench/runner.py`, lines 46–444 |
+| Published 473/500 Hindsight result | [`results-manifest.json`](https://github.com/vectorize-io/agent-memory-benchmark/blob/decbb07f4f9899deac28a76293564cf263872652/results-manifest.json) |
 | Answer and judge model selection | `src/memory_bench/llm/__init__.py`, lines 21–40 |
 | OpenAI-compatible structured output and retries | `src/memory_bench/llm/openai.py`, lines 63–139 |
 | Gemini structured output and retries | `src/memory_bench/llm/gemini.py`, lines 23–175 |
