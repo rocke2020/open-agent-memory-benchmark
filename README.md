@@ -96,6 +96,18 @@ Stopping preserves Docker volumes, provider/database data, saved results, logs, 
 
 Full reports are written under `outputs/full-test/<run-label>/`; smoke reports use `outputs/smoke-test/<run-label>/`. The self-contained HTML opens automatically. Set `OAMB_NO_OPEN=1` for headless use; the report is still generated and its path printed.
 
+### Generate a report from separate provider results
+
+When Hindsight, Mem0, and OpenViking were completed and preserved as separate snapshots beneath one directory, generate the report without rerunning providers:
+
+```bash
+./run.sh --generate-report --result-dir=outputs/saved-results/lme60-provider-native
+```
+
+The directory must contain exactly one complete 60-question snapshot for each provider, with `resolved-plan.json` and `results/<provider>.json` in each snapshot. The command requires the root `.env` for the frozen judge-model connection, makes one bounded LLM analysis call when no matching analysis is cached, and reuses the content-addressed cache at `<result-dir>/report-analysis-cache` without another model call when the report inputs and analysis configuration are unchanged. It requires no precheck or provider service, leaves the source snapshots unchanged, and writes a create-only `comparison/` directory (or a timestamped successor when that name already exists). It records every source plan/result hash and suppresses an affected leader claim when the saved plans do not prove the same comparison control.
+
+The HTML keeps the comparison focused: it omits unavailable secondary accounting and Wilson-interval text, and its Question results section shows only questions answered incorrectly by at least one provider. The complete 60-question matrix and statistical evidence remain in `report.json`.
+
 ### Check saved accuracy
 
 Answer accuracy is the primary result. For a complete or interrupted full run, use the saved result map to calculate `correct / judged`; report `saved / 60` separately as completion coverage. Set `provider` to `hindsight`, `mem0`, or `openviking`:

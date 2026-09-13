@@ -867,6 +867,51 @@ def report_build(
     typer.echo(f"report: {built.report_path}")
 
 
+@report_app.command("saved-results")
+def report_saved_results(
+    result_dir: Annotated[
+        Path,
+        typer.Argument(help="Directory containing one saved snapshot per provider."),
+    ],
+    output_root: Annotated[
+        Path,
+        typer.Option("--output-root", help="Create-only comparison report directory."),
+    ],
+    analysis_model_env: Annotated[
+        Path,
+        typer.Option(
+            "--analysis-model-env",
+            help="Dotenv file for cached concise report analysis.",
+        ),
+    ] = Path(".env"),
+    analysis_cache_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--analysis-cache-root",
+            help="Content-addressed cache for report analysis reuse.",
+        ),
+    ] = None,
+) -> None:
+    """Build one report from saved provider results and cached LLM analysis."""
+
+    from .reporting.saved_results import build_saved_results_report
+
+    try:
+        built = build_saved_results_report(
+            result_root=result_dir,
+            output_root=output_root,
+            analysis_model_env=analysis_model_env,
+            analysis_cache_root=analysis_cache_root,
+        )
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    for comparison_path in built.comparison_paths:
+        typer.echo(f"comparison: {comparison_path}")
+    typer.echo(f"report export: {built.export_path}")
+    typer.echo(f"offline report: {built.html_path}")
+    typer.echo(f"report analysis: {built.analysis_path}")
+
+
 def _load_object(path: Path) -> dict[str, object]:
     value = json.loads(path.read_bytes())
     if not isinstance(value, dict):

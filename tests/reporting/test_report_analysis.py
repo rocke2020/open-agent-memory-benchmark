@@ -173,6 +173,9 @@ def test_analysis_uses_six_total_attempts_then_seals_and_reuses_the_cache(
     prompt = json.dumps(request_bodies[0], sort_keys=True)
     assert "must-not-leave-the-report" not in prompt
     assert "secret-test-key" not in prompt
+    assert request_bodies[0]["max_tokens"] == 2_048
+    assert "median_seconds" in prompt
+    assert "median_microseconds" not in prompt
 
     def forbidden_handler(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("a valid matching analysis cache must prevent another paid call")
@@ -192,6 +195,44 @@ def test_analysis_uses_six_total_attempts_then_seals_and_reuses_the_cache(
     assert cached is not None
     assert cached.cache_hit is True
     assert cached.analysis_path.read_bytes() == result.analysis_path.read_bytes()
+
+
+def test_analysis_retries_provider_specific_overview_and_raw_subsecond_units(
+    tmp_path: Path,
+) -> None:
+    """Catches plausible prose contradicting metrics or exposing raw timing units."""
+
+    module = _analysis_module()
+    assert module is not None
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        document = json.loads(_valid_analysis_text())
+        if calls == 1:
+            document["overall"] = "Hindsight leads the observed providers overall."
+        elif calls == 2:
+            document["metrics"]["retrieval_latency"] = (
+                "Mem0 retrieval latency was 121414 microseconds."
+            )
+        return _response(json.dumps(document))
+
+    result = module.generate_report_analysis(
+        _report(),
+        model="deepseek-v4-flash",
+        thinking_effort="high",
+        base_url="https://models.example/v1",
+        api_key="secret-test-key",
+        cache_root=tmp_path / "cache",
+        timeout_seconds=30,
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _seconds: None,
+    )
+
+    assert result is not None
+    assert calls == 3
+    assert json.loads(result.analysis_path.read_bytes())["attempt_count"] == 3
 
 
 @pytest.mark.parametrize("malformed_envelope", [False, True])

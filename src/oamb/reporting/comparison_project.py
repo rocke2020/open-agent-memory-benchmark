@@ -273,6 +273,8 @@ def _publish_comparison_documents(
     output_root: Path,
     diagnostic: bool,
     analysis_generator: AnalysisGenerator | None,
+    source_mode: str = "resolved_plan",
+    saved_result_sources: tuple[dict[str, object], ...] = (),
 ) -> ComparisonProjectBuildResult:
     accuracy_decision = _report_accuracy_decision(plan, cell_documents, comparison_documents)
     export_body: dict[str, Any] = {
@@ -310,8 +312,16 @@ def _publish_comparison_documents(
         "retrieval_generation": plan.retrieval.generation,
         "retrieval": retrieval_documents,
         "limitations": limitations,
-        "controlled_comparison_warning": CONTROLLED_COMPARISON_WARNING,
+        "controlled_comparison_warning": (
+            "This report combines separately run provider-native results; source-plan "
+            "differences and unsupported comparisons remain explicit."
+            if source_mode == "saved_provider_results"
+            else CONTROLLED_COMPARISON_WARNING
+        ),
     }
+    if source_mode != "resolved_plan":
+        export_body["source_mode"] = source_mode
+        export_body["saved_result_sources"] = saved_result_sources
     if diagnostic:
         export_body["diagnostic"] = True
     report_id = canonical_sha256(["oamb-comparison-project-initial-v1", export_body])
@@ -401,6 +411,8 @@ def build_question_results_comparison_project(
     output_root: Path,
     dataset_source: Path | None = None,
     analysis_generator: AnalysisGenerator | None = None,
+    saved_result_sources: tuple[dict[str, object], ...] = (),
+    pair_limitations: Mapping[frozenset[str], tuple[str, ...]] | None = None,
 ) -> ComparisonProjectBuildResult:
     """Build the final comparison directly from ordinary provider result files."""
 
@@ -429,15 +441,28 @@ def build_question_results_comparison_project(
             )
     except QuestionResultsError as exc:
         raise ComparisonProjectError(str(exc)) from exc
-    cell_documents = tuple(
-        _question_result_cell_document(
+    saved_sources_by_provider = {str(item["provider_id"]): item for item in saved_result_sources}
+    if saved_result_sources and set(saved_sources_by_provider) != {
+        cell.provider_id for cell in plan.cells
+    }:
+        raise ComparisonProjectError(
+            "saved result provenance does not close the provider inventory"
+        )
+    cell_documents_list: list[dict[str, Any]] = []
+    for cell in plan.cells:
+        document = _question_result_cell_document(
             plan,
             cell,
             case_manifest,
             results_by_cell[cell.cell_id],
         )
-        for cell in plan.cells
-    )
+        if saved_result_sources:
+            source = saved_sources_by_provider[cell.provider_id]
+            document["cell_spec_hash"] = source["cell_spec_hash"]
+            document["source_resolved_plan_hash"] = source["resolved_plan_hash"]
+            document["source_result_sha256"] = source["result_sha256"]
+        cell_documents_list.append(document)
+    cell_documents = tuple(cell_documents_list)
     local_question_content = (
         _load_local_question_content(
             plan,
@@ -454,7 +479,16 @@ def build_question_results_comparison_project(
         local_question_content=local_question_content,
     )
     comparison_documents = tuple(
-        _pair_document(plan, left, right) for left, right in combinations(cell_documents, 2)
+        _pair_document(
+            plan,
+            left,
+            right,
+            additional_limitations=(pair_limitations or {}).get(
+                frozenset((str(left["provider_id"]), str(right["provider_id"]))),
+                (),
+            ),
+        )
+        for left, right in combinations(cell_documents, 2)
     )
     if len(comparison_documents) != math.comb(len(plan.cells), 2):
         raise ComparisonProjectError("question-result pairwise inventory is incomplete")
@@ -477,6 +511,23 @@ def build_question_results_comparison_project(
             "latency score",
         ]
     )
+    if saved_result_sources:
+        same_plan_limitation = (
+            "terminal results may come from separate fresh invocations under the same frozen "
+            "plan and workload"
+        )
+        limitations = (
+            "This report combines separate saved provider results; source plan and result "
+            "hashes are retained in report.json.",
+            *tuple(
+                dict.fromkeys(
+                    limitation
+                    for values in (pair_limitations or {}).values()
+                    for limitation in values
+                )
+            ),
+            *(item for item in limitations if item != same_plan_limitation),
+        )
     retrieval_documents = tuple(
         _retrieval_document(plan, item, state)
         for item, state in zip(plan.cells, proof_states, strict=True)
@@ -497,6 +548,8 @@ def build_question_results_comparison_project(
         output_root=output_root,
         diagnostic=False,
         analysis_generator=analysis_generator,
+        source_mode=("saved_provider_results" if saved_result_sources else "resolved_plan"),
+        saved_result_sources=saved_result_sources,
     )
 
 
@@ -1969,9 +2022,10 @@ def _pair_document(
     right: dict[str, Any],
     *,
     complete_coverage: bool = True,
+    additional_limitations: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    limitations: list[str] = []
-    comparable = True
+    limitations = list(additional_limitations)
+    comparable = not additional_limitations
     question_result_pair = (
         left.get("result_source") == "question_results"
         and right.get("result_source") == "question_results"
@@ -2866,13 +2920,31 @@ def _render_base_html(export: Mapping[str, Any]) -> bytes:
         "</tr>"
         for item in retrieval
     )
-    question_rows = _question_matrix_rows(questions, cells)
-    question_details = _question_detail_html(questions)
+    incorrect_questions = tuple(
+        question for question in questions if _question_has_incorrect_result(question)
+    )
+    question_rows = _question_matrix_rows(incorrect_questions, cells)
+    question_details = _question_detail_html(incorrect_questions)
     provider_headings = "".join(f"<th>{_escape(item['provider_id'])}</th>" for item in cells)
     limitation_items = "".join(f"<li>{_escape(item)}</li>" for item in limitations)
     dataset_notice = _dataset_notice(export["dataset_details"])
     accuracy_by_type = _accuracy_by_type_html(cells)
     accuracy_decision_text = _report_accuracy_decision_text(accuracy_decision)
+    saved_results_notice = (
+        '<p class="dataset-notice"><strong>Source mode:</strong> separate saved provider '
+        "results. Source plan and result hashes are retained in report.json.</p>"
+        if export.get("source_mode") == "saved_provider_results"
+        else ""
+    )
+    model_binding_note = (
+        "These are the common bindings declared by the saved source plans. Portable result "
+        "files do not independently reconstruct full runtime model-proof receipts."
+        if export.get("source_mode") == "saved_provider_results"
+        else (
+            "Runtime models were verified against this comparison's frozen configured bindings "
+            "before dispatch; any mismatch fails the run."
+        )
+    )
     style = """
 :root { color-scheme: light dark; --bg:#fff; --fg:#17202a; --muted:#5d6d7e; --panel:#f5f7f9; --border:#ccd1d1; --warning-bg:#fff3cd; --warning-fg:#664d03; --pre-bg:#f1f3f5; --good-bg:#d1e7dd; --good-fg:#0f5132; --bad-bg:#f8d7da; --bad-fg:#842029; }
 @media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#edf2f7; --muted:#aab4bf; --panel:#1b2026; --border:#47515c; --warning-bg:#4b3b00; --warning-fg:#ffe69c; --pre-bg:#0b0d10; --good-bg:#123c2d; --good-fg:#a3e9c4; --bad-bg:#4a1d24; --bad-fg:#ffb3bd; } }
@@ -2919,6 +2991,7 @@ a { color:inherit; }
 <body><main>
 <h1>OAMB comparison report</h1>
 <section><h2>Provider decision summary</h2><p class="metric-key"><strong>Five decision metrics:</strong> Answer accuracy · Context tokens · Indexing tokens · Retrieval latency · Indexing time</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Context tokens are the exact retrieval context shown to the answer model.</p>
+{saved_results_notice}
 <p><strong>{_escape(accuracy_decision_text)}</strong></p>
 <div class="table-wrap"><table><thead><tr><th>Provider</th><th>Answer accuracy</th><th>Context tokens</th><th>Indexing tokens</th><th>Retrieval latency (s)</th><th>Indexing time (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
 {partial_ingestion_note}
@@ -2926,8 +2999,8 @@ a { color:inherit; }
 {_REPORT_ANALYSIS_SLOT.decode("ascii")}
 {accuracy_by_type}
 <section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points. Exact McNemar p uses the matched discordant outcomes.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th><th>Discordant A/B</th><th>Exact McNemar p</th><th>Decision</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
-<section><h2>Question results</h2><p>Each row shows one frozen question across all providers; expand the evidence-backed details below when available.</p><div class="table-wrap"><table><thead><tr><th>Question</th><th>Type</th>{provider_headings}</tr></thead><tbody>{question_rows}</tbody></table></div>{question_details}</section>
-<section><h2>Model and thinking-effort bindings</h2><p>For generative roles, effort follows <code>low &lt; high &lt; max</code>; embedding is not applicable. Runtime models were verified against this comparison's frozen configured bindings before dispatch; any mismatch fails the run. The complete bindings remain in report.json.</p><div class="table-wrap"><table><thead><tr><th>Role</th><th>Runtime</th><th>Effort</th><th>Proof</th></tr></thead><tbody>{model_rows}</tbody></table></div></section>
+<section><h2>Question results</h2><p>Shows only questions answered incorrectly by at least one provider; complete results remain in report.json. Expand the evidence-backed details below when available.</p><div class="table-wrap"><table><thead><tr><th>Question</th><th>Type</th>{provider_headings}</tr></thead><tbody>{question_rows}</tbody></table></div>{question_details}</section>
+<section><h2>Model and thinking-effort bindings</h2><p>For generative roles, effort follows <code>low &lt; high &lt; max</code>; embedding is not applicable. {model_binding_note} The complete bindings remain in report.json.</p><div class="table-wrap"><table><thead><tr><th>Role</th><th>Runtime</th><th>Effort</th><th>Proof</th></tr></thead><tbody>{model_rows}</tbody></table></div></section>
 <section><h2>Generation-free retrieval</h2><div class="table-wrap"><table><thead><tr><th>Provider</th><th>Route</th><th>Disabled setting</th><th>Runtime proof</th></tr></thead><tbody>{retrieval_rows}</tbody></table></div></section>
 <section><h2>Limitations</h2><ul>{limitation_items}</ul></section>
 <section><h2>Deterministic export</h2><p><a href="report.json" download>Download report.json</a> for the complete machine-readable evidence and unavailable-measurement detail.</p></section>
@@ -2961,10 +3034,7 @@ def _embed_report_analysis(
     if base_html.count(_REPORT_ANALYSIS_SLOT) != 1:
         raise ComparisonProjectError("comparison report analysis slot is invalid")
     if analysis is None:
-        fragment = (
-            '<section><h2>Concise metric comparison</h2><p class="muted">'
-            "Analysis unavailable.</p></section>"
-        )
+        fragment = ""
     else:
         metrics = analysis.get("metrics")
         if (
@@ -3058,8 +3128,8 @@ def _accuracy_by_type_html(cells: tuple[Mapping[str, Any], ...]) -> str:
         rows.append(f"<tr><td>{_escape(question_type)}</td>{values}</tr>")
     return (
         "<section><h2>Accuracy by question type</h2>"
-        "<p>Each LME-60 stratum contains ten frozen questions. Intervals are 95% Wilson "
-        'score intervals.</p><div class="table-wrap"><table><thead><tr>'
+        '<p>Each LME-60 stratum contains ten frozen questions.</p><div class="table-wrap">'
+        "<table><thead><tr>"
         f"<th>Question type</th>{headings}</tr></thead><tbody>{''.join(rows)}"
         "</tbody></table></div></section>"
     )
@@ -3080,24 +3150,7 @@ def _accuracy_record_text(record: Mapping[str, object]) -> str:
         Decimal("0.1"),
         rounding=ROUND_HALF_UP,
     )
-    return (
-        f"{numerator}/{denominator} ({format(percentage, 'f')}%); {_wilson_interval_text(record)}"
-    )
-
-
-def _wilson_interval_text(value: object) -> str:
-    if not isinstance(value, Mapping):
-        return "unavailable"
-    interval = value.get("wilson_95")
-    if not isinstance(interval, Mapping):
-        return "unavailable"
-    lower = _decimal_value(interval.get("lower"))
-    upper = _decimal_value(interval.get("upper"))
-    if lower is None or upper is None:
-        return "unavailable"
-    lower_percentage = (lower * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-    upper_percentage = (upper * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-    return f"95% Wilson {format(lower_percentage, 'f')}%–{format(upper_percentage, 'f')}%"
+    return f"{numerator}/{denominator} ({format(percentage, 'f')}%)"
 
 
 def _discordance_text(value: object) -> str:
@@ -3162,6 +3215,8 @@ def _context_text(item: Mapping[str, Any]) -> str:
 
 
 def _secondary_accounting_html(cells: tuple[Mapping[str, Any], ...]) -> str:
+    if not any(_has_secondary_accounting(item) for item in cells):
+        return ""
     items = "".join(
         "<li>"
         f"<strong>{_escape(item['provider_id'])}</strong>: Answer input "
@@ -3175,6 +3230,27 @@ def _secondary_accounting_html(cells: tuple[Mapping[str, Any], ...]) -> str:
         f'<ul>{items}</ul><p class="muted">Lower context tokens usually reduce Answer input, '
         "but this report does not infer a provider's internal retrieval strategy from that "
         "correlation.</p></details>"
+    )
+
+
+def _has_secondary_accounting(cell: Mapping[str, Any]) -> bool:
+    accounting = cell["accounting"]
+    answer_input = accounting["tokens"]["answer"]["totals"]["input_tokens"]["value"]
+    attempts = accounting["attempts"]
+    cost = accounting["cost"]
+    return (
+        answer_input != "unavailable"
+        or any(
+            attempts[key] != "unavailable"
+            for key in (
+                "failed_count",
+                "retry_count",
+                "cancelled_count",
+                "unknown_outcome_count",
+            )
+        )
+        or cost["actual_supplier_charge"] != "unavailable"
+        or cost["billing_coverage"]["status"] != "unavailable"
     )
 
 
@@ -3309,6 +3385,14 @@ def _question_matrix_rows(
         states = "".join(_state_badge(by_provider[provider_id]) for provider_id in provider_ids)
         rows.append(f"<tr><td>{_escape(label)}</td><td>{_escape(question_type)}</td>{states}</tr>")
     return "".join(rows)
+
+
+def _question_has_incorrect_result(question: Mapping[str, Any]) -> bool:
+    results = question.get("provider_results")
+    return isinstance(results, (list, tuple)) and any(
+        isinstance(result, Mapping) and result.get("display_state") == "incorrect"
+        for result in results
+    )
 
 
 def _state_badge(result: Mapping[str, Any]) -> str:

@@ -26,15 +26,21 @@ MODE="smoke"
 MODE_SELECTED=false
 DRY_RUN=false
 RESUME=false
+GENERATE_REPORT=false
+RESULT_DIR=""
 
 usage() {
   cat <<'EOF'
 Usage: ./run.sh [--smoke_test | --full_test] [--resume] [--dry-run]
+       ./run.sh --generate-report --result-dir=DIR
 
 --smoke_test  Run one LME-60 question on every provider (default).
 --full_test   Run all 60 questions on every provider in parallel.
 --resume      Skip saved --full_test question IDs and run only missing questions.
 --dry-run     Validate configuration and readiness with zero model/provider calls.
+--generate-report
+              Build a report from saved results and cached concise LLM analysis.
+--result-dir  Directory containing one saved snapshot per provider.
 EOF
 }
 
@@ -72,6 +78,9 @@ request_stop() {
     stop_owned_process "$ACTIVE_COMMAND_PID"
     return
   fi
+  if [[ "$GENERATE_REPORT" == true ]]; then
+    exit "$exit_code"
+  fi
   "$ROOT/provider-services/bin/provider-services" stop || true
   exit "$exit_code"
 }
@@ -91,7 +100,9 @@ run_owned_command() {
     done
     if ! kill -0 "$OAMB_RUN_SH_PROCESS_ID" 2>/dev/null; then
       stop_owned_process "$command_pid"
-      "$ROOT/provider-services/bin/provider-services" stop || true
+      if [[ "$GENERATE_REPORT" == false ]]; then
+        "$ROOT/provider-services/bin/provider-services" stop || true
+      fi
     fi
   ) &
   watcher_pid=$!
@@ -99,8 +110,10 @@ run_owned_command() {
   wait "$command_pid" || command_code=$?
   if [[ "$STOP_REQUESTED" == true ]]; then
     wait "$command_pid" 2>/dev/null || true
-    if ! "$ROOT/provider-services/bin/provider-services" stop; then
-      printf 'run: provider services could not be stopped\n' >&2
+    if [[ "$GENERATE_REPORT" == false ]]; then
+      if ! "$ROOT/provider-services/bin/provider-services" stop; then
+        printf 'run: provider services could not be stopped\n' >&2
+      fi
     fi
     command_code=$STOP_EXIT_CODE
   fi
@@ -271,7 +284,8 @@ open_report() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --smoke_test|--full_test)
-      [[ "$MODE_SELECTED" == false ]] || die "choose only one of --smoke_test or --full_test"
+      [[ "$MODE_SELECTED" == false && "$GENERATE_REPORT" == false ]] || \
+        die "choose only one run or report mode"
       [[ "$1" == --smoke_test ]] && MODE="smoke" || MODE="full"
       MODE_SELECTED=true
       shift
@@ -283,6 +297,25 @@ while [[ $# -gt 0 ]]; do
     --resume)
       RESUME=true
       shift
+      ;;
+    --generate-report)
+      [[ "$GENERATE_REPORT" == false && "$MODE_SELECTED" == false ]] || \
+        die "choose only one run or report mode"
+      GENERATE_REPORT=true
+      MODE="report"
+      shift
+      ;;
+    --result-dir=*)
+      [[ -z "$RESULT_DIR" ]] || die "--result-dir may be supplied only once"
+      RESULT_DIR="${1#--result-dir=}"
+      [[ -n "$RESULT_DIR" ]] || die "--result-dir requires a directory"
+      shift
+      ;;
+    --result-dir)
+      [[ -z "$RESULT_DIR" ]] || die "--result-dir may be supplied only once"
+      [[ $# -ge 2 && -n "$2" ]] || die "--result-dir requires a directory"
+      RESULT_DIR=$2
+      shift 2
       ;;
     -h|--help)
       usage
@@ -316,6 +349,46 @@ trap 'request_stop 129' HUP
 rm "$LOG_PIPE_DIR/stdout" "$LOG_PIPE_DIR/stderr"
 rmdir "$LOG_PIPE_DIR"
 printf 'run: log=%s\n' "$LOG_FILE"
+
+if [[ "$GENERATE_REPORT" == true ]]; then
+  [[ -n "$RESULT_DIR" ]] || die "--generate-report requires --result-dir"
+  [[ "$RESUME" == false && "$DRY_RUN" == false ]] || \
+    die "--generate-report cannot be combined with --resume or --dry-run"
+  case "$RESULT_DIR" in
+    /*) ;;
+    *) RESULT_DIR="$ROOT/$RESULT_DIR" ;;
+  esac
+  [[ -d "$RESULT_DIR" && ! -L "$RESULT_DIR" ]] || \
+    die "saved result directory is missing or symlinked: $RESULT_DIR"
+  [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] || \
+    die "report analysis model environment is missing or symlinked: $ENV_FILE"
+  command -v jq >/dev/null 2>&1 || die "required command not found: jq"
+  command -v uv >/dev/null 2>&1 || die "required command not found: uv"
+  REPORT_OUTPUT="$RESULT_DIR/comparison"
+  if [[ -e "$REPORT_OUTPUT" || -L "$REPORT_OUTPUT" ]]; then
+    REPORT_OUTPUT="$RESULT_DIR/comparison-$(date -u +%Y%m%d-%H%M%S)-$$"
+  fi
+  cd "$ROOT"
+  printf 'run: status=building-saved-report\n'
+  run_owned_command uv run --locked oamb report saved-results "$RESULT_DIR" \
+    --output-root "$REPORT_OUTPUT" \
+    --analysis-model-env "$ENV_FILE" \
+    --analysis-cache-root "$RESULT_DIR/report-analysis-cache"
+  jq -e '.coverage == {
+    "cell_count": 3,
+    "unique_case_count": 60,
+    "provider_specific_result_count": 180
+  }' "$REPORT_OUTPUT/report.json" >/dev/null || die "saved report coverage is invalid"
+  [[ -s "$REPORT_OUTPUT/report.html" ]] || die "saved report HTML is missing or empty"
+  [[ -s "$REPORT_OUTPUT/report-analysis.json" ]] || \
+    die "saved report concise analysis is missing or empty"
+  open_report "$REPORT_OUTPUT/report.html"
+  printf 'run: PASS (saved report, 60 questions, 180 provider results)\n'
+  printf 'report: %s\n' "$REPORT_OUTPUT/report.html"
+  exit 0
+fi
+
+[[ -z "$RESULT_DIR" ]] || die "--result-dir requires --generate-report"
 
 if [[ "$RESUME" == true && "$MODE" != "full" ]]; then
   die "--resume requires --full_test"

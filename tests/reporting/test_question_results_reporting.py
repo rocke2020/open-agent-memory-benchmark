@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.runtime import question_results as result_contract
 from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
 
@@ -261,6 +262,10 @@ def test_three_closed_results_files_build_one_deterministic_180_result_report(
     assert len(report["comparisons"]) == 3
     assert first.export_path.read_bytes() == second.export_path.read_bytes()
     assert first.html_path.read_bytes() == second.html_path.read_bytes()
+    html = first.html_path.read_text(encoding="utf-8")
+    assert "Secondary accounting" not in html
+    assert "Concise metric comparison" not in html
+    assert "Analysis unavailable" not in html
 
 
 def test_missing_provider_question_prevents_final_report_publication(tmp_path: Path) -> None:
@@ -290,5 +295,210 @@ def test_missing_provider_question_prevents_final_report_publication(tmp_path: P
             case_manifest=manifest,
             output_root=output_root,
         )
+
+    assert not output_root.exists()
+
+
+def _write_saved_result_snapshot(
+    root: Path,
+    *,
+    provider_id: str,
+    plan_bytes: bytes,
+) -> None:
+    snapshot = root / f"{provider_id}-snapshot"
+    results_root = snapshot / "results"
+    results_root.mkdir(parents=True)
+    (snapshot / "resolved-plan.json").write_bytes(plan_bytes)
+    (results_root / f"{provider_id}.json").write_bytes(
+        canonical_json_bytes(
+            {
+                question_id: result.model_dump(mode="json")
+                for question_id, result in _results().items()
+            }
+        )
+    )
+
+
+def test_saved_provider_results_retain_source_plans_and_suppress_mismatched_pairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches separately run results being relabeled as one uniform frozen plan."""
+
+    from oamb.config.benchmark import load_benchmark_configuration
+    from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
+    from oamb.reporting import saved_results
+    from tests.benchmark_configuration import MODEL_ENVIRONMENT
+
+    configuration = load_benchmark_configuration(
+        Path("configs/benchmark.yml"),
+        model_environment=MODEL_ENVIRONMENT,
+    )
+    plan = build_resolved_plan(configuration)
+    result_root = tmp_path / "saved-results"
+    current_plan_bytes = resolved_plan_bytes(plan)
+    legacy_document = json.loads(current_plan_bytes)
+    legacy_document.pop("resolved_plan_hash")
+    legacy_document["retrieval"].pop("top_k")
+    legacy_document["cells"][0]["cell_spec_hash"] = _sha("legacy-hindsight-cell")
+    legacy_plan_hash = canonical_sha256(["oamb-resolved-plan-initial-v1", legacy_document])
+    legacy_document["resolved_plan_hash"] = legacy_plan_hash
+    _write_saved_result_snapshot(
+        result_root,
+        provider_id="hindsight",
+        plan_bytes=canonical_json_bytes(legacy_document),
+    )
+    _write_saved_result_snapshot(
+        result_root,
+        provider_id="mem0",
+        plan_bytes=current_plan_bytes,
+    )
+    _write_saved_result_snapshot(
+        result_root,
+        provider_id="openviking",
+        plan_bytes=current_plan_bytes,
+    )
+    source_hashes_before = {
+        path.relative_to(result_root): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in result_root.rglob("*")
+        if path.is_file()
+    }
+    model_env = tmp_path / ".env"
+    model_env.write_text("ignored-by-test\n", encoding="utf-8")
+    analysis_cache_root = tmp_path / "report-analysis-cache"
+    analysis_calls: list[dict[str, object]] = []
+
+    def analysis_generator(export: dict[str, object]) -> None:
+        analysis_calls.append(export)
+        return None
+
+    captured_factory: dict[str, object] = {}
+
+    def build_analysis_generator(**kwargs: object) -> object:
+        captured_factory.update(kwargs)
+        return analysis_generator
+
+    monkeypatch.setattr(
+        saved_results,
+        "build_report_analysis_generator",
+        build_analysis_generator,
+        raising=False,
+    )
+
+    built = saved_results.build_saved_results_report(
+        result_root=result_root,
+        output_root=tmp_path / "comparison",
+        analysis_model_env=model_env,
+        analysis_cache_root=analysis_cache_root,
+    )
+
+    report = json.loads(built.export_path.read_bytes())
+    sources = {item["provider_id"]: item for item in report["saved_result_sources"]}
+    pairs = {
+        frozenset((item["left_provider_id"], item["right_provider_id"])): item
+        for item in report["comparisons"]
+    }
+    assert report["source_mode"] == "saved_provider_results"
+    assert report["coverage"] == {
+        "cell_count": 3,
+        "unique_case_count": 60,
+        "provider_specific_result_count": 180,
+    }
+    assert sources["hindsight"]["resolved_plan_hash"] == legacy_plan_hash
+    assert sources["hindsight"]["retrieval_top_k"] == "unavailable"
+    assert sources["hindsight"]["cell_spec_hash"] == _sha("legacy-hindsight-cell")
+    assert sources["mem0"]["retrieval_top_k"] == 150
+    assert pairs[frozenset(("hindsight", "mem0"))]["comparable"] is False
+    assert pairs[frozenset(("hindsight", "openviking"))]["comparable"] is False
+    assert pairs[frozenset(("mem0", "openviking"))]["comparable"] is True
+    assert report["accuracy_decision"]["status"] == "no_clear_accuracy_leader"
+    assert captured_factory == {
+        "plan": plan,
+        "model_env_path": model_env,
+        "cache_root": analysis_cache_root,
+    }
+    assert len(analysis_calls) == 1
+    assert analysis_calls[0]["report_id"] == report["report_id"]
+    html = built.html_path.read_text(encoding="utf-8")
+    assert "separate saved provider results" in html
+    assert "Portable result files do not independently reconstruct" in html
+    assert "Runtime models were verified against this comparison" not in html
+    assert report["controlled_comparison_warning"].startswith(
+        "This report combines separately run provider-native results"
+    )
+    source_hashes_after = {
+        path.relative_to(result_root): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in result_root.rglob("*")
+        if path.is_file()
+    }
+    assert source_hashes_after == source_hashes_before
+
+
+def test_saved_provider_results_reject_duplicate_provider_before_publication(
+    tmp_path: Path,
+) -> None:
+    from oamb.config.benchmark import load_benchmark_configuration
+    from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
+    from oamb.reporting.saved_results import SavedResultsError, build_saved_results_report
+    from tests.benchmark_configuration import MODEL_ENVIRONMENT
+
+    plan = build_resolved_plan(
+        load_benchmark_configuration(
+            Path("configs/benchmark.yml"),
+            model_environment=MODEL_ENVIRONMENT,
+        )
+    )
+    result_root = tmp_path / "saved-results"
+    plan_bytes = resolved_plan_bytes(plan)
+    for provider_id in ("hindsight", "mem0", "openviking"):
+        _write_saved_result_snapshot(
+            result_root,
+            provider_id=provider_id,
+            plan_bytes=plan_bytes,
+        )
+    duplicate = result_root / "duplicate-hindsight" / "results"
+    duplicate.mkdir(parents=True)
+    (duplicate.parent / "resolved-plan.json").write_bytes(plan_bytes)
+    (duplicate / "hindsight.json").write_bytes(
+        (result_root / "hindsight-snapshot/results/hindsight.json").read_bytes()
+    )
+    output_root = tmp_path / "comparison"
+
+    with pytest.raises(SavedResultsError, match="duplicate saved result provider: hindsight"):
+        build_saved_results_report(result_root=result_root, output_root=output_root)
+
+    assert not output_root.exists()
+
+
+def test_saved_provider_results_reject_plan_hash_drift_before_publication(
+    tmp_path: Path,
+) -> None:
+    from oamb.config.benchmark import load_benchmark_configuration
+    from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
+    from oamb.reporting.saved_results import SavedResultsError, build_saved_results_report
+    from tests.benchmark_configuration import MODEL_ENVIRONMENT
+
+    plan = build_resolved_plan(
+        load_benchmark_configuration(
+            Path("configs/benchmark.yml"),
+            model_environment=MODEL_ENVIRONMENT,
+        )
+    )
+    result_root = tmp_path / "saved-results"
+    plan_bytes = resolved_plan_bytes(plan)
+    for provider_id in ("hindsight", "mem0", "openviking"):
+        _write_saved_result_snapshot(
+            result_root,
+            provider_id=provider_id,
+            plan_bytes=plan_bytes,
+        )
+    hindsight_plan = result_root / "hindsight-snapshot/resolved-plan.json"
+    drifted = json.loads(hindsight_plan.read_bytes())
+    drifted["embedding_endpoint"]["ownership"] = "drifted"
+    hindsight_plan.write_bytes(canonical_json_bytes(drifted))
+    output_root = tmp_path / "comparison"
+
+    with pytest.raises(SavedResultsError, match="resolved plan hash does not match"):
+        build_saved_results_report(result_root=result_root, output_root=output_root)
 
     assert not output_root.exists()

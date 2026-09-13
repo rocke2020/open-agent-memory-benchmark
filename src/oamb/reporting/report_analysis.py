@@ -6,9 +6,11 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -19,9 +21,9 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.runtime.provider_env import load_t10_provider_environment
 
 REPORT_ANALYSIS_NAME = "report-analysis.json"
-REPORT_ANALYSIS_PROMPT_VERSION = "oamb-five-metric-comparison-v1"
+REPORT_ANALYSIS_PROMPT_VERSION = "oamb-five-metric-comparison-v2"
 REPORT_ANALYSIS_MAX_ATTEMPTS = 6
-REPORT_ANALYSIS_MAX_OUTPUT_TOKENS = 1_024
+REPORT_ANALYSIS_MAX_OUTPUT_TOKENS = 2_048
 REPORT_ANALYSIS_METRICS = (
     "answer_accuracy",
     "context_tokens",
@@ -171,7 +173,10 @@ def generate_report_analysis(
                 "JSON with exactly keys overall and metrics. metrics must contain exactly, in "
                 f"this order: {', '.join(REPORT_ANALYSIS_METRICS)}. overall is one concise "
                 "sentence; every metric value is one concise sentence. Explain observed reasons "
-                "only when supplied evidence supports them; otherwise say the reason is unknown."
+                "only when supplied evidence supports them; otherwise say the reason is unknown. "
+                "Keep overall neutral: do not name any provider or metric winner there; put all "
+                "provider-specific comparisons in metrics. Express durations only in seconds, "
+                "never in microseconds or milliseconds."
             ),
         },
         {
@@ -232,7 +237,13 @@ def generate_report_analysis(
 
             try:
                 output, usage = _parse_completion_response(raw_bytes)
-                overall, metrics = _parse_analysis_output(output)
+                overall, metrics = _parse_analysis_output(
+                    output,
+                    provider_ids=tuple(
+                        _required_text(cell, "provider_id")
+                        for cell in _required_cells(analysis_input)
+                    ),
+                )
             except _RetryableReportAnalysisError as error:
                 if attempt == REPORT_ANALYSIS_MAX_ATTEMPTS:
                     return None
@@ -349,13 +360,23 @@ def parse_report_analysis(
     if not isinstance(metrics_value, list) or len(metrics_value) != len(REPORT_ANALYSIS_METRICS):
         raise ValueError("report analysis metric inventory is incomplete")
     metric_ids: list[str] = []
+    metric_analyses: list[str] = []
     for item in metrics_value:
         if not isinstance(item, dict) or set(item) != {"metric_id", "analysis"}:
             raise ValueError("report analysis metric record is invalid")
         metric_ids.append(_required_text(item, "metric_id"))
-        _concise_sentence(item["analysis"], "metric analysis", maximum_characters=320)
+        metric_analyses.append(
+            _concise_sentence(item["analysis"], "metric analysis", maximum_characters=320)
+        )
     if tuple(metric_ids) != REPORT_ANALYSIS_METRICS:
         raise ValueError("report analysis metric order or identity drifted")
+    _validate_visible_analysis(
+        overall,
+        metric_analyses,
+        provider_ids=tuple(
+            _required_text(cell, "provider_id") for cell in _required_report_cells(report)
+        ),
+    )
     body = dict(value)
     analysis_id = body.pop("analysis_id")
     if analysis_id != canonical_sha256(["oamb-report-analysis-v1", body]):
@@ -393,10 +414,12 @@ def _analysis_input(report: Mapping[str, object]) -> dict[str, object]:
                         "supplier_reported_total_tokens", {"status": "unavailable"}
                     ),
                 },
-                "retrieval_latency": observed_time.get(
-                    "provider_request", {"status": "unavailable"}
+                "retrieval_latency": _analysis_time_seconds(
+                    observed_time.get("provider_request", {"status": "unavailable"})
                 ),
-                "indexing_time": observed_time.get("indexing_ready", {"status": "unavailable"}),
+                "indexing_time": _analysis_time_seconds(
+                    observed_time.get("indexing_ready", {"status": "unavailable"})
+                ),
                 "time_comparability": observed_time.get("comparability", "unavailable"),
                 "ingestion_path_evidence": _PROFILE_PATH_EVIDENCE.get(
                     profile, "Provider ingestion path evidence is unavailable."
@@ -476,7 +499,11 @@ def _usage_summary(value: object) -> dict[str, object]:
     }
 
 
-def _parse_analysis_output(output: str) -> tuple[str, dict[str, str]]:
+def _parse_analysis_output(
+    output: str,
+    *,
+    provider_ids: tuple[str, ...],
+) -> tuple[str, dict[str, str]]:
     try:
         value = json.loads(output, object_pairs_hook=_unique_object)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -487,7 +514,7 @@ def _parse_analysis_output(output: str) -> tuple[str, dict[str, str]]:
     metrics = value["metrics"]
     if not isinstance(metrics, dict) or tuple(metrics) != REPORT_ANALYSIS_METRICS:
         raise _RetryableReportAnalysisError("analysis metric order or identity is invalid")
-    return overall, {
+    parsed_metrics = {
         metric_id: _concise_sentence(
             metrics[metric_id],
             f"{metric_id} analysis",
@@ -495,6 +522,59 @@ def _parse_analysis_output(output: str) -> tuple[str, dict[str, str]]:
         )
         for metric_id in REPORT_ANALYSIS_METRICS
     }
+    _validate_visible_analysis(overall, parsed_metrics.values(), provider_ids=provider_ids)
+    return overall, parsed_metrics
+
+
+def _validate_visible_analysis(
+    overall: str,
+    metric_analyses: Iterable[str],
+    *,
+    provider_ids: tuple[str, ...],
+) -> None:
+    normalized_overall = overall.casefold()
+    if any(provider_id.casefold() in normalized_overall for provider_id in provider_ids):
+        raise _RetryableReportAnalysisError("overall must not name a provider")
+    visible_text = " ".join((overall, *(str(item) for item in metric_analyses)))
+    if re.search(
+        r"(?<![A-Za-z])(?:microseconds?|milliseconds?|[µμ]s|ms)(?![A-Za-z])",
+        visible_text,
+        flags=re.IGNORECASE,
+    ):
+        raise _RetryableReportAnalysisError("visible analysis durations must use seconds")
+
+
+def _analysis_time_seconds(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {"status": "unavailable"}
+    return {
+        "status": value.get("status", "unavailable"),
+        "count": value.get("count", "unavailable"),
+        "median_seconds": _microseconds_as_seconds(value.get("median_microseconds")),
+        "p95_seconds": _microseconds_as_seconds(value.get("p95_microseconds")),
+        "maximum_seconds": _microseconds_as_seconds(value.get("maximum_microseconds")),
+    }
+
+
+def _microseconds_as_seconds(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return "unavailable"
+    try:
+        seconds = Decimal(str(value)) / Decimal(1_000_000)
+    except InvalidOperation:
+        return "unavailable"
+    return format(seconds, "f") if seconds.is_finite() else "unavailable"
+
+
+def _required_cells(value: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    cells = value.get("cells")
+    if not isinstance(cells, (list, tuple)) or any(not isinstance(cell, Mapping) for cell in cells):
+        raise ValueError("report analysis requires provider cells")
+    return cast(tuple[Mapping[str, object], ...], tuple(cells))
+
+
+def _required_report_cells(report: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    return _required_cells(report)
 
 
 def _concise_sentence(value: object, label: str, *, maximum_characters: int) -> str:

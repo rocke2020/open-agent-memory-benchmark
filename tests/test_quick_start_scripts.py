@@ -1544,6 +1544,20 @@ PY
       "$diagnostic" "$cases" "$results" > "$output_root/report.json"
     printf '%s\n' '<!doctype html><title>OAMB comparison report</title>' > "$output_root/report.html"
     ;;
+  *" oamb report saved-results "*)
+    output_root=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --output-root) output_root=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ ! -e "$output_root" ] || exit 92
+    mkdir -p "$output_root"
+    printf '%s\n' '{"coverage":{"cell_count":3,"unique_case_count":60,"provider_specific_result_count":180}}' > "$output_root/report.json"
+    printf '%s\n' '<!doctype html><title>OAMB saved results report</title>' > "$output_root/report.html"
+    printf '%s\n' '{"schema_name":"report_analysis"}' > "$output_root/report-analysis.json"
+    ;;
 esac
 """.strip(),
     )
@@ -2583,6 +2597,45 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
         "provider-config changed-runtime-model|changed-runtime-model|changed-runtime-model|plan-embedding|"
     )
     assert "run: PASS (full, 60 questions, 180 provider results)" in result.stdout
+
+
+def test_run_generate_report_skips_precheck_services_and_provider_calls(tmp_path: Path) -> None:
+    """Catches the offline saved-result report accidentally entering the live run path."""
+
+    root, env, trace = _run_fixture(tmp_path)
+    script = _copy_quick_start_script(RUN_SCRIPT, root)
+    result_root = root / "outputs" / "saved-results" / "provider-native"
+    result_root.mkdir(parents=True)
+    (root / "outputs" / "tmp" / "quick-start-current.json").unlink()
+    env["OAMB_NO_OPEN"] = "1"
+
+    result = subprocess.run(
+        [
+            str(script),
+            "--generate-report",
+            f"--result-dir={result_root}",
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    report_calls = [line for line in calls if "oamb report saved-results" in line]
+    assert len(report_calls) == 1
+    assert str(result_root) in report_calls[0]
+    assert f"--output-root {result_root}/comparison" in report_calls[0]
+    assert f"--analysis-model-env {root}/.env" in report_calls[0]
+    assert f"--analysis-cache-root {result_root}/report-analysis-cache" in report_calls[0]
+    assert not any("provider-services" in line for line in calls)
+    assert not any("oamb run" in line for line in calls)
+    assert not any("oamb compare" in line for line in calls)
+    assert "run: PASS (saved report, 60 questions, 180 provider results)" in result.stdout
+    assert f"report: {result_root}/comparison/report.html" in result.stdout
 
 
 @pytest.mark.parametrize(

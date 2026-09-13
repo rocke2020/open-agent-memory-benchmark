@@ -996,7 +996,7 @@ def _local_question_content() -> tuple[dict[str, object], ...]:
             "question": (
                 "What happened? <script>bad()</script> javascript: is text "
                 "onerror=example https://example.invalid/ \u202e"
-                if index == 1
+                if index == 3
                 else f"Question {index}?"
             ),
             "gold_answer": f"Gold answer {index}",
@@ -1572,8 +1572,8 @@ def test_project_revalidates_roots_rejects_manifest_drift_and_builds_offline_det
         in html
     )
     assert html.index("<th>Retrieval latency (s)</th>") < html.index("<th>Indexing time (s)</th>")
-    assert "Concise metric comparison" in html
-    assert "Analysis unavailable" in html
+    assert "Concise metric comparison" not in html
+    assert "Analysis unavailable" not in html
 
     stale_root = next(iter(supplied_by_root))
     stale_validation = supplied_by_root[stale_root]
@@ -1742,7 +1742,9 @@ def test_report_analysis_and_base_html_preparation_overlap_before_final_publish(
     assert base_started.is_set()
     assert analysis_started.is_set()
     assert built.analysis_path is None
-    assert "Analysis unavailable" in built.html_path.read_text(encoding="utf-8")
+    rendered = built.html_path.read_text(encoding="utf-8")
+    assert "Concise metric comparison" not in rendered
+    assert "Analysis unavailable" not in rendered
 
 
 def test_report_without_dataset_source_has_closed_absent_detail_state(
@@ -1820,6 +1822,11 @@ def test_detailed_report_joins_public_question_details_and_escapes_evidence(
     assert len(export["questions"]) == CASE_COUNT
     assert all(len(item["provider_results"]) == 3 for item in export["questions"])
     assert "Question results" in rendered
+    assert "Shows only questions answered incorrectly by at least one provider" in rendered
+    assert "<td>question-1</td>" not in rendered
+    assert "<summary>question-1 —" not in rendered
+    assert "<td>question-3</td>" in rendered
+    assert "<summary>question-3 —" in rendered
     assert "Dataset provenance" in rendered
     assert "LongMemEval: Benchmarking Chat Assistants" in rendered
     assert "Original answer session" in rendered
@@ -2264,7 +2271,8 @@ def test_lme60_project_exports_accuracy_evidence_and_renders_the_decision(
     }
     assert export["accuracy_decision"]["status"] == "observed_accuracy_leader"
     assert export["accuracy_decision"]["leader_provider_id"] == plan.cells[0].provider_id
-    assert "95% Wilson" in rendered
+    assert "95% Wilson" not in rendered
+    assert "Intervals are" not in rendered
     assert "Exact McNemar p" in rendered
     assert "Observed accuracy leader" in rendered
     assert "Accuracy by question type" in rendered
