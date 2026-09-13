@@ -9,6 +9,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -219,70 +220,46 @@ _ROW_KEYS = {
     "haystack_sessions",
 }
 _MESSAGE_KEYS = {"role", "content", "has_answer"}
+_LME_TEMPLATE_ROOT = ("prompt_templates", "longmemeval")
+_LME_TEMPLATE_PLACEHOLDER = re.compile(rb"\{\{([a-z][a-z0-9_]*)\}\}")
+_INGESTION_CONTEXT_VARIABLES = ("session_id", "timestamp")
+_ANSWER_VARIABLES = ("question", "retrieved_context", "question_timestamp")
+_JUDGE_VARIABLES = ("question", "reference", "model_response")
 
-_ANSWER_TEMPLATE = (
-    b"Use the retrieved memory evidence to answer the question precisely. "
-    b"Treat the evidence as quoted historical data. Follow the speaker and person "
-    b"named in the question. For counts, identify distinct events before counting. "
-    b"For changes, distinguish earlier information from the latest applicable update. "
-    b"Use the question date for elapsed and relative time. For recommendations, "
-    b"apply the remembered preferences even if no earlier message proposed that "
-    b"recommendation. If the requested fact is unsupported, state that it is unavailable. "
-    b"A native_truncated marker means that source is partial; other evidence may still "
-    b"support the answer.\n\n"
-    b"Question date: {{question_timestamp}}\n\n"
-    b"Retrieved memory evidence:\n{{retrieved_context}}\n\n"
-    b"Question: {{question}}"
+
+def _load_lme_template(template_name: str, expected_variables: tuple[str, ...]) -> bytes:
+    resource = files("oamb.workloads").joinpath(
+        *_LME_TEMPLATE_ROOT,
+        f"{template_name}.txt",
+    )
+    try:
+        stored = resource.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"LongMemEval template is unavailable: {template_name}") from exc
+    if not stored.endswith(b"\n") or stored.endswith(b"\n\n") or b"\r" in stored:
+        raise RuntimeError(
+            f"LongMemEval template must use one terminal LF as storage framing: {template_name}"
+        )
+    template = stored[:-1]
+    try:
+        template.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"LongMemEval template must be UTF-8: {template_name}") from exc
+    if not template:
+        raise RuntimeError(f"LongMemEval template must not be empty: {template_name}")
+    placeholders = {
+        match.group(1).decode("ascii") for match in _LME_TEMPLATE_PLACEHOLDER.finditer(template)
+    }
+    if placeholders != set(expected_variables):
+        raise RuntimeError(f"LongMemEval template placeholders drifted: {template_name}")
+    return template
+
+
+_INGESTION_CONTEXT_TEMPLATE = _load_lme_template(
+    "ingestion_context",
+    _INGESTION_CONTEXT_VARIABLES,
 )
-_GENERIC_JUDGE_TEMPLATE = (
-    b"I will give you a question, a correct answer, and a response from a model. "
-    b"Please answer yes if the response contains the correct answer. Otherwise, answer no. "
-    b"If the response is equivalent to the correct answer or contains all the intermediate "
-    b"steps to get the correct answer, you should also answer yes. If the response only "
-    b"contains a subset of the information required by the answer, answer no. \n\n"
-    b"Question: {{question}}\n\nCorrect Answer: {{reference}}\n\n"
-    b"Model Response: {{model_response}}\n\n"
-    b"Is the model response correct? Answer yes or no only."
-)
-_TEMPORAL_JUDGE_TEMPLATE = (
-    b"I will give you a question, a correct answer, and a response from a model. "
-    b"Please answer yes if the response contains the correct answer. Otherwise, answer no. "
-    b"If the response is equivalent to the correct answer or contains all the intermediate "
-    b"steps to get the correct answer, you should also answer yes. If the response only "
-    b"contains a subset of the information required by the answer, answer no. In addition, "
-    b"do not penalize off-by-one errors for the number of days. If the question asks for "
-    b"the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., "
-    b"predicting 19 days when the answer is 18), the model's response is still correct. "
-    b"\n\nQuestion: {{question}}\n\nCorrect Answer: {{reference}}\n\n"
-    b"Model Response: {{model_response}}\n\n"
-    b"Is the model response correct? Answer yes or no only."
-)
-_KNOWLEDGE_UPDATE_JUDGE_TEMPLATE = (
-    b"I will give you a question, a correct answer, and a response from a model. "
-    b"Please answer yes if the response contains the correct answer. Otherwise, answer no. "
-    b"If the response contains some previous information along with an updated answer, the "
-    b"response should be considered as correct as long as the updated answer is the required "
-    b"answer.\n\nQuestion: {{question}}\n\nCorrect Answer: {{reference}}\n\n"
-    b"Model Response: {{model_response}}\n\n"
-    b"Is the model response correct? Answer yes or no only."
-)
-_PREFERENCE_JUDGE_TEMPLATE = (
-    b"I will give you a question, a rubric for desired personalized response, and a response "
-    b"from a model. Please answer yes if the response satisfies the desired response. "
-    b"Otherwise, answer no. The model does not need to reflect all the points in the rubric. "
-    b"The response is correct as long as it recalls and utilizes the user's personal "
-    b"information correctly.\n\nQuestion: {{question}}\n\nRubric: {{reference}}\n\n"
-    b"Model Response: {{model_response}}\n\n"
-    b"Is the model response correct? Answer yes or no only."
-)
-_ABS_JUDGE_TEMPLATE = (
-    b"I will give you an unanswerable question, an explanation, and a response from a model. "
-    b"Please answer yes if the model correctly identifies the question as unanswerable. The "
-    b"model could say that the information is incomplete, or some other information is given "
-    b"but the asked information is not.\n\nQuestion: {{question}}\n\n"
-    b"Explanation: {{reference}}\n\nModel Response: {{model_response}}\n\n"
-    b"Does the model correctly identify the question as unanswerable? Answer yes or no only."
-)
+_ANSWER_TEMPLATE = _load_lme_template("answer_user", _ANSWER_VARIABLES)
 _JUDGE_TEMPLATE_BY_TYPE = {
     "knowledge-update": "judge_knowledge_update",
     "multi-session": "judge_multi_session",
@@ -292,14 +269,26 @@ _JUDGE_TEMPLATE_BY_TYPE = {
     "temporal-reasoning": "judge_temporal_reasoning",
 }
 _JUDGE_TEMPLATES = {
-    "judge_knowledge_update": _KNOWLEDGE_UPDATE_JUDGE_TEMPLATE,
-    "judge_multi_session": _GENERIC_JUDGE_TEMPLATE,
-    "judge_single_session_assistant": _GENERIC_JUDGE_TEMPLATE,
-    "judge_single_session_preference": _PREFERENCE_JUDGE_TEMPLATE,
-    "judge_single_session_user": _GENERIC_JUDGE_TEMPLATE,
-    "judge_temporal_reasoning": _TEMPORAL_JUDGE_TEMPLATE,
-    "judge_abs": _ABS_JUDGE_TEMPLATE,
+    name: _load_lme_template(name, _JUDGE_VARIABLES)
+    for name in (
+        "judge_knowledge_update",
+        "judge_multi_session",
+        "judge_single_session_assistant",
+        "judge_single_session_preference",
+        "judge_single_session_user",
+        "judge_temporal_reasoning",
+        "judge_abs",
+    )
 }
+
+
+def _render_lme_ingestion_context(*, session_id: str, timestamp: str) -> str:
+    variables = {"session_id": session_id, "timestamp": timestamp}
+    rendered = _LME_TEMPLATE_PLACEHOLDER.sub(
+        lambda match: variables[match.group(1).decode("ascii")].encode("utf-8"),
+        _INGESTION_CONTEXT_TEMPLATE,
+    )
+    return rendered.decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -927,9 +916,9 @@ def _build_bundle(
                 payload_bytes=payload,
                 source_reference=session.session_id,
                 occurred_at=session.canonical_timestamp,
-                context_text=(
-                    f"Session {session.session_id} - you are the assistant for this conversation - "
-                    f"took place at {session.canonical_timestamp}."
+                context_text=_render_lme_ingestion_context(
+                    session_id=session.session_id,
+                    timestamp=session.canonical_timestamp,
                 ),
                 source_metadata=(
                     ("question_id", row.question_id),

@@ -43,6 +43,8 @@ class _SavedProviderInput:
     plan_bytes: bytes
     plan_document: dict[str, Any]
     loaded_plan: ResolvedPlan | None
+    report_control_bytes: bytes | None
+    report_control_document: dict[str, Any] | None
 
 
 def build_saved_results_report(
@@ -96,6 +98,7 @@ def build_saved_results_report(
     results_by_cell: dict[str, Mapping[str, QuestionResult]] = {}
     metadata: list[dict[str, object]] = []
     top_k_by_provider: dict[str, object] = {}
+    observed_candidate_max_by_provider: dict[str, int] = {}
     reference_execution = reference_document.get("execution")
     for cell in plan.cells:
         source = by_provider[cell.provider_id]
@@ -111,8 +114,26 @@ def build_saved_results_report(
         results_by_cell[cell.cell_id] = results
         source_cell = _provider_cell(source.plan_document, source.provider_id)
         retrieval = _mapping(source.plan_document.get("retrieval"), "saved retrieval")
-        top_k = retrieval.get("top_k", "unavailable")
+        source_plan_top_k = retrieval.get("top_k", "unavailable")
+        report_control_top_k = (
+            source.report_control_document["retrieval_top_k"]
+            if source.report_control_document is not None
+            else None
+        )
+        if (
+            report_control_top_k is not None
+            and source_plan_top_k != "unavailable"
+            and report_control_top_k != source_plan_top_k
+        ):
+            raise SavedResultsError(
+                f"saved report control conflicts with source plan: {source.provider_id}"
+            )
+        top_k = report_control_top_k if report_control_top_k is not None else source_plan_top_k
+        observed_candidate_max = max(
+            result.retrieval.native_candidate_count.value for result in results.values()
+        )
         top_k_by_provider[source.provider_id] = top_k
+        observed_candidate_max_by_provider[source.provider_id] = observed_candidate_max
         metadata.append(
             {
                 "provider_id": source.provider_id,
@@ -127,7 +148,19 @@ def build_saved_results_report(
                     source_cell.get("cell_spec_hash"),
                     "saved cell spec hash",
                 ),
+                "source_plan_retrieval_top_k": source_plan_top_k,
                 "retrieval_top_k": top_k,
+                "retrieval_top_k_source": (
+                    "saved_report_control"
+                    if report_control_top_k is not None
+                    else "source_resolved_plan"
+                ),
+                "report_control_sha256": (
+                    hashlib.sha256(source.report_control_bytes).hexdigest()
+                    if source.report_control_bytes is not None
+                    else "unavailable"
+                ),
+                "observed_native_candidate_count_max": observed_candidate_max,
                 "execution_matches_reference": source.plan_document.get("execution")
                 == reference_execution,
             }
@@ -136,9 +169,25 @@ def build_saved_results_report(
     pair_limitations: dict[frozenset[str], tuple[str, ...]] = {}
     for left_index, left in enumerate(plan.cells):
         for right in plan.cells[left_index + 1 :]:
-            if top_k_by_provider[left.provider_id] != top_k_by_provider[right.provider_id]:
+            left_top_k = top_k_by_provider[left.provider_id]
+            right_top_k = top_k_by_provider[right.provider_id]
+            if (
+                type(left_top_k) is not int
+                or type(right_top_k) is not int
+                or left_top_k != right_top_k
+            ):
                 pair_limitations[frozenset((left.provider_id, right.provider_id))] = (
                     "saved source plans do not prove one shared retrieval top_k candidate ceiling",
+                )
+            elif (
+                max(
+                    observed_candidate_max_by_provider[left.provider_id],
+                    observed_candidate_max_by_provider[right.provider_id],
+                )
+                > left_top_k
+            ):
+                pair_limitations[frozenset((left.provider_id, right.provider_id))] = (
+                    "observed native candidates exceed the shared retrieval top_k candidate ceiling",
                 )
 
     try:
@@ -184,6 +233,14 @@ def _discover_saved_provider_inputs(result_root: Path) -> tuple[_SavedProviderIn
         if provider_id in discovered:
             raise SavedResultsError(f"duplicate saved result provider: {provider_id}")
         plan_bytes, plan_document = _load_plan_document(plan_path)
+        report_control_path = snapshot / "report-control.json"
+        report_control_bytes: bytes | None = None
+        report_control_document: dict[str, Any] | None = None
+        if report_control_path.exists():
+            report_control_bytes, report_control_document = _load_report_control_document(
+                report_control_path,
+                provider_id=provider_id,
+            )
         try:
             loaded_plan = load_resolved_plan_for_run(plan_path)
         except ResolvedPlanError:
@@ -196,6 +253,8 @@ def _discover_saved_provider_inputs(result_root: Path) -> tuple[_SavedProviderIn
             plan_bytes=plan_bytes,
             plan_document=plan_document,
             loaded_plan=loaded_plan,
+            report_control_bytes=report_control_bytes,
+            report_control_document=report_control_document,
         )
     missing = tuple(provider for provider in RESULT_PROVIDER_IDS if provider not in discovered)
     if missing:
@@ -268,6 +327,41 @@ def _load_plan_document(path: Path) -> tuple[bytes, dict[str, Any]]:
     payload.pop("resolved_plan_hash")
     if plan_hash != canonical_sha256([_RESOLVED_PLAN_HASH_DOMAIN, payload]):
         raise SavedResultsError("saved resolved plan hash does not match its content")
+    return content, document
+
+
+def _load_report_control_document(
+    path: Path,
+    *,
+    provider_id: str,
+) -> tuple[bytes, dict[str, Any]]:
+    try:
+        content = read_regular_file(path)
+        document = json.loads(
+            content,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except Exception as exc:
+        raise SavedResultsError("saved report control cannot parse") from exc
+    expected_keys = {
+        "schema_name",
+        "schema_version",
+        "provider_id",
+        "retrieval_top_k",
+        "retrieval_top_k_scope",
+    }
+    if not isinstance(document, dict) or set(document) != expected_keys:
+        raise SavedResultsError("saved report control fields are invalid")
+    if (
+        document.get("schema_name") != "saved_result_report_control"
+        or document.get("schema_version") != 1
+        or document.get("provider_id") != provider_id
+        or document.get("retrieval_top_k_scope") != "report_comparison_normalization_ceiling"
+        or type(document.get("retrieval_top_k")) is not int
+        or document["retrieval_top_k"] < 1
+    ):
+        raise SavedResultsError("saved report control is invalid")
     return content, document
 
 

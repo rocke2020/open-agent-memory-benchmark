@@ -11,6 +11,8 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -20,10 +22,23 @@ from oamb.artifacts.atomic import atomic_write_bytes, read_regular_file
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.runtime.provider_env import load_t10_provider_environment
 
+
+def _load_report_analysis_prompt() -> tuple[str, str]:
+    payload = files("oamb.reporting").joinpath("report_analysis_prompt.txt").read_bytes()
+    try:
+        prompt = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:  # pragma: no cover - invalid packaged resource
+        raise RuntimeError("report analysis prompt must be UTF-8") from exc
+    if not prompt.strip():  # pragma: no cover - invalid packaged resource
+        raise RuntimeError("report analysis prompt must not be empty")
+    return prompt, f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
 REPORT_ANALYSIS_NAME = "report-analysis.json"
-REPORT_ANALYSIS_PROMPT_VERSION = "oamb-five-metric-comparison-v2"
+REPORT_ANALYSIS_SYSTEM_PROMPT, REPORT_ANALYSIS_PROMPT_VERSION = _load_report_analysis_prompt()
 REPORT_ANALYSIS_MAX_ATTEMPTS = 6
-REPORT_ANALYSIS_MAX_OUTPUT_TOKENS = 2_048
+REPORT_ANALYSIS_MAX_OUTPUT_TOKENS = 8_192
+REPORT_ANALYSIS_MAX_INSIGHT_CHARACTERS = 560
 REPORT_ANALYSIS_METRICS = (
     "answer_accuracy",
     "context_tokens",
@@ -31,6 +46,15 @@ REPORT_ANALYSIS_METRICS = (
     "retrieval_latency",
     "indexing_time",
 )
+REPORT_ANALYSIS_QUESTION_TYPES = (
+    "knowledge-update",
+    "multi-session",
+    "single-session-assistant",
+    "single-session-preference",
+    "single-session-user",
+    "temporal-reasoning",
+)
+REPORT_ANALYSIS_INVESTIGATION_ROOT = Path("docs/investigations")
 _REPORT_ANALYSIS_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
 
 _METRIC_DEFINITIONS = {
@@ -40,17 +64,18 @@ _METRIC_DEFINITIONS = {
     "retrieval_latency": "Provider retrieval request wall time; lower is faster.",
     "indexing_time": "First provider write through terminal indexing readiness.",
 }
-_PROFILE_PATH_EVIDENCE = {
-    "hindsight-rest-v1": (
-        "Each ordered source dispatch uses one synchronous Hindsight retain request."
-    ),
-    "mem0-rest-v1": "Each ordered source dispatch uses one synchronous Mem0 add request.",
-    "openviking-session-rest-v1": (
-        "Each ordered source dispatch checks and creates a native session, uploads messages, "
-        "commits it, polls its task to terminal state, reads the archive, and captures a "
-        "projection."
-    ),
+_METRIC_PRIORITIES = {
+    "answer_accuracy": "co_primary",
+    "context_tokens": "co_primary",
+    "indexing_tokens": "important",
+    "retrieval_latency": "important",
+    "indexing_time": "secondary",
 }
+_PROVIDER_STAGE_ROLE_IDS = (
+    "hindsight_extraction",
+    "mem0_extraction",
+    "openviking_semantic_understanding",
+)
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 429})
 
 Sleep = Callable[[float], None]
@@ -68,11 +93,30 @@ class _RetryableReportAnalysisError(ValueError):
     pass
 
 
+def provider_stages_share_model_and_effort(models: object) -> bool:
+    if not isinstance(models, (list, tuple)):
+        return False
+    bindings: dict[str, tuple[str, str]] = {}
+    for item in models:
+        if not isinstance(item, Mapping):
+            continue
+        role_id = item.get("role_id")
+        if role_id not in _PROVIDER_STAGE_ROLE_IDS or role_id in bindings:
+            continue
+        model = item.get("model")
+        effort = item.get("thinking_effort")
+        if not isinstance(model, str) or not model or not isinstance(effort, str) or not effort:
+            return False
+        bindings[role_id] = (model, effort)
+    return len(bindings) == len(_PROVIDER_STAGE_ROLE_IDS) and len(set(bindings.values())) == 1
+
+
 def build_report_analysis_generator(
     *,
     plan: Any,
     model_env_path: Path,
     cache_root: Path,
+    investigation_root: Path = REPORT_ANALYSIS_INVESTIGATION_ROOT,
     base_environment: Mapping[str, str] | None = None,
     transport: httpx.BaseTransport | None = None,
     sleep: Sleep = time.sleep,
@@ -106,6 +150,7 @@ def build_report_analysis_generator(
                 api_key=api_key,
                 cache_root=cache_root,
                 timeout_seconds=float(plan.execution.operation_timeout_seconds),
+                investigation_root=investigation_root,
                 transport=transport,
                 sleep=sleep,
             )
@@ -125,6 +170,7 @@ def generate_report_analysis(
     api_key: str,
     cache_root: Path,
     timeout_seconds: float,
+    investigation_root: Path = REPORT_ANALYSIS_INVESTIGATION_ROOT,
     transport: httpx.BaseTransport | None = None,
     sleep: Sleep = time.sleep,
 ) -> ReportAnalysisBuildResult | None:
@@ -139,7 +185,7 @@ def generate_report_analysis(
 
     report_bytes = canonical_json_bytes(report)
     report_sha256 = hashlib.sha256(report_bytes).hexdigest()
-    analysis_input = _analysis_input(report)
+    analysis_input = _analysis_input(report, investigation_root=investigation_root)
     analysis_input_bytes = canonical_json_bytes(analysis_input)
     analysis_input_sha256 = hashlib.sha256(analysis_input_bytes).hexdigest()
     endpoint_fingerprint = hashlib.sha256(base_url.rstrip("/").encode("utf-8")).hexdigest()
@@ -158,33 +204,40 @@ def generate_report_analysis(
     analysis_path = cache_directory / REPORT_ANALYSIS_NAME
     if analysis_path.exists() or analysis_path.is_symlink():
         payload = read_regular_file(analysis_path)
-        parse_report_analysis(payload, report)
+        parse_report_analysis(payload, report, investigation_root=investigation_root)
         return ReportAnalysisBuildResult(
             analysis_path=analysis_path,
             cache_directory=cache_directory,
             cache_hit=True,
         )
 
+    investigations = analysis_input["investigations"]
+    evaluation_evidence = {
+        key: value for key, value in analysis_input.items() if key != "investigations"
+    }
     messages: list[dict[str, str]] = [
         {
             "role": "system",
-            "content": (
-                "Compare the three memory providers using only supplied evidence. Return strict "
-                "JSON with exactly keys overall and metrics. metrics must contain exactly, in "
-                f"this order: {', '.join(REPORT_ANALYSIS_METRICS)}. overall is one concise "
-                "sentence; every metric value is one concise sentence. Explain observed reasons "
-                "only when supplied evidence supports them; otherwise say the reason is unknown. "
-                "Keep overall neutral: do not name any provider or metric winner there; put all "
-                "provider-specific comparisons in metrics. Express durations only in seconds, "
-                "never in microseconds or milliseconds."
-            ),
+            "content": REPORT_ANALYSIS_SYSTEM_PROMPT,
         },
         {
             "role": "user",
             "content": canonical_json_bytes(
                 {
-                    "task": "Produce a concise cross-provider comparison of all five metrics.",
-                    "evidence": analysis_input,
+                    "task": "Read every investigation document before analyzing results.",
+                    "investigations": investigations,
+                }
+            ).decode("utf-8"),
+        },
+        {
+            "role": "user",
+            "content": canonical_json_bytes(
+                {
+                    "task": (
+                        "Now produce first-glance provider insights after checking every supplied "
+                        "question result and question-type summary."
+                    ),
+                    "evidence": evaluation_evidence,
                 }
             ).decode("utf-8"),
         },
@@ -237,12 +290,9 @@ def generate_report_analysis(
 
             try:
                 output, usage = _parse_completion_response(raw_bytes)
-                overall, metrics = _parse_analysis_output(
+                overall, provider_insights = _parse_analysis_output(
                     output,
-                    provider_ids=tuple(
-                        _required_text(cell, "provider_id")
-                        for cell in _required_cells(analysis_input)
-                    ),
+                    analysis_input=analysis_input,
                 )
             except _RetryableReportAnalysisError as error:
                 if attempt == REPORT_ANALYSIS_MAX_ATTEMPTS:
@@ -276,17 +326,14 @@ def generate_report_analysis(
                 "raw_response_sha256": raw_sha256,
                 "usage": usage,
                 "overall": overall,
-                "metrics": tuple(
-                    {"metric_id": metric_id, "analysis": metrics[metric_id]}
-                    for metric_id in REPORT_ANALYSIS_METRICS
-                ),
+                "provider_insights": provider_insights,
             }
             document = {
                 **body,
                 "analysis_id": canonical_sha256(["oamb-report-analysis-v1", body]),
             }
             payload = canonical_json_bytes(document)
-            parse_report_analysis(payload, report)
+            parse_report_analysis(payload, report, investigation_root=investigation_root)
             atomic_write_bytes(
                 analysis_path,
                 payload,
@@ -305,6 +352,8 @@ def generate_report_analysis(
 def parse_report_analysis(
     payload: bytes,
     report: Mapping[str, object],
+    *,
+    investigation_root: Path = REPORT_ANALYSIS_INVESTIGATION_ROOT,
 ) -> dict[str, object]:
     """Parse and bind cached analysis to the exact deterministic report export."""
 
@@ -329,7 +378,7 @@ def parse_report_analysis(
         "raw_response_sha256",
         "usage",
         "overall",
-        "metrics",
+        "provider_insights",
     }
     if set(value) != expected_keys:
         raise ValueError("report analysis fields do not match the closed schema")
@@ -341,7 +390,8 @@ def parse_report_analysis(
         or value["report_export_sha256"] != hashlib.sha256(report_bytes).hexdigest()
     ):
         raise ValueError("report analysis does not bind the exact report export")
-    expected_input_hash = hashlib.sha256(canonical_json_bytes(_analysis_input(report))).hexdigest()
+    analysis_input = _analysis_input(report, investigation_root=investigation_root)
+    expected_input_hash = hashlib.sha256(canonical_json_bytes(analysis_input)).hexdigest()
     if value["analysis_input_sha256"] != expected_input_hash:
         raise ValueError("report analysis compact input binding drifted")
     if value["prompt_version"] != REPORT_ANALYSIS_PROMPT_VERSION:
@@ -356,26 +406,17 @@ def parse_report_analysis(
         if not isinstance(value[name], str) or not value[name]:
             raise ValueError(f"report analysis {name} is invalid")
     overall = _concise_sentence(value["overall"], "overall", maximum_characters=480)
-    metrics_value = value["metrics"]
-    if not isinstance(metrics_value, list) or len(metrics_value) != len(REPORT_ANALYSIS_METRICS):
-        raise ValueError("report analysis metric inventory is incomplete")
-    metric_ids: list[str] = []
-    metric_analyses: list[str] = []
-    for item in metrics_value:
-        if not isinstance(item, dict) or set(item) != {"metric_id", "analysis"}:
-            raise ValueError("report analysis metric record is invalid")
-        metric_ids.append(_required_text(item, "metric_id"))
-        metric_analyses.append(
-            _concise_sentence(item["analysis"], "metric analysis", maximum_characters=320)
-        )
-    if tuple(metric_ids) != REPORT_ANALYSIS_METRICS:
-        raise ValueError("report analysis metric order or identity drifted")
+    provider_ids = tuple(
+        _required_text(cell, "provider_id") for cell in _required_report_cells(report)
+    )
+    provider_insights = _parse_provider_insights(
+        value["provider_insights"],
+        provider_ids=provider_ids,
+    )
     _validate_visible_analysis(
         overall,
-        metric_analyses,
-        provider_ids=tuple(
-            _required_text(cell, "provider_id") for cell in _required_report_cells(report)
-        ),
+        provider_insights,
+        analysis_input=analysis_input,
     )
     body = dict(value)
     analysis_id = body.pop("analysis_id")
@@ -385,7 +426,11 @@ def parse_report_analysis(
     return cast(dict[str, object], value)
 
 
-def _analysis_input(report: Mapping[str, object]) -> dict[str, object]:
+def _analysis_input(
+    report: Mapping[str, object],
+    *,
+    investigation_root: Path = REPORT_ANALYSIS_INVESTIGATION_ROOT,
+) -> dict[str, object]:
     raw_cells = report.get("cells")
     if not isinstance(raw_cells, (list, tuple)) or not raw_cells:
         raise ValueError("report analysis requires provider cells")
@@ -397,7 +442,6 @@ def _analysis_input(report: Mapping[str, object]) -> dict[str, object]:
         tokens = _required_mapping(accounting, "tokens")
         indexing = _required_mapping(tokens, "indexing")
         observed_time = _required_mapping(raw_cell, "observed_time")
-        profile = _required_text(raw_cell, "adapter_profile_id")
         cells.append(
             {
                 "provider_id": _required_text(raw_cell, "provider_id"),
@@ -421,11 +465,15 @@ def _analysis_input(report: Mapping[str, object]) -> dict[str, object]:
                     observed_time.get("indexing_ready", {"status": "unavailable"})
                 ),
                 "time_comparability": observed_time.get("comparability", "unavailable"),
-                "ingestion_path_evidence": _PROFILE_PATH_EVIDENCE.get(
-                    profile, "Provider ingestion path evidence is unavailable."
-                ),
                 "limitations": raw_cell.get("limitations", ()),
             }
+        )
+    provider_ids = tuple(str(item["provider_id"]) for item in cells)
+    question_evidence = _question_evidence(report, provider_ids=provider_ids)
+    for cell in cells:
+        cell["question_type_accuracy"] = _question_type_accuracy(
+            str(cell["provider_id"]),
+            question_evidence,
         )
     raw_retrieval = report.get("retrieval", ())
     if not isinstance(raw_retrieval, (list, tuple)):
@@ -439,18 +487,237 @@ def _analysis_input(report: Mapping[str, object]) -> dict[str, object]:
         if isinstance(item, Mapping)
     )
     return {
+        "investigations": _load_investigations(investigation_root),
         "metric_order": REPORT_ANALYSIS_METRICS,
         "metric_definitions": tuple(
             {"metric_id": metric_id, "definition": _METRIC_DEFINITIONS[metric_id]}
             for metric_id in REPORT_ANALYSIS_METRICS
         ),
+        "metric_priorities": tuple(
+            {"metric_id": metric_id, "importance": _METRIC_PRIORITIES[metric_id]}
+            for metric_id in REPORT_ANALYSIS_METRICS
+        ),
+        "model_effort_controls": _model_effort_control_evidence(
+            report,
+            provider_ids=provider_ids,
+        ),
         "coverage": report.get("coverage", {"status": "unavailable"}),
         "cells": tuple(cells),
+        "questions": question_evidence,
         "accuracy_decision": report.get("accuracy_decision", {"status": "unavailable"}),
         "pairwise_accuracy": report.get("comparisons", ()),
+        "retrieval_controls": _retrieval_control_evidence(
+            report,
+            provider_ids=provider_ids,
+        ),
         "retrieval_routes": retrieval_routes,
         "limitations": report.get("limitations", ()),
     }
+
+
+def _model_effort_control_evidence(
+    report: Mapping[str, object],
+    *,
+    provider_ids: tuple[str, ...],
+) -> dict[str, object]:
+    raw_models = report.get("models")
+    if not isinstance(raw_models, (list, tuple)) or not raw_models:
+        return {"status": "unavailable"}
+    bindings: list[dict[str, str]] = []
+    for item in raw_models:
+        if not isinstance(item, Mapping):
+            raise ValueError("report analysis model-effort controls are invalid")
+        bindings.append(
+            {
+                "role_id": _required_text(item, "role_id"),
+                "model": _required_text(item, "model"),
+                "thinking_effort": _required_text(item, "thinking_effort"),
+            }
+        )
+    return {
+        "status": (
+            "shared_across_providers"
+            if provider_stages_share_model_and_effort(raw_models)
+            else "provider_stages_differ"
+        ),
+        "providers": provider_ids,
+        "bindings": tuple(bindings),
+    }
+
+
+def _retrieval_control_evidence(
+    report: Mapping[str, object],
+    *,
+    provider_ids: tuple[str, ...],
+) -> dict[str, object]:
+    raw_sources = report.get("saved_result_sources")
+    if not isinstance(raw_sources, (list, tuple)) or not raw_sources:
+        return {"status": "unavailable"}
+    sources = tuple(item for item in raw_sources if isinstance(item, Mapping))
+    if len(sources) != len(raw_sources):
+        raise ValueError("report analysis saved-result controls are invalid")
+    by_provider = {_required_text(item, "provider_id"): item for item in sources}
+    if len(by_provider) != len(sources) or set(by_provider) != set(provider_ids):
+        raise ValueError("report analysis saved-result controls do not close")
+    providers: list[dict[str, object]] = []
+    for provider_id in provider_ids:
+        source = by_provider[provider_id]
+        top_k = source.get("retrieval_top_k", "unavailable")
+        observed_max = source.get("observed_native_candidate_count_max", "unavailable")
+        providers.append(
+            {
+                "provider_id": provider_id,
+                "effective_top_k": top_k,
+                "top_k_source": source.get("retrieval_top_k_source", "unavailable"),
+                "source_plan_top_k": source.get("source_plan_retrieval_top_k", "unavailable"),
+                "observed_native_candidate_count_max": observed_max,
+            }
+        )
+    top_ks = tuple(item["effective_top_k"] for item in providers)
+    all_share = all(type(value) is int and value > 0 for value in top_ks) and len(set(top_ks)) == 1
+    shared_top_k_value = cast(int, top_ks[0]) if all_share else None
+    observed_maxima = tuple(item["observed_native_candidate_count_max"] for item in providers)
+    all_within = shared_top_k_value is not None and all(
+        type(value) is int and 0 <= value <= shared_top_k_value for value in observed_maxima
+    )
+    comparisons = report.get("comparisons", ())
+    expected_pair_count = len(provider_ids) * (len(provider_ids) - 1) // 2
+    all_pairs_comparable = (
+        isinstance(comparisons, (list, tuple))
+        and len(comparisons) == expected_pair_count
+        and all(
+            isinstance(item, Mapping) and item.get("comparable") is True for item in comparisons
+        )
+    )
+    return {
+        "status": "available",
+        "scope": "report_comparison_normalization_ceiling",
+        "providers": tuple(providers),
+        "shared_top_k": (shared_top_k_value if shared_top_k_value is not None else "unavailable"),
+        "all_providers_share_top_k": all_share,
+        "all_observed_candidates_within_top_k": all_within,
+        "all_provider_pairs_comparable": all_pairs_comparable,
+    }
+
+
+def _load_investigations(root: Path) -> tuple[dict[str, str], ...]:
+    selected_root = Path(root)
+    if selected_root.is_symlink() or not selected_root.is_dir():
+        raise ValueError("report analysis investigations must be a regular directory")
+    paths = tuple(
+        sorted(
+            selected_root.rglob("*.md"),
+            key=lambda path: path.relative_to(selected_root).as_posix(),
+        )
+    )
+    if not paths:
+        raise ValueError("report analysis investigations are empty")
+    documents: list[dict[str, str]] = []
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("report analysis investigation must be a regular file")
+        payload = read_regular_file(path)
+        try:
+            content = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("report analysis investigation must be UTF-8") from exc
+        if not content.strip():
+            raise ValueError("report analysis investigation must not be empty")
+        documents.append(
+            {
+                "relative_path": path.relative_to(selected_root).as_posix(),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "content": content,
+            }
+        )
+    return tuple(documents)
+
+
+def _question_type_accuracy(
+    provider_id: str,
+    questions: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    summaries: list[dict[str, object]] = []
+    for question_type in REPORT_ANALYSIS_QUESTION_TYPES:
+        results = [
+            next(
+                result
+                for result in cast(tuple[dict[str, str], ...], question["provider_results"])
+                if result["provider_id"] == provider_id
+            )
+            for question in questions
+            if question["question_type"] == question_type
+        ]
+        if not results:
+            raise ValueError("report analysis question-type inventory is incomplete")
+        correct = sum(result["result"] == "correct" for result in results)
+        summaries.append(
+            {
+                "question_type": question_type,
+                "correct": correct,
+                "total": len(results),
+                "incorrect": len(results) - correct,
+            }
+        )
+    return tuple(summaries)
+
+
+def _question_evidence(
+    report: Mapping[str, object],
+    *,
+    provider_ids: tuple[str, ...],
+) -> tuple[dict[str, object], ...]:
+    questions = report.get("questions")
+    if not isinstance(questions, (list, tuple)) or not questions:
+        raise ValueError("report analysis requires question evidence")
+    evidence: list[dict[str, object]] = []
+    question_types: set[str] = set()
+    for question in questions:
+        if not isinstance(question, Mapping):
+            raise ValueError("report analysis question evidence is invalid")
+        question_type = _required_text(question, "question_type")
+        question_types.add(question_type)
+        raw_results = question.get("provider_results")
+        if not isinstance(raw_results, (list, tuple)):
+            raise ValueError("report analysis question provider results are invalid")
+        provider_results: list[dict[str, str]] = []
+        for result in raw_results:
+            if not isinstance(result, Mapping):
+                raise ValueError("report analysis question provider result is invalid")
+            display_state = _required_text(result, "display_state")
+            if display_state not in {"correct", "incorrect"}:
+                raise ValueError("report analysis requires terminal judged question results")
+            provider_results.append(
+                {
+                    "provider_id": _required_text(result, "provider_id"),
+                    "result": display_state,
+                    "model_answer": _required_text(result, "model_answer"),
+                    "judge_decision": _required_text(result, "judge_decision"),
+                }
+            )
+        if tuple(item["provider_id"] for item in provider_results) != provider_ids:
+            raise ValueError("report analysis question provider inventory drifted")
+        evidence.append(
+            {
+                "question_id": _required_text(question, "raw_question_id"),
+                "question_type": question_type,
+                "question": _required_text(question, "question"),
+                "gold_answer": _gold_answer(question),
+                "provider_results": tuple(provider_results),
+            }
+        )
+    if question_types != set(REPORT_ANALYSIS_QUESTION_TYPES):
+        raise ValueError("report analysis requires all six question types")
+    return tuple(evidence)
+
+
+def _gold_answer(question: Mapping[str, object]) -> str | int | float:
+    value = question.get("gold_answer")
+    if isinstance(value, str) and value:
+        return value
+    if type(value) is int or (type(value) is float and math.isfinite(value)):
+        return value
+    raise ValueError("report analysis gold answer is invalid")
 
 
 def _parse_completion_response(raw_bytes: bytes) -> tuple[str, object]:
@@ -502,46 +769,372 @@ def _usage_summary(value: object) -> dict[str, object]:
 def _parse_analysis_output(
     output: str,
     *,
-    provider_ids: tuple[str, ...],
-) -> tuple[str, dict[str, str]]:
+    analysis_input: Mapping[str, object],
+) -> tuple[str, tuple[dict[str, str], ...]]:
     try:
         value = json.loads(output, object_pairs_hook=_unique_object)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise _RetryableReportAnalysisError("analysis content is not strict JSON") from exc
-    if not isinstance(value, dict) or set(value) != {"overall", "metrics"}:
+    if not isinstance(value, dict) or set(value) != {"overall", "provider_insights"}:
         raise _RetryableReportAnalysisError("analysis content has the wrong fields")
+    provider_ids = tuple(
+        _required_text(cell, "provider_id") for cell in _required_cells(analysis_input)
+    )
     overall = _concise_sentence(value["overall"], "overall", maximum_characters=480)
-    metrics = value["metrics"]
-    if not isinstance(metrics, dict) or tuple(metrics) != REPORT_ANALYSIS_METRICS:
-        raise _RetryableReportAnalysisError("analysis metric order or identity is invalid")
-    parsed_metrics = {
-        metric_id: _concise_sentence(
-            metrics[metric_id],
-            f"{metric_id} analysis",
-            maximum_characters=320,
+    provider_insights = _parse_provider_insights(
+        value["provider_insights"],
+        provider_ids=provider_ids,
+    )
+    _validate_visible_analysis(
+        overall,
+        provider_insights,
+        analysis_input=analysis_input,
+    )
+    return overall, provider_insights
+
+
+def _parse_provider_insights(
+    value: object,
+    *,
+    provider_ids: tuple[str, ...],
+) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list) or len(value) != len(provider_ids):
+        raise _RetryableReportAnalysisError("analysis provider insight inventory is incomplete")
+    insights: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"provider_id", "insight"}:
+            raise _RetryableReportAnalysisError("analysis provider insight is invalid")
+        provider_id_value = item.get("provider_id")
+        if not isinstance(provider_id_value, str) or not provider_id_value:
+            raise _RetryableReportAnalysisError("analysis provider identity is invalid")
+        provider_id = provider_id_value
+        insight = _concise_sentence(
+            item["insight"],
+            f"{provider_id} insight",
+            maximum_characters=REPORT_ANALYSIS_MAX_INSIGHT_CHARACTERS,
         )
-        for metric_id in REPORT_ANALYSIS_METRICS
-    }
-    _validate_visible_analysis(overall, parsed_metrics.values(), provider_ids=provider_ids)
-    return overall, parsed_metrics
+        if not any(question_type in insight for question_type in REPORT_ANALYSIS_QUESTION_TYPES):
+            raise _RetryableReportAnalysisError("each provider insight must name a question type")
+        if re.search(r"\b\d{1,2}/\d{1,2}\b", insight) is None:
+            raise _RetryableReportAnalysisError(
+                "each provider insight must include correct/total evidence"
+            )
+        insights.append({"provider_id": provider_id, "insight": insight})
+    if tuple(item["provider_id"] for item in insights) != provider_ids:
+        raise _RetryableReportAnalysisError("analysis provider order or identity is invalid")
+    return tuple(insights)
 
 
 def _validate_visible_analysis(
     overall: str,
-    metric_analyses: Iterable[str],
+    provider_insights: Iterable[Mapping[str, str]],
     *,
-    provider_ids: tuple[str, ...],
+    analysis_input: Mapping[str, object],
 ) -> None:
+    cells = _required_cells(analysis_input)
+    recorded_leader = _recorded_accuracy_leader(cells)
     normalized_overall = overall.casefold()
-    if any(provider_id.casefold() in normalized_overall for provider_id in provider_ids):
-        raise _RetryableReportAnalysisError("overall must not name a provider")
-    visible_text = " ".join((overall, *(str(item) for item in metric_analyses)))
+    overall_sentences = tuple(
+        sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", overall) if sentence.strip()
+    )
+    model_effort_controls = analysis_input.get("model_effort_controls")
+    shared_provider_stages = (
+        isinstance(model_effort_controls, Mapping)
+        and model_effort_controls.get("status") == "shared_across_providers"
+    )
+    required_opening = (
+        "With the same models and thinking effort at each corresponding stage across providers,"
+        if shared_provider_stages
+        else "Across the evaluated providers,"
+    )
+    if len(overall_sentences) != 1 or not overall.startswith(required_opening):
+        raise _RetryableReportAnalysisError(
+            "overall must give accuracy and context equal space in one controlled sentence"
+        )
+    if recorded_leader is not None:
+        provider_id, numerator, denominator = recorded_leader
+        if provider_id.casefold() not in normalized_overall or (
+            f"{numerator}/{denominator}" not in overall
+        ):
+            raise _RetryableReportAnalysisError(
+                "overall must name the highest recorded provider and its exact result"
+            )
+        leader_fraction = f"{numerator}/{denominator}"
+        if any(
+            fraction != leader_fraction for fraction in re.findall(r"\b\d{1,3}/\d{1,3}\b", overall)
+        ):
+            raise _RetryableReportAnalysisError(
+                "overall must not repeat nonleading provider results"
+            )
+    if re.search(
+        r"\b(?:accuracy[_ ]decision|equal[-_ ]coverage|failed predicates?|threshold checks?)\b",
+        overall,
+        flags=re.IGNORECASE,
+    ):
+        raise _RetryableReportAnalysisError("overall must not expose internal decision jargon")
+    context_leaders = _recorded_context_leaders(cells)
+    context_sentence = overall_sentences[0]
+    other_provider_ids = tuple(
+        _required_text(cell, "provider_id")
+        for cell in cells
+        if _required_text(cell, "provider_id") not in context_leaders
+    )
+    if context_leaders and not any(
+        provider_id.casefold() in context_sentence.casefold() for provider_id in context_leaders
+    ):
+        raise _RetryableReportAnalysisError("overall must name the lowest-context provider")
+    if (
+        "context" not in context_sentence.casefold()
+        or re.search(r"\d", context_sentence) is None
+        or not all(
+            provider_id.casefold() in context_sentence.casefold()
+            for provider_id in other_provider_ids
+        )
+    ):
+        raise _RetryableReportAnalysisError(
+            "overall must quantify the lowest-context provider against every peer"
+        )
+    insights = tuple(provider_insights)
+    expected_by_provider = _question_type_accuracy_by_provider(cells)
+    slowest_indexing_provider = _recorded_slowest_indexing_provider(cells)
+    covered_operational_metrics: set[str] = set()
+    for item in insights:
+        provider_id = item["provider_id"]
+        insight = item["insight"]
+        mentioned_types = tuple(
+            question_type
+            for question_type in REPORT_ANALYSIS_QUESTION_TYPES
+            if question_type in insight
+        )
+        sentences = tuple(
+            sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", insight) if sentence.strip()
+        )
+        if len(sentences) != 2 or not 1 <= len(mentioned_types) <= 3:
+            raise _RetryableReportAnalysisError(
+                "each provider insight must use one to three question types in two sentences"
+            )
+        for question_type in mentioned_types:
+            correct, total = expected_by_provider[provider_id][question_type]
+            if f"{correct}/{total}" not in insight:
+                raise _RetryableReportAnalysisError(
+                    "provider insight question-type evidence does not match the report"
+                )
+        allowed_fractions = {
+            f"{correct}/{total}" for correct, total in expected_by_provider[provider_id].values()
+        }
+        if any(
+            fraction not in allowed_fractions
+            for fraction in re.findall(r"\b\d{1,3}/\d{1,3}\b", insight)
+        ):
+            raise _RetryableReportAnalysisError(
+                "provider insight contains a result outside the current report"
+            )
+        if re.search(
+            r"\b(?:external|managed|official|public|self-evaluation|benchmark)\b|"
+            r"\breference comparison\b",
+            insight,
+            flags=re.IGNORECASE,
+        ):
+            raise _RetryableReportAnalysisError(
+                "provider insight must stay on the current report's evidence"
+            )
+        if re.search(
+            r"\bvisible\s+evidence\b|\b(?:retrieved|injected)\s+(?:evidence|context)\b|"
+            r"\bmemory\s+(?:contained|held|lacked|missed|omitted|retained|unused)\b|"
+            r"\b(?:contained|held|lacked|missing|omitted|present|retained|unused)\s+"
+            r"(?:in|from)\s+(?:the\s+)?memory\b",
+            insight,
+            flags=re.IGNORECASE,
+        ):
+            raise _RetryableReportAnalysisError(
+                "provider insight cannot infer unsupplied retrieval-context contents"
+            )
+        other_provider_ids = tuple(
+            candidate for candidate in expected_by_provider if candidate != provider_id
+        )
+        if not any(
+            candidate.casefold() in sentences[1].casefold() for candidate in other_provider_ids
+        ):
+            raise _RetryableReportAnalysisError(
+                "provider operational insight must compare another supplied provider"
+            )
+        operational_metrics = _mentioned_operational_metrics(sentences[1])
+        if not operational_metrics:
+            raise _RetryableReportAnalysisError(
+                "each provider insight must include a non-accuracy metric comparison"
+            )
+        if "indexing_time" in operational_metrics and slowest_indexing_provider is not None:
+            if provider_id != slowest_indexing_provider or not all(
+                candidate.casefold() in sentences[1].casefold() for candidate in other_provider_ids
+            ):
+                raise _RetryableReportAnalysisError(
+                    "indexing-time insight must lead with the largest cross-provider gap"
+                )
+        covered_operational_metrics.update(operational_metrics)
+    if not {
+        "context_tokens",
+        "indexing_tokens",
+        "retrieval_latency",
+        "indexing_time",
+    }.issubset(covered_operational_metrics):
+        raise _RetryableReportAnalysisError(
+            "provider insights must cover all four operational metrics"
+        )
+    visible_text = " ".join((overall, *(item["insight"] for item in insights)))
+    if re.search(
+        r"\btop[_ -]?k\b|\bcandidate[- ]ceilings?\b|\bretrieval[- ]control(?:s| alignment)?\b",
+        visible_text,
+        flags=re.IGNORECASE,
+    ):
+        raise _RetryableReportAnalysisError(
+            "visible analysis must omit retrieval-control configuration"
+        )
+    if re.search(
+        r"\b(?:evaluation|benchmark)[- ](?:process|configuration|design|controls?)\b|"
+        r"\bcomparability\b|\bdecision[- ]thresholds?\b",
+        visible_text,
+        flags=re.IGNORECASE,
+    ):
+        raise _RetryableReportAnalysisError(
+            "visible analysis must trust the validated evaluation and focus on results"
+        )
+    if re.search(
+        r"\b(?:costs?|costly|cheaper|expensive)\b",
+        visible_text,
+        flags=re.IGNORECASE,
+    ):
+        raise _RetryableReportAnalysisError(
+            "visible analysis must let token differences speak for themselves"
+        )
+    if re.search(r"\b(?:thousand|million|billion)\b", visible_text, flags=re.IGNORECASE):
+        raise _RetryableReportAnalysisError(
+            "visible analysis must use compact k, M, or B number suffixes"
+        )
+    if re.search(r"\d(?:\.\d+)?[kMB]\b", visible_text):
+        raise _RetryableReportAnalysisError(
+            "visible analysis must put a space before k, M, or B number suffixes"
+        )
     if re.search(
         r"(?<![A-Za-z])(?:microseconds?|milliseconds?|[µμ]s|ms)(?![A-Za-z])",
         visible_text,
         flags=re.IGNORECASE,
     ):
         raise _RetryableReportAnalysisError("visible analysis durations must use seconds")
+    for number in re.findall(r"\d[\d,.]*", visible_text):
+        if len(re.sub(r"\D", "", number)) > 4:
+            raise _RetryableReportAnalysisError(
+                "visible analysis numbers must contain at most four digits"
+            )
+
+
+def _recorded_accuracy_leader(
+    cells: tuple[Mapping[str, object], ...],
+) -> tuple[str, int, int] | None:
+    scored: list[tuple[Fraction, str, int, int]] = []
+    for cell in cells:
+        accuracy = cell.get("answer_accuracy")
+        if not isinstance(accuracy, Mapping):
+            return None
+        numerator = accuracy.get("numerator")
+        denominator = accuracy.get("denominator")
+        if type(numerator) is not int or type(denominator) is not int or denominator <= 0:
+            return None
+        scored.append(
+            (
+                Fraction(numerator, denominator),
+                _required_text(cell, "provider_id"),
+                numerator,
+                denominator,
+            )
+        )
+    highest = max(item[0] for item in scored)
+    leaders = tuple(item for item in scored if item[0] == highest)
+    if len(leaders) != 1:
+        return None
+    _, provider_id, numerator, denominator = leaders[0]
+    return provider_id, numerator, denominator
+
+
+def _recorded_context_leaders(
+    cells: tuple[Mapping[str, object], ...],
+) -> tuple[str, ...]:
+    scored: list[tuple[Decimal, str]] = []
+    for cell in cells:
+        context = cell.get("context_tokens")
+        if not isinstance(context, Mapping):
+            return ()
+        try:
+            mean = Decimal(str(context.get("mean")))
+        except InvalidOperation:
+            return ()
+        if not mean.is_finite() or mean < 0:
+            return ()
+        scored.append((mean, _required_text(cell, "provider_id")))
+    if not scored:
+        return ()
+    lowest = min(item[0] for item in scored)
+    return tuple(provider_id for mean, provider_id in scored if mean == lowest)
+
+
+def _recorded_slowest_indexing_provider(
+    cells: tuple[Mapping[str, object], ...],
+) -> str | None:
+    scored: list[tuple[Decimal, str]] = []
+    for cell in cells:
+        indexing_time = cell.get("indexing_time")
+        if not isinstance(indexing_time, Mapping):
+            return None
+        try:
+            median = Decimal(str(indexing_time.get("median_seconds")))
+        except InvalidOperation:
+            return None
+        if not median.is_finite() or median < 0:
+            return None
+        scored.append((median, _required_text(cell, "provider_id")))
+    if not scored:
+        return None
+    slowest = max(item[0] for item in scored)
+    providers = tuple(provider_id for median, provider_id in scored if median == slowest)
+    return providers[0] if len(providers) == 1 else None
+
+
+def _mentioned_operational_metrics(text: str) -> set[str]:
+    normalized = text.casefold()
+    metrics: set[str] = set()
+    if re.search(
+        r"\b(?:answer[-\s]+)?context[-\s]+(?:tokens?|loads?)\b",
+        normalized,
+    ):
+        metrics.add("context_tokens")
+    if re.search(r"\bindexing[-\s]+tokens?\b", normalized):
+        metrics.add("indexing_tokens")
+    if re.search(
+        r"\bretrieval[-\s]+(?:latency|median)\b|\bmedian[-\s]+retrieval\b",
+        normalized,
+    ):
+        metrics.add("retrieval_latency")
+    if re.search(r"\bindexing[-\s]+time\b", normalized):
+        metrics.add("indexing_time")
+    return metrics
+
+
+def _question_type_accuracy_by_provider(
+    cells: tuple[Mapping[str, object], ...],
+) -> dict[str, dict[str, tuple[object, object]]]:
+    expected: dict[str, dict[str, tuple[object, object]]] = {}
+    for cell in cells:
+        records = cell.get("question_type_accuracy")
+        if not isinstance(records, (list, tuple)):
+            raise ValueError("report analysis question-type evidence is invalid")
+        expected[_required_text(cell, "provider_id")] = {
+            _required_text(record, "question_type"): (
+                record.get("correct"),
+                record.get("total"),
+            )
+            for record in records
+            if isinstance(record, Mapping)
+        }
+    return expected
 
 
 def _analysis_time_seconds(value: object) -> dict[str, object]:
@@ -582,7 +1175,7 @@ def _concise_sentence(value: object, label: str, *, maximum_characters: int) -> 
         raise _RetryableReportAnalysisError(f"{label} must be non-empty text")
     normalized = value.strip()
     if "\n" in normalized or "\r" in normalized or len(normalized) > maximum_characters:
-        raise _RetryableReportAnalysisError(f"{label} must be one concise sentence")
+        raise _RetryableReportAnalysisError(f"{label} must be compact single-line text")
     return normalized
 
 
@@ -635,4 +1228,5 @@ __all__ = [
     "build_report_analysis_generator",
     "generate_report_analysis",
     "parse_report_analysis",
+    "provider_stages_share_model_and_effort",
 ]

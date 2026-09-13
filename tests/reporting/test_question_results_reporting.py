@@ -23,8 +23,9 @@ PLAN_HASH = _sha("plan")
 MANIFEST_HASH = _sha("manifest")
 
 
-def _results() -> dict[str, result_contract.QuestionResult]:
+def _results(*, native_candidate_count: int = 1) -> dict[str, result_contract.QuestionResult]:
     measured = result_contract.ResultMeasurement(status="measured", value=1)
+    candidates = result_contract.ResultMeasurement(status="measured", value=native_candidate_count)
     ingestion = result_contract.ResultIngestion(
         status="sealed",
         intended_source_count=1,
@@ -40,8 +41,8 @@ def _results() -> dict[str, result_contract.QuestionResult]:
         visible_context=result_contract.ResultText(status="available", value="x"),
         visible_context_byte_count=measured,
         visible_context_token_count=measured,
-        native_candidate_count=measured,
-        visible_kept_count=measured,
+        native_candidate_count=candidates,
+        visible_kept_count=candidates,
         visible_dropped_count=result_contract.ResultMeasurement(status="measured", value=0),
         visible_truncated_count=result_contract.ResultMeasurement(status="measured", value=0),
         request_latency_microseconds=measured,
@@ -304,22 +305,38 @@ def _write_saved_result_snapshot(
     *,
     provider_id: str,
     plan_bytes: bytes,
+    native_candidate_count: int = 1,
+    report_control_top_k: int | None = None,
 ) -> None:
     snapshot = root / f"{provider_id}-snapshot"
     results_root = snapshot / "results"
     results_root.mkdir(parents=True)
     (snapshot / "resolved-plan.json").write_bytes(plan_bytes)
+    if report_control_top_k is not None:
+        (snapshot / "report-control.json").write_bytes(
+            canonical_json_bytes(
+                {
+                    "schema_name": "saved_result_report_control",
+                    "schema_version": 1,
+                    "provider_id": provider_id,
+                    "retrieval_top_k": report_control_top_k,
+                    "retrieval_top_k_scope": "report_comparison_normalization_ceiling",
+                }
+            )
+        )
     (results_root / f"{provider_id}.json").write_bytes(
         canonical_json_bytes(
             {
                 question_id: result.model_dump(mode="json")
-                for question_id, result in _results().items()
+                for question_id, result in _results(
+                    native_candidate_count=native_candidate_count
+                ).items()
             }
         )
     )
 
 
-def test_saved_provider_results_retain_source_plans_and_suppress_mismatched_pairs(
+def test_saved_provider_results_use_report_control_when_candidates_fit_its_ceiling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -347,6 +364,7 @@ def test_saved_provider_results_retain_source_plans_and_suppress_mismatched_pair
         result_root,
         provider_id="hindsight",
         plan_bytes=canonical_json_bytes(legacy_document),
+        report_control_top_k=plan.retrieval.top_k,
     )
     _write_saved_result_snapshot(
         result_root,
@@ -405,11 +423,14 @@ def test_saved_provider_results_retain_source_plans_and_suppress_mismatched_pair
         "provider_specific_result_count": 180,
     }
     assert sources["hindsight"]["resolved_plan_hash"] == legacy_plan_hash
-    assert sources["hindsight"]["retrieval_top_k"] == "unavailable"
+    assert sources["hindsight"]["source_plan_retrieval_top_k"] == "unavailable"
+    assert sources["hindsight"]["retrieval_top_k"] == plan.retrieval.top_k
+    assert sources["hindsight"]["retrieval_top_k_source"] == "saved_report_control"
+    assert sources["hindsight"]["observed_native_candidate_count_max"] == 1
     assert sources["hindsight"]["cell_spec_hash"] == _sha("legacy-hindsight-cell")
-    assert sources["mem0"]["retrieval_top_k"] == 150
-    assert pairs[frozenset(("hindsight", "mem0"))]["comparable"] is False
-    assert pairs[frozenset(("hindsight", "openviking"))]["comparable"] is False
+    assert sources["mem0"]["retrieval_top_k"] == plan.retrieval.top_k
+    assert pairs[frozenset(("hindsight", "mem0"))]["comparable"] is True
+    assert pairs[frozenset(("hindsight", "openviking"))]["comparable"] is True
     assert pairs[frozenset(("mem0", "openviking"))]["comparable"] is True
     assert report["accuracy_decision"]["status"] == "no_clear_accuracy_leader"
     assert captured_factory == {
@@ -432,6 +453,60 @@ def test_saved_provider_results_retain_source_plans_and_suppress_mismatched_pair
         if path.is_file()
     }
     assert source_hashes_after == source_hashes_before
+
+
+def test_saved_provider_results_reject_report_control_when_candidates_exceed_its_ceiling(
+    tmp_path: Path,
+) -> None:
+    from oamb.config.benchmark import load_benchmark_configuration
+    from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
+    from oamb.reporting.saved_results import build_saved_results_report
+    from tests.benchmark_configuration import MODEL_ENVIRONMENT
+
+    plan = build_resolved_plan(
+        load_benchmark_configuration(
+            Path("configs/benchmark.yml"),
+            model_environment=MODEL_ENVIRONMENT,
+        )
+    )
+    result_root = tmp_path / "saved-results"
+    current_plan_bytes = resolved_plan_bytes(plan)
+    legacy_document = json.loads(current_plan_bytes)
+    legacy_document.pop("resolved_plan_hash")
+    legacy_document["retrieval"].pop("top_k")
+    legacy_document["cells"][0]["cell_spec_hash"] = _sha("legacy-cell")
+    legacy_document["resolved_plan_hash"] = canonical_sha256(
+        ["oamb-resolved-plan-initial-v1", legacy_document]
+    )
+    configured_ceiling = plan.retrieval.top_k
+    _write_saved_result_snapshot(
+        result_root,
+        provider_id="hindsight",
+        plan_bytes=canonical_json_bytes(legacy_document),
+        native_candidate_count=configured_ceiling + 1,
+        report_control_top_k=configured_ceiling,
+    )
+    for provider_id in ("mem0", "openviking"):
+        _write_saved_result_snapshot(
+            result_root,
+            provider_id=provider_id,
+            plan_bytes=current_plan_bytes,
+        )
+
+    built = build_saved_results_report(
+        result_root=result_root,
+        output_root=tmp_path / "comparison",
+    )
+
+    report = json.loads(built.export_path.read_bytes())
+    pairs = {
+        frozenset((item["left_provider_id"], item["right_provider_id"])): item
+        for item in report["comparisons"]
+    }
+    for peer in ("mem0", "openviking"):
+        pair = pairs[frozenset(("hindsight", peer))]
+        assert pair["comparable"] is False
+        assert any("retrieval" in reason for reason in pair["limitations"])
 
 
 def test_saved_provider_results_reject_duplicate_provider_before_publication(

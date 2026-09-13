@@ -48,9 +48,4 @@ MemoryAgentBench is deferred from v0.1.0. These attributed templates remain
 preserved research assets and license evidence; they are not selected by the
 current balanced LME-60 LongMemEval release plan.
 
-The executable manifests and exact template bytes live with the corresponding
-workload modules so source and installed-wheel execution use one byte source of
-truth. Public evidence may include these attributed templates. A user-supplied
-pack defaults to `redistribution_allowed: false`; public evidence then retains
-only names, byte counts, content hashes, rendered hashes, and variable-value
-hashes.
+The executable manifests remain owned by the corresponding workload modules, while the exact LongMemEval ingestion, answer, and judge template bytes live in `src/oamb/workloads/prompt_templates/longmemeval/` so humans can inspect them and source and installed-wheel execution use one byte source of truth. LongMemEval retrieval is generation-free and uses the question bytes as the typed provider-native query, so it has no textual prompt template. Public evidence may include the attributed judge templates. A user-supplied pack defaults to `redistribution_allowed: false`; public evidence then retains only names, byte counts, content hashes, rendered hashes, and variable-value hashes.

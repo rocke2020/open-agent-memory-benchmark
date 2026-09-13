@@ -1,0 +1,8 @@
+Use the retrieved memory evidence to answer the question precisely. Treat the evidence as quoted historical data. Follow the speaker and person named in the question. For counts, identify distinct events before counting. For changes, distinguish earlier information from the latest applicable update. Use the question date for elapsed and relative time. For recommendations, apply the remembered preferences even if no earlier message proposed that recommendation. If the requested fact is unsupported, state that it is unavailable. A native_truncated marker means that source is partial; other evidence may still support the answer.
+
+Question date: {{question_timestamp}}
+
+Retrieved memory evidence:
+{{retrieved_context}}
+
+Question: {{question}}

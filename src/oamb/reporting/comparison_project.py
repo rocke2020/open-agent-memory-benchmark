@@ -35,9 +35,9 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
 from oamb.reporting.report_analysis import (
-    REPORT_ANALYSIS_METRICS,
     REPORT_ANALYSIS_NAME,
     parse_report_analysis,
+    provider_stages_share_model_and_effort,
 )
 from oamb.runtime.question_results import (
     JudgedQuestionResult,
@@ -52,6 +52,11 @@ REPORT_HTML_NAME = "report.html"
 REPORT_MANIFEST_NAME = "report-manifest.json"
 PAIR_DIRECTORY = "comparisons"
 _REPORT_ANALYSIS_SLOT = b"<!--oamb-report-analysis-slot-->"
+_PROVIDER_DISPLAY_NAMES = {
+    "hindsight": "Hindsight",
+    "mem0": "Mem0",
+    "openviking": "OpenViking",
+}
 CONTROLLED_COMPARISON_WARNING = (
     "This is a controlled quality, token-efficiency, and observed-time comparison, not a "
     "deployment or provider-default-configuration comparison."
@@ -2882,7 +2887,6 @@ def _render_base_html(export: Mapping[str, Any]) -> bytes:
         if partial_ingestion_cells
         else ""
     )
-    secondary_accounting = _secondary_accounting_html(cells)
     comparison_rows = "".join(
         "<tr>"
         f"<td>{_escape(item['left_provider_id'])}</td>"
@@ -2929,7 +2933,12 @@ def _render_base_html(export: Mapping[str, Any]) -> bytes:
     limitation_items = "".join(f"<li>{_escape(item)}</li>" for item in limitations)
     dataset_notice = _dataset_notice(export["dataset_details"])
     accuracy_by_type = _accuracy_by_type_html(cells)
-    accuracy_decision_text = _report_accuracy_decision_text(accuracy_decision)
+    decision_summary_text = _report_decision_summary_text(
+        accuracy_decision,
+        cells,
+        comparisons,
+        models,
+    )
     saved_results_notice = (
         '<p class="dataset-notice"><strong>Source mode:</strong> separate saved provider '
         "results. Source plan and result hashes are retained in report.json.</p>"
@@ -2992,11 +3001,12 @@ a { color:inherit; }
 <h1>OAMB comparison report</h1>
 <section><h2>Provider decision summary</h2><p class="metric-key"><strong>Five decision metrics:</strong> Answer accuracy · Context tokens · Indexing tokens · Retrieval latency · Indexing time</p><p>{export["coverage"]["unique_case_count"]} unique cases; {export["coverage"]["provider_specific_result_count"]} provider-specific results. Context tokens are the exact retrieval context shown to the answer model.</p>
 {saved_results_notice}
-<p><strong>{_escape(accuracy_decision_text)}</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Answer accuracy</th><th>Context tokens</th><th>Indexing tokens</th><th>Retrieval latency (s)</th><th>Indexing time (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div>
-{partial_ingestion_note}
-{_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Context tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Retrieval latency is the provider memory-query request. Indexing time measures one question's history from first ingestion attempt through readiness; it is not the elapsed time to finish all questions. Histories can overlap, and earlier interrupted attempts are not reconstructed here. Both time columns show median / p95 / max observed seconds.</p>{secondary_accounting}</section>
+<p><strong>{_escape(decision_summary_text)}</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Answer accuracy</th><th>Context tokens</th><th>Indexing tokens</th><th>Retrieval latency (s)</th><th>Indexing time (s)</th></tr></thead><tbody>{cell_rows}</tbody></table></div><p class="muted"><strong>Number abbreviations:</strong> k = thousand; M = million; B = billion.</p></section>
 {_REPORT_ANALYSIS_SLOT.decode("ascii")}
+<section><h2>Measurement notes</h2>
+{partial_ingestion_note}
+{_indexing_measurement_note(cells)}{_omitted_measurements_note(cells)}<p class="muted">Context tokens are the exact context shown to the answer model; they are not provider-internal retrieval supplier usage. Retrieval latency is the provider memory-query request. Indexing time measures one question's history from first ingestion attempt through readiness; it is not the elapsed time to finish all questions. Histories can overlap, and earlier interrupted attempts are not reconstructed here. Both time columns show median / p95 / max observed seconds.</p></section>
 {accuracy_by_type}
 <section><h2>Pairwise accuracy deltas</h2><p>Compares two providers' judged accuracy on the same questions. Positive favors Provider A; negative favors Provider B. Values are percentage points. Exact McNemar p uses the matched discordant outcomes.</p><div class="table-wrap"><table><thead><tr><th>Provider A</th><th>Provider B</th><th>Accuracy delta (A − B)</th><th>Discordant A/B</th><th>Exact McNemar p</th><th>Decision</th></tr></thead><tbody>{comparison_rows}</tbody></table></div>{comparison_note}</section>
 <section><h2>Question results</h2><p>Shows only questions answered incorrectly by at least one provider; complete results remain in report.json. Expand the evidence-backed details below when available.</p><div class="table-wrap"><table><thead><tr><th>Question</th><th>Type</th>{provider_headings}</tr></thead><tbody>{question_rows}</tbody></table></div>{question_details}</section>
@@ -3036,32 +3046,17 @@ def _embed_report_analysis(
     if analysis is None:
         fragment = ""
     else:
-        metrics = analysis.get("metrics")
-        if (
-            not isinstance(metrics, list)
-            or tuple(item.get("metric_id") for item in metrics if isinstance(item, Mapping))
-            != REPORT_ANALYSIS_METRICS
-        ):
-            raise ComparisonProjectError("comparison report analysis metric inventory drifted")
-        labels = {
-            "answer_accuracy": "Answer accuracy",
-            "context_tokens": "Context tokens",
-            "indexing_tokens": "Indexing tokens",
-            "retrieval_latency": "Retrieval latency",
-            "indexing_time": "Indexing time",
-        }
+        provider_insights = analysis.get("provider_insights")
+        if not isinstance(provider_insights, list) or not provider_insights:
+            raise ComparisonProjectError("comparison report provider insights are invalid")
         items = "".join(
             "<li><strong>"
-            f"{_escape(labels[str(item['metric_id'])])}:</strong> "
-            f"{_escape(item['analysis'])}</li>"
-            for item in metrics
+            f"{_escape(_PROVIDER_DISPLAY_NAMES.get(str(item['provider_id']), item['provider_id']))}:"
+            f"</strong> {_escape(item['insight'])}</li>"
+            for item in provider_insights
             if isinstance(item, Mapping)
         )
-        fragment = (
-            "<section><h2>Concise metric comparison</h2>"
-            f"<p>{_escape(analysis.get('overall', 'unavailable'))}</p>"
-            f"<ol>{items}</ol></section>"
-        )
+        fragment = f"<section><h2>What stands out</h2><ul>{items}</ul></section>"
     return base_html.replace(_REPORT_ANALYSIS_SLOT, fragment.encode("utf-8"), 1)
 
 
@@ -3128,7 +3123,7 @@ def _accuracy_by_type_html(cells: tuple[Mapping[str, Any], ...]) -> str:
         rows.append(f"<tr><td>{_escape(question_type)}</td>{values}</tr>")
     return (
         "<section><h2>Accuracy by question type</h2>"
-        '<p>Each LME-60 stratum contains ten frozen questions.</p><div class="table-wrap">'
+        '<p>Each category contains ten questions.</p><div class="table-wrap">'
         "<table><thead><tr>"
         f"<th>Question type</th>{headings}</tr></thead><tbody>{''.join(rows)}"
         "</tbody></table></div></section>"
@@ -3178,7 +3173,7 @@ def _mcnemar_text(value: object) -> str:
         or not isinstance(denominator, int)
     ):
         return "unavailable"
-    return f"{display} ({numerator}/{denominator})"
+    return f"{_number_text(display)} ({numerator}/{denominator})"
 
 
 def _pair_decision_text(value: object) -> str:
@@ -3190,67 +3185,134 @@ def _pair_decision_text(value: object) -> str:
     )
 
 
-def _report_accuracy_decision_text(value: Mapping[str, Any]) -> str:
-    if value.get("status") != "observed_accuracy_leader":
-        return "No clear accuracy leader. See pair evidence and failed predicates."
-    provider = value.get("leader_provider_id")
-    return (
-        f"Observed accuracy leader: {provider}."
-        if isinstance(provider, str)
-        else ("No clear accuracy leader.")
+def _report_accuracy_decision_text(
+    value: Mapping[str, Any],
+    cells: tuple[Mapping[str, Any], ...],
+    comparisons: tuple[Mapping[str, Any], ...],
+) -> str:
+    scored = tuple(
+        (
+            Fraction(_required_int(cell, "judged_numerator"), denominator),
+            cell,
+            denominator,
+        )
+        for cell in cells
+        if (denominator := _required_int(cell, "judged_denominator")) > 0
     )
+    if not scored:
+        return "Recorded accuracy is unavailable."
+    highest = max(score for score, _, _ in scored)
+    leaders = tuple(item for item in scored if item[0] == highest)
+    if len(leaders) == 1:
+        _, leader, denominator = leaders[0]
+        provider_id = _required_text(leader, "provider_id")
+        provider = _PROVIDER_DISPLAY_NAMES.get(provider_id, provider_id)
+        recorded = (
+            f"{provider} has the highest recorded accuracy at "
+            f"{_required_int(leader, 'judged_numerator')}/{denominator}."
+        )
+    else:
+        _, leader, denominator = leaders[0]
+        recorded = (
+            "The highest recorded accuracy is tied at "
+            f"{_required_int(leader, 'judged_numerator')}/{denominator}."
+        )
+    if value.get("status") == "observed_accuracy_leader":
+        if len(leaders) == 1:
+            _, leader, denominator = leaders[0]
+            provider_id = _required_text(leader, "provider_id")
+            provider = _PROVIDER_DISPLAY_NAMES.get(provider_id, provider_id)
+            return (
+                f"Observed accuracy leader: {provider} at "
+                f"{_required_int(leader, 'judged_numerator')}/{denominator}."
+            )
+        return recorded
+    del comparisons
+    return recorded
+
+
+def _report_decision_summary_text(
+    accuracy_decision: Mapping[str, Any],
+    cells: tuple[Mapping[str, Any], ...],
+    comparisons: tuple[Mapping[str, Any], ...],
+    models: object,
+) -> str:
+    accuracy = _report_accuracy_decision_text(
+        accuracy_decision,
+        cells,
+        comparisons,
+    ).removesuffix(".")
+    context = _context_token_decision_clause(cells).removesuffix(".")
+    opening = (
+        "With the same models and thinking effort at each corresponding stage across providers,"
+        if provider_stages_share_model_and_effort(models)
+        else "Across the evaluated providers,"
+    )
+    return f"{opening} {accuracy}, while {context}."
+
+
+def _context_token_decision_clause(cells: tuple[Mapping[str, Any], ...]) -> str:
+    measured: list[tuple[Decimal, Mapping[str, Any]]] = []
+    for cell in cells:
+        accounting = cell.get("accounting")
+        if not isinstance(accounting, Mapping):
+            continue
+        context = accounting.get("answer_visible_context_tokens")
+        if not isinstance(context, Mapping) or context.get("status") == "unavailable":
+            continue
+        try:
+            mean = Decimal(str(context.get("mean")))
+        except InvalidOperation:
+            continue
+        if mean.is_finite() and mean >= 0:
+            measured.append((mean, cell))
+    if len(measured) != len(cells) or not measured:
+        return "answer-context comparison is unavailable"
+    lowest_mean = min(mean for mean, _ in measured)
+    leaders = tuple(cell for mean, cell in measured if mean == lowest_mean)
+    if len(leaders) != 1:
+        providers = " and ".join(
+            _PROVIDER_DISPLAY_NAMES.get(
+                _required_text(cell, "provider_id"),
+                _required_text(cell, "provider_id"),
+            )
+            for cell in leaders
+        )
+        return (
+            f"the least answer context is tied at {_number_text(lowest_mean)} mean tokens "
+            f"across {providers}"
+        )
+    else:
+        leader = leaders[0]
+        leader_id = _required_text(leader, "provider_id")
+        provider = _PROVIDER_DISPLAY_NAMES.get(leader_id, leader_id)
+        reductions: list[str] = []
+        for mean, cell in measured:
+            if cell is leader or mean <= 0:
+                continue
+            other_id = _required_text(cell, "provider_id")
+            other = _PROVIDER_DISPLAY_NAMES.get(other_id, other_id)
+            reduction = ((Decimal(1) - (lowest_mean / mean)) * Decimal(100)).quantize(
+                Decimal("1"),
+                rounding=ROUND_HALF_UP,
+            )
+            reductions.append(f"{_number_text(reduction)}% less context than {other}")
+        reduction_text = " and ".join(reductions)
+        return (
+            f"{provider} uses {reduction_text}"
+            if reduction_text
+            else f"{provider} uses the least answer context"
+        )
 
 
 def _context_text(item: Mapping[str, Any]) -> str:
     accounting = item["accounting"]
     context = accounting["answer_visible_context_tokens"]
-    coverage = (
-        f"{context['measured_case_count']}/{context['case_count']} cases ({context['status']})"
-    )
+    coverage = f"{context['measured_case_count']}/{context['case_count']} cases measured"
     if context["status"] == "unavailable":
         return f"unavailable; {coverage}"
     return (
         f"{_number_text(context['total'])} total / {_number_text(context['mean'])} mean; {coverage}"
-    )
-
-
-def _secondary_accounting_html(cells: tuple[Mapping[str, Any], ...]) -> str:
-    if not any(_has_secondary_accounting(item) for item in cells):
-        return ""
-    items = "".join(
-        "<li>"
-        f"<strong>{_escape(item['provider_id'])}</strong>: Answer input "
-        f"{_escape(_number_text(item['accounting']['tokens']['answer']['totals']['input_tokens']['value']))}; "
-        f"Failures / retries {_escape(_failure_retry_text(item['accounting']['attempts']))}; "
-        f"cost {_escape(_cost_text(item['accounting']['cost']))}</li>"
-        for item in cells
-    )
-    return (
-        "<details><summary>Secondary accounting</summary>"
-        f'<ul>{items}</ul><p class="muted">Lower context tokens usually reduce Answer input, '
-        "but this report does not infer a provider's internal retrieval strategy from that "
-        "correlation.</p></details>"
-    )
-
-
-def _has_secondary_accounting(cell: Mapping[str, Any]) -> bool:
-    accounting = cell["accounting"]
-    answer_input = accounting["tokens"]["answer"]["totals"]["input_tokens"]["value"]
-    attempts = accounting["attempts"]
-    cost = accounting["cost"]
-    return (
-        answer_input != "unavailable"
-        or any(
-            attempts[key] != "unavailable"
-            for key in (
-                "failed_count",
-                "retry_count",
-                "cancelled_count",
-                "unknown_outcome_count",
-            )
-        )
-        or cost["actual_supplier_charge"] != "unavailable"
-        or cost["billing_coverage"]["status"] != "unavailable"
     )
 
 
@@ -3273,11 +3335,31 @@ def _supplier_tokens_text(stage: Mapping[str, Any]) -> str:
 def _number_text(value: object) -> str:
     if isinstance(value, bool):
         return str(value)
-    if isinstance(value, int):
-        return f"{value:,}"
-    if isinstance(value, str) and re.fullmatch(r"-?\d+(?:\.\d+)?", value):
-        return format(Decimal(value), ",f")
-    return str(value)
+    decimal = _decimal_value(value)
+    if decimal is None or not decimal.is_finite():
+        return str(value)
+    absolute = abs(decimal)
+    for threshold, scale, suffix in (
+        (Decimal(1_000_000_000), Decimal(1_000_000_000), " B"),
+        (Decimal(1_000_000), Decimal(1_000_000), " M"),
+        (Decimal("9999.5"), Decimal(1_000), " k"),
+    ):
+        if absolute >= threshold:
+            return f"{_four_digit_decimal(decimal / scale)}{suffix}"
+    return _four_digit_decimal(decimal)
+
+
+def _four_digit_decimal(value: Decimal) -> str:
+    absolute = abs(value)
+    if Decimal(0) < absolute < Decimal("0.001"):
+        return "<0.001" if value > 0 else ">-0.001"
+    integer_digits = 1 if absolute < 1 else len(str(int(absolute)))
+    decimal_places = max(0, 4 - integer_digits)
+    rounded = value.quantize(
+        Decimal(1).scaleb(-decimal_places),
+        rounding=ROUND_HALF_UP,
+    )
+    return _decimal_text(rounded)
 
 
 def _omitted_measurements_note(
@@ -3451,7 +3533,7 @@ def _provider_detail_html(result: Mapping[str, Any]) -> str:
         return f"{heading}<p>{_escape(reason)}</p></details>"
     return (
         f"{heading}<p>Judge decision: <strong>{_escape(result['judge_decision'])}</strong>; "
-        f"Context tokens: {_escape(result['context_tokens'])}</p>"
+        f"Context tokens: {_escape(_number_text(result['context_tokens']))}</p>"
         f"<h4>Model answer</h4><pre>{_escape(result['model_answer'])}</pre>"
         "<details><summary>Injected context</summary>"
         f"<pre>{_escape(result['injected_context'])}</pre></details></details>"
@@ -3461,21 +3543,25 @@ def _provider_detail_html(result: Mapping[str, Any]) -> str:
 def _time_text(value: object) -> str:
     if value == "unavailable":
         return "unavailable"
-    decimal = (Decimal(str(value)) / Decimal(1_000_000)).quantize(
-        Decimal("0.001"),
-        rounding=ROUND_HALF_UP,
-    )
-    return f"{format(decimal, 'f')} s"
+    decimal = _decimal_value(value)
+    if decimal is None:
+        return "unavailable"
+    return f"{_number_text(decimal / Decimal(1_000_000))} s"
 
 
 def _request_time_text(value: Mapping[str, object]) -> str:
-    coverage = f"n={value['count']} ({value['status']})"
-    if value["status"] == "unavailable":
-        return f"unavailable; {coverage}"
+    status = value["status"]
+    coverage = ""
+    if status == "measured_partial":
+        coverage = f"; n={value['count']}, partial"
+    elif status not in {"measured", "unavailable"}:
+        coverage = f"; n={value['count']}, {str(status).replace('_', ' ')}"
+    if status == "unavailable":
+        return f"unavailable; n={value['count']}"
     return (
         f"median {_time_text(value['median_microseconds'])}; "
         f"p95 {_time_text(value['p95_microseconds'])}; "
-        f"max {_time_text(value['maximum_microseconds'])}; {coverage}"
+        f"max {_time_text(value['maximum_microseconds'])}{coverage}"
     )
 
 
@@ -3498,23 +3584,6 @@ def _delta_text(value: object) -> str:
     )
     sign = "+" if points > 0 else ""
     return f"{sign}{format(points, 'f')} pp"
-
-
-def _failure_retry_text(value: Mapping[str, object]) -> str:
-    return (
-        f"failed={value['failed_count']}, retry={value['retry_count']}, "
-        f"cancelled={value['cancelled_count']}, unknown={value['unknown_outcome_count']}"
-    )
-
-
-def _cost_text(value: Mapping[str, Any]) -> str:
-    totals = value["actual_supplier_charge"]
-    rendered = (
-        ", ".join(f"{currency} {amount}" for currency, amount in totals.items())
-        if isinstance(totals, Mapping)
-        else "unavailable"
-    )
-    return f"{rendered}; billing={value['billing_coverage']['status']}"
 
 
 def _escape(value: object) -> str:

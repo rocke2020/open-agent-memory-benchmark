@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from fractions import Fraction
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -1237,10 +1238,10 @@ def test_project_reports_separated_accounting_and_preserves_unavailable_measurem
     assert "/ coverage</th>" not in rendered
     assert "<th>Configured</th>" not in rendered
     assert "<th>Runtime</th>" in rendered
-    assert "Secondary accounting" in rendered
-    assert "Answer input" in rendered
-    assert "Failures / retries" in rendered
-    assert "CNY 0.0125" in rendered
+    assert "Secondary accounting" not in rendered
+    assert "Answer input" not in rendered
+    assert "Failures / retries" not in rendered
+    assert "CNY 0.013" not in rendered
     assert "Retrieval supplier usage" not in rendered
     assert "Judge supplier usage" not in rendered
     assert "Peak memory" not in rendered
@@ -1342,10 +1343,10 @@ def test_indexing_measurement_note_explains_partial_and_unavailable_coverage() -
     assert "hindsight: 300/300 metered" in note
     assert "every report record has a total, but usage details can still be incomplete" in note
     assert "hindsight reasoning breakdown is unavailable, not zero" in note
-    assert "5,764,508 is the measured supplier total, with no inferred reasoning added" in note
+    assert "5.765 M is the measured supplier total, with no inferred reasoning added" in note
     assert "mem0: 0/300 metered" in note
     assert "openviking: 300/300 metered" in note
-    assert "openviking reasoning: 1,436,612, already included in its total" in note
+    assert "openviking reasoning: 1.437 M, already included in its total" in note
     assert "300/600" not in note
     assert "0/600" not in note
     assert "0/602" not in note
@@ -1630,29 +1631,90 @@ def test_project_seals_and_embeds_analysis_bound_to_the_exact_report(
     from oamb.reporting.report_analysis import generate_report_analysis
 
     plan = _plan(tmp_path)
-    sources = _sources(tmp_path, plan)
+    sources = _content_sources(tmp_path, plan)
     supplied_by_root = {source.root: source.validation_result for source in sources.values()}
     monkeypatch.setattr(
         comparison_project,
         "validate_source_root",
         lambda root: supplied_by_root[root],
     )
-    metric_ids = (
-        "answer_accuracy",
-        "context_tokens",
-        "indexing_tokens",
-        "retrieval_latency",
-        "indexing_time",
+    dataset_source = tmp_path / "dataset.json"
+    dataset_source.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(
+        comparison_project,
+        "_load_local_question_content",
+        lambda resolved_plan, source, case_manifest_bytes: tuple(
+            {
+                **item,
+                "question_type": (
+                    "knowledge-update",
+                    "multi-session",
+                    "single-session-assistant",
+                    "single-session-preference",
+                    "single-session-user",
+                    "temporal-reasoning",
+                )[index],
+            }
+            for index, item in enumerate(_local_question_content())
+        ),
     )
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body = json.loads(request.content)
+        evaluation = json.loads(request_body["messages"][2]["content"])["evidence"]
+        cells = tuple(evaluation["cells"])
+        provider_ids = tuple(cell["provider_id"] for cell in cells)
+        leader = max(
+            cells,
+            key=lambda cell: Fraction(
+                cell["answer_accuracy"]["numerator"],
+                cell["answer_accuracy"]["denominator"],
+            ),
+        )
+        context_leader = min(
+            cells,
+            key=lambda cell: Decimal(cell["context_tokens"]["mean"]),
+        )
+        context_reductions = " and ".join(
+            f"{((Decimal(1) - Decimal(context_leader['context_tokens']['mean']) / Decimal(cell['context_tokens']['mean'])) * Decimal(100)).quantize(Decimal('1'))}% less context than {cell['provider_id']}"
+            for cell in cells
+            if cell is not context_leader
+        )
+        operational_results = (
+            f"Compared with {provider_ids[1]}, its indexing tokens differ.",
+            f"Compared with {provider_ids[2]}, its context tokens and retrieval latency differ.",
+            f"Compared with {provider_ids[0]} and {provider_ids[1]}, its retrieval latency and "
+            "indexing time differ.",
+        )
         content = json.dumps(
             {
-                "overall": "The observed providers trade quality, tokens, and time.",
-                "metrics": {
-                    metric_id: f"Evidence-bounded comparison for {metric_id}."
-                    for metric_id in metric_ids
-                },
+                "overall": (
+                    "With the same models and thinking effort at each corresponding stage across "
+                    f"providers, {leader['provider_id']} has the highest recorded accuracy at "
+                    f"{leader['answer_accuracy']['numerator']}/"
+                    f"{leader['answer_accuracy']['denominator']}, while "
+                    f"{context_leader['provider_id']} uses {context_reductions}."
+                ),
+                "provider_insights": [
+                    {
+                        "provider_id": provider_id,
+                        "insight": (
+                            f"{provider_id} records {records[0]['correct']}/{records[0]['total']} "
+                            f"on {records[0]['question_type']} and "
+                            f"{records[1]['correct']}/{records[1]['total']} on "
+                            f"{records[1]['question_type']}, with a missed-case error pattern. "
+                            f"{operational}"
+                        ),
+                    }
+                    for provider_id, records, operational in (
+                        (
+                            cell["provider_id"],
+                            cell["question_type_accuracy"],
+                            operational,
+                        )
+                        for cell, operational in zip(cells, operational_results, strict=True)
+                    )
+                ],
             }
         )
         return httpx.Response(
@@ -1666,7 +1728,7 @@ def test_project_seals_and_embeds_analysis_bound_to_the_exact_report(
     def generate(export: dict[str, object]) -> bytes | None:
         generated = generate_report_analysis(
             export,
-            model="deepseek-v4-flash",
+            model=__name__,
             thinking_effort="high",
             base_url="https://models.example/v1",
             api_key="secret-test-key",
@@ -1682,6 +1744,7 @@ def test_project_seals_and_embeds_analysis_bound_to_the_exact_report(
         plan,
         sources,
         output_root=tmp_path / "report",
+        dataset_source=dataset_source,
         analysis_generator=generate,
     )
 
@@ -1693,9 +1756,35 @@ def test_project_seals_and_embeds_analysis_bound_to_the_exact_report(
         == hashlib.sha256(built.export_path.read_bytes()).hexdigest()
     )
     html = built.html_path.read_text(encoding="utf-8")
-    assert analysis["overall"] in html
-    for item in analysis["metrics"]:
-        assert item["analysis"] in html
+    assert analysis["overall"] not in html
+    assert "What stands out" in html
+    assert "Concise metric comparison" not in html
+    assert "Measurement notes" in html
+    assert "k = thousand; M = million; B = billion" in html
+    assert html.index("<th>Indexing time (s)</th>") < html.index("What stands out")
+    assert html.index("What stands out") < html.index("Measurement notes")
+    decision_summary = html.split("<section><h2>What stands out</h2>", 1)[0]
+    assert "less context" in decision_summary
+    assert (
+        "With the same models and thinking effort at each corresponding stage across providers,"
+        in decision_summary
+    )
+    assert (
+        html.count(
+            "With the same models and thinking effort at each corresponding stage across providers,"
+        )
+        == 1
+    )
+    assert "cost" not in decision_summary.casefold()
+    assert "The decision rule does not establish an overall winner." not in decision_summary
+    assert "candidate ceiling" not in decision_summary
+    assert "top-k" not in decision_summary
+    assert "Secondary accounting" not in html
+    assert "measured_complete" not in html
+    assert "failed predicates" not in html
+    assert "LME-60 stratum" not in html
+    for item in analysis["provider_insights"]:
+        assert item["insight"] in html
     manifest = json.loads(built.manifest_path.read_bytes())
     assert manifest["analysis_sha256"] == hashlib.sha256(analysis_bytes).hexdigest()
 
@@ -1971,6 +2060,107 @@ def test_visible_time_is_decimal_seconds_only() -> None:
     from oamb.reporting.comparison_project import _time_text
 
     assert _time_text(1_234_567) == "1.235 s"
+    assert _time_text(1_234_567_890) == "1235 s"
+
+
+def test_accuracy_headline_omits_control_configuration() -> None:
+    from oamb.reporting.comparison_project import _report_accuracy_decision_text
+
+    case_count = 3
+    cells = tuple(
+        {
+            "cell_id": f"cell-{index}",
+            "provider_id": f"provider-{index}",
+            "judged_numerator": case_count - index,
+            "judged_denominator": case_count,
+        }
+        for index in range(case_count)
+    )
+    comparisons = tuple(
+        {
+            "left_cell_id": cells[0]["cell_id"],
+            "right_cell_id": cell["cell_id"],
+            "comparable": False,
+            "limitations": ("shared retrieval top_k candidate ceiling is not proven",),
+        }
+        for cell in cells[1:]
+    )
+
+    rendered = _report_accuracy_decision_text(
+        {"status": "no_clear_accuracy_leader"},
+        cells,
+        comparisons,
+    )
+
+    assert str(cells[0]["provider_id"]) in rendered
+    assert "retrieval" not in rendered.casefold()
+    assert "top-k" not in rendered.casefold()
+    assert "overall winner" not in rendered.casefold()
+
+
+def test_report_summary_does_not_claim_shared_effort_when_provider_stages_differ() -> None:
+    from oamb.reporting.comparison_project import _report_decision_summary_text
+
+    cells = tuple(
+        {
+            "cell_id": f"cell-{index}",
+            "provider_id": f"provider-{index}",
+            "judged_numerator": 3 - index,
+            "judged_denominator": 3,
+            "accounting": {
+                "answer_visible_context_tokens": {
+                    "status": "measured_complete",
+                    "mean": str(100 * (index + 1)),
+                }
+            },
+        }
+        for index in range(3)
+    )
+    models = tuple(
+        {
+            "role_id": role_id,
+            "model": __name__,
+            "thinking_effort": "high" if index == 1 else "low",
+        }
+        for index, role_id in enumerate(
+            (
+                "hindsight_extraction",
+                "mem0_extraction",
+                "openviking_semantic_understanding",
+            )
+        )
+    )
+
+    summary = _report_decision_summary_text(
+        {"status": "no_clear_accuracy_leader"},
+        cells,
+        (),
+        models,
+    )
+
+    assert summary.startswith("Across the evaluated providers,")
+    assert "same models" not in summary
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (12_345_678, "12.35 M"),
+        ("12345.6", "12.35 k"),
+        (987_654, "987.7 k"),
+        (999, "999"),
+    ),
+)
+def test_human_numbers_never_show_more_than_four_digits(
+    value: object,
+    expected: str,
+) -> None:
+    from oamb.reporting.comparison_project import _number_text
+
+    rendered = _number_text(value)
+
+    assert rendered == expected
+    assert len(re.sub(r"\D", "", rendered)) <= 4
 
 
 def test_accuracy_text_keeps_exact_denominator_and_human_percentage() -> None:
@@ -2276,6 +2466,7 @@ def test_lme60_project_exports_accuracy_evidence_and_renders_the_decision(
     assert "Exact McNemar p" in rendered
     assert "Observed accuracy leader" in rendered
     assert "Accuracy by question type" in rendered
+    assert "Each category contains ten questions." in rendered
 
 
 def test_lme60_normal_comparison_rejects_one_question_capsules(
@@ -2508,9 +2699,10 @@ def test_provider_headline_exposes_partial_context_and_latency_coverage() -> Non
     )
 
     assert "1/2 (50.0%); judged 2/3 cases" in row
-    assert "100 total / 50 mean; 2/3 cases (measured_partial)" in row
-    assert "n=1 (measured_partial)" in row
-    assert "n=3 (measured)" in row
+    assert "100 total / 50 mean; 2/3 cases measured" in row
+    assert "n=1, partial" in row
+    assert "n=3" not in row
+    assert "measured_partial" not in row
 
 
 def test_indexing_ready_latency_spans_ingest_through_readiness_per_plan() -> None:

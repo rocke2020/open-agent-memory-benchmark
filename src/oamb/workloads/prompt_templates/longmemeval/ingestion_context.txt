@@ -1,0 +1,1 @@
+Session {{session_id}} - you are the assistant for this conversation - took place at {{timestamp}}.

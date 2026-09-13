@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import math
+from importlib.resources import files
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
@@ -134,6 +135,84 @@ def test_bundle_frames_ingestion_context_as_an_assistant_conversation(tmp_path: 
         "Session session-1 - you are the assistant for this conversation - took place at "
         "2024-02-28T01:02:00+00:00."
     )
+
+
+def test_longmemeval_templates_are_packaged_without_changing_runtime_bytes() -> None:
+    lme = require_longmemeval()
+    expected_hashes = {
+        "ingestion_context": "8a3c975afdf2ab32651ea2ec3dc6673e8d8153c1d4b8aa65cfa89162a1449d5f",
+        "answer_user": "e8be9760dc8b322400b01b9364cafbed8b5274eaaffe33ffe610bf7351a3fa0f",
+        "judge_knowledge_update": "e640ccd14da3a252247ade980d38722d29bcccc1d66cc50098db51cb2d8edeb3",
+        "judge_multi_session": "056f9307755b019bbdb358abd276d14918d06bb79355990ea0f69e39ab48400f",
+        "judge_single_session_assistant": (
+            "056f9307755b019bbdb358abd276d14918d06bb79355990ea0f69e39ab48400f"
+        ),
+        "judge_single_session_preference": (
+            "beb40178a762d9c2ea068ea1057d7760cdbd4c58c70b7ba5bdef2c1bcb8677c6"
+        ),
+        "judge_single_session_user": (
+            "056f9307755b019bbdb358abd276d14918d06bb79355990ea0f69e39ab48400f"
+        ),
+        "judge_temporal_reasoning": (
+            "dfd2fa9733e7e857d1425e75f0cedb88a16a2e0c0c257e2cc97bd0626db5f200"
+        ),
+        "judge_abs": "0ad7b1f42686473ac5fc26ce781060f09e85107307d31564bb5807a7c475f1be",
+    }
+    template_root = files("oamb.workloads").joinpath("prompt_templates", "longmemeval")
+
+    runtime_templates = {
+        name: template_root.joinpath(f"{name}.txt").read_bytes()[:-1] for name in expected_hashes
+    }
+
+    assert all(
+        template_root.joinpath(f"{name}.txt").read_bytes().endswith(b"\n")
+        for name in expected_hashes
+    )
+    assert {
+        name: hashlib.sha256(content).hexdigest() for name, content in runtime_templates.items()
+    } == expected_hashes
+    assert lme._INGESTION_CONTEXT_TEMPLATE == runtime_templates["ingestion_context"]
+    assert lme.LME_PROMPT_PACKS[0].templates == {"answer_user": runtime_templates["answer_user"]}
+    assert lme.LME_PROMPT_PACKS[1].templates == {
+        name: runtime_templates[name] for name in expected_hashes if name.startswith("judge_")
+    }
+    assert tuple(pack.manifest.manifest_sha256 for pack in lme.LME_PROMPT_PACKS) == (
+        "6167d60478e6ed25934a84680c558d0763c4d6d063f99fd5c63ecc6d286efb47",
+        "8d983732e79e177df1ea53db79cfc0d0c84ba2b92c9ab2972172fd9c0dfbe727",
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored", "message"),
+    (
+        (None, "unavailable"),
+        (b"{{session_id}} {{timestamp}}", "terminal LF"),
+        (b"{{session_id}} {{timestamp}}\r\n", "terminal LF"),
+        (b"\n", "empty"),
+        (b"\xff\n", "UTF-8"),
+        (b"{{session_id}}\n", "placeholders"),
+    ),
+)
+def test_longmemeval_template_loader_rejects_invalid_resources_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    stored: bytes | None,
+    message: str,
+) -> None:
+    lme = require_longmemeval()
+
+    class Resource:
+        def joinpath(self, *_parts: str) -> Resource:
+            return self
+
+        def read_bytes(self) -> bytes:
+            if stored is None:
+                raise FileNotFoundError
+            return stored
+
+    monkeypatch.setattr(lme, "files", lambda _package: Resource())
+
+    with pytest.raises(RuntimeError, match=message):
+        lme._load_lme_template("invalid", ("session_id", "timestamp"))
 
 
 def test_loader_rejects_checksum_and_aligned_list_failures(tmp_path: Path) -> None:
