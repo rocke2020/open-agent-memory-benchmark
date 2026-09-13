@@ -136,7 +136,8 @@ def test_real_pinned_source_builds_exact_lme30_and_lme6_manifests() -> None:
     assert tuple(row.question_id for row in reversed_selection) == EXPECTED_IDS
     assert full.dataset_manifest.manifest_hash == lme.LME_DATASET_MANIFEST_HASH
     assert full.case_manifest.manifest_hash == lme.LME30_CASE_MANIFEST_HASH
-    assert full.dataset_manifest.source_files[0].license_id == "NOASSERTION"
+    assert full.dataset_manifest.source_files[0].license_id == "MIT"
+    assert full.dataset_manifest.payload_policy == "redistribution-allowed-under-MIT"
     assert len(full.case_manifest.logical_contexts) == 30
     assert len(full.case_manifest.ingestion_plans) == 30
     assert len(full.case_manifest.cases) == 30
@@ -193,7 +194,7 @@ def test_real_pinned_source_builds_exact_balanced_lme60_manifest() -> None:
     assert bundle.case_manifest.manifest_id == "lme60-balanced-v1-manifest-v1"
     assert (
         bundle.case_manifest.manifest_hash
-        == "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
+        == "20afb9ae0d18a5821871e76a1b90df573fd5f155511c264249fdb49154088962"
     )
     assert len(bundle.case_manifest.logical_contexts) == 60
     assert len(bundle.case_manifest.ingestion_plans) == 60
@@ -279,7 +280,9 @@ def test_lme_profile_binds_complete_dataset_source_identity() -> None:
             update={"source_files": (original_file.model_copy(update={"byte_count": 1}),)}
         ),
         original_dataset.model_copy(
-            update={"source_files": (original_file.model_copy(update={"license_id": "MIT"}),)}
+            update={
+                "source_files": (original_file.model_copy(update={"license_id": "Apache-2.0"}),)
+            }
         ),
     )
 

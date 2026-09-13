@@ -11,7 +11,7 @@ import pytest
 from oamb.config.benchmark import load_benchmark_configuration
 from oamb.config.doctor import build_resolved_plan, resolved_plan_bytes
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
-from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
+from oamb.workloads.longmemeval import LME60_CASE_MANIFEST_HASH, LME60_EXPECTED_QUESTION_IDS
 from tests.benchmark_configuration import MODEL_ENVIRONMENT
 from tests.unit.test_question_results import _judged_result
 
@@ -95,9 +95,7 @@ def _write_legacy_resume_source(root: Path, *, mismatch: bool = False) -> tuple[
             "cell_id": cell_id,
             "provider_id": provider,
             "workload_id": "lme60-balanced-v1",
-            "case_manifest_hash": (
-                "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
-            ),
+            "case_manifest_hash": LME60_CASE_MANIFEST_HASH,
             "ordered_question_ids": list(LME60_EXPECTED_QUESTION_IDS),
             "results": [
                 _progress_entry(

@@ -491,7 +491,7 @@ def test_lme60_cells_use_their_frozen_workload_and_producer_role(
     assert built.role_ids == (producer_role_id, "embedding", "answer", "judge")
     assert built.control.run_spec.workload_id == "lme60-balanced-v1"
     assert built.control.run_spec.case_manifest_hash == (
-        "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
+        "20afb9ae0d18a5821871e76a1b90df573fd5f155511c264249fdb49154088962"
     )
     assert built.control.budget.max_attempts == 28_015
     assert built.control.max_retries_per_operation == 2

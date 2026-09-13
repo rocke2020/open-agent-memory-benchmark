@@ -32,6 +32,7 @@ from oamb.artifacts.validation.source_root import validate_source_root
 from oamb.config.doctor import CellSpec, ModelExecutionBinding, ResolvedPlan
 from oamb.contracts.evidence import CapsuleManifest, ValidationResult
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from oamb.contracts.specifications import CaseManifest
 from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.openviking.session_adapter import OPENVIKING_SESSION_PROFILE_ID
 from oamb.reporting.report_analysis import (
@@ -453,21 +454,6 @@ def build_question_results_comparison_project(
         raise ComparisonProjectError(
             "saved result provenance does not close the provider inventory"
         )
-    cell_documents_list: list[dict[str, Any]] = []
-    for cell in plan.cells:
-        document = _question_result_cell_document(
-            plan,
-            cell,
-            case_manifest,
-            results_by_cell[cell.cell_id],
-        )
-        if saved_result_sources:
-            source = saved_sources_by_provider[cell.provider_id]
-            document["cell_spec_hash"] = source["cell_spec_hash"]
-            document["source_resolved_plan_hash"] = source["resolved_plan_hash"]
-            document["source_result_sha256"] = source["result_sha256"]
-        cell_documents_list.append(document)
-    cell_documents = tuple(cell_documents_list)
     local_question_content = (
         _load_local_question_content(
             plan,
@@ -477,6 +463,22 @@ def build_question_results_comparison_project(
         if dataset_source is not None
         else ()
     )
+    cell_documents_list: list[dict[str, Any]] = []
+    for cell in plan.cells:
+        document = _question_result_cell_document(
+            plan,
+            cell,
+            case_manifest,
+            results_by_cell[cell.cell_id],
+            include_content=not bool(local_question_content),
+        )
+        if saved_result_sources:
+            source = saved_sources_by_provider[cell.provider_id]
+            document["cell_spec_hash"] = source["cell_spec_hash"]
+            document["source_resolved_plan_hash"] = source["resolved_plan_hash"]
+            document["source_result_sha256"] = source["result_sha256"]
+        cell_documents_list.append(document)
+    cell_documents = tuple(cell_documents_list)
     question_documents = _question_result_question_documents(
         plan.cells,
         case_manifest,
@@ -879,6 +881,8 @@ def _question_result_cell_document(
     cell: CellSpec,
     case_manifest: Any,
     results: Mapping[str, QuestionResult],
+    *,
+    include_content: bool = True,
 ) -> dict[str, Any]:
     """Reduce ordinary question results without reconstructing capsule identities."""
 
@@ -887,6 +891,7 @@ def _question_result_cell_document(
             item.case_manifest_entry_id,
             item.raw_question_id,
             results[item.raw_question_id],
+            include_content=include_content,
         )
         for item in case_manifest.cases
     )
@@ -966,10 +971,12 @@ def _question_result_case_document(
     case_manifest_entry_id: str,
     question_id: str,
     entry: QuestionResult,
+    *,
+    include_content: bool,
 ) -> dict[str, Any]:
     judged = isinstance(entry, JudgedQuestionResult)
     judged_entry = cast(JudgedQuestionResult, entry) if judged else None
-    return {
+    document: dict[str, Any] = {
         "case_manifest_entry_id": case_manifest_entry_id,
         "question_id": question_id,
         "state": "completed" if judged else "error",
@@ -982,21 +989,27 @@ def _question_result_case_document(
         "metric_denominator": (
             judged_entry.evaluation.denominator if judged_entry is not None else None
         ),
-        "judge_decision": (
-            judged_entry.evaluation.judge_decision if judged_entry is not None else None
-        ),
-        "model_answer": (
-            entry.answer.parsed_answer.value if entry.answer.status == "parsed" else None
-        ),
-        "answer_unavailable_reason": (
-            None if entry.answer.status == "parsed" else entry.answer.parsed_answer.reason
-        ),
-        "injected_context": entry.retrieval.visible_context.value,
         "visible_evidence_token_count": entry.retrieval.visible_context_token_count.value,
         "error_stage": getattr(entry, "failure_stage", None),
         "failure_kind": getattr(entry, "failure_kind", None),
         "failure_reason": getattr(entry, "failure_reason", None),
     }
+    if include_content:
+        document.update(
+            {
+                "judge_decision": (
+                    judged_entry.evaluation.judge_decision if judged_entry is not None else None
+                ),
+                "model_answer": (
+                    entry.answer.parsed_answer.value if entry.answer.status == "parsed" else None
+                ),
+                "answer_unavailable_reason": (
+                    None if entry.answer.status == "parsed" else entry.answer.parsed_answer.reason
+                ),
+                "injected_context": entry.retrieval.visible_context.value,
+            }
+        )
+    return document
 
 
 def _question_result_accounting_document(
@@ -1643,18 +1656,24 @@ def _load_local_question_content(
         raise ComparisonProjectError("dataset source changed while the report was built") from exc
     if after_hash != before_hash:
         raise ComparisonProjectError("dataset source changed while the report was built")
+    try:
+        report_manifest = CaseManifest.model_validate_json(case_manifest_bytes)
+    except ValueError as exc:
+        raise ComparisonProjectError("frozen case manifest cannot parse") from exc
     if (
         bundle.dataset_manifest.dataset_id != plan.dataset.dataset_id
         or bundle.dataset_manifest.revision != plan.dataset.revision
         or bundle.case_manifest.workload_id != plan.dataset.workload_id
-        or bundle.case_manifest.manifest_hash != plan.dataset.case_manifest_hash
-        or canonical_json_bytes(bundle.case_manifest) != case_manifest_bytes
+        or report_manifest.workload_id != plan.dataset.workload_id
+        or report_manifest.manifest_hash != plan.dataset.case_manifest_hash
+        or tuple(item.raw_question_id for item in bundle.case_manifest.cases)
+        != tuple(item.raw_question_id for item in report_manifest.cases)
     ):
         raise ComparisonProjectError("dataset source does not match the frozen case manifest")
 
     content: list[dict[str, object]] = []
     for manifest_case, row in zip(
-        bundle.case_manifest.cases,
+        report_manifest.cases,
         bundle.selected_rows,
         strict=True,
     ):
@@ -1720,6 +1739,7 @@ def _dataset_details_document(
         LME_DATASET_CITATION,
         LME_DATASET_SOURCE_ID,
         LME_PAYLOAD_POLICY,
+        LME_PUBLIC_DISTRIBUTION_SCOPE,
         LME_SOURCE_LICENSE_ID,
     )
 
@@ -1729,7 +1749,7 @@ def _dataset_details_document(
         "revision": plan.dataset.revision,
         "source_sha256": plan.dataset.source_sha256,
         "case_manifest_hash": plan.dataset.case_manifest_hash,
-        "distribution_scope": "local_only",
+        "distribution_scope": LME_PUBLIC_DISTRIBUTION_SCOPE,
         "license_id": LME_SOURCE_LICENSE_ID,
         "payload_policy": LME_PAYLOAD_POLICY,
         "citation": LME_DATASET_CITATION,
@@ -2669,7 +2689,7 @@ def _validate_comparison_export(
         }
         if (
             set(details) != required_detail_keys
-            or details.get("distribution_scope") != "local_only"
+            or details.get("distribution_scope") != "public"
             or any(not content_keys.issubset(question) for question in questions)
         ):
             raise ComparisonProjectError("comparison export verified dataset detail is incomplete")
@@ -3442,9 +3462,9 @@ def _dataset_notice(details: Mapping[str, object]) -> str:
             "because no verified dataset source was supplied.</p>"
         )
     return (
-        '<details class="dataset-notice"><summary>Personal/offline detail report · '
+        '<details class="dataset-notice"><summary>Public detail report · '
         "Dataset provenance</summary>"
-        "<p>This content-bearing artifact is local-only under the frozen dataset policy. "
+        "<p>This content-bearing artifact may be redistributed under the MIT license. "
         f"Source: {_escape(details['source_id'])}; revision: "
         f"<code>{_escape(details['revision'])}</code>; source SHA-256: "
         f"<code>{_escape(details['source_sha256'])}</code>; license metadata: "

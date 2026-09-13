@@ -1,8 +1,6 @@
 # Dataset Policy
 
-> **TL;DR:** Downloaded benchmark payloads stay under ignored `datasets/`.
-> Repository scripts fetch only the frozen LongMemEval S and MemoryAgentBench
-> inputs and reject bytes that do not match their pinned SHA-256 values.
+> **TL;DR:** Full downloaded benchmark payloads stay under ignored `datasets/`. Versioned release evidence under `eval_results/` may include the selected question content needed to audit a report when the upstream license permits redistribution.
 
 MemoryAgentBench remains downloadable, pinned research input but is deferred
 from v0.1.0. The planned release comparison uses the balanced LME-60 selection
@@ -14,9 +12,7 @@ OAMB does not treat benchmark data as project-owned source code. Every dataset
 binding must identify its authoritative source, exact revision, file hashes,
 license, redistribution policy, and any required local download procedure.
 
-Raw, downloaded, restricted, or bulk datasets are not committed by default.
-Small generated or license-compatible fixtures may be tracked when they are
-necessary for fail-capable tests and contain no restricted expression.
+Raw, downloaded, restricted, or bulk datasets are not committed by default. Small generated or license-compatible fixtures and versioned evaluation evidence may be tracked when they are necessary for reproducibility and contain no restricted expression. The v0.1.0 LongMemEval evidence retains its upstream MIT notice.
 
 Derived manifests preserve source row and question ordinals, repeated raw IDs,
 nested answer values, and provenance. They never modify, deduplicate, or

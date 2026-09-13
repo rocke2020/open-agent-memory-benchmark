@@ -12,9 +12,11 @@
 | Mem0 | 52/60 (86.7%) | **392.6k total / 6.54k mean** |
 | OpenViking | 51/60 (85.0%) | 927.6k total / 15.46k mean |
 
+**[Open the full v0.1.0 report](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/v0.1.0/comparison-20260913-133717-82378/report.html)** · [Browse the complete public evaluation snapshot](eval_results/v0.1.0/)
+
 **Coverage:** 60 shared LongMemEval questions across three providers, producing 180/180 judged provider-specific results.
 
-Hindsight has the highest recorded accuracy, but none of the three provider pairs passed OAMB's predefined exact McNemar `p <= 0.05` threshold, so the comparison identifies no clear accuracy leader. Answer-visible context tokens measure the exact retrieved evidence shown to the answer model, not provider-internal token usage. This is a balanced 60-question screening comparison, not a complete 500-question LongMemEval reproduction or a universal provider ranking.
+Hindsight recorded the highest accuracy in this 60-question screen. Mem0's standout result is its low context use: it reached 52/60 (86.7%) with 392.6k answer-visible context tokens, 59% fewer than Hindsight. OAMB does not declare a definitive winner from this sample; see the full report for paired statistical analysis. Answer-visible context tokens measure the exact retrieved evidence shown to the answer model, not provider-internal token usage. This is a balanced 60-question screening comparison, not a complete 500-question LongMemEval reproduction or a universal provider ranking.
 
 ## Overview
 
@@ -57,7 +59,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env`: set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_LIGHT_MODEL`, and `LLM_DEEP_MODEL`; keep `LLM_URL_TYPE=openai_chat`. The [template](.env.example) uses `deepseek-flash` for both model profiles. The light profile handles provider extraction and judging; the deep profile handles answering. [Benchmark configuration](configs/benchmark.yml) owns role assignments, thinking effort, and execution controls.
+Edit `.env`: set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_LIGHT_MODEL`, and `LLM_DEEP_MODEL`; keep `LLM_URL_TYPE=openai_chat`. The [template](.env.example) uses `deepseek-flash` (DeepSeek-V4.1-Flash) for both model profiles. The light profile handles provider extraction and judging; the deep profile handles answering. [Benchmark configuration](configs/benchmark.yml) owns role assignments, thinking effort, and execution controls.
 
 To reuse an embedding service, set its OpenAI-compatible base URL. The default profile requires `qwen3-embedding:0.6b`, 1,024-dimensional vectors, and sufficient context capacity for the providers' source-session inputs. For an existing host-local service:
 
@@ -129,10 +131,10 @@ Full reports are written under `outputs/full-test/<run-label>/`; smoke reports u
 When Hindsight, Mem0, and OpenViking were completed and preserved as separate snapshots beneath one directory, generate the report without rerunning providers:
 
 ```bash
-./run.sh --generate-report --result-dir=outputs/saved-results/lme60-provider-native
+./run.sh --generate-report --result-dir=./eval_results/v0.1.0
 ```
 
-The directory must contain exactly one complete 60-question snapshot for each provider, with `resolved-plan.json` and `results/<provider>.json` in each snapshot. The command requires the root `.env` for the frozen judge-model connection, makes one bounded LLM analysis call when no matching analysis is cached, and reuses the content-addressed cache at `<result-dir>/report-analysis-cache` without another model call when the report inputs and analysis configuration are unchanged. It requires no precheck or provider service, leaves the source snapshots unchanged, and writes a create-only `comparison/` directory (or a timestamped successor when that name already exists). It records every source plan/result hash and suppresses an affected leader claim when the saved plans do not prove the same comparison control.
+The directory must contain exactly one complete 60-question snapshot for each provider, with `resolved-plan.json` and `results/<provider>.json` in each snapshot. A versioned historical snapshot may also include a root `case-manifest.json` to preserve the evaluated IDs while new runs use the current manifest. The command requires the root `.env` for the frozen judge-model connection, makes one bounded LLM analysis call when no matching analysis is cached, and reuses the content-addressed cache at `<result-dir>/report-analysis-cache` without another model call when the report inputs and analysis configuration are unchanged. It requires no precheck or provider service, leaves the source snapshots unchanged, and writes a create-only `comparison/` directory (or a timestamped successor when that name already exists). It records every source plan/result hash and suppresses an affected leader claim when the saved plans do not prove the same comparison control.
 
 The HTML keeps the comparison focused: it omits unavailable secondary accounting and Wilson-interval text, and its Question results section shows only questions answered incorrectly by at least one provider. The complete 60-question matrix and statistical evidence remain in `report.json`.
 

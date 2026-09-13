@@ -13,6 +13,7 @@ from typing import Any
 from oamb.artifacts.atomic import read_regular_file
 from oamb.config.doctor import ResolvedPlan, ResolvedPlanError, load_resolved_plan_for_run
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
+from oamb.contracts.specifications import CaseManifest, case_manifest_hash
 from oamb.reporting.comparison_project import (
     ComparisonProjectBuildResult,
     ComparisonProjectError,
@@ -32,6 +33,7 @@ class SavedResultsError(ValueError):
 
 
 _RESOLVED_PLAN_HASH_DOMAIN = "oamb-resolved-plan-initial-v1"
+_SAVED_CASE_MANIFEST_NAME = "case-manifest.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +59,8 @@ def build_saved_results_report(
 ) -> ComparisonProjectBuildResult:
     """Build one report from exactly three preserved provider snapshots."""
 
-    sources = _discover_saved_provider_inputs(Path(result_root))
+    result_root = Path(result_root)
+    sources = _discover_saved_provider_inputs(result_root)
     reference = _select_reference_plan(sources)
     reference_document = reference.plan_document
     plan = reference.loaded_plan
@@ -84,12 +87,23 @@ def build_saved_results_report(
     if not source_path.is_absolute():
         source_path = Path.cwd() / source_path
     try:
-        manifest = build_longmemeval_bundle(source_path, plan.dataset.selection).case_manifest
+        current_manifest = build_longmemeval_bundle(
+            source_path,
+            plan.dataset.selection,
+        ).case_manifest
     except Exception as exc:
         raise SavedResultsError("saved result dataset cannot be loaded") from exc
+    archived_manifest_path = result_root / _SAVED_CASE_MANIFEST_NAME
+    manifest = (
+        _load_saved_case_manifest(archived_manifest_path)
+        if archived_manifest_path.exists() or archived_manifest_path.is_symlink()
+        else current_manifest
+    )
     if (
         manifest.manifest_hash != plan.dataset.case_manifest_hash
         or manifest.workload_id != plan.dataset.workload_id
+        or tuple(item.raw_question_id for item in manifest.cases)
+        != tuple(item.raw_question_id for item in current_manifest.cases)
     ):
         raise SavedResultsError("saved result dataset differs from the resolved plans")
     ordered_question_ids = tuple(item.raw_question_id for item in manifest.cases)
@@ -328,6 +342,24 @@ def _load_plan_document(path: Path) -> tuple[bytes, dict[str, Any]]:
     if plan_hash != canonical_sha256([_RESOLVED_PLAN_HASH_DOMAIN, payload]):
         raise SavedResultsError("saved resolved plan hash does not match its content")
     return content, document
+
+
+def _load_saved_case_manifest(path: Path) -> CaseManifest:
+    try:
+        content = read_regular_file(path)
+        json.loads(
+            content,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        manifest = CaseManifest.model_validate_json(content)
+    except Exception as exc:
+        raise SavedResultsError("saved case manifest cannot parse") from exc
+    if canonical_json_bytes(manifest) != content:
+        raise SavedResultsError("saved case manifest must be canonical JSON")
+    if case_manifest_hash(manifest.model_dump(mode="python")) != manifest.manifest_hash:
+        raise SavedResultsError("saved case manifest hash does not match its content")
+    return manifest
 
 
 def _load_report_control_document(

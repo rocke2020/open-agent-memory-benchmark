@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import BaseModel
 
 from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.runtime import question_results as result_contract
@@ -21,6 +22,17 @@ QUESTION_IDS = LME60_EXPECTED_QUESTION_IDS
 CASE_IDS = tuple(_sha(value) for value in QUESTION_IDS)
 PLAN_HASH = _sha("plan")
 MANIFEST_HASH = _sha("manifest")
+
+
+class _SerializableManifestCase(BaseModel):
+    raw_question_id: str
+    case_manifest_entry_id: str
+
+
+class _SerializableCaseManifest(BaseModel):
+    manifest_hash: str
+    workload_id: str
+    cases: tuple[_SerializableManifestCase, ...]
 
 
 def _results(*, native_candidate_count: int = 1) -> dict[str, result_contract.QuestionResult]:
@@ -230,11 +242,14 @@ def test_three_closed_results_files_build_one_deterministic_180_result_report(
     from tests.reporting.test_comparison_project import _lme60_plan
 
     plan = _lme60_plan()
-    manifest = SimpleNamespace(
+    manifest = _SerializableCaseManifest(
         manifest_hash=plan.dataset.case_manifest_hash,
         workload_id=plan.dataset.workload_id,
         cases=tuple(
-            SimpleNamespace(raw_question_id=question_id, case_manifest_entry_id=case_id)
+            _SerializableManifestCase(
+                raw_question_id=question_id,
+                case_manifest_entry_id=case_id,
+            )
             for question_id, case_id in zip(QUESTION_IDS, CASE_IDS, strict=True)
         ),
     )
@@ -261,12 +276,96 @@ def test_three_closed_results_files_build_one_deterministic_180_result_report(
     }
     assert len(report["questions"]) == 60
     assert len(report["comparisons"]) == 3
+    cell_results = [result for cell in report["cells"] for result in cell["results"]]
+    question_results = [
+        result for question in report["questions"] for result in question["provider_results"]
+    ]
+    assert len(cell_results) == len(question_results) == 180
+    assert all("model_answer" in result and "injected_context" in result for result in cell_results)
+    assert all(
+        "model_answer" not in result and "injected_context" not in result
+        for result in question_results
+    )
     assert first.export_path.read_bytes() == second.export_path.read_bytes()
     assert first.html_path.read_bytes() == second.html_path.read_bytes()
     html = first.html_path.read_text(encoding="utf-8")
     assert "Secondary accounting" not in html
     assert "Concise metric comparison" not in html
     assert "Analysis unavailable" not in html
+
+
+def test_detailed_question_results_store_answer_and_context_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches detailed report content being duplicated in both result projections."""
+
+    from oamb.reporting import comparison_project
+    from tests.reporting.test_comparison_project import _lme60_plan
+
+    plan = _lme60_plan()
+    manifest = _SerializableCaseManifest(
+        manifest_hash=plan.dataset.case_manifest_hash,
+        workload_id=plan.dataset.workload_id,
+        cases=tuple(
+            _SerializableManifestCase(
+                raw_question_id=question_id,
+                case_manifest_entry_id=case_id,
+            )
+            for question_id, case_id in zip(QUESTION_IDS, CASE_IDS, strict=True)
+        ),
+    )
+    results_by_cell = {cell.cell_id: _results() for cell in plan.cells}
+    local_question_content = tuple(
+        {
+            "case_manifest_entry_id": case_id,
+            "raw_question_id": question_id,
+            "question_type": "single-session-user",
+            "question": f"Question {index}",
+            "gold_answer": f"Gold answer {index}",
+            "answer_sessions": (),
+            "has_answer_label_mismatch": False,
+        }
+        for index, (case_id, question_id) in enumerate(
+            zip(CASE_IDS, QUESTION_IDS, strict=True),
+            start=1,
+        )
+    )
+    dataset_source = tmp_path / "dataset.json"
+    dataset_source.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(
+        comparison_project,
+        "_load_local_question_content",
+        lambda resolved_plan, source, case_manifest_bytes: local_question_content,
+    )
+
+    built = comparison_project.build_question_results_comparison_project(
+        plan,
+        results_by_cell,
+        case_manifest=manifest,
+        output_root=tmp_path / "detailed",
+        dataset_source=dataset_source,
+    )
+
+    report = json.loads(built.export_path.read_bytes())
+    cell_results = [result for cell in report["cells"] for result in cell["results"]]
+    question_results = [
+        result for question in report["questions"] for result in question["provider_results"]
+    ]
+    assert len(cell_results) == len(question_results) == 180
+    assert all(
+        "model_answer" not in result
+        and "injected_context" not in result
+        and "judge_decision" not in result
+        and "answer_unavailable_reason" not in result
+        for result in cell_results
+    )
+    assert all(
+        result["model_answer"] == "answer"
+        and result["injected_context"] == "x"
+        and result["judge_decision"] == "yes"
+        for result in question_results
+    )
 
 
 def test_missing_provider_question_prevents_final_report_publication(tmp_path: Path) -> None:

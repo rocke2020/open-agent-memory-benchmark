@@ -671,7 +671,7 @@ def compare_command(
         Path | None,
         typer.Option(
             "--dataset-source",
-            help="Exact frozen dataset file used to add local-only question and answer details.",
+            help="Exact frozen dataset file used to add question and answer details.",
         ),
     ] = None,
     analysis_model_env: Annotated[

@@ -1,0 +1,7 @@
+{
+  "schema_name": "saved_result_report_control",
+  "schema_version": 1,
+  "provider_id": "hindsight",
+  "retrieval_top_k": 150,
+  "retrieval_top_k_scope": "report_comparison_normalization_ceiling"
+}

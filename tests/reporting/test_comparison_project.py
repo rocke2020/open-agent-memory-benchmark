@@ -1903,8 +1903,9 @@ def test_detailed_report_joins_public_question_details_and_escapes_evidence(
     rendered = built.html_path.read_text(encoding="utf-8")
 
     assert export["dataset_details"]["status"] == "verified"
-    assert export["dataset_details"]["license_id"] == "NOASSERTION"
-    assert export["dataset_details"]["payload_policy"] == "download-required-not-redistributed"
+    assert export["dataset_details"]["distribution_scope"] == "public"
+    assert export["dataset_details"]["license_id"] == "MIT"
+    assert export["dataset_details"]["payload_policy"] == "redistribution-allowed-under-MIT"
     assert export["questions"][0]["question_type"] == "single-session-user"
     assert export["questions"][0]["gold_answer"] == "Gold answer 1"
     assert export["questions"][0]["answer_sessions"][0]["messages"][0]["has_answer"] is True
@@ -1917,6 +1918,9 @@ def test_detailed_report_joins_public_question_details_and_escapes_evidence(
     assert "<td>question-3</td>" in rendered
     assert "<summary>question-3 —" in rendered
     assert "Dataset provenance" in rendered
+    assert "Public detail report" in rendered
+    assert "may be redistributed under the MIT license" in rendered
+    assert "local-only" not in rendered
     assert "LongMemEval: Benchmarking Chat Assistants" in rendered
     assert "Original answer session" in rendered
     assert "Injected context" in rendered

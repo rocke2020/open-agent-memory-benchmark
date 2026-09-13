@@ -80,7 +80,7 @@ def test_checked_in_configuration_selects_one_lme60_three_provider_comparison() 
         "datasets/longmemeval-cleaned/longmemeval_s_cleaned.json",
         "98d7416c24c778c2fee6e6f3006e7a073259d48f",
         "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
-        "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80",
+        "20afb9ae0d18a5821871e76a1b90df573fd5f155511c264249fdb49154088962",
     )
     assert tuple(cell.cell_id for cell in configuration.cells) == EXPECTED_CELL_IDS
     assert tuple(
