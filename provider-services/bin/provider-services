@@ -176,6 +176,13 @@ verify_project_attestation() {
     [ "$(attestation_value versions_sha256)" = "$versions_hash" ] || die "version fingerprint changed since project creation"
 }
 
+verify_attested_project_name() {
+    [ -f "$PROJECT_ATTESTATION" ] || die "provider project attestation is absent"
+    project=$(env_value OAMB_PROVIDER_PROJECT)
+    [ "$(attestation_value project)" = "$project" ] || \
+        die "provider project attestation names a different project"
+}
+
 check_project_ownership() {
     project=$(env_value OAMB_PROVIDER_PROJECT)
     if [ -f "$PROJECT_ATTESTATION" ]; then
@@ -712,14 +719,52 @@ stop_services() {
     check_env_file
     check_project_name
     acquire_lifecycle_stop_lock
-    verify_project_attestation
+    verify_attested_project_name
     compose stop --timeout 0
     clear_stopped_provider_lifecycle
     printf 'stop: PASS (containers stopped; data and benchmark results preserved)\n'
 }
 
+prepare_new_run() {
+    new_project=$1
+    preserved_runtime=$2
+    printf '%s' "$new_project" | grep -Eq '^oamb-providers-[a-z0-9-]{8,48}$' || \
+        die "new provider project must be a unique oamb-providers-* identifier"
+    case "$preserved_runtime" in
+        "$ROOT"/.runtime-preserved-*) ;;
+        *) die "preserved provider runtime must be below $ROOT" ;;
+    esac
+    preserved_suffix=${preserved_runtime#"$ROOT"/.runtime-preserved-}
+    case "$preserved_suffix" in
+        ""|*/*) die "preserved provider runtime must be one directory" ;;
+    esac
+    [ ! -e "$preserved_runtime" ] && [ ! -L "$preserved_runtime" ] || \
+        die "preserved provider runtime already exists"
+    check_tools
+    check_env_file
+    check_project_name
+    acquire_lifecycle_lock
+    verify_attested_project_name
+    compose stop --timeout 0
+    clear_stopped_provider_lifecycle
+    mkdir -m 700 "$preserved_runtime"
+    for runtime_entry in \
+        "$RUNTIME_DIR"/* \
+        "$RUNTIME_DIR"/.[!.]* \
+        "$RUNTIME_DIR"/..?*
+    do
+        if [ ! -e "$runtime_entry" ] && [ ! -L "$runtime_entry" ]; then
+            continue
+        fi
+        [ "$runtime_entry" = "$LIFECYCLE_LOCK" ] && continue
+        mv "$runtime_entry" "$preserved_runtime/"
+    done
+    set_env_value "$ENV_FILE" OAMB_PROVIDER_PROJECT "$new_project"
+    printf 'prepare-new-run: PASS (previous runtime preserved; project switched)\n'
+}
+
 usage() {
-    printf 'usage: %s {doctor|build|up|verify --services|verify --model-readiness --resolved-plan FILE --model-env FILE|status|stop}\n' "$0" >&2
+    printf 'usage: %s {doctor|build|up|verify --services|verify --model-readiness --resolved-plan FILE --model-env FILE|status|stop|prepare-new-run PROJECT PRESERVED_RUNTIME}\n' "$0" >&2
     exit 2
 }
 
@@ -736,6 +781,11 @@ case "${1:-}" in
         esac
         ;;
     status) ensure_plan_model_environment; check_env_file; compose ps ;;
-    stop) ensure_plan_model_environment; stop_services ;;
+    stop) [ "$#" -eq 1 ] || usage; ensure_plan_model_environment; stop_services ;;
+    prepare-new-run)
+        [ "$#" -eq 3 ] || usage
+        ensure_plan_model_environment
+        prepare_new_run "$2" "$3"
+        ;;
     *) usage ;;
 esac

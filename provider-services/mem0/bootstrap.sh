@@ -108,4 +108,6 @@ until curl --noproxy '*' --fail --silent --show-error --connect-timeout 2 --max-
   sleep 2
 done
 readback
+compose exec -T mem0 python -c \
+  'from main import get_memory_instance; get_memory_instance().vector_store.create_col()'
 printf 'mem0 bootstrap: PASS (configuration persisted across restart)\n'

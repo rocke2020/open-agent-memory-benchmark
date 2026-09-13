@@ -503,7 +503,16 @@ def _quick_start_fixture(tmp_path: Path, *, system_name: str) -> tuple[Path, dic
     (root / "outputs" / "tmp" / "provider-source" / "mem0" / ".git").mkdir(parents=True)
 
     _write_executable(fake_bin / "uname", f"printf '%s\\n' {system_name}")
-    _write_executable(fake_bin / "docker", "printf '%s\\n' 172.17.0.1")
+    _write_executable(
+        fake_bin / "docker",
+        r"""
+printf 'docker %s\n' "$*" >> "$OAMB_TEST_TRACE"
+case "$*" in
+  network\ rm\ *) exit 0 ;;
+esac
+printf '%s\n' 172.17.0.1
+""".strip(),
+    )
     _write_executable(
         fake_bin / "curl",
         """
@@ -587,6 +596,31 @@ printf 'provider-config %s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
   "${OAMB_HINDSIGHT_LLM_PROVIDER:-missing}" \
   "${OAMB_OPENVIKING_VLM_PROVIDER:-missing}" >> "$OAMB_TEST_TRACE"
 printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
+if [ "${1:-}" = "prepare-new-run" ]; then
+  new_project=$2
+  preserved_runtime=$3
+  provider_root=$(cd "$(dirname "$0")/.." && pwd)
+  runtime="$provider_root/.runtime"
+  mkdir -p "$preserved_runtime"
+  shopt -s dotglob nullglob
+  for runtime_entry in "$runtime"/*; do
+    mv "$runtime_entry" "$preserved_runtime/"
+  done
+  OAMB_ENV_FILE="$provider_root/../.env" OAMB_NEW_PROJECT="$new_project" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["OAMB_ENV_FILE"])
+lines = path.read_text(encoding="utf-8").splitlines()
+lines = [
+    f"OAMB_PROVIDER_PROJECT={os.environ['OAMB_NEW_PROJECT']}"
+    if line.startswith("OAMB_PROVIDER_PROJECT=")
+    else line
+    for line in lines
+]
+path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+PY
+fi
 """.strip(),
     )
     resolver = root / "provider-services" / "lib" / "host_embedding.sh"
@@ -718,6 +752,125 @@ def test_precheck_managed_local_embedding_leaves_prepared_dotenv_byte_identical(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert env_path.read_bytes() == original
+
+
+def test_precheck_replaces_existing_provider_project_for_new_run(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    old_project = "oamb-providers-old-project"
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "OAMB_PROVIDER_PROJECT=change-me",
+            f"OAMB_PROVIDER_PROJECT={old_project}",
+        ),
+        encoding="utf-8",
+    )
+    provider_root = root / "provider-services"
+    runtime = provider_root / ".runtime"
+    runtime.mkdir()
+    (runtime / "provider-project.attestation").write_text(
+        f"project={old_project}\ncompose_sha256={'a' * 64}\nversions_sha256={'b' * 64}\n",
+        encoding="utf-8",
+    )
+    (runtime / "preserved-evidence.json").write_text("{}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads((root / "outputs" / "tmp" / "quick-start-current.json").read_bytes())
+    new_project = next(
+        line.split("=", 1)[1]
+        for line in env_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("OAMB_PROVIDER_PROJECT=")
+    )
+    assert new_project == f"oamb-providers-{state['run_label']}"
+    assert new_project != old_project
+    preserved_runtime = provider_root / f".runtime-preserved-{state['run_label']}"
+    assert (preserved_runtime / "preserved-evidence.json").read_text(encoding="utf-8") == "{}\n"
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    prepare_call = next(
+        line for line in calls if line.startswith("provider-services prepare-new-run ")
+    )
+    assert calls.index(prepare_call) < calls.index("provider-services doctor")
+    assert f"docker network rm {old_project}_default" in calls
+
+
+def test_precheck_does_not_replace_an_active_provider_project(tmp_path: Path) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    first = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    old_project = next(
+        line.split("=", 1)[1]
+        for line in env_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("OAMB_PROVIDER_PROJECT=")
+    )
+    original_env = env_path.read_bytes()
+    provider_root = root / "provider-services"
+    runtime = provider_root / ".runtime"
+    runtime.mkdir()
+    attestation = runtime / "provider-project.attestation"
+    attestation.write_text(
+        f"project={old_project}\ncompose_sha256={'a' * 64}\nversions_sha256={'b' * 64}\n",
+        encoding="utf-8",
+    )
+    active_operation = runtime / "active-operation"
+    active_operation.write_text('{"kind":"benchmark_run"}\n', encoding="utf-8")
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    original_state = state_path.read_bytes()
+    _write_executable(
+        provider_root / "bin" / "provider-services",
+        """
+printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
+if [ "${1:-}" = "prepare-new-run" ] && [ -e "$OAMB_TEST_ACTIVE_OPERATION" ]; then
+  printf 'provider-services: active OAMB provider operation exists; refusing provider lifecycle mutation\n' >&2
+  exit 1
+fi
+""".strip(),
+    )
+    env["OAMB_TEST_ACTIVE_OPERATION"] = str(active_operation)
+    trace.write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "active OAMB provider operation" in result.stderr
+    assert env_path.read_bytes() == original_env
+    assert state_path.read_bytes() == original_state
+    assert attestation.is_file()
+    assert active_operation.is_file()
+    assert not tuple(provider_root.glob(".runtime-preserved-*"))
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("provider-services prepare-new-run ") for line in calls)
+    assert not any(line.startswith("docker network rm ") for line in calls)
 
 
 def test_precheck_publishes_state_and_plan_below_outputs_root(tmp_path: Path) -> None:

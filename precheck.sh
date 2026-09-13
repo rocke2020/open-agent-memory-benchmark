@@ -5,6 +5,7 @@ set -euo pipefail
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ENV_FILE="$ROOT/.env"
 readonly RUNTIME_DIR="$ROOT/provider-services/.runtime"
+readonly PROJECT_ATTESTATION="$RUNTIME_DIR/provider-project.attestation"
 readonly OUTPUTS_ROOT="$ROOT/outputs"
 readonly TMP_ROOT="$OUTPUTS_ROOT/tmp"
 readonly STATE_FILE="$TMP_ROOT/quick-start-current.json"
@@ -17,6 +18,7 @@ readonly DEFAULT_OPENVIKING_ACCOUNT_ID="oamb-benchmark"
 readonly DEFAULT_OPENVIKING_ADMIN_USER_ID="oamb-admin"
 readonly EMBEDDING_STARTUP_ATTEMPTS="${OAMB_EMBEDDING_STARTUP_ATTEMPTS:-180}"
 
+. "$ROOT/provider-services/lib/env.sh"
 . "$ROOT/provider-services/lib/host_embedding.sh"
 . "$ROOT/provider-services/lib/plan_environment.sh"
 
@@ -74,35 +76,6 @@ require_single_env_assignment() {
   local key=$1
   [[ "$(env_assignment_count "$ENV_FILE" "$key")" == 1 ]] || \
     die "$key must occur exactly once in .env"
-}
-
-set_env_value() {
-  local file=$1
-  local key=$2
-  local value=$3
-  OAMB_ENV_FILE="$file" OAMB_ENV_KEY="$key" OAMB_ENV_VALUE="$value" python3 - <<'PY'
-import os
-from pathlib import Path
-
-path = Path(os.environ["OAMB_ENV_FILE"])
-key = os.environ["OAMB_ENV_KEY"]
-value = os.environ["OAMB_ENV_VALUE"]
-if "\n" in value or "\r" in value:
-    raise SystemExit(f"{key} must fit on one dotenv line")
-lines = path.read_text(encoding="utf-8").splitlines()
-matches = [index for index, line in enumerate(lines) if line.startswith(f"{key}=")]
-if len(matches) > 1:
-    raise SystemExit(f"duplicate dotenv key: {key}")
-replacement = f"{key}={value}"
-if matches:
-    lines[matches[0]] = replacement
-else:
-    lines.append(replacement)
-temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-temporary.chmod(0o600)
-temporary.replace(path)
-PY
 }
 
 random_secret() {
@@ -306,6 +279,19 @@ ensure_provider_environment() {
   fi
 }
 
+prepare_fresh_provider_project() {
+  [[ -e "$PROJECT_ATTESTATION" ]] || return 0
+  local old_project
+  old_project="$(read_env_value "$ENV_FILE" OAMB_PROVIDER_PROJECT)"
+  local preserved_runtime="$ROOT/provider-services/.runtime-preserved-$RUN_LABEL"
+  [[ ! -e "$preserved_runtime" && ! -L "$preserved_runtime" ]] || \
+    die "preserved provider runtime already exists: $preserved_runtime"
+  printf 'provider project: stopping and preserving the previous run\n'
+  "$ROOT/provider-services/bin/provider-services" prepare-new-run \
+    "oamb-providers-$RUN_LABEL" "$preserved_runtime"
+  docker network rm "${old_project}_default" 2>/dev/null || true
+}
+
 validate_existing_readiness() {
   uv run --locked python - "$PLAN" "$ENV_FILE" "$RUNTIME_DIR" <<'PY'
 import os
@@ -420,6 +406,7 @@ else
   printf 'embedding: local startup skipped; configured API will be verified directly\n'
 fi
 
+prepare_fresh_provider_project
 "$ROOT/provider-services/bin/provider-services" doctor
 "$ROOT/provider-services/bin/provider-services" build
 "$ROOT/provider-services/bin/provider-services" up

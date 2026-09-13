@@ -1,13 +1,29 @@
 # Open Agent Memory Benchmark
 
+**A reproducible, evidence-first benchmark for comparing self-hosted agent-memory systems through their native APIs.**
+
+## v0.1.0 results
+
+**On the balanced LME-60 screen, Hindsight recorded the highest answer accuracy at 57/60 (95.0%), while Mem0 used the least answer-visible context: 392.6k tokens, 59% less than Hindsight and 58% less than OpenViking.**
+
+| Provider | Answer accuracy | Answer-visible context tokens |
+|---|---:|---:|
+| Hindsight | **57/60 (95.0%)** | 954.4k total / 15.91k mean |
+| Mem0 | 52/60 (86.7%) | **392.6k total / 6.54k mean** |
+| OpenViking | 51/60 (85.0%) | 927.6k total / 15.46k mean |
+
+**Coverage:** 60 shared LongMemEval questions across three providers, producing 180/180 judged provider-specific results.
+
+Hindsight has the highest recorded accuracy, but none of the three provider pairs passed OAMB's predefined exact McNemar `p <= 0.05` threshold, so the comparison identifies no clear accuracy leader. Answer-visible context tokens measure the exact retrieved evidence shown to the answer model, not provider-internal token usage. This is a balanced 60-question screening comparison, not a complete 500-question LongMemEval reproduction or a universal provider ranking.
+
 ## Overview
 
 Open Agent Memory Benchmark (OAMB) compares Hindsight, Mem0, and OpenViking through their native REST APIs under one shared evaluation protocol. The v0.1.0 profile uses the same balanced selection of 60 LongMemEval questions for each provider: ten questions from each of six question types, producing 180 provider-specific results.
 
-The offline report presents five metrics separately:
+The offline report presents answer accuracy and answer-visible context as the two most prominent metrics, with three supporting operational measurements:
 
 - **Answer accuracy** — correctness using retrieved memory.
-- **Context tokens** — retrieved evidence shown to the answer model.
+- **Answer-visible context tokens** — retrieved evidence shown to the answer model.
 - **Indexing tokens** — supplier-reported generative producer tokens for building memory; embedding and provider user-provisioning setup are excluded.
 - **Retrieval latency** — time spent on the provider's memory-query request.
 - **Indexing time** — time from the first history write to query readiness.

@@ -77,6 +77,36 @@ read_optional_env_value() {
         "$env_file"
 }
 
+set_env_value() {
+    env_file=$1
+    env_key=$2
+    env_value=$3
+    OAMB_ENV_FILE="$env_file" OAMB_ENV_KEY="$env_key" OAMB_ENV_VALUE="$env_value" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["OAMB_ENV_FILE"])
+key = os.environ["OAMB_ENV_KEY"]
+value = os.environ["OAMB_ENV_VALUE"]
+if "\n" in value or "\r" in value:
+    raise SystemExit(f"{key} must fit on one dotenv line")
+lines = path.read_text(encoding="utf-8").splitlines()
+matches = [index for index, line in enumerate(lines) if line.startswith(f"{key}=")]
+if len(matches) > 1:
+    raise SystemExit(f"duplicate dotenv key: {key}")
+replacement = f"{key}={value}"
+if matches:
+    lines[matches[0]] = replacement
+else:
+    lines.append(replacement)
+temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+temporary.chmod(0o600)
+temporary.replace(path)
+PY
+    unset env_file env_key env_value
+}
+
 # Provider containers reach a host-local embedding server through Docker's
 # host gateway, while host-side probes keep using the user-configured URL.
 resolve_container_embedding_base() {
