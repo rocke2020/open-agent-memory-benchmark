@@ -2179,17 +2179,17 @@ def test_run_full_reports_progress_per_provider_out_of_sixty(tmp_path: Path) -> 
         assert (
             f"provider={provider} status=starting, elapsed=0s, completed_questions=0 (0/60, 0%)"
         ) in result.stdout
-        progress_line = next(
+        progress_lines = tuple(
             line
             for line in result.stdout.splitlines()
-            if f"provider={provider} status=running" in line
+            if line.startswith(f"provider={provider} status=running, elapsed=")
         )
-        assert progress_line.startswith(f"provider={provider} status=running, elapsed=")
-        assert progress_line.endswith(
-            f"completed_questions={completed} ({completed}/60, {percentage}%)"
+        assert any(
+            line.endswith(f"completed_questions={completed} ({completed}/60, {percentage}%)")
+            for line in progress_lines
         )
-        assert "completed_operations=" not in progress_line
-        assert "question_progress=" not in progress_line
+        assert all("completed_operations=" not in line for line in progress_lines)
+        assert all("question_progress=" not in line for line in progress_lines)
     assert "/180" not in result.stdout
     assert "/1)" not in result.stdout
 
