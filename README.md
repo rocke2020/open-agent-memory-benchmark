@@ -1,5 +1,7 @@
 # Open Agent Memory Benchmark
 
+English | [简体中文](README_CN.md) | [日本語](README_JA.md)
+
 **A reproducible, evidence-first benchmark for comparing self-hosted agent-memory systems through their native APIs.**
 
 ## v0.1.0 results
@@ -18,17 +20,17 @@
 
 Hindsight recorded the highest accuracy in this 60-question screen. Mem0's standout result is its low context use: it reached 52/60 (86.7%) with 392.6k answer-visible context tokens, 59% fewer than Hindsight. OAMB does not declare a definitive winner from this sample; see the full report for paired statistical analysis. Answer-visible context tokens measure the exact retrieved evidence shown to the answer model, not provider-internal token usage. This is a balanced 60-question screening comparison, not a complete 500-question LongMemEval reproduction or a universal provider ranking.
 
+## generative model: DeepSeek V4.1 Flash
+
+OAMB v0.1.0 uses **DeepSeek V4.1 Flash as its only generative model** for provider memory processing, answers, and judging across all three providers. This lower-cost choice delivered quality strong enough for the v0.1.0 comparison while making the benchmark more affordable to reproduce. A separate non-generative `qwen3-embedding:0.6b` model handles embeddings.
+
 ## Overview
 
 Open Agent Memory Benchmark (OAMB) compares Hindsight, Mem0, and OpenViking through their native REST APIs under one shared evaluation protocol. The v0.1.0 profile uses the same balanced selection of 60 LongMemEval questions for each provider: ten questions from each of six question types, producing 180 provider-specific results.
 
-The offline report presents answer accuracy and answer-visible context as the two most prominent metrics, with three supporting operational measurements:
+A highlight of OAMB is its five-metric view: **Answer accuracy**, **Answer-visible context tokens**, **Indexing tokens**, **Retrieval latency**, and **Indexing time**. Definitions and detailed results are in the [full v0.1.0 report](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/v0.1.0/comparison-20260913-133717-82378/report.html).
 
-- **Answer accuracy** — correctness using retrieved memory.
-- **Answer-visible context tokens** — retrieved evidence shown to the answer model.
-- **Indexing tokens** — supplier-reported generative producer tokens for building memory; embedding and provider user-provisioning setup are excluded.
-- **Retrieval latency** — time spent on the provider's memory-query request.
-- **Indexing time** — time from the first history write to query readiness.
+Earlier work behind OAMB included my [full 500-question Hindsight reproduction with AMB](https://github.com/rocke2020/agent-memory-benchmark/tree/deepseek-provider). It reproduced the published Hindsight 0.4.17 setup except for the external model stack, using DeepSeek V4 Flash 0731 for extraction and judging and DeepSeek V4 Pro 0813 for answers. The study reinforced that model selection changes what is being evaluated and that run-to-run nondeterminism can change outcomes; a few LongMemEval cases are ambiguous, but the dataset remains broadly useful. To contain cost, OAMB compares pinned releases—including Hindsight 0.9.2—on balanced LME-60 rather than rerunning all 500 questions.
 
 OAMB fixes questions, model roles, answer/judge policy, and comparison settings before execution. Providers retain their native storage and indexing behavior. Retries, failures, partial ingestion, costs, and unavailable measurements remain visible; there is no universal combined score. Retrieval permits query embedding but disables generative query rewriting, reflection, and reranking.
 
@@ -59,7 +61,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env`: set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_LIGHT_MODEL`, and `LLM_DEEP_MODEL`; keep `LLM_URL_TYPE=openai_chat`. The [template](.env.example) uses `deepseek-flash` (DeepSeek-V4.1-Flash) for both model profiles. The light profile handles provider extraction and judging; the deep profile handles answering. [Benchmark configuration](configs/benchmark.yml) owns role assignments, thinking effort, and execution controls.
+Edit `.env`: set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_LIGHT_MODEL`, and `LLM_DEEP_MODEL`; keep `LLM_URL_TYPE=openai_chat`. The [template](.env.example) uses `deepseek-flash` (DeepSeek-V4.1-Flash) as the only generative model for both profiles. The light profile handles provider extraction and judging; the deep profile handles answering. [Benchmark configuration](configs/benchmark.yml) owns role assignments, thinking effort, and execution controls.
 
 To reuse an embedding service, set its OpenAI-compatible base URL. The default profile requires `qwen3-embedding:0.6b`, 1,024-dimensional vectors, and sufficient context capacity for the providers' source-session inputs. For an existing host-local service:
 
