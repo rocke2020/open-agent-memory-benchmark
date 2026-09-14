@@ -20,6 +20,14 @@ English | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
 Hindsight recorded the highest accuracy in this 60-question screen. Mem0's standout result is its low context use: it reached 52/60 (86.7%) with 392.6k answer-visible context tokens, 59% fewer than Hindsight. OAMB does not declare a definitive winner from this sample; see the full report for paired statistical analysis. Answer-visible context tokens measure the exact retrieved evidence shown to the answer model, not provider-internal token usage. This is a balanced 60-question screening comparison, not a complete 500-question LongMemEval reproduction or a universal provider ranking.
 
+### Practical takeaway
+
+OpenViking's clearest weakness in this run was speed. OAMB uses a direct OpenViking recall path—generation-free `/api/v1/search/find` with native reranking disabled—yet its median retrieval latency was 0.79 seconds (p95 1.30 seconds), compared with 0.17 seconds for Hindsight and 0.12 seconds for Mem0. Its median per-question history indexing-to-ready time was 1,190 seconds (19.8 minutes), compared with 761 seconds for Hindsight and 842 seconds for Mem0. These are observed times from this workload, not environment-independent product benchmarks, but they are a clear practical concern for real-time agents, where both recall latency and the delay before new memory becomes ready matter.
+
+Hindsight looks strong for the core memory tasks covered here. User-profile quality is not evaluated in v0.1.0; separate hands-on use suggests that profiling is a weaker area for Hindsight, so this remains a practical caveat outside this release's measured scope rather than a result established by this benchmark.
+
+Mem0 Cloud (Platform v3) and self-hosted Mem0 OSS 2.0.19 also have an important capability difference. Platform v3 provides native temporal inputs and temporal ranking; the evaluated OSS release does not, making temporal questions a practical weakness without additional adaptation. OAMB compensates with a custom historical-date extraction prompt, so the 9/10 temporal-reasoning result reflects the enhanced OAMB and Mem0 OSS pipeline rather than native OSS temporal capability. The detailed compatibility notice at the end of this README explains the boundary.
+
 ## Used generative model: DeepSeek V4.1 Flash
 
 OAMB v0.1.0 uses **DeepSeek V4.1 Flash as its only generative model** for provider memory processing, answers, and judging across all three providers. This lower-cost choice delivered quality strong enough for the v0.1.0 comparison while making the benchmark more affordable to reproduce. A separate non-generative `qwen3-embedding:0.6b` model handles embeddings.
@@ -177,3 +185,11 @@ We also thank the [LongMemEval authors](https://github.com/xiaowu0162/LongMemEva
 See [Security](SECURITY.md), [Dataset provenance](DATASETS.md), and [Third-party components](THIRD_PARTY.md).
 
 OAMB is licensed under [Apache-2.0](LICENSE). Datasets and third-party artifacts retain their own licenses.
+
+## Mem0 temporal-input compatibility notice
+
+OAMB v0.1.0 evaluates self-hosted Mem0 OSS 2.0.19, not Mem0 Platform v3. These products have different temporal capabilities: [Mem0 Platform v3 Temporal Reasoning](https://docs.mem0.ai/platform/features/temporal-reasoning) provides native `timestamp` input for historical writes, `reference_date` for time-anchored searches, and temporal ranking; Mem0's documentation states that this feature is not available in the OSS SDK.
+
+For the self-hosted OSS profile, OAMB adds a LongMemEval ingestion compatibility enhancement. It preserves each source session's timestamp in `metadata.created_at` and supplies a custom extraction prompt that instructs Mem0's extraction model to use that timestamp as the Observation Date when resolving expressions such as “yesterday” or “last week.” The two inputs serve different purposes: `metadata.created_at` preserves storage provenance and enables evidence validation, while the custom prompt supplies the historical-time semantics during extraction.
+
+This enhancement does not add `reference_date`, time filtering, or temporal ranking to Mem0 OSS search. OAMB validates the stored timestamp but sends the extracted memory text—not `created_at`—to the answer model. The v0.1.0 temporal-reasoning result of 9/10 therefore measures the adapted end-to-end OAMB and Mem0 OSS pipeline; it is not a measurement of native Mem0 Platform v3 Temporal Reasoning, and it does not establish an independent accuracy contribution from `metadata.created_at`. See the [Mem0 evaluation and temporal-input investigation](docs/investigations/mem0-longmemeval-evaluation-and-temporal-parity.md) for the full evidence boundary.
