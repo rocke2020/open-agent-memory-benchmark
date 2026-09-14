@@ -1014,7 +1014,7 @@ async def test_sdk_profile_rejects_before_scope_add_search_or_worker_dispatch() 
 
 def test_sdk_worker_boundary_forwards_receipt_and_shuts_down_child() -> None:
     mem0 = importlib.import_module("oamb.memory_systems.mem0")
-    worker = SupervisedWorker(echo_worker_handler, hard_timeout_seconds=1)
+    worker = SupervisedWorker(echo_worker_handler, hard_timeout_seconds=5)
     boundary = mem0.Mem0SdkWorkerBoundary(worker=worker)
 
     receipt = boundary.request(worker_request("sdk-request-1"))

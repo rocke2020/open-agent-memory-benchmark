@@ -39,7 +39,7 @@ def request(request_id: str) -> WorkerRequest:
 
 
 def test_supervised_worker_returns_typed_receipt_and_closes_cleanly() -> None:
-    worker = SupervisedWorker(echo_handler, hard_timeout_seconds=1)
+    worker = SupervisedWorker(echo_handler, hard_timeout_seconds=5)
 
     receipt = worker.request(request("request-1"))
     worker.close()

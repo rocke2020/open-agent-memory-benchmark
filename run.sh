@@ -73,10 +73,18 @@ request_stop() {
   STOP_EXIT_CODE=$exit_code
   if [[ -n "$ACTIVE_HEARTBEAT_PID" ]]; then
     kill -TERM "$ACTIVE_HEARTBEAT_PID" 2>/dev/null || true
+    wait "$ACTIVE_HEARTBEAT_PID" 2>/dev/null || true
+    ACTIVE_HEARTBEAT_PID=""
   fi
   if [[ -n "$ACTIVE_COMMAND_PID" ]]; then
     stop_owned_process "$ACTIVE_COMMAND_PID"
-    return
+    wait "$ACTIVE_COMMAND_PID" 2>/dev/null || true
+    ACTIVE_COMMAND_PID=""
+  fi
+  if [[ -n "$ACTIVE_COMMAND_WATCHER_PID" ]]; then
+    kill "$ACTIVE_COMMAND_WATCHER_PID" 2>/dev/null || true
+    wait "$ACTIVE_COMMAND_WATCHER_PID" 2>/dev/null || true
+    ACTIVE_COMMAND_WATCHER_PID=""
   fi
   if [[ "$GENERATE_REPORT" == true ]]; then
     exit "$exit_code"
