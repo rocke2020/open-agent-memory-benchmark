@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from click import unstyle
+
 from oamb.artifacts.store import ArtifactStore
 from oamb.cli import run_generated_fake_vertical_slice
 from oamb.contracts.evidence import ValidationResult
@@ -126,7 +128,7 @@ def test_installed_run_exposes_plain_results_without_resume_protocol_options() -
     compose_help = _installed_oamb("capsule", "compose", "--help")
 
     assert run_help.returncode == 0, run_help.stdout + run_help.stderr
-    run_output = run_help.stdout + run_help.stderr
+    run_output = unstyle(run_help.stdout + run_help.stderr)
     assert "--case" in run_output
     assert "--results-root" in run_output
     assert "--full-progress-root" not in run_output

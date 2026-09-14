@@ -13,6 +13,17 @@ from oamb.contracts.ids import canonical_json_bytes, canonical_sha256
 from oamb.runtime import question_results as result_contract
 from oamb.workloads.longmemeval import LME60_EXPECTED_QUESTION_IDS
 
+LONGMEMEVAL_DATASET = (
+    Path(__file__).resolve().parents[2]
+    / "datasets"
+    / "longmemeval-cleaned"
+    / "longmemeval_s_cleaned.json"
+)
+REQUIRES_LONGMEMEVAL_DATASET = pytest.mark.skipif(
+    not LONGMEMEVAL_DATASET.is_file(),
+    reason="requires the ignored pinned LongMemEval-S dataset",
+)
+
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
@@ -435,6 +446,7 @@ def _write_saved_result_snapshot(
     )
 
 
+@REQUIRES_LONGMEMEVAL_DATASET
 def test_saved_provider_results_use_report_control_when_candidates_fit_its_ceiling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -554,6 +566,7 @@ def test_saved_provider_results_use_report_control_when_candidates_fit_its_ceili
     assert source_hashes_after == source_hashes_before
 
 
+@REQUIRES_LONGMEMEVAL_DATASET
 def test_saved_provider_results_reject_report_control_when_candidates_exceed_its_ceiling(
     tmp_path: Path,
 ) -> None:

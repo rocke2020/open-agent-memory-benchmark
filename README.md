@@ -20,7 +20,7 @@ English | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
 Hindsight recorded the highest accuracy in this 60-question screen. Mem0's standout result is its low context use: it reached 52/60 (86.7%) with 392.6k answer-visible context tokens, 59% fewer than Hindsight. OAMB does not declare a definitive winner from this sample; see the full report for paired statistical analysis. Answer-visible context tokens measure the exact retrieved evidence shown to the answer model, not provider-internal token usage. This is a balanced 60-question screening comparison, not a complete 500-question LongMemEval reproduction or a universal provider ranking.
 
-## generative model: DeepSeek V4.1 Flash
+## Used generative model: DeepSeek V4.1 Flash
 
 OAMB v0.1.0 uses **DeepSeek V4.1 Flash as its only generative model** for provider memory processing, answers, and judging across all three providers. This lower-cost choice delivered quality strong enough for the v0.1.0 comparison while making the benchmark more affordable to reproduce. A separate non-generative `qwen3-embedding:0.6b` model handles embeddings.
 
@@ -61,6 +61,12 @@ cp .env.example .env
 chmod 600 .env
 ```
 
+Download and checksum-verify the pinned LongMemEval-S dataset:
+
+```bash
+./scripts/download/longmemeval.sh
+```
+
 Edit `.env`: set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_LIGHT_MODEL`, and `LLM_DEEP_MODEL`; keep `LLM_URL_TYPE=openai_chat`. The [template](.env.example) uses `deepseek-flash` (DeepSeek-V4.1-Flash) as the only generative model for both profiles. The light profile handles provider extraction and judging; the deep profile handles answering. [Benchmark configuration](configs/benchmark.yml) owns role assignments, thinking effort, and execution controls.
 
 To reuse an embedding service, set its OpenAI-compatible base URL. The default profile requires `qwen3-embedding:0.6b`, 1,024-dimensional vectors, and sufficient context capacity for the providers' source-session inputs. For an existing host-local service:
@@ -76,7 +82,7 @@ If the URL is unset or remains `change-me`, precheck uses the local fallback: ma
 
 ### 2. Precheck and run
 
-Prepare dependencies, the dataset, pinned provider services, and model readiness:
+Prepare dependencies, automatically download and checksum-verify the pinned LongMemEval-S dataset, start pinned provider services, and verify model readiness:
 
 ```bash
 ./precheck.sh

@@ -2285,6 +2285,14 @@ def _run_progress_fixture(
     )
 
 
+def _last_provider_progress_line(output: str, provider: str) -> str:
+    matches = tuple(
+        line for line in output.splitlines() if line.startswith(f"provider={provider} status=")
+    )
+    assert matches, f"missing progress for provider={provider}"
+    return matches[-1]
+
+
 @pytest.mark.parametrize("failed_state", ("aborted", "infrastructure_blocked"))
 def test_run_progress_preserves_terminal_provider_state_while_peer_runs(
     tmp_path: Path, failed_state: str
@@ -2301,8 +2309,12 @@ def test_run_progress_preserves_terminal_provider_state_while_peer_runs(
     assert f"provider=hindsight status={failed_state}, elapsed=1348s" in result.stdout
     assert "provider=mem0 status=execution-completed, elapsed=1348s" in result.stdout
     assert "provider=openviking status=running, elapsed=" in result.stdout
-    assert "provider=hindsight status=running" not in result.stdout
-    assert "provider=mem0 status=running" not in result.stdout
+    assert _last_provider_progress_line(result.stdout, "hindsight").startswith(
+        f"provider=hindsight status={failed_state},"
+    )
+    assert _last_provider_progress_line(result.stdout, "mem0").startswith(
+        "provider=mem0 status=execution-completed,"
+    )
     assert "provider=openviking status=unavailable, elapsed=unavailable" in result.stdout
     assert "providers=hindsight,mem0,openviking status=failed" not in result.stderr
     assert "provider=mem0 status=failed" not in result.stdout + result.stderr
@@ -2328,7 +2340,9 @@ def test_run_progress_reports_invalid_terminal_record_as_unavailable(
 
     assert result.returncode == 44, result.stdout + result.stderr
     assert "provider=hindsight status=unavailable, elapsed=unavailable" in result.stdout
-    assert "provider=hindsight status=running" not in result.stdout
+    assert _last_provider_progress_line(result.stdout, "hindsight").startswith(
+        "provider=hindsight status=unavailable,"
+    )
     assert "provider=hindsight status=aborted" not in result.stdout
 
 
@@ -2337,7 +2351,9 @@ def test_run_progress_reports_ambiguous_provider_root_as_unavailable(tmp_path: P
 
     assert result.returncode == 44, result.stdout + result.stderr
     assert "provider=hindsight status=unavailable, elapsed=unavailable" in result.stdout
-    assert "provider=hindsight status=running" not in result.stdout
+    assert _last_provider_progress_line(result.stdout, "hindsight").startswith(
+        "provider=hindsight status=unavailable,"
+    )
 
 
 @pytest.mark.parametrize(
@@ -3269,7 +3285,13 @@ def test_one_signal_stops_owned_full_run_tree_once(
         process.wait(timeout=10)
 
         assert not received_signals.exists()
-        assert "provider-services stop" in trace.read_text(encoding="utf-8")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if "provider-services stop" in trace.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("stop handler did not stop provider services")
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
             try:

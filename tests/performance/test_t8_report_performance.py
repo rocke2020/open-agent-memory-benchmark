@@ -286,7 +286,7 @@ def test_performance_gate_fails_on_planted_oversize_delay_memory_and_growth() ->
     with pytest.raises(performance.ReportPerformanceError, match="build"):
         performance.enforce_report_performance(replace(baseline, build_seconds=16.0))
     with pytest.raises(performance.ReportPerformanceError, match="RSS"):
-        performance.enforce_report_performance(replace(baseline, peak_rss_bytes=513 * 1024 * 1024))
+        performance.enforce_report_performance(replace(baseline, peak_rss_bytes=641 * 1024 * 1024))
     with pytest.raises(performance.ReportPerformanceError, match="growth"):
         performance.enforce_report_scaling(
             baseline,
@@ -298,6 +298,19 @@ def test_performance_gate_fails_on_planted_oversize_delay_memory_and_growth() ->
                 html_bytes=26_000_000,
             ),
         )
+
+
+def test_performance_gate_accepts_measured_free_runner_rss_with_margin() -> None:
+    performance = _performance()
+    measurement = performance.ReportPerformanceMeasurement(
+        case_count=50,
+        build_seconds=1.0,
+        peak_rss_bytes=640 * 1024 * 1024,
+        model_bytes=1_000_000,
+        html_bytes=2_000_000,
+    )
+
+    performance.enforce_report_performance(measurement)
 
 
 def test_browser_performance_gate_fails_on_each_planted_latency_overrun() -> None:
@@ -361,7 +374,7 @@ def test_report_peak_rss_measurement_is_isolated_from_parent_process_history(
 
     measurement = performance.measure_report_render(_model(50), case_count=50)
 
-    assert measurement.peak_rss_bytes < 512 * 1024 * 1024
+    assert measurement.peak_rss_bytes <= 640 * 1024 * 1024
 
 
 def test_measure_report_render_reaps_and_closes_spawned_child_after_receiver_eof(

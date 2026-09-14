@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from oamb import live
@@ -630,7 +631,7 @@ def test_question_results_build_only_cells_with_remaining_questions(
     if limits is not None and 0 in limits:
         assert result.exit_code != 0
         assert "must be a positive finite integer" in " ".join(
-            result.output.replace("│", " ").split()
+            unstyle(result.output).replace("│", " ").split()
         )
         assert not built
         assert not environment_loaded

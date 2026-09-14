@@ -15,6 +15,17 @@ from oamb.workloads.longmemeval import LME60_CASE_MANIFEST_HASH, LME60_EXPECTED_
 from tests.benchmark_configuration import MODEL_ENVIRONMENT
 from tests.unit.test_question_results import _judged_result
 
+LONGMEMEVAL_DATASET = (
+    Path(__file__).resolve().parents[2]
+    / "datasets"
+    / "longmemeval-cleaned"
+    / "longmemeval_s_cleaned.json"
+)
+REQUIRES_LONGMEMEVAL_DATASET = pytest.mark.skipif(
+    not LONGMEMEVAL_DATASET.is_file(),
+    reason="requires the ignored pinned LongMemEval-S dataset",
+)
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_SCRIPT = REPOSITORY_ROOT / "scripts" / "migrate_managed_local_resume.py"
 PROVIDERS = ("hindsight", "mem0", "openviking")
@@ -175,6 +186,7 @@ def _write_target_precheck(root: Path) -> tuple[bytes, Path]:
     return state_bytes, plan_path
 
 
+@REQUIRES_LONGMEMEVAL_DATASET
 def test_migration_preserves_completed_results_and_selects_only_unfinished_questions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -267,6 +279,7 @@ def test_migration_preserves_completed_results_and_selects_only_unfinished_quest
     assert source_full_root.is_dir()
 
 
+@REQUIRES_LONGMEMEVAL_DATASET
 def test_migration_requires_new_plan_readiness_before_publishing_target(
     tmp_path: Path,
 ) -> None:
@@ -294,6 +307,7 @@ def test_migration_requires_new_plan_readiness_before_publishing_target(
     assert not (target / "outputs" / "full-test" / "managed-local-migration").exists()
 
 
+@REQUIRES_LONGMEMEVAL_DATASET
 def test_migration_mismatch_leaves_active_state_and_target_unchanged(tmp_path: Path) -> None:
     source = tmp_path / "source"
     target = tmp_path / "target"

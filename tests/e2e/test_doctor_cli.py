@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml  # type: ignore[import-untyped]
+from click import unstyle
 from typer.testing import CliRunner, Result
 
 from oamb.cli import app
@@ -106,14 +107,15 @@ def test_doctor_rejects_invalid_parallel_limits(tmp_path: Path, key: str, value:
 
 def test_doctor_public_interface_has_no_free_provider_dataset_or_workload_selection() -> None:
     result = CliRunner().invoke(app, ["doctor", "--help"])
+    output = unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "CONFIG" in result.output
-    assert "--output" in result.output
-    assert "--model-env" in result.output
-    assert "--provider" not in result.output
-    assert "--dataset" not in result.output
-    assert "--workload" not in result.output
+    assert "CONFIG" in output
+    assert "--output" in output
+    assert "--model-env" in output
+    assert "--provider" not in output
+    assert "--dataset" not in output
+    assert "--workload" not in output
     lowered = result.output.lower()
     assert "approval" not in lowered
     assert "signature" not in lowered
