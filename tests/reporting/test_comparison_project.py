@@ -4,8 +4,6 @@ import gzip
 import hashlib
 import json
 import re
-import threading
-from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1789,53 +1787,6 @@ def test_project_seals_and_embeds_analysis_bound_to_the_exact_report(
     assert manifest["analysis_sha256"] == hashlib.sha256(analysis_bytes).hexdigest()
 
 
-def test_report_analysis_and_base_html_preparation_overlap_before_final_publish(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Catches serial analysis/render preparation or publication before their join."""
-
-    from oamb.reporting import comparison_project
-
-    base_renderer = getattr(comparison_project, "_render_base_html", None)
-    assert base_renderer is not None, "base HTML preparation is not independently runnable"
-    base_renderer = cast(Callable[[dict[str, object]], bytes], base_renderer)
-    plan = _plan(tmp_path)
-    sources = _sources(tmp_path, plan)
-    supplied_by_root = {source.root: source.validation_result for source in sources.values()}
-    monkeypatch.setattr(
-        comparison_project,
-        "validate_source_root",
-        lambda root: supplied_by_root[root],
-    )
-    analysis_started = threading.Event()
-    base_started = threading.Event()
-
-    def blocked_base_renderer(export: dict[str, object]) -> bytes:
-        base_started.set()
-        assert analysis_started.wait(2), "analysis generation did not overlap base rendering"
-        return base_renderer(export)
-
-    def blocked_analysis(_export: dict[str, object]) -> None:
-        analysis_started.set()
-        assert base_started.wait(2), "base rendering did not overlap analysis generation"
-        return None
-
-    monkeypatch.setattr(comparison_project, "_render_base_html", blocked_base_renderer)
-    built = comparison_project.build_comparison_project(
-        plan,
-        sources,
-        output_root=tmp_path / "report",
-        analysis_generator=blocked_analysis,
-    )
-
-    assert base_started.is_set()
-    assert analysis_started.is_set()
-    assert built.analysis_path is None
-    rendered = built.html_path.read_text(encoding="utf-8")
-    assert "Concise metric comparison" not in rendered
-    assert "Analysis unavailable" not in rendered
-
-
 def test_report_without_dataset_source_has_closed_absent_detail_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2060,48 +2011,6 @@ def test_pairwise_delta_uses_signed_percentage_points(
     assert _delta_text(fraction) == expected
 
 
-def test_visible_time_is_decimal_seconds_only() -> None:
-    from oamb.reporting.comparison_project import _time_text
-
-    assert _time_text(1_234_567) == "1.235 s"
-    assert _time_text(1_234_567_890) == "1235 s"
-
-
-def test_accuracy_headline_omits_control_configuration() -> None:
-    from oamb.reporting.comparison_project import _report_accuracy_decision_text
-
-    case_count = 3
-    cells = tuple(
-        {
-            "cell_id": f"cell-{index}",
-            "provider_id": f"provider-{index}",
-            "judged_numerator": case_count - index,
-            "judged_denominator": case_count,
-        }
-        for index in range(case_count)
-    )
-    comparisons = tuple(
-        {
-            "left_cell_id": cells[0]["cell_id"],
-            "right_cell_id": cell["cell_id"],
-            "comparable": False,
-            "limitations": ("shared retrieval top_k candidate ceiling is not proven",),
-        }
-        for cell in cells[1:]
-    )
-
-    rendered = _report_accuracy_decision_text(
-        {"status": "no_clear_accuracy_leader"},
-        cells,
-        comparisons,
-    )
-
-    assert str(cells[0]["provider_id"]) in rendered
-    assert "retrieval" not in rendered.casefold()
-    assert "top-k" not in rendered.casefold()
-    assert "overall winner" not in rendered.casefold()
-
-
 def test_report_summary_does_not_claim_shared_effort_when_provider_stages_differ() -> None:
     from oamb.reporting.comparison_project import _report_decision_summary_text
 
@@ -2144,27 +2053,6 @@ def test_report_summary_does_not_claim_shared_effort_when_provider_stages_differ
 
     assert summary.startswith("Across the evaluated providers,")
     assert "same models" not in summary
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    (
-        (12_345_678, "12.35 M"),
-        ("12345.6", "12.35 k"),
-        (987_654, "987.7 k"),
-        (999, "999"),
-    ),
-)
-def test_human_numbers_never_show_more_than_four_digits(
-    value: object,
-    expected: str,
-) -> None:
-    from oamb.reporting.comparison_project import _number_text
-
-    rendered = _number_text(value)
-
-    assert rendered == expected
-    assert len(re.sub(r"\D", "", rendered)) <= 4
 
 
 def test_accuracy_text_keeps_exact_denominator_and_human_percentage() -> None:

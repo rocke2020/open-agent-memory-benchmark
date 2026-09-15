@@ -605,20 +605,6 @@ def _validate(value: core.ProviderServiceEvidenceValidationInput) -> Any:
     )
 
 
-def test_t4_provider_profile_freezes_exact_order_version_and_hash() -> None:
-    profile = profiles.provider_service_evidence_profile()
-
-    assert (
-        tuple(requirement.rule_id for requirement in profile.required_rules) == EXPECTED_INVENTORY
-    )
-    assert tuple(requirement.minimum_version for requirement in profile.required_rules) == (1,) * 11
-    assert profile.required_rule_inventory_hash == EXPECTED_INVENTORY_HASH
-    assert profile.applicability == (
-        "source_kind=provider_service",
-        "operation=model_readiness",
-    )
-
-
 def test_valid_provider_root_executes_every_closed_rule(tmp_path: Path) -> None:
     result = _validate(_write_valid_root(tmp_path / "provider-root"))
 

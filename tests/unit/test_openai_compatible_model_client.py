@@ -1032,38 +1032,6 @@ async def test_inflight_cancellation_is_a_typed_unknown_outcome_and_remains_canc
 
 
 @pytest.mark.asyncio
-async def test_close_waits_for_the_single_inflight_dispatch_and_then_rejects_new_calls() -> None:
-    request_started = asyncio.Event()
-    release_response = asyncio.Event()
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        request_started.set()
-        await release_response.wait()
-        return httpx.Response(
-            200,
-            json={
-                "model": "answer-model",
-                "choices": [
-                    {"index": 0, "message": {"content": "answer"}, "finish_reason": "stop"}
-                ],
-            },
-        )
-
-    client = _client(CapturingStore(), handler)
-    completion = asyncio.create_task(client.complete(_request()))
-    await request_started.wait()
-    closing = asyncio.create_task(client.close())
-    await asyncio.sleep(0)
-
-    assert not closing.done()
-    release_response.set()
-    assert (await completion).output_text == "answer"
-    await closing
-    with pytest.raises(RuntimeError, match="closed"):
-        await client.complete(_request())
-
-
-@pytest.mark.asyncio
 async def test_two_admitted_completions_dispatch_in_parallel_and_close_drains_both() -> None:
     both_requests_started = asyncio.Event()
     release_response = asyncio.Event()

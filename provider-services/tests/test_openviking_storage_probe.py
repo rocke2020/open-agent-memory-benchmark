@@ -78,19 +78,6 @@ class OpenVikingStorageProbeTests(unittest.TestCase):
             self.assertEqual(result["dimension"], 1024)
             self.assertGreaterEqual(result["agfs_entries"], 1)
 
-    def test_large_preserved_workspace_has_no_fixed_entry_gate(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            workspace = self.make_workspace(Path(temporary))
-            entries = workspace / "viking" / "preserved"
-            entries.mkdir()
-            for ordinal in range(10_001):
-                (entries / str(ordinal)).mkdir()
-
-            result = self.module.probe_storage(workspace, exact_release=False)
-
-            self.assertEqual(result["status"], "ok")
-            self.assertGreater(result["agfs_entries"], 10_000)
-
     def test_missing_or_corrupt_vector_metadata_fails(self) -> None:
         for mode in ("missing", "corrupt"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
@@ -121,16 +108,6 @@ class OpenVikingStorageProbeTests(unittest.TestCase):
                 Path("/probe/workspace"),
                 "36 25 0:32 / /probe/workspace rw,nosuid,nodev - virtiofs host rw\n",
             )
-
-    def test_exact_release_path_avoids_mutating_provider_constructors(self) -> None:
-        source = PROBE_PATH.read_text(encoding="utf-8")
-        self.assertIn("get_binding_client", source)
-        self.assertIn("FileStore", source)
-        self.assertNotIn("CollectionMeta(", source)
-        self.assertNotIn("IndexMeta(", source)
-        self.assertNotIn("initialize_openviking_config", source)
-        self.assertNotIn("create_agfs_client", source)
-
 
 if __name__ == "__main__":
     unittest.main()

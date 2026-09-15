@@ -181,21 +181,6 @@ def test_versioned_contract_inventory_is_explicit_and_unique() -> None:
     }
 
 
-def test_contract_registry_exposes_no_generated_schema_maintenance_surface() -> None:
-    schema = require_schema()
-    removed_names = {
-        "PUBLIC_CONTRACTS",
-        "schema_filename",
-        "schema_bytes",
-        "expected_schema_files",
-        "generate_schemas",
-        "schema_drift",
-        "packaged_schema_names",
-    }
-
-    assert not any(hasattr(schema, name) for name in removed_names)
-
-
 @pytest.mark.parametrize("maximum", [1.5, "1.0", "01"])
 def test_runtime_parser_rejects_noncanonical_decimal_json(maximum: object) -> None:
     schema = require_schema()

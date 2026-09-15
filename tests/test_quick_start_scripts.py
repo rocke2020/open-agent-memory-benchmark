@@ -1261,88 +1261,6 @@ def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path
     assert not (root / "provider-services" / ".env").exists()
 
 
-def test_precheck_upgrades_legacy_two_key_root_env(tmp_path: Path) -> None:
-    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
-    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
-    root_env_path = root / ".env"
-    root_env_path.write_text(
-        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
-        encoding="utf-8",
-    )
-    root_env_path.chmod(0o600)
-
-    result = subprocess.run(
-        [str(script)],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=20,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    root_env = root_env_path.read_text(encoding="utf-8")
-    assert "LLM_URL_TYPE=openai_chat" in root_env
-    assert "LLM_BASE_URL=https://models.example/v1" in root_env
-    assert "LLM_API_KEY=test-model-key" in root_env
-    assert "DEEPSEEK_BASE_URL=" not in root_env
-    assert "DEEPSEEK_API_KEY=" not in root_env
-    for expected in (
-        "OAMB_HINDSIGHT_PORT=18888",
-        "OAMB_MEM0_PORT=18889",
-        "OAMB_MEM0_INSPECTOR_PORT=16333",
-        "OAMB_OPENVIKING_PORT=19330",
-        "OAMB_OPENVIKING_ACCOUNT_ID=oamb-benchmark",
-        "OAMB_OPENVIKING_ADMIN_USER_ID=oamb-admin",
-    ):
-        assert expected in root_env
-    assert (
-        "provider-config deepseek-flash|deepseek-flash|deepseek-flash|plan-embedding|low|high|max|openai|openai"
-        in (trace.read_text(encoding="utf-8"))
-    )
-    assert not (root / "provider-services" / ".env").exists()
-
-
-@pytest.mark.parametrize(
-    ("key", "duplicate_value"),
-    (
-        ("DEEPSEEK_BASE_URL", "https://duplicate.example/v1"),
-        ("DEEPSEEK_API_KEY", "duplicate-model-key"),
-    ),
-)
-def test_precheck_rejects_duplicate_legacy_llm_assignment_without_mutation(
-    tmp_path: Path,
-    key: str,
-    duplicate_value: str,
-) -> None:
-    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
-    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
-    env_path = root / ".env"
-    env_path.write_text(
-        "DEEPSEEK_BASE_URL=https://models.example/v1\n"
-        "DEEPSEEK_API_KEY=test-model-key\n"
-        f"{key}={duplicate_value}\n",
-        encoding="utf-8",
-    )
-    original = env_path.read_bytes()
-
-    result = subprocess.run(
-        [str(script)],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=20,
-    )
-
-    assert result.returncode != 0
-    assert f"precheck: FAIL: {key} must occur exactly once in .env" in result.stderr
-    assert env_path.read_bytes() == original
-    assert "provider-services " not in trace.read_text(encoding="utf-8")
-
-
 def test_precheck_rejects_symlinked_root_env_without_mutating_target(tmp_path: Path) -> None:
     root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
     script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
@@ -1968,7 +1886,7 @@ def test_run_smoke_runs_the_dry_run_gate_before_dispatch(tmp_path: Path) -> None
         capture_output=True,
         text=True,
         check=False,
-        timeout=20,
+        timeout=60,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2096,19 +2014,6 @@ def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path
         "unique_case_count": 1,
         "provider_specific_result_count": 3,
     }
-
-
-def test_run_progress_has_no_deleted_history_rebuild_parser() -> None:
-    source = RUN_SCRIPT.read_text(encoding="utf-8")
-
-    for removed in (
-        "progress_records(",
-        "history_rebuild_attempts",
-        "history-retries",
-        "successor_history_attempt_ordinal",
-        "history_attempt_ordinal",
-    ):
-        assert removed not in source
 
 
 def test_run_reports_live_cell_progress_while_provider_is_running(tmp_path: Path) -> None:

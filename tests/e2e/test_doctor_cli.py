@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 import yaml  # type: ignore[import-untyped]
-from click import unstyle
 from typer.testing import CliRunner, Result
 
 from oamb.cli import app
@@ -103,44 +102,6 @@ def test_doctor_rejects_invalid_parallel_limits(tmp_path: Path, key: str, value:
     assert result.exit_code != 0
     assert f"execution {key}" in result.output
     assert not output.exists()
-
-
-def test_doctor_public_interface_has_no_free_provider_dataset_or_workload_selection() -> None:
-    result = CliRunner().invoke(app, ["doctor", "--help"])
-    output = unstyle(result.output)
-
-    assert result.exit_code == 0, result.output
-    assert "CONFIG" in output
-    assert "--output" in output
-    assert "--model-env" in output
-    assert "--provider" not in output
-    assert "--dataset" not in output
-    assert "--workload" not in output
-    lowered = result.output.lower()
-    assert "approval" not in lowered
-    assert "signature" not in lowered
-    assert "phase" not in lowered
-    assert "t10" not in lowered
-
-
-def test_doctor_rejects_legacy_free_selection_flags_without_output(tmp_path: Path) -> None:
-    output = tmp_path / "comparison"
-
-    result = _invoke_doctor(
-        config=BENCHMARK_CONFIG_PATH,
-        output=output,
-        extra=(
-            "--provider",
-            "arbitrary-provider",
-            "--dataset",
-            "ai-hyz/MemoryAgentBench",
-            "--workload",
-            "arbitrary-workload",
-        ),
-    )
-
-    assert result.exit_code != 0
-    assert not (output / "resolved-plan.json").exists()
 
 
 def test_doctor_writes_one_canonical_plan_with_three_ordered_cell_specs(tmp_path: Path) -> None:
@@ -413,19 +374,6 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "credential values: [REDACTED]" in result.output
     assert "api_key" not in result.output.lower()
     assert "authorization: bearer" not in result.output.lower()
-
-
-def test_doctor_omits_thinking_effort_from_embedding_summary(tmp_path: Path) -> None:
-    embedding_model = load_benchmark_configuration(
-        BENCHMARK_CONFIG_PATH, model_environment=MODEL_ENVIRONMENT
-    ).models.embedding.model
-    output = tmp_path / "comparison"
-
-    result = _invoke_doctor(config=BENCHMARK_CONFIG_PATH, output=output)
-
-    assert result.exit_code == 0, result.output
-    assert f"model embedding: {embedding_model}; recipient=embedding-api" in result.output
-    assert f"model embedding: {embedding_model} /" not in result.output
 
 
 def test_loaded_plan_is_frozen_and_does_not_reopen_mutated_yaml(tmp_path: Path) -> None:

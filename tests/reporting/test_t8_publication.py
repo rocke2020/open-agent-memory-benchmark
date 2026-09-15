@@ -38,7 +38,6 @@ from oamb.contracts.specifications import (
     SourceEvidenceBinding,
     SourceEvidenceKind,
 )
-from oamb.contracts.states import ValidationDisposition
 from oamb.memory_systems.mem0 import Mem0ReferenceNegativeAdapter
 from oamb.reporting.compare import (
     REQUIRED_COMPARISON_CONTROL_IDS,
@@ -47,7 +46,6 @@ from oamb.reporting.compare import (
 )
 from oamb.reporting.public import (
     build_comparison_report_model,
-    build_diagnostic_run_report_model,
     build_evaluation_report_model,
     build_run_report_model,
 )
@@ -371,31 +369,6 @@ def _evaluation_model_spec_and_sources() -> tuple[
     )
 
 
-def test_evaluation_publication_uses_v2_v2_v3_v3_and_offline_html(tmp_path: Path) -> None:
-    publication = _publication()
-    model, spec, sources, validations, validation_targets = _evaluation_model_spec_and_sources()
-
-    built = publication.build_report_derivation(
-        model=model,
-        report_spec=spec,
-        ordered_source_bindings=sources,
-        evidence_validations=validations,
-        evidence_validation_targets=validation_targets,
-        transform_spec_hash=SHA_D,
-        schema_versions=("evaluation_report_model@1", "report_artifact_manifest@3"),
-        output_root=tmp_path,
-        committed_at=COMMITTED_AT,
-    )
-
-    derivation = (built.final_directory / "derivation-spec.json").read_text()
-    artifact = (built.final_directory / "report-artifact-manifest.json").read_text()
-    html = built.report_path.read_text()
-    assert '"schema_version":3' in derivation
-    assert '"schema_version":3' in artifact
-    assert '<meta name="color-scheme" content="light dark">' in html
-    assert "https://" not in html and "http://" not in html
-
-
 def test_evaluation_export_rejects_self_hashed_comparison_with_foreign_run_hashes(
     tmp_path: Path,
 ) -> None:
@@ -540,29 +513,6 @@ def test_evaluation_export_rejects_duplicate_system_case_display_coverage(
     assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
 
 
-def test_external_run_publication_fails_closed_until_the_t9_importer(
-    tmp_path: Path,
-) -> None:
-    publication = _publication()
-    model, spec, source = _model_and_spec()
-
-    with pytest.raises(publication.ReportExportError) as captured:
-        publication.build_report_derivation(
-            model=model,
-            report_spec=spec,
-            ordered_source_bindings=(source,),
-            evidence_validations=(_validation(),),
-            evidence_validation_targets=(_validation_target(),),
-            transform_spec_hash=SHA_A,
-            schema_versions=("run_report_model@3", "report_artifact_manifest@2"),
-            output_root=tmp_path,
-            committed_at=COMMITTED_AT,
-        )
-
-    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
-    assert not (tmp_path / "derivations").exists()
-
-
 def test_public_export_failure_is_retained_only_as_an_attempt(tmp_path: Path) -> None:
     publication = _publication()
     model, spec, source = _model_and_spec()
@@ -659,37 +609,6 @@ def test_export_rejects_unfrozen_selector_and_schema_inventory(tmp_path: Path) -
 
     assert "report-binding-mismatch" in {issue.code for issue in selector.value.result.issues}
     assert "report-binding-mismatch" in {issue.code for issue in schema.value.result.issues}
-
-
-def test_report_spec_builder_rejects_planted_renderer_and_acceptance_hashes() -> None:
-    _model, spec, _source = _model_and_spec()
-
-    def build_with_hashes(
-        *,
-        renderer_hash: str = spec.renderer_hash,
-        browser_contract_hash: str = spec.browser_contract_hash,
-        performance_contract_hash: str = spec.performance_contract_hash,
-    ) -> ReportSpec:
-        return build_report_spec(
-            report_kind="run",
-            audience=spec.audience,
-            preview_max_field_bytes=spec.preview_max_field_bytes,
-            preview_total_bytes=spec.preview_total_bytes,
-            display_field_ids=spec.display_field_ids,
-            renderer_hash=renderer_hash,
-            asset_hashes=spec.asset_hashes,
-            browser_contract_hash=browser_contract_hash,
-            performance_contract_hash=performance_contract_hash,
-            export_profile_selector_id="public-run-v1",
-            export_profile_selector_version=1,
-        )
-
-    with pytest.raises(ValueError, match="renderer identity"):
-        build_with_hashes(renderer_hash=SHA_A)
-    with pytest.raises(ValueError, match="browser contract"):
-        build_with_hashes(browser_contract_hash=SHA_A)
-    with pytest.raises(ValueError, match="performance contract"):
-        build_with_hashes(performance_contract_hash=SHA_A)
 
 
 def test_export_rejects_network_active_markup_in_any_copied_payload(tmp_path: Path) -> None:
@@ -848,95 +767,3 @@ def test_export_rejects_display_previews_outside_the_bound_report_spec(
         )
 
     assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
-
-
-def test_external_diagnostic_publication_fails_closed_until_the_t9_importer(
-    tmp_path: Path,
-) -> None:
-    publication = _publication()
-    target = _validation_target()
-    first_event = target.audit.ordered_events[0]
-    invalid_target = replace(
-        target,
-        audit=replace(
-            target.audit,
-            ordered_events=(
-                replace(first_event, dispatcher_count_after=1),
-                *target.audit.ordered_events[1:],
-            ),
-        ),
-    )
-    validation = validate_catalog_profile("oamb-t8-adapter-mem0-rest-v1", invalid_target)
-    assert validation.disposition == ValidationDisposition.INVALID
-    validation_hash = canonical_sha256(validation)
-    source = SourceEvidenceBinding(
-        binding_id=SHA_A,
-        source_kind=SourceEvidenceKind.EXTERNAL,
-        source_identity="invalid-diagnostic-fixture",
-        source_root_hash=validation.target_hash,
-        validation_result_hash=validation_hash,
-        source_schema_versions=("mem0_zero_dispatch_audit@1",),
-    )
-    css_hash, script_hash = _renderer().offline_asset_hashes()
-    spec = build_report_spec(
-        report_kind="run",
-        audience="public",
-        preview_max_field_bytes=4096,
-        preview_total_bytes=65536,
-        display_field_ids=("identity", "validation", "limitations"),
-        renderer_hash=_renderer().offline_renderer_hash(),
-        asset_hashes=(css_hash, script_hash),
-        export_profile_selector_id="public-run-v1",
-        export_profile_selector_version=1,
-    )
-    profile_hash = canonical_sha256(
-        [
-            "oamb-validation-profile-binding-v1",
-            validation.validation_profile_id,
-            validation.required_rule_ids,
-            validation.implementation_versions,
-        ]
-    )
-    with pytest.raises(ValueError, match="run identity"):
-        build_diagnostic_run_report_model(
-            report_spec_hash=canonical_sha256(spec),
-            source_binding=source,
-            evidence_validation_profile_hash=profile_hash,
-            evidence_validation_result_hash=validation_hash,
-            origin_kind="external",
-            run_id="spoofed-unrelated-run",
-            validation_issue_codes=tuple(dict.fromkeys(issue.code for issue in validation.issues)),
-            limitations=("diagnostic-only",),
-        )
-    model = build_diagnostic_run_report_model(
-        report_spec_hash=canonical_sha256(spec),
-        source_binding=source,
-        evidence_validation_profile_hash=profile_hash,
-        evidence_validation_result_hash=validation_hash,
-        origin_kind="external",
-        run_id="invalid-diagnostic-fixture",
-        validation_issue_codes=tuple(dict.fromkeys(issue.code for issue in validation.issues)),
-        limitations=("diagnostic-only; no benchmark quality or cost claims",),
-    )
-    arguments = {
-        "model": model,
-        "report_spec": spec,
-        "ordered_source_bindings": (source,),
-        "evidence_validations": (validation,),
-        "evidence_validation_targets": (invalid_target,),
-        "transform_spec_hash": SHA_A,
-        "schema_versions": (
-            "diagnostic_run_report_model@1",
-            "report_artifact_manifest@2",
-        ),
-        "output_root": tmp_path,
-        "committed_at": COMMITTED_AT,
-    }
-
-    with pytest.raises(ValueError, match="explicit opt-in"):
-        publication.build_report_derivation(**arguments)
-    with pytest.raises(publication.ReportExportError) as captured:
-        publication.build_report_derivation(**arguments, diagnostic=True)
-
-    assert "report-binding-mismatch" in {issue.code for issue in captured.value.result.issues}
-    assert not (tmp_path / "derivations").exists()

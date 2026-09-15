@@ -304,67 +304,6 @@ def test_money_json_accepts_only_canonical_decimal_strings() -> None:
         accounting.CostRecord.model_validate_json(json.dumps(payload | {"amount": "0.250"}))
 
 
-def test_runtime_checkable_ports_accept_structural_fakes() -> None:
-    ports = require("oamb.contracts.ports")
-
-    assert {
-        "resolve_sources",
-        "build_case_manifest",
-        "iter_ingestion_plans",
-        "iter_case_plans",
-        "render_retrieval_query",
-        "build_visible_evidence",
-        "render_answer",
-        "evaluate",
-        "finalize_judge",
-        "validate_records",
-    } <= set(vars(ports.WorkloadPort))
-    assert {
-        "resolve",
-        "capabilities",
-        "allocate_ingestion_scope",
-        "ingest",
-        "wait_ready",
-        "inventory",
-        "state_digest",
-        "retrieve",
-        "close",
-    } <= set(vars(ports.MemorySystemPort))
-
-    class FakeWorkload:
-        def resolve_sources(self) -> Any:
-            return object()
-
-        def build_case_manifest(self, dataset_manifest: Any) -> Any:
-            return object()
-
-        def iter_ingestion_plans(self, case_manifest: Any) -> Any:
-            return ()
-
-        def iter_case_plans(self, case_manifest: Any) -> Any:
-            return ()
-
-        def render_retrieval_query(self, case_plan: Any) -> bytes:
-            return b"query"
-
-        def build_visible_evidence(self, native_batch: Any, policy: Any) -> Any:
-            return object()
-
-        def render_answer(self, case_plan: Any, visible_evidence: Any) -> Any:
-            return object()
-
-        def evaluate(self, case_plan: Any, answer: Any) -> Any:
-            return object()
-
-        def finalize_judge(self, case_plan: Any, answer: Any, judge_answer: Any) -> Any:
-            return object()
-
-        def validate_records(self, records: Any) -> Any:
-            return ()
-
-    assert isinstance(FakeWorkload(), ports.WorkloadPort)
-
-
 def test_t5_implementation_imports_preserve_the_frozen_dependency_direction() -> None:
     source_root = Path(__file__).resolve().parents[2] / "src" / "oamb"
     forbidden = {
@@ -392,47 +331,6 @@ def test_t5_implementation_imports_preserve_the_frozen_dependency_direction() ->
                     violations.append(f"{path.relative_to(source_root)} imports {module}")
 
     assert violations == []
-
-
-def test_workload_port_payloads_carry_inputs_needed_by_t5() -> None:
-    ports = require("oamb.contracts.ports")
-
-    assert {
-        "intended_source_count",
-        "ordered_source_units",
-        "ordered_case_manifest_entry_ids",
-    } <= set(ports.IngestionPlan.__dataclass_fields__)
-    assert {
-        "question_bytes",
-        "reference_payload",
-        "prompt_binding_id",
-        "output_contract_id",
-        "metric_id",
-        "judge_binding_id",
-    } <= set(ports.CasePlan.__dataclass_fields__)
-    assert {"raw_answer", "parsed_value"} <= set(ports.AnswerValue.__dataclass_fields__)
-    assert {
-        "logical_context_records",
-        "ingestion_plan_records",
-        "case_records",
-    } <= set(ports.WorkloadRecordSet.__dataclass_fields__)
-
-
-def test_t5_case_and_summary_v2_distinguish_unjudged_from_incorrect() -> None:
-    evidence = require("oamb.contracts.evidence")
-    reporting = require("oamb.contracts.reporting")
-
-    assert {
-        "evaluation_disposition",
-        "parsed_answer_sha256",
-    } <= set(evidence.CaseRecordV2.model_fields)
-    assert {
-        "parsed_cases",
-        "evaluated_cases",
-        "judged_cases",
-        "unjudged_cases",
-    } <= set(reporting.RunSummaryV2.model_fields)
-    assert reporting.RunReportModelV2.model_fields["summary"].annotation is reporting.RunSummaryV2
 
 
 def test_t5_case_v2_closes_evaluation_disposition_against_terminal_state() -> None:

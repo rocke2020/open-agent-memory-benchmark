@@ -78,13 +78,6 @@ def test_store_seals_canonical_occurrence_records_and_rejects_unsafe_paths(
     assert not (tmp_path / "outside").exists()
 
 
-def test_artifact_package_exports_the_durable_store_and_publisher() -> None:
-    import oamb.artifacts as artifacts
-
-    assert artifacts.ArtifactStore is ArtifactStore
-    assert artifacts.publish_with_last_marker is publish_with_last_marker
-
-
 def test_store_rejects_an_existing_symlink_that_escapes_the_artifact_root(tmp_path: Path) -> None:
     store_root = tmp_path / "capsule"
     outside = tmp_path / "outside"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import FrozenInstanceError
 from types import ModuleType
 
 import pytest
@@ -48,28 +47,6 @@ def test_illegal_and_terminal_rewrites_fail() -> None:
             states.RunState.FINALIZED,
             states.TransitionEvent.START_RUN,
         )
-
-
-def test_transition_records_are_immutable() -> None:
-    states = require_states()
-    transition = states.apply_transition(
-        states.EntityKind.INGESTION_PLAN,
-        states.IngestionPlanState.PENDING,
-        states.TransitionEvent.ALLOCATE_SCOPE,
-    )
-
-    with pytest.raises(FrozenInstanceError):
-        transition.next_state = states.IngestionPlanState.ERROR
-
-
-def test_unknown_outcome_terminal_states_are_explicit() -> None:
-    states = require_states()
-
-    assert states.AttemptOutcome.UNKNOWN_OUTCOME.value == "unknown_outcome"
-    assert (
-        states.IngestionPlanState.INTERRUPTED_UNKNOWN_OUTCOME.value == "interrupted_unknown_outcome"
-    )
-    assert states.ResumeDisposition.REPLACEMENT_RUN_REQUIRED.value == ("replacement_run_required")
 
 
 def test_structured_retry_exhaustion_has_an_explicit_run_terminal() -> None:

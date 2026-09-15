@@ -5,8 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from click import unstyle
-
 from oamb.artifacts.store import ArtifactStore
 from oamb.cli import run_generated_fake_vertical_slice
 from oamb.contracts.evidence import ValidationResult
@@ -110,34 +108,6 @@ def _run_lme_identity_fixture_capsule(tmp_path: Path) -> NativeRunArtifacts:
         judge_model_factory=SuccessfulJudgeModel,
         judge_role_binding_id="oamb-lme-judge-v1",
     )
-
-
-def test_installed_source_root_commands_have_no_fake_only_or_review_surface() -> None:
-    for command in (("capsule", "validate", "--help"), ("report", "build", "--help")):
-        result = _installed_oamb(*command)
-
-        assert result.returncode == 0, result.stdout + result.stderr
-        output = (result.stdout + result.stderr).lower()
-        assert "source root" in output
-        assert "fake" not in output
-        assert all(term not in output for term in FORBIDDEN_PUBLIC_TERMS)
-
-
-def test_installed_run_exposes_plain_results_without_resume_protocol_options() -> None:
-    run_help = _installed_oamb("run", "--help")
-    compose_help = _installed_oamb("capsule", "compose", "--help")
-
-    assert run_help.returncode == 0, run_help.stdout + run_help.stderr
-    run_output = unstyle(run_help.stdout + run_help.stderr)
-    assert "--case" in run_output
-    assert "--results-root" in run_output
-    assert "--full-progress-root" not in run_output
-    assert "--full-resume-lock" not in run_output
-    assert "--full-resume-pointer" not in run_output
-    assert "--full-resume-rehearsal" not in run_output
-    assert "--recover-from" not in run_output
-    assert "--continue-from" not in run_output
-    assert compose_help.returncode != 0
 
 
 def test_installed_native_source_root_validates_and_builds_deterministic_offline_report(

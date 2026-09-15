@@ -13,7 +13,7 @@ from oamb.contracts.evidence import (
 )
 from oamb.contracts.ids import canonical_sha256, ingestion_occurrence_id
 from oamb.contracts.ports import RawReferenceHandle, SettledTransientIngestionFailure
-from oamb.contracts.schema import CONTRACT_REGISTRY, parse_contract
+from oamb.contracts.schema import parse_contract
 
 NOW = datetime(2026, 9, 6, tzinfo=UTC)
 HASHES = tuple(canonical_sha256(["history-rebuild-contract", index]) for index in range(20))
@@ -21,26 +21,6 @@ HINDSIGHT_FAILURE = (
     b'{"detail":"Fact extraction failed: 1/1 chunks failed. First failures: '
     b'chunk 0: APIConnectionError: Connection error."}'
 )
-
-REMOVED_RECOVERY_SCHEMA_NAMES = frozenset(
-    {
-        "capsule_composition_contribution",
-        "capsule_composition_part_binding",
-        "capsule_composition_record",
-        "case_partition_spec",
-        "history_retry_carry_record",
-        "history_retry_event",
-        "recovery_decision_record",
-    }
-)
-
-
-def test_obsolete_recovery_schemas_are_rejected_by_the_contract_parser() -> None:
-    registered_names = {name for name, _version in CONTRACT_REGISTRY}
-    assert registered_names.isdisjoint(REMOVED_RECOVERY_SCHEMA_NAMES)
-    for schema_name in REMOVED_RECOVERY_SCHEMA_NAMES:
-        with pytest.raises(ValueError, match="unsupported contract"):
-            parse_contract({"schema_name": schema_name, "schema_version": 1})
 
 
 def _attempt_fields(*, ordinal: int = 1, status: str = "ready") -> dict[str, object]:

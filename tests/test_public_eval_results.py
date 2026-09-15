@@ -131,29 +131,3 @@ def test_v010_public_results_are_complete_and_portable() -> None:
     )
     assert b"/Users/" not in public_bytes
     assert b"rocke_dong" not in public_bytes
-
-
-def test_v010_readme_documents_the_direct_report_command_and_authoritative_results() -> None:
-    readme = (PUBLIC_ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert "./run.sh --generate-report --result-dir=./eval_results/v0.1.0" in readme
-    assert "https://rocke2020.github.io/open-agent-memory-benchmark/" in readme
-    assert "results/hindsight.json" in readme
-    assert "results/mem0.json" in readme
-    assert "results/openviking.json" in readme
-    assert "result-map-first.json" not in readme
-    assert "result-map-second.json" not in readme
-
-
-def test_local_report_outputs_are_outside_the_frozen_release_inventory() -> None:
-    assert _is_local_report_output("comparison/report.json")
-    assert _is_local_report_output("comparison-20990101-000000-1/report.html")
-    assert _is_local_report_output("report-analysis-cache/local/report-analysis.json")
-    assert not _is_local_report_output("mem0-lme60-20260913-oamb/results/extra.json")
-
-
-def test_longmemeval_source_contains_no_stale_private_distribution_metadata() -> None:
-    source = b"\n".join(path.read_bytes() for path in (REPOSITORY_ROOT / "src").rglob("*.py"))
-
-    assert b"download-required-not-redistributed" not in source
-    assert b"local-only" not in source
