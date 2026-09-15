@@ -26,11 +26,7 @@ OpenViking's clearest weakness in this run was speed. OAMB uses a direct OpenVik
 
 Hindsight looks strong for the core memory tasks covered here. User-profile quality is not evaluated in v0.1.0; separate hands-on use suggests that profiling is a weaker area for Hindsight, so this remains a practical caveat outside this release's measured scope rather than a result established by this benchmark.
 
-Mem0 Cloud (Platform v3) and self-hosted Mem0 OSS 2.0.19 also have an important capability difference. Platform v3 provides native temporal inputs and temporal ranking; the evaluated OSS release does not, making temporal questions a practical weakness without additional adaptation. OAMB compensates with a custom historical-date extraction prompt, so the 9/10 temporal-reasoning result reflects the enhanced OAMB and Mem0 OSS pipeline rather than native OSS temporal capability. The detailed compatibility notice at the end of this README explains the boundary.
-
-## Used generative model: DeepSeek V4.1 Flash
-
-OAMB v0.1.0 uses **DeepSeek V4.1 Flash as its only generative model** for provider memory processing, answers, and judging across all three providers. This lower-cost choice delivered quality strong enough for the v0.1.0 comparison while making the benchmark more affordable to reproduce. A separate non-generative `qwen3-embedding:0.6b` model handles embeddings.
+Mem0 Cloud (Platform v3) and self-hosted Mem0 OSS 2.0.19 also have an important capability difference. Platform v3 provides native temporal inputs and temporal ranking; the evaluated OSS release does not, making temporal questions a practical weakness without additional adaptation. OAMB compensates with a custom historical-date extraction prompt, so the 9/10 temporal-reasoning result reflects the enhanced OAMB and Mem0 OSS pipeline rather than native OSS temporal capability. The detailed compatibility notice later in this README explains the boundary.
 
 ## Overview
 
@@ -193,3 +189,7 @@ OAMB v0.1.0 evaluates self-hosted Mem0 OSS 2.0.19, not Mem0 Platform v3. These p
 For the self-hosted OSS profile, OAMB adds a LongMemEval ingestion compatibility enhancement. It preserves each source session's timestamp in `metadata.created_at` and supplies a custom extraction prompt that instructs Mem0's extraction model to use that timestamp as the Observation Date when resolving expressions such as “yesterday” or “last week.” The two inputs serve different purposes: `metadata.created_at` preserves storage provenance and enables evidence validation, while the custom prompt supplies the historical-time semantics during extraction.
 
 This enhancement does not add `reference_date`, time filtering, or temporal ranking to Mem0 OSS search. OAMB validates the stored timestamp but sends the extracted memory text—not `created_at`—to the answer model. The v0.1.0 temporal-reasoning result of 9/10 therefore measures the adapted end-to-end OAMB and Mem0 OSS pipeline; it is not a measurement of native Mem0 Platform v3 Temporal Reasoning, and it does not establish an independent accuracy contribution from `metadata.created_at`. See the [Mem0 evaluation and temporal-input investigation](docs/investigations/mem0-longmemeval-evaluation-and-temporal-parity.md) for the full evidence boundary.
+
+## Used generative model: DeepSeek V4.1 Flash
+
+OAMB v0.1.0 uses **DeepSeek V4.1 Flash as its only generative model** for provider memory processing, answers, and judging across all three providers. This lower-cost choice delivered quality strong enough for the v0.1.0 comparison while making the benchmark more affordable to reproduce. A separate non-generative `qwen3-embedding:0.6b` model handles embeddings.

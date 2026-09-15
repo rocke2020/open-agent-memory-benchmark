@@ -26,11 +26,7 @@ OpenViking 在本次运行中最明显的弱点是速度。OAMB 使用一条直�
 
 Hindsight 在本次覆盖的基础记忆任务上表现很强。v0.1.0 没有评测用户画像质量；另外的实际使用表明，用户画像是 Hindsight 相对较弱的领域，因此这是本次发布测量范围之外的实际注意事项，而不是该基准已经证实的结果。
 
-Mem0 Cloud（Platform v3）与自托管 Mem0 OSS 2.0.19 之间也存在重要的能力差异。Platform v3 原生提供时间输入和时间感知排序，而本次评测的 OSS 版本没有这些能力，因此如果不做额外适配，时间问题是一个实际弱项。OAMB 使用自定义历史日期提取提示词进行补偿，所以 temporal-reasoning 9/10 反映的是增强后的 OAMB 与 Mem0 OSS 流水线，而不是 OSS 的原生时间能力。本 README 文末的详细兼容性说明解释了这一边界。
-
-## 使用的生成式模型：DeepSeek V4.1 Flash
-
-OAMB v0.1.0 在三个提供方的记忆处理、答案生成和评判中，**统一只使用 DeepSeek V4.1 Flash 这一种生成式模型**。这个成本较低的选择提供了足以支撑 v0.1.0 比较的质量，同时让复现实验更经济。语义嵌入向量由独立的非生成式模型 `qwen3-embedding:0.6b` 完成。
+Mem0 Cloud（Platform v3）与自托管 Mem0 OSS 2.0.19 之间也存在重要的能力差异。Platform v3 原生提供时间输入和时间感知排序，而本次评测的 OSS 版本没有这些能力，因此如果不做额外适配，时间问题是一个实际弱项。OAMB 使用自定义历史日期提取提示词进行补偿，所以 temporal-reasoning 9/10 反映的是增强后的 OAMB 与 Mem0 OSS 流水线，而不是 OSS 的原生时间能力。本 README 后文的详细兼容性说明解释了这一边界。
 
 ## 概览
 
@@ -187,3 +183,7 @@ OAMB v0.1.0 评测的是自托管 Mem0 OSS 2.0.19，而不是 Mem0 Platform v3�
 对于自托管 OSS 配置，OAMB 为 LongMemEval 摄取增加了一项兼容性增强。它在 `metadata.created_at` 中保留每个源会话的时间戳，并提供自定义提取提示词，要求 Mem0 的提取模型在解析“昨天”或“上周”等表达时，将该时间戳作为 Observation Date。这两个输入的用途不同：`metadata.created_at` 保留存储来源信息并支持证据验证，而自定义提示词在提取阶段提供历史时间语义。
 
 该增强不会为 Mem0 OSS 搜索增加 `reference_date`、时间过滤或时间感知排序。OAMB 会验证存储的时间戳，但发送给答案模型的是提取后的记忆文本，而不是 `created_at`。因此，v0.1.0 的 temporal-reasoning 9/10 衡量的是经过适配的 OAMB 与 Mem0 OSS 端到端流水线；它不是对 Mem0 Platform v3 原生 Temporal Reasoning 的测量，也不能证明 `metadata.created_at` 对准确率有独立贡献。完整证据边界见 [Mem0 评测与时间输入调查](docs/investigations/mem0-longmemeval-evaluation-and-temporal-parity.md)。
+
+## 使用的生成式模型：DeepSeek V4.1 Flash
+
+OAMB v0.1.0 在三个提供方的记忆处理、答案生成和评判中，**统一只使用 DeepSeek V4.1 Flash 这一种生成式模型**。这个成本较低的选择提供了足以支撑 v0.1.0 比较的质量，同时让复现实验更经济。语义嵌入向量由独立的非生成式模型 `qwen3-embedding:0.6b` 完成。
