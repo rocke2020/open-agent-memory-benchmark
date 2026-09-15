@@ -8,11 +8,13 @@ English | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
 **On the balanced LME-60 screen, Hindsight recorded the highest answer accuracy at 57/60 (95.0%), while Mem0 used the least answer-visible context: 392.6k tokens, 59% less than Hindsight and 58% less than OpenViking.**
 
-| Provider | Answer accuracy | Answer-visible context tokens |
-|---|---:|---:|
-| Hindsight | **57/60 (95.0%)** | 954.4k total / 15.91k mean |
-| Mem0 | 52/60 (86.7%) | **392.6k total / 6.54k mean** |
-| OpenViking | 51/60 (85.0%) | 927.6k total / 15.46k mean |
+| Provider | Answer accuracy | Answer-visible context tokens | Indexing tokens | Retrieval latency (median / p95) |
+|---|---:|---:|---:|---:|
+| Hindsight | **57/60 (95.0%)** | 954.4k total / 15.91k mean | 58.44M total (partial) | 0.17s / 0.33s |
+| Mem0 | 52/60 (86.7%) | **392.6k total / 6.54k mean** | Unavailable | 0.12s / 0.35s |
+| OpenViking | 51/60 (85.0%) | 927.6k total / 15.46k mean | 58.22M total (complete) | 0.79s / 1.30s |
+
+Indexing-token coverage is partial for Hindsight, unavailable for Mem0, and complete for OpenViking, so those totals are not a complete three-provider ranking. Retrieval latency is observed provider-request wall time for this workload, not an environment-independent product benchmark.
 
 **[Open the full v0.1.0 report](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/v0.1.0/comparison-20260913-133717-82378/report.html)** · [Browse the complete public evaluation snapshot](eval_results/v0.1.0/)
 
