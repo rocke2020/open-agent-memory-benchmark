@@ -165,7 +165,9 @@ public, non-rerunnable evidence exists and users must reopen it.
   effort with provider-defined scale/rank, exact request or provider proof, and
   usage coverage. Supplier-reported model metadata remains in raw evidence and
   is not a second normalized identity; embedding records thinking effort as not
-  applicable.
+  applicable. `configs/benchmark.yml` owns the current v0.1.0 role settings below.
+- **`low`** for memory extraction, semantic processing, and answering.
+- **`high`** for judging.
 - Keep indexing usage and cost on the physical ingestion plan; do not multiply
   it by logical members or questions.
 - Core import, CLI help, artifact parsing, and validation commands must not import provider
