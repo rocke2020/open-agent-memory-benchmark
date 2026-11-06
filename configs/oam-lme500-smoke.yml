@@ -1,0 +1,11 @@
+dataset: lme500
+source: tests/fixtures/oam/lme500-smoke.json
+source_sha256: c718c40846fc210b1770102576f4dc980e8c016bbc954bc498d051b22df06231
+diagnostic: true
+max_model_calls: 4
+max_model_tokens: 50000
+max_output_tokens: 8192
+timeout_seconds: 300
+answer_effort: low
+judge_effort: low
+max_indexing_tokens: 2000000

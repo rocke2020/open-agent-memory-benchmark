@@ -2,7 +2,13 @@
 
 ## Overview
 
-Open Agent Memory Benchmark (OAMB) compares Hindsight, Mem0, and OpenViking through their native REST APIs under one shared evaluation protocol. The v0.1.0 profile uses the same balanced selection of 60 LongMemEval questions for each provider: ten questions from each of six question types, producing 180 provider-specific results.
+Open Agent Memory Benchmark (OAMB) focuses on evaluating Open Agent Memory (OAM), with Hindsight, Mem0, and OpenViking as comparison systems.
+
+The saved OAM v0.0.1 development evaluations cover [LongMemEval's 500 questions](docs/evaluations/oam-v0.0.1-lme500.md) and [BEAM-10M's 10 conversations and 200 questions](docs/evaluations/oam-v0.0.1-beam10m.md). LME-500 achieved **94.0% (470/500)**; BEAM-10M's policy-final mean rubric score was **61.56%**, with **142/200** questions meeting the 0.5 threshold. These reports reuse completed campaigns and require no setup or new evaluation calls.
+
+**We use only `deepseek-v4.1-flash` for extraction, answering and judging, prioritizing everyday agent tasks over peak leaderboard scores. Model choice matters:** Hindsight [reports **64.1%** on BEAM-10M](https://vectorize.io/benchmarks) using **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`) for answering; our [DeepSeek replay of its saved contexts scored **52.16%** after 43 eligible max-effort answer retries](docs/evaluations/oam-v0.0.1-beam10m.md), a gap of **about 12 percentage points** in mean rubric score.
+
+The existing executable comparison profile uses the native REST APIs of Hindsight, Mem0, and OpenViking on the same balanced selection of 60 LongMemEval questions: ten questions from each of six question types, producing 180 provider-specific results. The saved OAM evaluations remain separate historical evidence. The [native OAM workflows](docs/native-oam.md) now provide portable LME-500 and BEAM-10M execution through `./precheck.sh --oam` and `./run.sh --oam`, with small synthetic end-to-end diagnostics. Neither saved scores nor diagnostic passes certify the final release artifact.
 
 The offline report presents five metrics separately:
 
@@ -16,17 +22,39 @@ OAMB fixes questions, model roles, answer/judge policy, and comparison settings 
 
 ## Provider versions
 
-OAMB currently pins these formal provider releases and immutable source commits:
+OAMB targets **OAM v0.0.1** first, alongside these comparison-provider releases and source commits:
 
 | Provider | Release | Source commit |
 |---|---|---|
+| Open Agent Memory (OAM) | **0.0.1 development snapshot** | `d41fd439956a7ec4e92d0d67185250be4e86ee35` |
 | Hindsight | [0.9.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.9.2) | [`ebad478240d3171bb88201ececda5e8d9883d22d`](https://github.com/vectorize-io/hindsight/commit/ebad478240d3171bb88201ececda5e8d9883d22d) |
 | Mem0 | [2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19) | [`dc82354e143c2581d505d581a00286d6ef8c3605`](https://github.com/mem0ai/mem0/commit/dc82354e143c2581d505d581a00286d6ef8c3605) |
 | OpenViking | [0.4.19](https://github.com/volcengine/OpenViking/releases/tag/v0.4.19) | [`f3afef11637f2d7c11e4b1f36ed2f90630737cdc`](https://github.com/volcengine/OpenViking/commit/f3afef11637f2d7c11e4b1f36ed2f90630737cdc) |
 
-[`provider-services/versions.env`](provider-services/versions.env) is the authoritative runtime pin; image digests and source archive hashes there make provider preparation reproducible.
+[`provider-services/versions.env`](provider-services/versions.env) pins the comparison-provider images and source archives. The OAM development image is built from the source commit above using the instructions below.
+
+### OAM development image
+
+Build the OAM v0.0.1 development image from a checkout containing the recorded commit:
+
+```bash
+./provider-services/oam/build-image.sh /path/to/open-agent-memory d41fd439956a7ec4e92d0d67185250be4e86ee35
+docker run --rm oamb/oam:0.0.1-d41fd439956a --version
+```
+
+The build uses committed source and the OAM lockfile, excluding local uncommitted files. The resulting local image is a development snapshot, not the published release image. A working OAM deployment still requires an isolated PostgreSQL database, appropriate credentials and configured model services. Use the [native OAM setup and execution guide](docs/native-oam.md) for isolated PostgreSQL/API/worker preparation, input and model binding checks, token ceilings, checkpoints and resume.
+
+The evaluation overrides in `provider-services/oam/` configure LME-500 for the shared `small` vector index and BEAM-10M for `large` per-user indexes. Both disable Insights and Profile and select low extraction reasoning. The evaluator must request fast recall for LME and normal recall for BEAM; these modes are request parameters, not index settings. Other settings come from the image's canonical OAM configuration and must be checked against the historical protocol before claiming a matched rerun.
+
+The historical evaluations used Qwen3 embedding with a 32K-token input limit and OAM's approximate tokenizer. Current OAM defaults ingestion packing to `o200k_base` using `toktok-rs`, so the supplied image and overrides do not recreate the historical tokenizer behavior by themselves. For more accurate chunk sizing, prefer the embedding model's own tokenizer and configure its actual input and request limits. For example, `cl100k_base` matches OpenAI's `text-embedding-3` models. Check the exact model's tokenizer, input formatting and limits before use; the default encoding is not a universal match.
+
+Current OAM supports `o200k_base`, `cl100k_base`, the legacy `oam-unicode-quarter-v1` counter and a model-specific `tokenizer_json` asset. Set `tokenizer.type` for ingestion packing and, when needed, a separate `models.embedding.tokenizer` for embedding admission. Configure `models.embedding.max_input_tokens`, `max_request_tokens` and `max_request_items` to match the service. If no supported counter matches the model, treat the count as an approximation and allow a safety margin; it cannot guarantee that input fits the provider's limit. Verify the embedding dimension as well. Changing the embedding model or tokenizer may change chunking, embeddings and results, so report it rather than presenting the rerun as identical to the historical campaign.
+
+The native BEAM workflow provisions a dedicated index after each conversation's embedded search units exist. Both profiles verify the expected index against the actual dense-discovery query plan before scoring. Small synthetic samples have exercised real ingestion, recall, answering, judging and offline HTML inspection; they are separate from historical and full-dataset results. See the [workflow guide](docs/native-oam.md) for exact commands, artifact boundaries and current limitations.
 
 ## Quick start
+
+The commands below start a separate native provider comparison. They are unnecessary for reading the saved [LME-500](docs/evaluations/oam-v0.0.1-lme500.md) and [BEAM-10M](docs/evaluations/oam-v0.0.1-beam10m.md) evaluations.
 
 You need Git, Python 3.11+, `uv`, Docker with Compose, `curl`, `jq`, `shasum`, and credentials for an OpenAI-compatible model endpoint. Preparation and evaluation can make billable model calls. They create isolated provider state and preserve existing provider/database data.
 

@@ -1,0 +1,43 @@
+[
+  {
+    "question_id": "oam-smoke-lme",
+    "question_type": "single-session-user",
+    "question": "Which drink do I prefer?",
+    "answer": "green tea",
+    "question_date": "2024/01/03 (Wed) 00:00",
+    "answer_session_ids": [
+      "s1"
+    ],
+    "haystack_session_ids": [
+      "s1",
+      "s2"
+    ],
+    "haystack_dates": [
+      "2024/01/01 (Mon) 00:00",
+      "2024/01/02 (Tue) 00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "I prefer green tea.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Understood."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "I avoid coffee because it keeps me awake."
+        },
+        {
+          "role": "assistant",
+          "content": "That makes sense."
+        }
+      ]
+    ]
+  }
+]

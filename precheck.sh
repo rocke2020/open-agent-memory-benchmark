@@ -3,6 +3,11 @@
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${1:-}" == "--oam" ]]; then
+  shift
+  cd "$ROOT"
+  exec uv run --locked python -m oamb.oam_workflow precheck "$@"
+fi
 readonly ENV_FILE="$ROOT/.env"
 readonly RUNTIME_DIR="$ROOT/provider-services/.runtime"
 readonly OUTPUTS_ROOT="$ROOT/outputs"
@@ -26,6 +31,7 @@ EMBEDDING_API_URL=""
 usage() {
   cat <<'EOF'
 Usage: ./precheck.sh [--embedding-api-url URL | --no-start-embedding]
+       ./precheck.sh --oam CONFIG --output DIR [--env-file FILE]
 
 Prepare inputs, configure local files, start and verify providers, and freeze
 the exact LME-60 plan. A configured embedding URL is reused with an optional

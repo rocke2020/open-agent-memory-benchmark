@@ -3,6 +3,11 @@
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${1:-}" == "--oam" ]]; then
+  shift
+  cd "$ROOT"
+  exec uv run --locked python -m oamb.oam_workflow run "$@"
+fi
 readonly ENV_FILE="$ROOT/.env"
 readonly OUTPUTS_ROOT="$ROOT/outputs"
 readonly PRECHECK_ROOT="$OUTPUTS_ROOT/tmp/precheck"
@@ -33,6 +38,7 @@ usage() {
   cat <<'EOF'
 Usage: ./run.sh [--smoke_test | --full_test] [--resume] [--dry-run]
        ./run.sh --generate-report --result-dir=DIR
+       ./run.sh --oam DIR [--resume]
 
 --smoke_test  Run one LME-60 question on every provider (default).
 --full_test   Run all 60 questions on every provider in parallel.

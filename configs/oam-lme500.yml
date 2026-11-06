@@ -1,0 +1,6 @@
+dataset: lme500
+source: datasets/longmemeval-cleaned/longmemeval_s_cleaned.json
+source_sha256: d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442
+max_model_calls: 1000
+max_model_tokens: 100000000
+max_indexing_tokens: 500000000

@@ -1,0 +1,6 @@
+dataset: beam10m
+source: datasets/beam/10m.json
+source_sha256: c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8
+max_model_calls: 3000
+max_model_tokens: 100000000
+max_indexing_tokens: 500000000

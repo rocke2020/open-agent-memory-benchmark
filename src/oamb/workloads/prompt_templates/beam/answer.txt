@@ -1,0 +1,9 @@
+Answer the question from the stored conversation evidence below. Read the entire evidence before deciding which details matter. Resolve references to people or events from that evidence, combine related facts, and use specific names, dates and quantities when available. Distinguish changed information from earlier statements. Do not invent missing facts; explicitly say when the evidence is insufficient. Keep the answer concise while covering every part of the question.
+
+Question:
+{query}
+
+Stored conversation evidence:
+{context}
+
+Answer:

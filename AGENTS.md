@@ -3,14 +3,9 @@ This file provides context for AI coding assistants (Claude Code, Codex, etc.)
 
 ## Project scope
 
-Open Agent Memory Benchmark (OAMB) is a clean-room Python package for
-reproducible, evidence-first comparisons of self-hosted memory systems. The
-planned v0.1 comparison reaches Hindsight, Mem0, and the OpenViking session
-profile through REST APIs on the balanced LME-60 LongMemEval selection: the
-same ten questions from each of six question types for all three providers.
-MemoryAgentBench is deferred. Mem0's
-optional Python SDK is a separate, non-default profile whose evidence can never
-substitute for REST evidence.
+Open Agent Memory Benchmark (OAMB) focuses on evaluating Open Agent Memory (OAM), with other self-hosted memory systems as comparison systems. The current OAM v0.0.1 addition reuses the completed historical LME-500 campaign; see [the performance report](docs/evaluations/oam-v0.0.1-lme500.md). Show 94.0% (470/500) as the main result and 90.6% (453/500) in supplementary details, preserving the recorded retry policy and failure attribution. Do not rerun ingestion, recall, answering, judging, or model-based review for this historical addition.
+
+The existing executable v0.1 comparison reaches Hindsight, Mem0, and the OpenViking session profile through REST APIs on balanced LME-60: the same ten questions from each of six question types for all three providers. Native OAM execution is a separate explicit profile documented in `docs/native-oam.md`; it uses the same public precheck/run scripts and does not acquire three-provider comparison or historical-score compatibility claims. MemoryAgentBench is deferred. Mem0's optional Python SDK is a separate, non-default profile whose evidence can never substitute for REST evidence.
 
 Provider service preparation, offline implementation, live evidence, quality
 acceptance, and release readiness are different completion states. Never infer
@@ -153,10 +148,7 @@ public, non-rerunnable evidence exists and users must reopen it.
   `FINALIZED` does not mean `VALIDATED`, and `VALIDATED` does not mean a high
   score.
 - Preserve provider-returned retrieval order. OAMB owns no reranker.
-- v0.1.0 compares Hindsight, Mem0, and the OpenViking session profile on the
-  same balanced LME-60 manifest. Its 60 unique questions produce 180
-  provider-specific results. MemoryAgentBench is deferred and cannot satisfy
-  a v0.1 execution or release gate.
+- The executable v0.1.0 profile compares Hindsight, Mem0, and the OpenViking session profile on balanced LME-60, producing 180 provider-specific results. Historical OAM LME-500 evidence remains separate from native execution and release gates. MemoryAgentBench is deferred.
 - Retrieval generation is disabled. Query embedding remains allowed, but
   Hindsight `reflect`, Mem0 generative reranking/search processing, OpenViking
   session-intent search, query planning/rewriting, and any other generative

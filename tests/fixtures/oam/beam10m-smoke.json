@@ -1,0 +1,39 @@
+[
+  {
+    "conversation_id": "oam-smoke-beam",
+    "chat": [
+      {
+        "plan-0": [
+          {
+            "time_anchor": "March-15-2024",
+            "turns": [
+              [
+                {
+                  "id": 0,
+                  "role": "user",
+                  "content": "My bicycle's frame color is cobalt blue."
+                },
+                {
+                  "id": 1,
+                  "role": "assistant",
+                  "content": "I will remember the color of your bicycle."
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    ],
+    "probing_questions": {
+      "information_extraction": [
+        {
+          "question": "What color is my bicycle frame?",
+          "answer": "cobalt blue",
+          "rubric": [
+            "The response should state that the bicycle frame is cobalt blue."
+          ]
+        }
+      ]
+    }
+  }
+]

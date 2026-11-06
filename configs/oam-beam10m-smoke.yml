@@ -1,0 +1,11 @@
+dataset: beam10m
+source: tests/fixtures/oam/beam10m-smoke.json
+source_sha256: 5d210b35908a76c1538449b737f2c2a3ab21ff2bc5fdc642a8f5fa284ec92c6f
+diagnostic: true
+max_model_calls: 4
+max_model_tokens: 50000
+max_output_tokens: 8192
+timeout_seconds: 300
+answer_effort: low
+judge_effort: low
+max_indexing_tokens: 2000000

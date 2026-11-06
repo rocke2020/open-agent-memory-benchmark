@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+    environment:
+      POSTGRES_PASSWORD: ${OAMB_OAM_DB_PASSWORD:?set a fresh password}
+      POSTGRES_DB: oam
+    shm_size: 256mb
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d oam]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  api:
+    image: ${OAMB_OAM_IMAGE:?build the OAM image first}
+    env_file: ${OAMB_OAM_SERVICE_ENV:?select the private service env file}
+    command: [api, --config, /opt/oam-eval/config.yaml, --host, 0.0.0.0, --port, '8080']
+    ports:
+      - '127.0.0.1:${OAMB_OAM_PORT:?select a free local port}:8080'
+    volumes:
+      - ${OAMB_OAM_CONFIG:?select lme500.yaml or beam10m.yaml}:/opt/oam-eval/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+  worker:
+    image: ${OAMB_OAM_IMAGE:?build the OAM image first}
+    env_file: ${OAMB_OAM_SERVICE_ENV:?select the private service env file}
+    command: [worker, --config, /opt/oam-eval/config.yaml]
+    volumes:
+      - ${OAMB_OAM_CONFIG:?select lme500.yaml or beam10m.yaml}:/opt/oam-eval/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  postgres-data:
