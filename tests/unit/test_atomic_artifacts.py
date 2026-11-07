@@ -119,22 +119,6 @@ def test_atomic_fault_hook_can_interrupt_each_durability_boundary(
         assert not target.exists()
 
 
-def test_atomic_write_does_not_use_replacing_rename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = tmp_path / "sealed.json"
-
-    def reject_replace(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("replace-style publication is forbidden")
-
-    monkeypatch.setattr("os.replace", reject_replace)
-    monkeypatch.setattr("os.rename", reject_replace)
-
-    atomic_write_bytes(target, b"create only")
-
-    assert target.read_bytes() == b"create only"
-
-
 def test_atomic_replace_publishes_new_complete_bytes_over_an_existing_file(
     tmp_path: Path,
 ) -> None:

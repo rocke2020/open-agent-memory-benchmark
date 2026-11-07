@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from oamb import live
@@ -30,31 +31,6 @@ def _plan() -> ResolvedPlan:
 
 def _lme6_plan() -> ResolvedPlan:
     return build_resolved_plan(load_lme6_configuration())
-
-
-def test_run_help_excludes_deleted_recovery_options() -> None:
-    result = CliRunner().invoke(app, ["run", "--help"])
-
-    assert result.exit_code == 0, result.output
-    for option in ("--continue-from", "--recover-from", "--recovery-analysis-output"):
-        assert option not in result.output
-
-
-def test_root_environment_template_contains_model_placeholders_without_credentials() -> None:
-    entries = {}
-    for line in (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
-        if line and not line.startswith("#"):
-            key, value = line.split("=", 1)
-            entries[key] = value
-
-    assert entries["LLM_URL_TYPE"] == "openai_chat"
-    assert entries["LLM_LIGHT_MODEL"] == "deepseek-flash"
-    assert entries["LLM_DEEP_MODEL"] == "deepseek-flash"
-    assert entries["LLM_BASE_URL"] == "change-me"
-    assert entries["LLM_API_KEY"] == "change-me"
-    assert "DEEPSEEK_BASE_URL" not in entries
-    assert "DEEPSEEK_API_KEY" not in entries
-    assert not any(value.startswith("sk-") for value in entries.values())
 
 
 def test_live_question_run_writes_machine_readable_result_map(
@@ -630,7 +606,7 @@ def test_question_results_build_only_cells_with_remaining_questions(
     if limits is not None and 0 in limits:
         assert result.exit_code != 0
         assert "must be a positive finite integer" in " ".join(
-            result.output.replace("│", " ").split()
+            unstyle(result.output).replace("│", " ").split()
         )
         assert not built
         assert not environment_loaded

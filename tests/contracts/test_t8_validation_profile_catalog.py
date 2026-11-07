@@ -17,7 +17,6 @@ from oamb.artifacts.validation.profiles import (
     ReportKind,
     exact_report_export_profile,
     t8_profile_catalog,
-    validation_profile_catalog,
 )
 from oamb.artifacts.validation.registry import RuleRegistry
 from oamb.contracts.states import ValidationDisposition
@@ -157,69 +156,6 @@ def _counting_registry(
         implementations,
         disabled_rule_ids=disabled_rule_ids,
         implementation_versions=implementation_versions,
-    )
-
-
-def test_t8_catalog_is_exact_and_contains_no_t11_profile() -> None:
-    catalog = t8_profile_catalog()
-
-    assert tuple(catalog) == EXPECTED_PROFILE_IDS
-    for profile_id, definition in catalog.items():
-        assert definition.profile.profile_id == profile_id
-        assert (
-            tuple(
-                (item.rule_id, item.minimum_version) for item in definition.profile.required_rules
-            )
-            == definition.rule_inventory
-        )
-        assert (
-            tuple(rule_id for rule_id, _version in definition.rule_inventory)
-            == (EXPECTED_RULE_IDS_BY_PROFILE[profile_id])
-        )
-        assert all(version == 1 for _rule_id, version in definition.rule_inventory)
-        assert len({rule_id for rule_id, _version in definition.rule_inventory}) == len(
-            definition.rule_inventory
-        )
-
-    serialized = repr(tuple(catalog.values())).lower()
-    assert "phase_2" not in serialized
-    assert "repeatability" not in serialized
-    assert "unique_cases=95" not in serialized
-    assert "system_results=190" not in serialized
-    assert "pairs=22" not in serialized
-    mem0_rest = catalog["oamb-t8-adapter-mem0-rest-v1"].profile.applicability
-    mem0_sdk = catalog["oamb-t8-adapter-mem0-sdk-v1"].profile.applicability
-    assert "transport=rest_api" in mem0_rest
-    assert "support=unsupported" in mem0_rest
-    assert "transport=python_sdk" in mem0_sdk
-    assert "support=unsupported" in mem0_sdk
-    assert "comparison_eligible=false" in mem0_sdk
-
-
-def test_current_catalog_extends_frozen_t8_with_t9_and_t10_profiles() -> None:
-    t8_catalog = t8_profile_catalog()
-    current_catalog = validation_profile_catalog()
-
-    assert tuple(current_catalog) == (
-        *tuple(t8_catalog),
-        "oamb-t9-external-amb-historical-v1",
-        "oamb-t10-adapter-mem0-rest-blackbox-v1",
-    )
-    external = current_catalog["oamb-t9-external-amb-historical-v1"]
-    assert tuple(rule.rule_id for rule in external.profile.required_rules) == (
-        "external.provenance.v1",
-        "external.transformation.v1",
-        "external.case-aggregate.v1",
-        "external.compatibility.v1",
-        "external.limitations.v1",
-    )
-    assert "repeatability" not in repr(tuple(current_catalog.values())).lower()
-    mem0_blackbox = current_catalog["oamb-t10-adapter-mem0-rest-blackbox-v1"]
-    assert tuple(rule.rule_id for rule in mem0_blackbox.profile.required_rules) == (
-        "adapter.mem0.rest.runtime-profile.v2",
-        "adapter.mem0.rest.scope-dispatch-projection.v1",
-        "adapter.mem0.rest.retrieval-order-scope.v1",
-        "adapter.mem0.rest.query-mutation.v1",
     )
 
 

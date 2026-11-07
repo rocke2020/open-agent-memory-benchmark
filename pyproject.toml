@@ -45,8 +45,6 @@ oamb = "oamb.cli:main"
 dev = [
   "hypothesis>=6.140,<7",
   "mypy>=1.18,<2",
-  # T8: exact-engine file:// browser/security acceptance without a runtime dependency.
-  "playwright==1.55.0",
   "pytest>=8.4,<10",
   "pytest-asyncio>=1.2,<2",
   "ruff>=0.13,<1",

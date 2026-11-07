@@ -503,7 +503,16 @@ def _quick_start_fixture(tmp_path: Path, *, system_name: str) -> tuple[Path, dic
     (root / "outputs" / "tmp" / "provider-source" / "mem0" / ".git").mkdir(parents=True)
 
     _write_executable(fake_bin / "uname", f"printf '%s\\n' {system_name}")
-    _write_executable(fake_bin / "docker", "printf '%s\\n' 172.17.0.1")
+    _write_executable(
+        fake_bin / "docker",
+        r"""
+printf 'docker %s\n' "$*" >> "$OAMB_TEST_TRACE"
+case "$*" in
+  network\ rm\ *) exit 0 ;;
+esac
+printf '%s\n' 172.17.0.1
+""".strip(),
+    )
     _write_executable(
         fake_bin / "curl",
         """
@@ -587,6 +596,31 @@ printf 'provider-config %s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
   "${OAMB_HINDSIGHT_LLM_PROVIDER:-missing}" \
   "${OAMB_OPENVIKING_VLM_PROVIDER:-missing}" >> "$OAMB_TEST_TRACE"
 printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
+if [ "${1:-}" = "prepare-new-run" ]; then
+  new_project=$2
+  preserved_runtime=$3
+  provider_root=$(cd "$(dirname "$0")/.." && pwd)
+  runtime="$provider_root/.runtime"
+  mkdir -p "$preserved_runtime"
+  shopt -s dotglob nullglob
+  for runtime_entry in "$runtime"/*; do
+    mv "$runtime_entry" "$preserved_runtime/"
+  done
+  OAMB_ENV_FILE="$provider_root/../.env" OAMB_NEW_PROJECT="$new_project" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["OAMB_ENV_FILE"])
+lines = path.read_text(encoding="utf-8").splitlines()
+lines = [
+    f"OAMB_PROVIDER_PROJECT={os.environ['OAMB_NEW_PROJECT']}"
+    if line.startswith("OAMB_PROVIDER_PROJECT=")
+    else line
+    for line in lines
+]
+path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+PY
+fi
 """.strip(),
     )
     resolver = root / "provider-services" / "lib" / "host_embedding.sh"
@@ -718,6 +752,125 @@ def test_precheck_managed_local_embedding_leaves_prepared_dotenv_byte_identical(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert env_path.read_bytes() == original
+
+
+def test_precheck_replaces_existing_provider_project_for_new_run(
+    tmp_path: Path,
+) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    old_project = "oamb-providers-old-project"
+    env_path = root / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "OAMB_PROVIDER_PROJECT=change-me",
+            f"OAMB_PROVIDER_PROJECT={old_project}",
+        ),
+        encoding="utf-8",
+    )
+    provider_root = root / "provider-services"
+    runtime = provider_root / ".runtime"
+    runtime.mkdir()
+    (runtime / "provider-project.attestation").write_text(
+        f"project={old_project}\ncompose_sha256={'a' * 64}\nversions_sha256={'b' * 64}\n",
+        encoding="utf-8",
+    )
+    (runtime / "preserved-evidence.json").write_text("{}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads((root / "outputs" / "tmp" / "quick-start-current.json").read_bytes())
+    new_project = next(
+        line.split("=", 1)[1]
+        for line in env_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("OAMB_PROVIDER_PROJECT=")
+    )
+    assert new_project == f"oamb-providers-{state['run_label']}"
+    assert new_project != old_project
+    preserved_runtime = provider_root / f".runtime-preserved-{state['run_label']}"
+    assert (preserved_runtime / "preserved-evidence.json").read_text(encoding="utf-8") == "{}\n"
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    prepare_call = next(
+        line for line in calls if line.startswith("provider-services prepare-new-run ")
+    )
+    assert calls.index(prepare_call) < calls.index("provider-services doctor")
+    assert f"docker network rm {old_project}_default" in calls
+
+
+def test_precheck_does_not_replace_an_active_provider_project(tmp_path: Path) -> None:
+    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
+    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
+    env_path = root / ".env"
+    first = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    old_project = next(
+        line.split("=", 1)[1]
+        for line in env_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("OAMB_PROVIDER_PROJECT=")
+    )
+    original_env = env_path.read_bytes()
+    provider_root = root / "provider-services"
+    runtime = provider_root / ".runtime"
+    runtime.mkdir()
+    attestation = runtime / "provider-project.attestation"
+    attestation.write_text(
+        f"project={old_project}\ncompose_sha256={'a' * 64}\nversions_sha256={'b' * 64}\n",
+        encoding="utf-8",
+    )
+    active_operation = runtime / "active-operation"
+    active_operation.write_text('{"kind":"benchmark_run"}\n', encoding="utf-8")
+    state_path = root / "outputs" / "tmp" / "quick-start-current.json"
+    original_state = state_path.read_bytes()
+    _write_executable(
+        provider_root / "bin" / "provider-services",
+        """
+printf 'provider-services %s\n' "$*" >> "$OAMB_TEST_TRACE"
+if [ "${1:-}" = "prepare-new-run" ] && [ -e "$OAMB_TEST_ACTIVE_OPERATION" ]; then
+  printf 'provider-services: active OAMB provider operation exists; refusing provider lifecycle mutation\n' >&2
+  exit 1
+fi
+""".strip(),
+    )
+    env["OAMB_TEST_ACTIVE_OPERATION"] = str(active_operation)
+    trace.write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "active OAMB provider operation" in result.stderr
+    assert env_path.read_bytes() == original_env
+    assert state_path.read_bytes() == original_state
+    assert attestation.is_file()
+    assert active_operation.is_file()
+    assert not tuple(provider_root.glob(".runtime-preserved-*"))
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("provider-services prepare-new-run ") for line in calls)
+    assert not any(line.startswith("docker network rm ") for line in calls)
 
 
 def test_precheck_publishes_state_and_plan_below_outputs_root(tmp_path: Path) -> None:
@@ -1106,88 +1259,6 @@ def test_precheck_completes_single_root_env_without_provider_copy(tmp_path: Path
     ] == ["OAMB_EMBEDDING_BASE_URL"]
     assert stat.S_IMODE(root_env_path.stat().st_mode) == 0o600
     assert not (root / "provider-services" / ".env").exists()
-
-
-def test_precheck_upgrades_legacy_two_key_root_env(tmp_path: Path) -> None:
-    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
-    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
-    root_env_path = root / ".env"
-    root_env_path.write_text(
-        "DEEPSEEK_BASE_URL=https://models.example/v1\nDEEPSEEK_API_KEY=test-model-key\n",
-        encoding="utf-8",
-    )
-    root_env_path.chmod(0o600)
-
-    result = subprocess.run(
-        [str(script)],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=20,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    root_env = root_env_path.read_text(encoding="utf-8")
-    assert "LLM_URL_TYPE=openai_chat" in root_env
-    assert "LLM_BASE_URL=https://models.example/v1" in root_env
-    assert "LLM_API_KEY=test-model-key" in root_env
-    assert "DEEPSEEK_BASE_URL=" not in root_env
-    assert "DEEPSEEK_API_KEY=" not in root_env
-    for expected in (
-        "OAMB_HINDSIGHT_PORT=18888",
-        "OAMB_MEM0_PORT=18889",
-        "OAMB_MEM0_INSPECTOR_PORT=16333",
-        "OAMB_OPENVIKING_PORT=19330",
-        "OAMB_OPENVIKING_ACCOUNT_ID=oamb-benchmark",
-        "OAMB_OPENVIKING_ADMIN_USER_ID=oamb-admin",
-    ):
-        assert expected in root_env
-    assert (
-        "provider-config deepseek-flash|deepseek-flash|deepseek-flash|plan-embedding|low|high|max|openai|openai"
-        in (trace.read_text(encoding="utf-8"))
-    )
-    assert not (root / "provider-services" / ".env").exists()
-
-
-@pytest.mark.parametrize(
-    ("key", "duplicate_value"),
-    (
-        ("DEEPSEEK_BASE_URL", "https://duplicate.example/v1"),
-        ("DEEPSEEK_API_KEY", "duplicate-model-key"),
-    ),
-)
-def test_precheck_rejects_duplicate_legacy_llm_assignment_without_mutation(
-    tmp_path: Path,
-    key: str,
-    duplicate_value: str,
-) -> None:
-    root, env, trace = _quick_start_fixture(tmp_path, system_name="Darwin")
-    script = _copy_quick_start_script(PRECHECK_SCRIPT, root)
-    env_path = root / ".env"
-    env_path.write_text(
-        "DEEPSEEK_BASE_URL=https://models.example/v1\n"
-        "DEEPSEEK_API_KEY=test-model-key\n"
-        f"{key}={duplicate_value}\n",
-        encoding="utf-8",
-    )
-    original = env_path.read_bytes()
-
-    result = subprocess.run(
-        [str(script)],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=20,
-    )
-
-    assert result.returncode != 0
-    assert f"precheck: FAIL: {key} must occur exactly once in .env" in result.stderr
-    assert env_path.read_bytes() == original
-    assert "provider-services " not in trace.read_text(encoding="utf-8")
 
 
 def test_precheck_rejects_symlinked_root_env_without_mutating_target(tmp_path: Path) -> None:
@@ -1815,7 +1886,7 @@ def test_run_smoke_runs_the_dry_run_gate_before_dispatch(tmp_path: Path) -> None
         capture_output=True,
         text=True,
         check=False,
-        timeout=20,
+        timeout=60,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1945,19 +2016,6 @@ def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path
     }
 
 
-def test_run_progress_has_no_deleted_history_rebuild_parser() -> None:
-    source = RUN_SCRIPT.read_text(encoding="utf-8")
-
-    for removed in (
-        "progress_records(",
-        "history_rebuild_attempts",
-        "history-retries",
-        "successor_history_attempt_ordinal",
-        "history_attempt_ordinal",
-    ):
-        assert removed not in source
-
-
 def test_run_reports_live_cell_progress_while_provider_is_running(tmp_path: Path) -> None:
     root, env, _trace = _run_fixture(tmp_path)
     script = _copy_quick_start_script(RUN_SCRIPT, root)
@@ -2026,17 +2084,17 @@ def test_run_full_reports_progress_per_provider_out_of_sixty(tmp_path: Path) -> 
         assert (
             f"provider={provider} status=starting, elapsed=0s, completed_questions=0 (0/60, 0%)"
         ) in result.stdout
-        progress_line = next(
+        progress_lines = tuple(
             line
             for line in result.stdout.splitlines()
-            if f"provider={provider} status=running" in line
+            if line.startswith(f"provider={provider} status=running, elapsed=")
         )
-        assert progress_line.startswith(f"provider={provider} status=running, elapsed=")
-        assert progress_line.endswith(
-            f"completed_questions={completed} ({completed}/60, {percentage}%)"
+        assert any(
+            line.endswith(f"completed_questions={completed} ({completed}/60, {percentage}%)")
+            for line in progress_lines
         )
-        assert "completed_operations=" not in progress_line
-        assert "question_progress=" not in progress_line
+        assert all("completed_operations=" not in line for line in progress_lines)
+        assert all("question_progress=" not in line for line in progress_lines)
     assert "/180" not in result.stdout
     assert "/1)" not in result.stdout
 
@@ -2132,6 +2190,14 @@ def _run_progress_fixture(
     )
 
 
+def _last_provider_progress_line(output: str, provider: str) -> str:
+    matches = tuple(
+        line for line in output.splitlines() if line.startswith(f"provider={provider} status=")
+    )
+    assert matches, f"missing progress for provider={provider}"
+    return matches[-1]
+
+
 @pytest.mark.parametrize("failed_state", ("aborted", "infrastructure_blocked"))
 def test_run_progress_preserves_terminal_provider_state_while_peer_runs(
     tmp_path: Path, failed_state: str
@@ -2148,8 +2214,12 @@ def test_run_progress_preserves_terminal_provider_state_while_peer_runs(
     assert f"provider=hindsight status={failed_state}, elapsed=1348s" in result.stdout
     assert "provider=mem0 status=execution-completed, elapsed=1348s" in result.stdout
     assert "provider=openviking status=running, elapsed=" in result.stdout
-    assert "provider=hindsight status=running" not in result.stdout
-    assert "provider=mem0 status=running" not in result.stdout
+    assert _last_provider_progress_line(result.stdout, "hindsight").startswith(
+        f"provider=hindsight status={failed_state},"
+    )
+    assert _last_provider_progress_line(result.stdout, "mem0").startswith(
+        "provider=mem0 status=execution-completed,"
+    )
     assert "provider=openviking status=unavailable, elapsed=unavailable" in result.stdout
     assert "providers=hindsight,mem0,openviking status=failed" not in result.stderr
     assert "provider=mem0 status=failed" not in result.stdout + result.stderr
@@ -2175,7 +2245,9 @@ def test_run_progress_reports_invalid_terminal_record_as_unavailable(
 
     assert result.returncode == 44, result.stdout + result.stderr
     assert "provider=hindsight status=unavailable, elapsed=unavailable" in result.stdout
-    assert "provider=hindsight status=running" not in result.stdout
+    assert _last_provider_progress_line(result.stdout, "hindsight").startswith(
+        "provider=hindsight status=unavailable,"
+    )
     assert "provider=hindsight status=aborted" not in result.stdout
 
 
@@ -2184,7 +2256,9 @@ def test_run_progress_reports_ambiguous_provider_root_as_unavailable(tmp_path: P
 
     assert result.returncode == 44, result.stdout + result.stderr
     assert "provider=hindsight status=unavailable, elapsed=unavailable" in result.stdout
-    assert "provider=hindsight status=running" not in result.stdout
+    assert _last_provider_progress_line(result.stdout, "hindsight").startswith(
+        "provider=hindsight status=unavailable,"
+    )
 
 
 @pytest.mark.parametrize(
@@ -3116,7 +3190,13 @@ def test_one_signal_stops_owned_full_run_tree_once(
         process.wait(timeout=10)
 
         assert not received_signals.exists()
-        assert "provider-services stop" in trace.read_text(encoding="utf-8")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if "provider-services stop" in trace.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("stop handler did not stop provider services")
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
             try:

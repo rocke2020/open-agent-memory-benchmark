@@ -1,1 +1,0 @@
-"""Report performance acceptance tests."""

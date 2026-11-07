@@ -124,6 +124,10 @@ class OperatorDoctorTests(unittest.TestCase):
         docker_calls = [call for call in calls if call.startswith("file-project|")]
         self.assertTrue(any(" exec " in call for call in docker_calls), docker_calls)
         self.assertTrue(any(" restart mem0" in call for call in docker_calls), docker_calls)
+        self.assertTrue(
+            any("get_memory_instance().vector_store.create_col()" in call for call in docker_calls),
+            docker_calls,
+        )
         for call in docker_calls:
             self.assertTrue(call.startswith("file-project|file-postgres-password|"), call)
             self.assertIn("compose -p file-project ", call)
@@ -140,6 +144,9 @@ class OperatorDoctorTests(unittest.TestCase):
         env_extra: str = "",
         dotenv_mode: int = 0o600,
         symlink_dotenv: bool = False,
+        drift_compose_after_attestation: bool = False,
+        active_operation: bool = False,
+        append_preserved_runtime_argument: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -248,6 +255,15 @@ class OperatorDoctorTests(unittest.TestCase):
             f"versions_sha256={versions_hash}\n",
             encoding="utf-8",
         )
+        if drift_compose_after_attestation:
+            (bundle / "compose.yaml").write_text(
+                (bundle / "compose.yaml").read_text(encoding="utf-8") + "# changed\n",
+                encoding="utf-8",
+            )
+        if active_operation:
+            (runtime / "active-operation").write_text(
+                '{"kind":"benchmark_run"}\n', encoding="utf-8"
+            )
 
         fake_bin = directory / "bin"
         fake_bin.mkdir()
@@ -272,40 +288,69 @@ class OperatorDoctorTests(unittest.TestCase):
             "esac\n"
             "exit 0\n",
         )
+        _write_executable(
+            fake_bin / "mv",
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  "$OAMB_TEST_RUNTIME"/*)\n'
+            '    [ -d "$OAMB_TEST_RUNTIME/provider-lifecycle.lock" ] || exit 81\n'
+            "    printf 'archive-lock=held\\n'\n"
+            "    ;;\n"
+            "esac\n"
+            'exec /bin/mv "$@"\n',
+        )
+        effective_command = list(command or ("doctor",))
+        if append_preserved_runtime_argument:
+            effective_command.append(str(bundle / ".runtime-preserved-test"))
         return subprocess.run(
-            [str(bundle / "bin" / "provider-services"), *(command or ("doctor",))],
+            [str(bundle / "bin" / "provider-services"), *effective_command],
             check=False,
             capture_output=True,
             text=True,
             env={
                 **os.environ,
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "OAMB_TEST_RUNTIME": str(runtime),
                 **(model_overrides or {}),
                 **(process_overrides or {}),
             },
         )
 
-    def test_doctor_accepts_plan_models_from_the_process_environment(self) -> None:
+    def test_stop_allows_compose_drift_to_preserve_the_old_project(self) -> None:
         result = self._run_operator(
-            model_overrides={
-                "OAMB_HINDSIGHT_LLM_MODEL": "plan-hindsight",
-                "OAMB_HINDSIGHT_LLM_REASONING_EFFORT": "low",
-                "OAMB_MEM0_LLM_MODEL": "plan-mem0",
-                "OAMB_MEM0_LLM_REASONING_EFFORT": "high",
-                "OAMB_OPENVIKING_VLM_MODEL": "plan-openviking",
-                "OAMB_OPENVIKING_VLM_REASONING_EFFORT": "max",
-                "OAMB_EMBEDDING_MODEL": "plan-embedding",
-            },
-            process_overrides={"OAMB_MEM0_POSTGRES_PASSWORD": "PROCESS_OVERRIDE_SENTINEL"},
+            "stop",
+            drift_compose_after_attestation=True,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("doctor: PASS", result.stdout)
         self.assertIn(
-            "compose-env=test-value-oamb_mem0_postgres_password|plan-mem0|high|10",
-            result.stdout,
+            "stop: PASS (containers stopped; data and benchmark results preserved)", result.stdout
         )
-        self.assertNotIn("PROCESS_OVERRIDE_SENTINEL", result.stdout)
+
+    def test_prepare_new_run_refuses_an_active_provider_operation(self) -> None:
+        result = self._run_operator(
+            "prepare-new-run",
+            "oamb-providers-next-project",
+            active_operation=True,
+            append_preserved_runtime_argument=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("active OAMB provider operation", result.stderr)
+        self.assertNotIn("compose-env=", result.stdout)
+
+    def test_prepare_new_run_keeps_the_canonical_lock_while_archiving(self) -> None:
+        result = self._run_operator(
+            "prepare-new-run",
+            "oamb-providers-next-project",
+            append_preserved_runtime_argument=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("archive-lock=held", result.stdout)
+        self.assertLess(
+            result.stdout.index("compose-env="), result.stdout.index("archive-lock=held")
+        )
 
     def test_doctor_accepts_missing_embedding_api_key_as_keyless(self) -> None:
         result = self._run_operator(

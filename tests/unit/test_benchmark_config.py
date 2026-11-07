@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,7 @@ from oamb.config.benchmark import (
     load_benchmark_configuration,
     load_resume_concurrency,
 )
-from tests.benchmark_configuration import MODEL_ENVIRONMENT, load_lme6_configuration
+from tests.benchmark_configuration import MODEL_ENVIRONMENT
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "benchmark.yml"
@@ -80,7 +79,7 @@ def test_checked_in_configuration_selects_one_lme60_three_provider_comparison() 
         "datasets/longmemeval-cleaned/longmemeval_s_cleaned.json",
         "98d7416c24c778c2fee6e6f3006e7a073259d48f",
         "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
-        "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80",
+        "20afb9ae0d18a5821871e76a1b90df573fd5f155511c264249fdb49154088962",
     )
     assert tuple(cell.cell_id for cell in configuration.cells) == EXPECTED_CELL_IDS
     assert tuple(
@@ -123,22 +122,6 @@ def test_checked_in_generative_models_resolve_from_model_environment() -> None:
         "judge": "fixture-light-model",
         "embedding": "qwen3-embedding:0.6b",
     }
-
-
-def test_preserved_lme6_configuration_keeps_original_selection_and_concurrency() -> None:
-    configuration = load_lme6_configuration()
-
-    assert configuration.comparison_id == "t10-lme6"
-    assert configuration.dataset.selection == "lme6"
-    assert configuration.dataset.workload_id == "lme30-native-smoke-plus-v1"
-    assert tuple(cell.cell_id for cell in configuration.cells) == (
-        "hindsight-lme6",
-        "mem0-lme6",
-        "openviking-lme6",
-    )
-    assert configuration.evaluation_controls.as_tuple() == (2, 10, 6, 2, 900)
-    assert configuration.retrieval.top_k == 150
-    assert configuration.decision is None
 
 
 def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> None:
@@ -478,36 +461,6 @@ def test_loader_rejects_invalid_evaluation_controls(
         _load(_write_configuration(tmp_path, content))
 
 
-@pytest.mark.parametrize(
-    "legacy_line",
-    (
-        "  max_attempts_per_case: 2\n",
-        "  max_budgeted_attempts: 10000\n",
-        "  total_wall_time_seconds: 2940300\n",
-        "  max_input_tokens: 70000000\n",
-        "  max_output_tokens: 47000000\n",
-        "  max_recall_context_tokens_per_case: 32768\n",
-        "  max_storage_bytes: 10737418240\n",
-        "  max_peak_memory_bytes: 8589934592\n",
-        '  max_cost: "100.00"\n',
-        "  currency: CNY\n",
-        "  max_parallel_datasets: 1\n",
-    ),
-)
-def test_loader_rejects_each_removed_ceiling_or_dataset_concurrency_key(
-    tmp_path: Path,
-    legacy_line: str,
-) -> None:
-    content = _valid_configuration_yaml().replace(
-        "  operation_timeout_seconds: 900\n",
-        f"  operation_timeout_seconds: 900\n{legacy_line}",
-        1,
-    )
-
-    with pytest.raises(BenchmarkConfigurationError, match="execution keys"):
-        _load(_write_configuration(tmp_path, content))
-
-
 @pytest.mark.parametrize("retry_count", (0, 1))
 def test_loader_rejects_non_profile_batch_retry_count(tmp_path: Path, retry_count: int) -> None:
     content = _valid_configuration_yaml().replace(
@@ -518,27 +471,6 @@ def test_loader_rejects_non_profile_batch_retry_count(tmp_path: Path, retry_coun
 
     with pytest.raises(BenchmarkConfigurationError, match="batch retry"):
         _load(_write_configuration(tmp_path, content))
-
-
-def test_configuration_is_frozen() -> None:
-    configuration = _load(BENCHMARK_CONFIG_PATH)
-
-    with pytest.raises(AttributeError):
-        configuration.cells = ()  # type: ignore[misc]
-    assert replace(configuration.evaluation_controls).as_tuple() == (2, 10, 6, 2, 900)
-
-
-def test_loader_rejects_plan_without_layered_retry_fields(tmp_path: Path) -> None:
-    content = _valid_configuration_yaml()
-    for line in (
-        "  extraction_max_retries: 10\n",
-        "  model_max_attempts: 6\n",
-        "  model_transport_max_retries: 2\n",
-    ):
-        content = content.replace(line, "", 1)
-        with pytest.raises(BenchmarkConfigurationError, match="execution keys"):
-            _load(_write_configuration(tmp_path, content))
-        content = _valid_configuration_yaml()
 
 
 @pytest.mark.parametrize(

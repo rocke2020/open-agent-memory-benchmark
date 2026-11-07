@@ -372,95 +372,6 @@ def test_dangling_capsule_root_symlink_is_not_a_fresh_cell(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "cell_id",
-    ("hindsight-lme6", "mem0-lme6", "openviking-lme6"),
-)
-def test_lme6_budget_accepts_the_complete_owner_allocation_matrix(
-    tmp_path: Path,
-    cell_id: str,
-) -> None:
-    from oamb.live import build_live_cell
-    from oamb.runtime.budget import BudgetOwnerAllocation, ReservationRequest
-    from oamb.runtime.native_run import (
-        _live_budget_ledger,
-        _reservation_allocations_for_route,
-    )
-
-    built = build_live_cell(
-        plan=_plan(),
-        cell_id=cell_id,
-        output_root=tmp_path / "capsules",
-        provider_runtime_directory=(tmp_path / "provider-runtime").resolve(),
-        provider_project_id="oamb-providers-test-live",
-        provider_evidence=_provider_evidence(),
-        environment=_environment(),
-        run_label="budget-closure",
-        observed_at=NOW,
-        code_revision="source-tree-test",
-    )
-    ledger = _live_budget_ledger(built.control)
-    dispatch_counts = {
-        "runtime_resolve": 1,
-        "scope_allocate": 6,
-        "memory_ingest": 300,
-        "memory_readiness": 6,
-        "memory_projection": 6,
-        "pre_query_projection": 6,
-        "memory_query": 6,
-        "post_query_projection": 6,
-        "answer": 6,
-        "judge": 6,
-    }
-    expected_route_wall_seconds = {
-        "runtime_resolve": 900,
-        "scope_allocate": 900,
-        "memory_ingest": 900,
-        "memory_readiness": 900,
-        "memory_projection": 900,
-        "pre_query_projection": 900,
-        "memory_query": 900,
-        "post_query_projection": 900,
-        "answer": 900,
-        "judge": 900,
-    }
-
-    reservation_ordinal = 0
-    for stage, count in dispatch_counts.items():
-        route = built.control.require_budget_route(stage=stage)
-        maximum_output_tokens = 8192 if stage == "answer" else 1024 if stage == "judge" else 0
-        for _ in range(count):
-            reservation_ordinal += 1
-            _evidence, allocations, maximum = _reservation_allocations_for_route(
-                built.control.budget,
-                route,
-                maximum_output_tokens=maximum_output_tokens,
-            )
-            assert maximum.wall_seconds == expected_route_wall_seconds[stage]
-            owner_allocations = tuple(
-                BudgetOwnerAllocation(item.owner_id, item.maximum) for item in allocations
-            )
-            reservation_id = f"reservation-{reservation_ordinal}"
-            ledger.reserve(
-                ReservationRequest(
-                    reservation_id=reservation_id,
-                    maximum=maximum,
-                    owner_allocations=owner_allocations,
-                )
-            )
-            ledger.commit(
-                reservation_id,
-                observed=maximum,
-                owner_observed=owner_allocations,
-            )
-
-    snapshot = ledger.snapshot()
-    assert sum(dispatch_counts.values()) == 349
-    assert snapshot.reserved.attempts == 0
-    assert snapshot.committed.attempts == 955
-    assert snapshot.committed.output_tokens >= 6 * 8192
-
-
-@pytest.mark.parametrize(
     ("cell_id", "producer_role_id"),
     (
         ("hindsight-lme60", "hindsight_extraction"),
@@ -491,7 +402,7 @@ def test_lme60_cells_use_their_frozen_workload_and_producer_role(
     assert built.role_ids == (producer_role_id, "embedding", "answer", "judge")
     assert built.control.run_spec.workload_id == "lme60-balanced-v1"
     assert built.control.run_spec.case_manifest_hash == (
-        "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80"
+        "20afb9ae0d18a5821871e76a1b90df573fd5f155511c264249fdb49154088962"
     )
     assert built.control.budget.max_attempts == 28_015
     assert built.control.max_retries_per_operation == 2

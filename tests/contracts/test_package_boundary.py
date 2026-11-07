@@ -82,15 +82,6 @@ def test_artifact_validation_does_not_import_reporting_implementation() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_generated_schema_snapshots_are_absent_from_source_and_package_configuration() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
-    pyproject = (repository_root / "pyproject.toml").read_text(encoding="utf-8")
-
-    assert not (repository_root / "schemas").exists()
-    assert '"/schemas"' not in pyproject
-    assert '"schemas" = "oamb/schemas"' not in pyproject
-
-
 def test_built_and_installed_distributions_expose_no_generated_schema_surface(
     tmp_path: Path,
     install_wheel_in_isolated_environment: Callable[[Path, Path], Path],

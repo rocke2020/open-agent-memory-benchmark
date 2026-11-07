@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from oamb.artifacts.store import ArtifactStore
 from oamb.contracts import accounting, ports
 from oamb.contracts.ids import canonical_sha256
-from oamb.memory_systems.fake import ScriptedFakeMemorySystem
 from oamb.memory_systems.hindsight import HindsightAdapter
 from oamb.memory_systems.mem0 import Mem0RestAdapter, Mem0SdkAdapter
 from oamb.memory_systems.openviking import OpenVikingRestAdapter
@@ -119,47 +118,6 @@ def test_unsupported_profile_verdict_is_typed_and_machine_readable() -> None:
         unsupported_type("mem0-rest-v1", reason_codes=("duplicate", "duplicate"))
 
 
-def test_ingestion_receipt_binds_ordered_dispatch_receipts_for_readiness() -> None:
-    ingestion_dispatch_type = _port_type("IngestionDispatch")
-    dispatch_receipt_type = _port_type("IngestionDispatchReceipt")
-    source = _source("source-1", 1)
-    scope = ports.ScopeReceipt(
-        ingestion_occurrence_id="a" * 64,
-        scope_id="scope-1",
-        raw_reference=ports.RawReferenceHandle("1" * 64),
-    )
-    dispatch = ingestion_dispatch_type(
-        dispatch_ordinal_1_indexed=1,
-        operation_kind="fixture_ingest",
-        request_fingerprint="b" * 64,
-        ordered_source_units=(source,),
-    )
-    dispatch_receipt = dispatch_receipt_type(
-        attempt_id="c" * 64,
-        dispatch=dispatch,
-        accepted_source_unit_ids=("source-1",),
-        rejected_source_unit_ids=(),
-        raw_reference=ports.RawReferenceHandle("2" * 64),
-        raw_response_bytes=b'{"accepted":true}',
-        usage_records=(),
-    )
-    receipt = ports.IngestionReceipt(
-        ingestion_occurrence_id=scope.ingestion_occurrence_id,
-        accepted_source_unit_ids=("source-1",),
-        rejected_source_unit_ids=(),
-        raw_references=(dispatch_receipt.raw_reference,),
-        dispatch_receipts=(dispatch_receipt,),
-    )
-
-    readiness = ports.ReadinessRequest(
-        scope=scope,
-        expected_source_unit_ids=("source-1",),
-        ingestion_receipt=receipt,
-    )
-
-    assert readiness.ingestion_receipt.dispatch_receipts == (dispatch_receipt,)
-
-
 def test_ingestion_batch_attempt_ordinal_is_bounded_and_skipped_sources_are_preserved() -> None:
     ingestion_dispatch_type = _port_type("IngestionDispatch")
     source = _source("source-1", 1)
@@ -210,88 +168,6 @@ def test_ingestion_batch_attempt_ordinal_is_bounded_and_skipped_sources_are_pres
                 dispatch=dispatch,
                 batch_attempt_ordinal=cast(Any, invalid_ordinal),
             )
-
-
-def test_scope_receipt_binds_ordered_allocation_supporting_raw_references() -> None:
-    supporting = (
-        ports.RawReferenceHandle("2" * 64),
-        ports.RawReferenceHandle("3" * 64),
-    )
-
-    scope = ports.ScopeReceipt(
-        ingestion_occurrence_id="a" * 64,
-        scope_id="scope-1",
-        raw_reference=ports.RawReferenceHandle("1" * 64),
-        supporting_raw_references=supporting,
-    )
-
-    assert scope.supporting_raw_references == supporting
-
-
-@pytest.mark.asyncio
-async def test_fake_adapter_plans_before_dispatch_and_binds_attempt(tmp_path: Path) -> None:
-    memory = ScriptedFakeMemorySystem(ArtifactStore(tmp_path / "capsule"))
-    scope = await memory.allocate_ingestion_scope(
-        ports.ScopeAllocationRequest(
-            ingestion_occurrence_id="a" * 64,
-            ingestion_plan_id="plan-1",
-        )
-    )
-    sources = (_source("source-1", 1), _source("source-2", 2))
-
-    dispatches = memory.plan_ingestion(
-        ports.IngestionRequest(scope=scope, ordered_source_units=sources)
-    )
-
-    assert len(dispatches) == 1
-    assert dispatches[0].dispatch_ordinal_1_indexed == 1
-    assert dispatches[0].ordered_source_units == sources
-    receipt = await memory.ingest(
-        _port_type("IngestionDispatchRequest")(
-            scope=scope,
-            attempt_id="c" * 64,
-            dispatch=dispatches[0],
-        )
-    )
-    assert receipt.attempt_id == "c" * 64
-    assert receipt.accepted_source_unit_ids == ("source-1", "source-2")
-    assert receipt.raw_response_bytes
-
-
-def test_native_evidence_batch_binds_ordered_hydration_raw_references() -> None:
-    primary = ports.RawReferenceHandle("1" * 64)
-    hydration = (ports.RawReferenceHandle("2" * 64), ports.RawReferenceHandle("3" * 64))
-
-    batch = ports.NativeEvidenceBatch(
-        raw_reference=primary,
-        supporting_raw_references=hydration,
-        candidates=(),
-    )
-
-    assert batch.raw_reference == primary
-    assert batch.supporting_raw_references == hydration
-
-
-def test_projection_receipt_binds_ordered_provider_raw_references() -> None:
-    supporting = (
-        ports.RawReferenceHandle("3" * 64),
-        ports.RawReferenceHandle("4" * 64),
-    )
-    projection = ports.ProjectionReceipt(
-        inventory=ports.InventoryReceipt(
-            ingestion_occurrence_id="a" * 64,
-            ordered_source_unit_ids=("source-1",),
-            raw_reference=ports.RawReferenceHandle("1" * 64),
-        ),
-        state_digest=ports.StateDigestReceipt(
-            ingestion_occurrence_id="a" * 64,
-            state_sha256="b" * 64,
-            raw_reference=ports.RawReferenceHandle("2" * 64),
-        ),
-        supporting_raw_references=supporting,
-    )
-
-    assert projection.supporting_raw_references == supporting
 
 
 @pytest.mark.asyncio

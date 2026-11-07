@@ -1,4 +1,4 @@
-"""Fail-closed scan for local-only references in tracked public artifacts."""
+"""Fail-closed scan for private references in tracked public artifacts."""
 
 from __future__ import annotations
 

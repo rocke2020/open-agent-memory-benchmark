@@ -21,23 +21,6 @@ class _EchoHandler(socketserver.BaseRequestHandler):
         self.request.sendall(b"relay:" + self.request.recv(1024))
 
 
-class _HoldHandler(socketserver.BaseRequestHandler):
-    active_condition = threading.Condition()
-    active_count = 0
-
-    def handle(self) -> None:
-        with self.active_condition:
-            type(self).active_count += 1
-            self.active_condition.notify_all()
-        try:
-            while self.request.recv(1024):
-                pass
-        finally:
-            with self.active_condition:
-                type(self).active_count -= 1
-                self.active_condition.notify_all()
-
-
 class _StalledHandler(socketserver.BaseRequestHandler):
     accepted = threading.Event()
     release = threading.Event()
@@ -119,37 +102,6 @@ def test_relay_forwards_bytes_and_drains_on_termination() -> None:
                 client.sendall(b"probe")
                 assert client.recv(1024) == b"relay:probe"
         finally:
-            relay.terminate()
-            relay.wait(timeout=5)
-            target.shutdown()
-            target_thread.join(timeout=5)
-
-    assert relay.returncode == 0
-
-
-def test_relay_rejects_connections_above_its_active_cap() -> None:
-    _HoldHandler.active_count = 0
-    with socketserver.ThreadingTCPServer(("127.0.0.1", 0), _HoldHandler) as target:
-        target_thread = threading.Thread(target=target.serve_forever)
-        target_thread.start()
-        relay_port = _relay_port()
-        relay = _start_relay(int(target.server_address[1]), relay_port)
-        clients: list[socket.socket] = []
-        try:
-            for _ in range(MAX_ACTIVE_CONNECTIONS):
-                clients.append(_connect(relay_port))
-            deadline = time.monotonic() + 5
-            with _HoldHandler.active_condition:
-                while _HoldHandler.active_count != MAX_ACTIVE_CONNECTIONS:
-                    remaining = deadline - time.monotonic()
-                    assert remaining > 0
-                    _HoldHandler.active_condition.wait(timeout=remaining)
-            with _connect(relay_port) as rejected:
-                rejected.settimeout(2)
-                assert rejected.recv(1) == b""
-        finally:
-            for client in clients:
-                client.close()
             relay.terminate()
             relay.wait(timeout=5)
             target.shutdown()

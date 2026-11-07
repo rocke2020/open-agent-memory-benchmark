@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -14,8 +14,6 @@ from oamb.contracts.specifications import (
     prompt_pack_manifest_hash,
 )
 from oamb.workloads.fake import GeneratedFakeWorkload
-from oamb.workloads.metrics import METRIC_SPECS, OUTPUT_CONTRACTS
-from oamb.workloads.prompts import ALL_PROMPT_PACK_IDS
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
@@ -177,42 +175,3 @@ def test_case_manifest_hash_is_recomputed_from_its_exact_members() -> None:
 
     with pytest.raises(ValidationError, match="manifest hash"):
         manifest.__class__(**(manifest.model_dump() | {"manifest_hash": HASH_A}))
-
-
-def test_t6_freeze_gate_enumerates_prompt_output_and_metric_ids() -> None:
-    assert ALL_PROMPT_PACK_IDS == (
-        "oamb-lme-answer-v1",
-        "oamb-lme-judge-v1",
-        "oamb-mab-eventqa-rag-v1",
-        "oamb-mab-icl-rag-v1",
-        "oamb-mab-redial-rag-v1",
-        "oamb-mab-detectiveqa-rag-v1",
-        "oamb-mab-factconsolidation-rag-v1",
-    )
-    assert tuple(OUTPUT_CONTRACTS) == (
-        "lme-answer-text-v1",
-        "lme-judge-yes-no-v1",
-        "mab-first-line-v1",
-        "mab-raw-or-first-line-max-v1",
-        "mab-redial-ranked-movies-v1",
-    )
-    assert {key: value.max_output_tokens for key, value in OUTPUT_CONTRACTS.items()} == {
-        "lme-answer-text-v1": 8192,
-        "lme-judge-yes-no-v1": 1024,
-        "mab-first-line-v1": 40,
-        "mab-raw-or-first-line-max-v1": 2000,
-        "mab-redial-ranked-movies-v1": 512,
-    }
-    assert tuple(METRIC_SPECS) == (
-        "lme-judged-accuracy-v1",
-        "mab-exact-v1",
-        "mab-substring-em-v1",
-        "mab-redial-recall-at-5-v1",
-    )
-
-    with pytest.raises(TypeError):
-        cast(dict[str, OutputContract], OUTPUT_CONTRACTS)["new-output"] = next(
-            iter(OUTPUT_CONTRACTS.values())
-        )
-    with pytest.raises(TypeError):
-        cast(dict[str, MetricSpec], METRIC_SPECS)["new-metric"] = next(iter(METRIC_SPECS.values()))

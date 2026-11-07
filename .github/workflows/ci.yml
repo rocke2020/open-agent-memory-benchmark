@@ -40,14 +40,6 @@ jobs:
           uv run ruff format --check .
           uv run mypy src tests
 
-      - name: Install locked browser engines
-        if: runner.os == 'Linux'
-        run: uv run playwright install --with-deps chromium firefox webkit
-
-      - name: Install locked browser engines
-        if: runner.os == 'macOS'
-        run: uv run playwright install chromium firefox webkit
-
       - name: Full credential-free test suite
         run: uv run pytest -q
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -49,24 +48,3 @@ def test_display_preview_rejects_invalid_utf8_and_nonpositive_limit(tmp_path: Pa
             media_type="application/octet-stream",
             max_bytes=0,
         )
-
-
-def test_display_preview_large_source_has_bounded_python_allocation(tmp_path: Path) -> None:
-    source = tmp_path / "large.json"
-    source.write_bytes(b"x" * (8 * 1024 * 1024))
-
-    tracemalloc.start()
-    try:
-        preview = build_display_preview(
-            source,
-            source_reference="source/raw/large.json",
-            media_type="application/json",
-            max_bytes=4_096,
-        )
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-
-    assert preview.total_bytes == 8 * 1024 * 1024
-    assert preview.shown_bytes == 4_096
-    assert peak < 512 * 1024

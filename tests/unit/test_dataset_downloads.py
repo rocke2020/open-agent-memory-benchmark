@@ -240,27 +240,6 @@ def test_longmemeval_wrapper_uses_pinned_s_dataset_and_repository_output(
     }
 
 
-def test_memoryagentbench_wrapper_uses_pinned_manifest_and_repository_output(
-    tmp_path: Path,
-) -> None:
-    environment = _capture_wrapper_environment(tmp_path, "memoryagentbench.sh")
-    repository = tmp_path / "repository"
-    output = repository / "datasets" / "MemoryAgentBench"
-
-    assert environment == {
-        "DATASET_REPOSITORY": "ai-hyz/MemoryAgentBench",
-        "DATASET_REVISION": MEMORY_AGENT_BENCH_REVISION,
-        "DATASET_FILE": "",
-        "OUTPUT_DIRECTORY": str(output),
-        "EXPECTED_SHA256": "",
-        "EXPECTED_CHECKSUMS_FILE": str(
-            repository / "scripts" / "download" / "memoryagentbench.sha256"
-        ),
-        "REVISION_FILE": str(output / "REVISION"),
-        "CHECKSUM_FILE": str(output / "SHA256SUMS"),
-    }
-
-
 def test_hf_dataset_wrapper_activates_locked_download_group(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     download_directory = repository / "scripts" / "download"

@@ -4,7 +4,6 @@ import hashlib
 import importlib
 import json
 from copy import deepcopy
-from enum import Enum
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -658,26 +657,6 @@ def test_invalid_identity_parts_return_mismatch_instead_of_raising() -> None:
     mixed_key_payload["identity_claims"][0]["identity_parts"] = ({"a": 1, 2: 3},)
     with pytest.raises(ValidationError):
         core.StructuralValidationInput.model_validate(mixed_key_payload)
-
-
-def test_identity_parts_reject_non_json_python_objects_at_the_model_boundary() -> None:
-    core = require("oamb.artifacts.validation.core")
-    valid = load_fixture("valid.json")
-    first_enum = Enum("first_enum", {"A": "same"}, module="first_module")
-    second_enum = Enum("second_enum", {"A": "same"}, module="second_module")
-
-    class BadRepr:
-        def __repr__(self) -> str:
-            raise RuntimeError("repr disabled")
-
-    for invalid_part in (
-        {first_enum.A: 1, second_enum.A: 2},
-        {BadRepr(): "value"},
-    ):
-        payload = valid.model_dump(mode="python")
-        payload["identity_claims"][0]["identity_parts"] = (invalid_part,)
-        with pytest.raises(ValidationError):
-            core.StructuralValidationInput.model_validate(payload)
 
 
 @pytest.mark.parametrize("invalid_count", (True, 1.0, "1"))

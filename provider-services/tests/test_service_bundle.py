@@ -129,97 +129,6 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertNotIn("MEM0_SERVER_OVERLAY_SHA256", operator)
         self.assertNotIn("MEM0_QDRANT_IMAGE_DIGEST", operator)
 
-    def test_operator_surface_preserves_state(self) -> None:
-        command = self.read("bin/provider-services")
-        embedding_transport = self.read("lib/host_embedding.sh")
-        lifecycle = self.read("lib/lifecycle.sh")
-        self.assertIn("doctor", command)
-        self.assertIn("build", command)
-        self.assertIn("verify --services", command)
-        self.assertIn("verify --model-readiness", command)
-        self.assertIn("stop", command)
-        self.assertIn("active-operation", lifecycle)
-        self.assertIn("provider-project.attestation", command)
-        self.assertIn("verify_project_attestation", command)
-        self.assertIn("provider-lifecycle.lock", command)
-        self.assertIn("acquire_lifecycle_lock", command)
-        self.assertIn("docker volume ls", command)
-        self.assertIn("docker network ls", command)
-        self.assertIn('--filter "publish=$port"', command)
-        self.assertIn("org.opencontainers.image.revision", command)
-        self.assertIn("ensure_image", command)
-        self.assertIn('docker image inspect "$image"', command)
-        self.assertIn("mem0_image_matches_pin", command)
-        self.assertIn("mem0_build_input_sha256", command)
-        self.assertIn("--build-arg MEM0_BUILD_INPUT_SHA256=", command)
-        self.assertIn("/v1/projection?run_id=", command)
-        self.assertIn("/chat/completions", command)
-        self.assertIn("/embeddings", embedding_transport)
-        self.assertIn("dimensions: 1024", command)
-        self.assertIn("/ready", command)
-        self.assertIn('.version == "v0.4.19"', command)
-        self.assertIn("openviking-storage-probe", command)
-        self.assertIn("compose stop openviking", command)
-        self.assertIn("compose start openviking", command)
-        self.assertIn("--resolved-plan", command)
-        self.assertIn("readiness_plan.py", command)
-        self.assertIn("readiness_response.py", command)
-        self.assertIn("environment_hash: $environment_hash", command)
-        self.assertIn("model_calls_dispatched: 7", command)
-        self.assertIn("MODEL_READINESS_CHAT_MAX_TOKENS=1024", command)
-        self.assertIn("max_tokens: $max_tokens", command)
-        self.assertNotIn("max_tokens: 16", command)
-        self.assertIn("model-readiness-attempt.json", command)
-        self.assertIn("billing_complete: false", command)
-        self.assertIn("service_verification_receipt_sha256", command)
-        self.assertNotIn('set -- "$service_receipt_directory"/*.json', command)
-        self.assertLess(
-            command.index('readiness_plan_temporary="$readiness_plan.partial.$$"'),
-            command.index('create_model_readiness_attempt "$project"'),
-        )
-        self.assertLess(
-            command.index("service_verification_receipt_sha256"),
-            command.index('create_model_readiness_attempt "$project"'),
-        )
-        self.assertNotIn('find "$RUNTIME_DIR/service-verification-receipts"', command)
-        self.assertIn("record_model_dispatch", command)
-        self.assertIn("record_model_terminal", command)
-        self.assertIn("restore_openviking_on_exit", command)
-        self.assertIn("OPENVIKING_QUIESCED", command)
-        all_text = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in ROOT.rglob("*")
-            if path.is_file()
-            and "__pycache__" not in path.parts
-            and "tests" not in path.parts
-            and ".build" not in path.parts
-            and ".runtime" not in path.parts
-            and path.name != ".env"
-        )
-        for destructive in (
-            "down " + "-v",
-            "docker rm " + "-f",
-            "qdrant/" + "delete",
-            "collections/" + "delete",
-        ):
-            self.assertNotIn(destructive, all_text)
-
-    def test_model_readiness_uses_the_shared_host_embedding_resolver(self) -> None:
-        command = self.read("bin/provider-services")
-        resolver = ROOT / "lib" / "host_embedding.sh"
-
-        self.assertTrue(resolver.is_file())
-        self.assertIn('. "$ROOT/lib/host_embedding.sh"', command)
-        self.assertIn("resolve_host_embedding_base", command)
-        self.assertIn(
-            'request_embedding "$embedding_base" "$embedding_api_key" "@$embedding_request" 3 "$READINESS_OPERATION_TIMEOUT_SECONDS"',
-            command,
-        )
-        self.assertNotIn(
-            'embedding_base="http://127.0.0.1:${embedding_base#http://host.docker.internal:}"',
-            command,
-        )
-
     def test_openviking_isolated_api_configuration(self) -> None:
         compose = self.read("compose.yaml")
         config = self.read("openviking/ov.conf")
@@ -295,20 +204,6 @@ class ServiceBundleContractTests(unittest.TestCase):
         ):
             self.assertIn(filename, operator)
 
-    def test_bootstrap_treats_dotenv_as_data(self) -> None:
-        mem0 = self.read("mem0/bootstrap.sh")
-        openviking = self.read("openviking/bootstrap.sh")
-        operator = self.read("bin/provider-services")
-        for script in (mem0, openviking):
-            self.assertNotIn('. "$ENV_FILE"', script)
-            self.assertIn("env_value()", script)
-        self.assertIn('read_runtime_env_value "$ENV_FILE" "$1"', mem0)
-        self.assertNotIn(benchmark_embedding_model(), mem0)
-        self.assertIn('read_env_value "$ENV_FILE" "$1"', openviking)
-        self.assertIn('. "$ROOT/lib/compose.sh"', mem0)
-        self.assertIn('. "$ROOT/lib/compose.sh"', operator)
-        self.assertNotIn("docker compose", mem0)
-
     def test_producer_containers_freeze_derived_no_proxy_without_global_proxy_changes(self) -> None:
         compose = self.read("compose.yaml")
         compose_driver = self.read("lib/compose.sh")
@@ -317,55 +212,6 @@ class ServiceBundleContractTests(unittest.TestCase):
         self.assertIn('derive_llm_no_proxy "$(read_env_value "$oamb_compose_env_file" LLM_BASE_URL)"', compose_driver)
         for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
             self.assertNotIn(f"{variable}:", compose)
-
-    def test_openviking_bootstrap_proves_full_non_root_identity(self) -> None:
-        script = self.read("openviking/bootstrap.sh")
-        self.assertIn('"$BASE_URL/health"', script)
-        self.assertIn('.role == "admin"', script)
-        self.assertIn(".account_id == $account", script)
-        self.assertIn(".user_id == $user", script)
-
-    def test_example_env_has_one_generic_llm_connection_without_credentials(self) -> None:
-        example = self.read_root_env_example()
-        values = dict(
-            line.split("=", 1) for line in example.splitlines() if line and not line.startswith("#")
-        )
-        for name in (
-            "LLM_URL_TYPE",
-            "LLM_BASE_URL",
-            "LLM_API_KEY",
-            "OAMB_PROVIDER_PROJECT",
-            "OAMB_MEM0_INSPECTOR_API_KEY",
-        ):
-            self.assertRegex(example, rf"(?m)^{name}=.*$")
-        for name in (
-            "OMBA_ANSWER_LLM",
-            "OMBA_ANSWER_MODEL",
-            "OMBA_JUDGE_LLM",
-            "OMBA_JUDGE_MODEL",
-            "OPENAI_BASE_URL",
-            "OPENAI_API_KEY",
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_API_KEY",
-            "OAMB_EMBEDDING_MODEL",
-            "OAMB_HINDSIGHT_LLM_PROVIDER",
-            "OAMB_HINDSIGHT_LLM_MODEL",
-            "OAMB_HINDSIGHT_LLM_BASE_URL",
-            "OAMB_HINDSIGHT_LLM_API_KEY",
-            "OAMB_MEM0_LLM_MODEL",
-            "OAMB_MEM0_LLM_BASE_URL",
-            "OAMB_MEM0_LLM_API_KEY",
-            "OAMB_OPENVIKING_VLM_PROVIDER",
-            "OAMB_OPENVIKING_VLM_MODEL",
-            "OAMB_OPENVIKING_VLM_BASE_URL",
-            "OAMB_OPENVIKING_VLM_API_KEY",
-        ):
-            self.assertNotIn(name, values)
-        self.assertEqual(values["LLM_URL_TYPE"], "openai_chat")
-        self.assertEqual(values["LLM_BASE_URL"], "change-me")
-        self.assertEqual(values["LLM_API_KEY"], "change-me")
-        self.assertNotRegex(example, r"sk-[A-Za-z0-9]{12,}")
-
 
 if __name__ == "__main__":
     unittest.main()

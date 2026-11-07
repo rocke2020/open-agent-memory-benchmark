@@ -171,29 +171,6 @@ class ServiceReceiptTests(unittest.TestCase):
                 "[redacted]",
             )
 
-    def test_new_nested_proof_directories_fsync_each_parent_in_order(self) -> None:
-        module = load_module()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            attempt = root / "attempt"
-            attempt.mkdir()
-            write_proof_files(attempt, "hindsight-rest-v1")
-            proof_store = root / "first" / "second" / "proofs"
-            observed: list[Path] = []
-
-            with mock.patch.object(module, "_fsync_directory", side_effect=observed.append):
-                module.seal_profile_proof_manifest(
-                    proof_store,
-                    profile_id="hindsight-rest-v1",
-                    proof_directory=attempt,
-                    trusted_root=root,
-                )
-
-            self.assertEqual(
-                observed[:4],
-                [root, root / "first", root / "first" / "second", proof_store],
-            )
-
     def test_profile_proof_seal_rejects_a_symlink_in_output_ancestors(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temporary:

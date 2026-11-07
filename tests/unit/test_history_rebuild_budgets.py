@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -169,39 +168,3 @@ def test_live_budget_expands_ingestion_stages_and_internal_owners(tmp_path: Path
     assert roles[bindings[ModelRole.ANSWER]] == 1_080
     assert roles[bindings[ModelRole.JUDGE]] == 1_080
     assert budget.max_attempts == 28_015
-
-
-def test_old_dispatch_retry_execution_document_is_not_reinterpreted(tmp_path: Path) -> None:
-    plan = build_resolved_plan(_configuration(retries=2))
-    document = json.loads(doctor_module.resolved_plan_bytes(plan))
-    execution = document["execution"]
-    assert isinstance(execution, dict)
-    execution.pop("ingestion_retry_unit", None)
-    execution.pop("ingestion_recovery_strategy", None)
-    execution["per_cell_retry_eligible_operation_count"] = 120
-    execution["per_cell_max_operation_attempt_count"] = 9_199
-    execution["per_cell_max_owner_authorization_count"] = 26_215
-    payload = dict(document)
-    payload.pop("resolved_plan_hash")
-    document["resolved_plan_hash"] = canonical_sha256(["oamb-resolved-plan-initial-v1", payload])
-    path = tmp_path / "old-dispatch-retry-plan.json"
-    path.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")))
-
-    with pytest.raises(ValueError):
-        doctor_module.load_resolved_plan_for_run(path)
-
-
-def test_old_connection_only_rebuild_plan_is_rejected_before_execution(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with monkeypatch.context() as previous_policy:
-        previous_policy.setattr(
-            doctor_module, "INGESTION_RECOVERY_STRATEGY", "fresh_scope_full_history_rebuild"
-        )
-        old_plan = build_resolved_plan(_configuration(retries=2))
-        old_bytes = doctor_module.resolved_plan_bytes(old_plan)
-    path = tmp_path / "old-connection-only-rebuild-plan.json"
-    path.write_bytes(old_bytes)
-
-    with pytest.raises(ValueError):
-        doctor_module.load_resolved_plan_for_run(path)

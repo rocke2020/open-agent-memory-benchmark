@@ -62,13 +62,13 @@ _EXPECTED_DATASETS = {
         **_DATASET_COMMON,
         "workload_id": "lme30-native-smoke-plus-v1",
         "selection": "lme6",
-        "case_manifest_hash": "3c0bc0e2e539b3f7ceca81569531c6a0fb5823ccc55426cb2b2cf9d295fa33e4",
+        "case_manifest_hash": "0462b0a8735597d206c2219f174c36910c60dc11e89b47cc56ca9326048229ab",
     },
     "lme60": {
         **_DATASET_COMMON,
         "workload_id": "lme60-balanced-v1",
         "selection": "lme60",
-        "case_manifest_hash": "90b2669f7b893e59d404549f5803882bcd6640ce82520a9bf09672cc79464c80",
+        "case_manifest_hash": "20afb9ae0d18a5821871e76a1b90df573fd5f155511c264249fdb49154088962",
     },
 }
 

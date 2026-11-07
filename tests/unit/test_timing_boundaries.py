@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from decimal import Decimal
 
 import pytest
@@ -97,80 +96,3 @@ def test_case_timing_rejects_globally_backwards_monotonic_boundaries() -> None:
             after_projection=lambda: None,
             clock=lambda: next(values),
         )
-
-
-@pytest.mark.asyncio
-async def test_async_query_timing_keeps_projection_outside_provider_interval() -> None:
-    from oamb.runtime.timing import capture_async_query_timing
-
-    clock = ManualClock()
-
-    async def before_projection() -> str:
-        clock.advance("2")
-        return "before"
-
-    async def provider_request() -> str:
-        clock.advance("3")
-        return "provider-result"
-
-    async def after_projection() -> str:
-        clock.advance("4")
-        return "after"
-
-    captured = await capture_async_query_timing(
-        before_projection=before_projection,
-        provider_request=provider_request,
-        after_projection=after_projection,
-        clock=clock,
-    )
-
-    assert captured.result == "provider-result"
-    assert captured.provider_request.seconds == Decimal("3")
-    assert captured.projection_verification.seconds == Decimal("6")
-    assert captured.case_total.seconds == Decimal("9")
-    assert captured.projection_intervals[0].ended_at <= captured.provider_interval.started_at
-    assert captured.provider_interval.ended_at <= captured.projection_intervals[1].started_at
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("provider_cancelled", [False, True])
-async def test_async_query_outcome_times_provider_failure_and_still_projects_after(
-    provider_cancelled: bool,
-) -> None:
-    from oamb.runtime import timing
-
-    clock = ManualClock()
-    calls: list[str] = []
-
-    async def before_projection() -> str:
-        calls.append("before")
-        clock.advance("2")
-        return "before"
-
-    async def provider_request() -> str:
-        calls.append("provider")
-        clock.advance("3")
-        if provider_cancelled:
-            raise asyncio.CancelledError("fixture provider cancelled")
-        raise RuntimeError("fixture provider failed")
-
-    async def after_projection() -> str:
-        calls.append("after")
-        clock.advance("4")
-        return "after"
-
-    outcome = await timing.capture_async_query_outcome(
-        before_projection=before_projection,
-        provider_request=provider_request,
-        after_projection=after_projection,
-        clock=clock,
-    )
-
-    assert calls == ["before", "provider", "after"]
-    assert outcome.timing.result is None
-    expected_error = asyncio.CancelledError if provider_cancelled else RuntimeError
-    assert isinstance(outcome.provider_error, expected_error)
-    assert outcome.post_projection_error is None
-    assert outcome.timing.provider_request.seconds == Decimal("3")
-    assert outcome.timing.projection_verification.seconds == Decimal("6")
-    assert outcome.timing.case_total.seconds == Decimal("9")

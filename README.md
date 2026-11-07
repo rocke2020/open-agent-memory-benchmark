@@ -2,7 +2,7 @@
 
 ## Overview
 
-Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for Open Agent Memory (OAM), serving the same role for OAM that Agent Memory Benchmark (AMB) serves for Hindsight. OAM implements the memory system; OAMB owns dataset preparation, evaluation procedures, execution and reporting. Hindsight, Mem0 and OpenViking are comparison systems.
+Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for Open Agent Memory (OAM). OAM implements the memory system; OAMB owns dataset preparation, evaluation procedures, execution and reporting. Hindsight, Mem0 and OpenViking are comparison systems.
 
 The goal is for another engineer to evaluate OAM on LME-500 and BEAM-10M using the published procedure and the same models, obtaining scores close to the published results. Exact scores can vary with model outputs and OAM revisions. Record the evaluated OAM revision and configuration changes while preserving the dataset, prompts, reasoning efforts, recall modes, judging and retry rules.
 

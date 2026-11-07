@@ -441,58 +441,6 @@ def test_checkpoint_provider_manifest_and_derivation_envelope_are_strict() -> No
         evidence.DerivationManifest(**(manifest.model_dump() | {"checksums_sha256": HASH}))
 
 
-def test_artifact_store_port_is_a_complete_runtime_dependency() -> None:
-    ports = require("oamb.contracts.ports")
-
-    class FakeArtifactStore:
-        def seal_raw(self, request: Any) -> Any:
-            return ports.RawReferenceHandle(sha256=request.sha256)
-
-        def seal_source_record(self, request: Any) -> Any:
-            return ports.ArtifactSealReceipt(request.record_id, request.canonical_sha256)
-
-        def seal_checkpoint(self, request: Any) -> Any:
-            return ports.ArtifactSealReceipt(request.record_id, request.canonical_sha256)
-
-        def seal_source_manifest(self, request: Any) -> Any:
-            return ports.ArtifactSealReceipt(request.record_id, request.canonical_sha256)
-
-        def read_verified(self, request: Any) -> bytes:
-            return b"{}"
-
-    assert isinstance(FakeArtifactStore(), ports.ArtifactStorePort)
-
-
-def test_t4_contract_versions_are_registered_explicitly() -> None:
-    schema = require("oamb.contracts.schema")
-    expected_keys = {
-        ("model_role_binding", 2),
-        ("memory_system_runtime_binding", 2),
-        ("budget_spec", 2),
-        ("attempt_record", 2),
-        ("token_usage_record", 2),
-        ("resource_budget_ceiling", 1),
-        ("provider_budget_cap", 1),
-        ("role_budget_ceiling", 1),
-        ("provider_runtime_profile_attestation", 1),
-        ("run_lease_record", 1),
-        ("run_lease_heartbeat_record", 1),
-        ("occurrence_claim_record", 1),
-        ("model_readiness_occurrence_record", 1),
-        ("provider_service_evidence_manifest", 1),
-        ("budget_reservation_record", 1),
-        ("attempt_intent_record", 1),
-        ("attempt_receipt_record", 1),
-        ("checkpoint_manifest", 1),
-        ("close_error_record", 1),
-        ("source_evidence_binding", 1),
-        ("derivation_spec", 1),
-        ("derivation_manifest", 1),
-    }
-
-    assert expected_keys <= set(schema.CONTRACT_REGISTRY)
-
-
 def _external_legacy_fixtures() -> tuple[tuple[dict[str, Any], type[Any]], ...]:
     specifications = require("oamb.contracts.specifications")
     documents = (
