@@ -1,117 +1,67 @@
 # AGENTS.md
+
 This file provides context for AI coding assistants (Claude Code, Codex, etc.)
 
 ## Project scope
 
-Open Agent Memory Benchmark (OAMB) focuses on evaluating Open Agent Memory (OAM), with other self-hosted memory systems as comparison systems. The current OAM v0.0.1 addition reuses the completed historical LME-500 campaign; see [the performance report](docs/evaluations/oam-v0.0.1-lme500.md). Show 94.0% (470/500) as the main result and 90.6% (453/500) in supplementary details, preserving the recorded retry policy and failure attribution. Do not rerun ingestion, recall, answering, judging, or model-based review for this historical addition.
+Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for Open Agent Memory (OAM). OAM implements the memory system; OAMB owns dataset preparation, evaluation, execution and reporting. Use [README.md](README.md) for the public workflow and [docs/native-oam.md](docs/native-oam.md) for native OAM setup and execution.
 
-The existing executable v0.1 comparison reaches Hindsight, Mem0, and the OpenViking session profile through REST APIs on balanced LME-60: the same ten questions from each of six question types for all three providers. Native OAM execution is a separate explicit profile documented in `docs/native-oam.md`; it uses the same public precheck/run scripts and does not acquire three-provider comparison or historical-score compatibility claims. MemoryAgentBench is deferred. Mem0's optional Python SDK is a separate, non-default profile whose evidence can never substitute for REST evidence.
+Native OAM evaluates full LME-500 and BEAM-10M using the published procedure and models. The goal is comparable scores while allowing model variability and disclosed OAM changes. Preserve dataset identity, prompts, model roles, reasoning efforts, recall modes, scoring and retry rules; record the evaluated OAM revision and configuration.
 
-Provider service preparation, offline implementation, live evidence, quality
-acceptance, and release readiness are different completion states. Never infer
-a live support or score claim from fixtures, schemas, a healthy container, or a
-non-empty response.
+The separate REST comparison evaluates Hindsight, Mem0 and OpenViking on balanced LME-60: ten questions from each of six types, producing 180 provider-specific results. Its settings and artifacts are separate from native OAM. Mem0's optional SDK profile is non-default and cannot substitute for REST evidence. MemoryAgentBench is deferred.
 
-## Product promise and minimal dependencies
+Published results and their provenance belong in [the LME report](docs/evaluations/oam-v0.0.1-lme500.md) and [the BEAM report](docs/evaluations/oam-v0.0.1-beam10m.md). Preserve those historical campaigns; new evaluations produce separate outputs. Do not rerun a completed campaign merely to update documentation.
 
-The product promise is:
+## Public workflows
 
-> One local engineer can use a few clear commands to compare real memory
-> providers on relevant datasets and produce a report that both an engineer and
-> a manager can understand and audit.
+The supported evaluation interface is `./precheck.sh` followed by `./run.sh`. Package-internal commands implement these scripts and are not an alternative public workflow. Service preparation and dataset download helpers are documented in the README and native guide.
 
-The supported public product interface is `./precheck.sh` followed by `./run.sh`. Package-internal command entry points used by these scripts are implementation details, not a supported public interface, and should not be invoked or documented as an alternative workflow.
+For native OAM, prepare an isolated deployment and its private client environment, then run:
 
-Derive data flow from this promise and the minimum true dependency between
-operations, not from existing function, module, phase, contract, or evidence
-boundaries. For example, a question depends on its own history becoming ready;
-it does not depend on every history or provider finishing ingestion. Release
-work at the earliest correct boundary, and never add a global barrier merely to
-simplify coordination or evidence sealing.
-
-Keep the design simple and direct. Do not introduce unnecessary
-over-engineering. Add an abstraction only when it removes existing duplication
-or enforces a real user-visible requirement. Do not build speculative
-compatibility families, control protocols, review layers, or benchmark-specific
-architectures before the simple end-to-end product flow works with real data.
-
-Keep OAMB focused on the evaluation itself and default to the minimum sufficient complexity. Resume is a required basic capability for experienced developers working with coding agents, and the operator remains responsible for the complete evaluation and its cost. Resume must not add URL or ownership auditing or a migration protocol for embedding services; its embedding gate verifies only the minimum evaluation contract: one finite vector whose dimension matches the previous run configuration.
-
-## Real-use vertical slice gate
-
-The first hard delivery gate is the smallest safe real user flow, not broader
-architecture or offline coverage. Before expanding contracts, schemas, control
-records, review protocols, provider matrices, concurrency, or report
-abstractions, complete this diagnostic flow with one provider and one
-LongMemEval case:
-
-```text
-doctor/preflight
-  → fresh isolated scope
-  → chronological real ingestion
-  → query-ready
-  → real retrieval
-  → answer
-  → judge
-  → freshly validated live capsule
-  → offline HTML that opens for manual inspection
+```bash
+./precheck.sh --oam configs/oam-lme500.yml --env-file <client.env> --output <run-directory>
+./run.sh --oam <run-directory>
+./run.sh --oam <run-directory> --resume
 ```
 
-This one-case flow is a diagnostic gate, not a substitute for the complete T10
-matrix. Until it passes, mock, fixture, contract, schema, and recorded-transport
-tests prove only their own boundaries and do not unlock architecture expansion.
-Only changes that directly unblock the next failing stage belong in the current
-work; every other improvement goes to a deferred TODO. Do not optimize
-parallelism or throughput before the same flow passes serially.
+Use `configs/oam-beam10m.yml` for BEAM, or the corresponding `*-smoke.yml` for a synthetic diagnostic. Full datasets come from `scripts/download/longmemeval.sh` and `scripts/download/beam10m.sh`; downloaded data stays outside Git. A smaller question/history selection must be identified as a diagnostic, not full-dataset coverage.
 
-Apply stop-loss when one active working day produces no new real,
-user-inspectable artifact, or when the diff grows materially while this gate
-remains red: stop feature work, freeze scope, name the exact first failing
-stage, preserve its evidence, and resume only with the smallest fix for that
-stage. A design review, large passing test suite, or substantial diff is not
-progress toward this gate without a new real artifact.
+For the separate comparison, use `./precheck.sh` and `./run.sh --full_test`; add `--resume` to continue unfinished work. `configs/benchmark.yml` owns comparison settings. Optional smoke, dry-run and saved-result reporting modes are documented in the README.
+
+Keep secrets and machine-local endpoints in private environment files. Native settings live in `configs/oam-*.yml`, with OAM runtime overrides in `provider-services/oam/`. Do not edit a saved plan to change an evaluation already in progress.
+
+## Evaluation behavior
+
+- Use the published `deepseek-v4.1-flash` model for native extraction, answering and judging; gateway aliases must resolve to that model. Extraction uses low reasoning, initial answers and judges use high reasoning, and an eligible policy retry uses max reasoning for its answer.
+- Native embedding uses `qwen3-embedding:0.6b` with 1,024-dimensional vectors. Record tokenizer or embedding changes because they can affect chunking and results. On resume, verify one finite vector with the recorded dimension; do not add endpoint-ownership or embedding-migration audits.
+- Preserve chronological source order, roles, timestamps, original questions, golds and rubrics. Wait for complete extraction and query readiness before evaluating that history. Partial extraction is not successful ingestion even when the operation status is `succeeded`.
+- LME uses fast recall with the shared `small` index; BEAM uses normal recall with `large` per-owner indexes. Both disable Insights, Profile and planning. Provision BEAM's owner index before retrieval.
+- Retrieval is non-generative. Query embedding is allowed; query rewriting, reflection, generative reranking and other generative memory-query operations are prohibited. Preserve provider-returned retrieval order; OAMB adds no reranker.
+- Save first-pass answers and judgments before retries. A failed question may receive one source/context/gold-reviewed answer retry on the same prompt, context and model. Incorrect gold blocks retry. The completed retry becomes policy-final even when its score is lower; keep first-pass and policy-final results separately.
+- Resume reuses accepted ingestion receipts and completed model/question results and runs unfinished work. Preserve failed and ambiguous attempts; do not silently redispatch a model call with an unknown outcome or operate the same run directory concurrently.
+- Keep accuracy, context tokens, indexing tokens, retrieval latency and indexing time separate. BEAM mean rubric score differs from the fraction of questions meeting its threshold. Missing measurements remain unavailable. Attribute indexing usage to the physical history, not every question sharing it.
 
 ## Codes Architecture
 
-Dependencies point inward toward strict contracts and behavior ports:
+The native execution path is `precheck.sh` / `run.sh` → `oam_workflow.py` → workload loading, OAM HTTP operations, model calls and saved results. The separate comparison is composed through `cli.py`, `live.py` and `runtime/`.
 
-```text
-contracts + ports
-   ▲       ▲       ▲       ▲
-workloads  memory systems  model clients  artifacts
-   └──────────── injected into runtime ────────────┘
-                         │
-validated source roots ─┴─→ reporting
-```
+| Path | Responsibility |
+| --- | --- |
+| `src/oamb/oam_workflow.py` | Native precheck, chronological execution, checkpoints, retry integration, validation and HTML/JSON results |
+| `src/oamb/workloads/` | Dataset loading, published prompt templates, model request formats, scoring and retry-review rules |
+| `src/oamb/memory_systems/` | Provider adapters; `oam.py` owns native OAM HTTP operations and request packing |
+| `src/oamb/model_clients/` | Comparison model transports; optional clients load only when selected |
+| `src/oamb/runtime/` | Comparison execution, attempts, readiness, resume and lifecycle |
+| `src/oamb/contracts/` | Typed identities, records, ports and artifact parsing; no concrete runtime, adapter, model-client or storage imports |
+| `src/oamb/artifacts/` and `src/oamb/reporting/` | Saved-artifact validation, comparison reduction and offline reports |
+| `src/oamb/external_evidence/` | Read-only historical evidence; separate from native execution artifacts |
+| `src/oamb/public_boundary.py` | Public-artifact checks for local-only paths and symlinks |
+| `provider-services/` | Isolated service preparation, image/source pins and non-destructive service management; never imported by the Python package |
+| `scripts/download/` | Pinned input acquisition and verified installation |
 
-- `src/oamb/contracts/` owns canonical identities, states, immutable public
-  records, accounting shapes, behavior ports, and initial-v1 artifact parsing. It must
-  not import concrete runtime, workload, adapter, model, or storage code.
-- `src/oamb/artifacts/validation/` owns early structural rule registration and
-  closed validation profiles. Semantic rules live with their later owners.
-- `src/oamb/external_evidence/` owns the read-only, hash-pinned historical
-  evidence boundary. Its reports remain explicitly external and cannot acquire
-  native capsule, attempt, indexing, billing, or compatibility claims.
-- `src/oamb/reporting/` owns deterministic reducers, comparison projections,
-  export validation, and offline HTML. It consumes validated capsules and does
-  not own approval, signature, AI/human review, or phase-acceptance gates.
-- `src/oamb/public_boundary.py` owns the fail-closed scan of tracked and
-  distributed public artifacts for local-only paths and symlinks.
-- `provider-services/` owns reproducible local API processes, immutable pins,
-  isolated persistent state, and non-destructive service verification. It is
-  beside the Python package, never imported by it.
-- Concrete adapters implement ports without importing runtime or one another.
-  Only an invoked execution command may lazily select a concrete
-  implementation; core import and command help remain implementation-free.
-- `src/oamb/contracts/schema.py` owns the fail-closed parser for one coherent
-  initial-v1 contract family. Persisted `schema_name` and `schema_version`
-  fields remain wire-format discriminators; unreleased historical forms and
-  generated schema snapshots are not repository or package surfaces.
+Concrete adapters do not import runtime or each other. Keep core import, command help, artifact parsing and validation free of provider SDKs, databases, model clients and credentials. Use one owner for each configuration or serialization rule; avoid generic dumping-ground modules.
 
-Avoid generic dumping grounds such as `utils.py`, `providers/`, or `services/`.
-Names should state the property or boundary a module actually owns.
-
-## Development workflow
+## Development and verification
 
 Use Python 3.11+ and the committed `uv.lock`:
 
@@ -126,54 +76,16 @@ uv run python scripts/check_public_boundary.py
 uv build
 ```
 
-Implement behavior test-first. Each validator rule needs a valid case and an
-independent planted failure that proves the rejection branch can fire. Run
-focused tests after each red-green cycle, then the affected offline suite.
+Implement behavior test-first and run the affected checks. Tests must not make paid calls, write/delete real provider or database data, or perform destructive container operations. Validator tests need a valid case and an independently invalid case that proves rejection.
 
-Before the first public release, change persisted contracts directly through
-their typed initial-v1 models and parser, updating all producers, consumers,
-fixtures, and validators together. Add a compatibility version only after
-public, non-rerunnable evidence exists and users must reopen it.
+Verify the actual affected path before claiming it works. A native diagnostic covers precheck, isolated ingestion, readiness, retrieval, answer, judge, saved evidence and inspectable HTML. Mocks and synthetic samples prove their own boundaries; they do not establish full-dataset accuracy, historical-score parity or release readiness.
 
-## Safety and evidence rules
-
-- Never delete provider or database data. Tests must not perform real writes,
-  real deletes, paid calls, or destructive container operations.
-- Preserve partial, failed, interrupted, and unknown-outcome evidence. Never
-  turn missing or unavailable measurements into zero.
-- Default external allowance is zero. A real call requires an explicit scope,
-  immutable runtime binding, BudgetSpec, ceilings, and retained raw
-  receipt.
-- Keep execution state separate from derived validation disposition:
-  `FINALIZED` does not mean `VALIDATED`, and `VALIDATED` does not mean a high
-  score.
-- Preserve provider-returned retrieval order. OAMB owns no reranker.
-- The executable v0.1.0 profile compares Hindsight, Mem0, and the OpenViking session profile on balanced LME-60, producing 180 provider-specific results. Historical OAM LME-500 evidence remains separate from native execution and release gates. MemoryAgentBench is deferred.
-- Retrieval generation is disabled. Query embedding remains allowed, but
-  Hindsight `reflect`, Mem0 generative reranking/search processing, OpenViking
-  session-intent search, query planning/rewriting, and any other generative
-  `memory_query` call are prohibited and must fail validation.
-- A generative model binding includes the requested model, effective thinking
-  effort with provider-defined scale/rank, exact request or provider proof, and
-  usage coverage. Supplier-reported model metadata remains in raw evidence and
-  is not a second normalized identity; embedding records thinking effort as not
-  applicable.
-- Keep indexing usage and cost on the physical ingestion plan; do not multiply
-  it by logical members or questions.
-- Core import, CLI help, artifact parsing, and validation commands must not import provider
-  SDKs, databases, model clients, or credentials. Optional dependencies load
-  only inside the selected future factory.
-- Never print secrets, resolved credential values, provider account keys, or
-  private artifact content. Public validation issues contain codes and hashes,
-  not offending values or host paths.
+Keep provider/database data and partial, failed or interrupted artifacts. Never expose credentials, private content or resolved secrets in logs or public validation messages. Store disposable verification output in `tmp/` and persistent local evidence in `personal/`; keep bulk/generated data outside Git.
 
 ## Change discipline
 
-Make the smallest change that closes the requested contract. Preserve unrelated
-work and existing provider state. Use named constants for domain limits and one
-canonical implementation for serialization, identity, transitions, contract
-registration, and rule inventories.
+Make the smallest complete change for the requested evaluation behavior and preserve unrelated work. Reuse existing checkpoints, adapters and reporting rather than adding parallel mechanisms. Native OAM records usage without harness spending limits or token reservations; the operator controls cost.
 
-Before claiming completion, run fail-capable checks against the final tree and
-distinguish implemented from committed, fixture-tested from live-preflighted,
-partial from complete, and committed from pushed or released.
+Keep README commands, configuration, prompts, design documentation and their actual consumers aligned. Before release, update typed artifact producers, parsers and consumers together; add compatibility machinery only for a demonstrated need to reopen existing public evidence.
+
+Report implementation, offline verification, live evidence, full-dataset quality, commit and push status separately. A successful check, finalized run or validated artifact does not imply a high score or a completed quality evaluation.

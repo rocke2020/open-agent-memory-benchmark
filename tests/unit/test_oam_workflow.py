@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ def test_completion_rejects_truncated_empty_and_refused(patch):
         parse_completion(response)
 
 
-def test_completion_resume_reuses_success_but_counts_failed_paid_attempt(tmp_path):
+def test_completion_resume_reuses_success_and_allows_unfinished_questions(tmp_path):
     requests = []
 
     def handle(request):
@@ -39,17 +40,13 @@ def test_completion_resume_reuses_success_but_counts_failed_paid_attempt(tmp_pat
         )
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as http:
-        cache = CompletionCache(
-            tmp_path, http, "http://model/v1", "secret", max_calls=1, max_tokens=10000, timeout=1
-        )
-        assert cache.complete("model", "high", "prompt", "answer", 1024) == "yes"
-        resumed = CompletionCache(
-            tmp_path, http, "http://model/v1", "secret", max_calls=1, max_tokens=10000, timeout=1
-        )
-        assert resumed.complete("model", "high", "prompt", "answer", 1024) == "yes"
-        with pytest.raises(ValueError, match="budget"):
-            resumed.complete("model", "high", "different", "answer", 1024)
-    assert len(requests) == 1
+        cache = CompletionCache(tmp_path, http, "http://model/v1", "secret", timeout=1)
+        assert cache.complete("model", "high", "prompt", "answer") == "yes"
+        resumed = CompletionCache(tmp_path, http, "http://model/v1", "secret", timeout=1)
+        assert resumed.complete("model", "high", "prompt", "answer") == "yes"
+        assert resumed.complete("model", "high", "different", "answer") == "yes"
+    assert len(requests) == 2
+    assert all("max_tokens" not in request for request in requests)
     assert "secret" not in "".join(p.read_text() for p in tmp_path.rglob("*.json"))
 
 
@@ -73,7 +70,7 @@ def test_validator_rejects_incomplete_or_tampered_context(tmp_path):
         validate_results(tmp_path, plan)
 
 
-def test_resume_retries_invalid_completion_within_total_attempt_budget(tmp_path):
+def test_resume_retries_invalid_completion_and_preserves_failed_attempt(tmp_path):
     responses = iter(
         [
             {
@@ -89,12 +86,10 @@ def test_resume_retries_invalid_completion_within_total_attempt_budget(tmp_path)
     with httpx.Client(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json=next(responses)))
     ) as http:
-        cache = CompletionCache(
-            tmp_path, http, "http://model/v1", "key", max_calls=2, max_tokens=5000, timeout=1
-        )
+        cache = CompletionCache(tmp_path, http, "http://model/v1", "key", timeout=1)
         with pytest.raises(ValueError):
-            cache.complete("model", "low", "prompt", "answer", 1024)
-        assert cache.complete("model", "low", "prompt", "answer", 1024) == "yes"
+            cache.complete("model", "low", "prompt", "answer")
+        assert cache.complete("model", "low", "prompt", "answer") == "yes"
     assert len(list((tmp_path / "model-calls").glob("*.json"))) == 2
 
 
@@ -115,12 +110,10 @@ def test_resume_does_not_reuse_semantically_invalid_judgment(tmp_path):
             raise ValueError("invalid judgment")
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as http:
-        cache = CompletionCache(
-            tmp_path, http, "http://model/v1", "key", max_calls=2, max_tokens=5000, timeout=1
-        )
+        cache = CompletionCache(tmp_path, http, "http://model/v1", "key", timeout=1)
         with pytest.raises(ValueError):
-            cache.complete("m", "low", "prompt", "judge", 1024, validator=validate)
-        assert cache.complete("m", "low", "prompt", "judge", 1024, validator=validate) == "yes"
+            cache.complete("m", "low", "prompt", "judge", validator=validate)
+        assert cache.complete("m", "low", "prompt", "judge", validator=validate) == "yes"
 
 
 def test_public_scripts_route_explicit_oam_profile_without_starting_comparison(tmp_path):
@@ -157,22 +150,6 @@ def test_full_beam_rejects_200_questions_on_one_owner():
     ]
     with pytest.raises(ValueError, match="ten complete"):
         validate_coverage("beam10m", histories, diagnostic=False)
-
-
-def test_indexing_budget_counts_usage_and_reserves_unknown_sources(tmp_path):
-    from oamb.oam_workflow import admit_indexing_source
-
-    owner = tmp_path / "owners/u"
-    owner.mkdir(parents=True)
-    (owner / "source-000000.json").write_text('{"operation_id":"op"}')
-    with pytest.raises(ValueError, match="indexing budget"):
-        admit_indexing_source(tmp_path, source_ceiling=1000, total_ceiling=1500)
-    (owner / "ready-000000.json").write_text(
-        json.dumps({"usage": {"coverage": "complete", "total_tokens": 200}})
-    )
-    admit_indexing_source(tmp_path, source_ceiling=1000, total_ceiling=1500)
-    with pytest.raises(ValueError, match="indexing budget"):
-        admit_indexing_source(tmp_path, source_ceiling=1000, total_ceiling=1100)
 
 
 @pytest.mark.parametrize(
@@ -218,7 +195,6 @@ def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mu
                     "request": {
                         "model": "m",
                         "reasoning_effort": "low",
-                        "max_tokens": 8192,
                         "n": 1,
                         "temperature": 0,
                         "top_p": 1,
@@ -281,3 +257,146 @@ def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mu
             validate_results(tmp_path, plan, histories)
     else:
         assert validate_results(tmp_path, plan, histories)[0]["score"] == 1.0
+
+
+def test_native_evaluation_and_resume_without_spending_or_sql_audits(tmp_path, monkeypatch):
+    from oamb import oam_workflow as workflow
+
+    source = tmp_path / "input.json"
+    source.write_bytes(Path("tests/fixtures/oam/lme500-smoke.json").read_bytes())
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(f"dataset: lme500\nsource: {source}\ndiagnostic: true\n")
+    env = {
+        "OAMB_OAM_BASE_URL": "http://oam",
+        "LLM_BASE_URL": "http://model/v1",
+        "LLM_API_KEY": "key",
+        "OAMB_OAM_ROOT_KEY": "root-key",
+        "LLM_DEEP_MODEL": "deepseek-flash",
+        "LLM_LIGHT_MODEL": "deepseek-flash",
+        "OAMB_OAM_TENANT_ID": "benchmark",
+        "OAMB_EMBEDDING_BASE_URL": "http://model/v1",
+        "OAMB_EMBEDDING_MODEL": "qwen3-embedding:0.6b",
+    }
+    runtime = {
+        "config_sha256": "cfg",
+        "models": {"extraction": "deepseek-flash", "embedding": "qwen3-embedding:0.6b"},
+        "config": {
+            "database": {"vector_index_mode": "small"},
+            "index": {
+                "insights_enabled": False,
+                "embedding_dimensions": 1024,
+                "generation_token_budget": None,
+            },
+            "profile": {"enabled": False},
+            "models": {"reasoning_effort": {"extraction": "low"}},
+        },
+    }
+    monkeypatch.setattr(workflow, "_environment", lambda *args: env)
+    monkeypatch.setattr(workflow, "_runtime_config", lambda *args: runtime)
+    responses = {
+        "/health/ready": {"ready": True},
+        "/v1/capabilities": {
+            "contract_version": "0.0.1",
+            "index_generation_id": "g",
+            "config_sha256": "cfg",
+            "limits": {"ingest": {"max_messages": 100, "max_bytes": 10000}},
+        },
+        "/v1/embeddings": {"data": [{"embedding": [0.0] * 1024}]},
+    }
+    calls = []
+
+    def respond(request):
+        path = request.url.path
+        if path in responses:
+            return httpx.Response(200, json=responses[path])
+        calls.append(path)
+        body = json.loads(request.content) if request.content else {}
+        if path == "/v1/users":
+            value = {"user_id": body["user_id"], "secret": "user-key"}
+        elif path == "/v1/retain":
+            value = {"operation_id": f"op-{len(calls)}", "source_id": f"s-{len(calls)}"}
+        elif "/operations/" in path:
+            value = {
+                "operation_id": path.rsplit("/", 1)[-1],
+                "status": "succeeded",
+                "readiness": {
+                    k: True
+                    for k in (
+                        "source_searchable",
+                        "memory_ready",
+                        "links_ready",
+                        "temporal_links_ready",
+                    )
+                },
+                "stage_state": {"extraction_coverage": "complete"},
+            }
+        elif path == "/v1/recall":
+            value = {
+                "context": "I prefer green tea.",
+                "diagnostics": {
+                    "generation_id": "g",
+                    "recall_level": "fast",
+                    "generative_calls": 0,
+                    "degraded": [],
+                    "partial": False,
+                    "readiness": "ready",
+                },
+            }
+        elif path == "/v1/chat/completions":
+            content = "green tea" if calls.count(path) == 1 else "yes"
+            value = {
+                "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            }
+        else:
+            raise AssertionError(f"unexpected request: {path}")
+        return httpx.Response(200, json=value)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(respond))
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("evaluation must not inspect database query plans"),
+    )
+    output = tmp_path / "run"
+    workflow.precheck(config_path, output, tmp_path / "unused.env")
+    plan = json.loads((output / "plan.json").read_text())
+    assert plan["question_ids"] == ["oam-smoke-lme"]
+    assert plan["runtime"]["config"]["index"]["generation_token_budget"] is None
+    workflow.run(output, resume=False)
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["first_pass_mean_score"] == summary["policy_final_mean_score"] == 1.0
+    assert "green tea" in (output / "report.html").read_text()
+    assert calls.count("/v1/retain") == 2
+    assert calls.count("/v1/chat/completions") == 2
+    before = list(calls)
+    workflow.run(output, resume=True)
+    assert calls == before
+    source.write_text("[]")
+    with pytest.raises(ValueError, match="checksum"):
+        workflow.run(output, resume=True)
+    assert calls == before
+
+
+def test_resume_prompt_identity_ignores_implementation_edits(tmp_path, monkeypatch):
+    from oamb import oam_workflow as workflow
+
+    code = tmp_path / "oam_workflow.py"
+    code.write_text("first implementation")
+    prompts = tmp_path / "workloads/prompt_templates"
+    prompts.mkdir(parents=True)
+    prompt = prompts / "answer.txt"
+    prompt.write_text("published prompt")
+    for name in ("workloads/oam_protocol.py", "workloads/oam_inputs.py", "memory_systems/oam.py"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("implementation")
+    monkeypatch.setattr(workflow, "__file__", str(code))
+    original = workflow._protocol_hash()
+    code.write_text("harmless implementation fix")
+    assert workflow._protocol_hash() == original
+    prompt.write_text("different prompt")
+    assert workflow._protocol_hash() != original

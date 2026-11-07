@@ -60,7 +60,7 @@ Build the OAM v0.0.1 development image from a checkout containing the recorded c
 docker run --rm oamb/oam:0.0.1-32f97cca5c5c --version
 ```
 
-The build uses committed source and the OAM lockfile, excluding local uncommitted files. The resulting local image is a development snapshot, not the published release image. A working OAM deployment still requires an isolated PostgreSQL database, appropriate credentials and configured model services. Use the [native OAM setup and execution guide](docs/native-oam.md) for isolated PostgreSQL/API/worker preparation, input and model binding checks, token ceilings, checkpoints and resume.
+The build uses committed source and the OAM lockfile, excluding local uncommitted files. The resulting local image is a development snapshot, not the published release image. A working OAM deployment still requires an isolated PostgreSQL database, appropriate credentials and configured model services. Use the [native OAM setup and execution guide](docs/native-oam.md) for isolated PostgreSQL/API/worker preparation, input and model binding checks, checkpoints and resume.
 
 The evaluation overrides in `provider-services/oam/` configure LME-500 for the shared `small` vector index and BEAM-10M for `large` per-user indexes. Both disable Insights and Profile and select low extraction reasoning. The evaluator must request fast recall for LME and normal recall for BEAM; these modes are request parameters, not index settings. Other settings come from the image's canonical OAM configuration and must be checked against the historical protocol before claiming a matched rerun.
 
@@ -70,7 +70,7 @@ Current OAM supports `o200k_base`, `cl100k_base`, the legacy `oam-unicode-quarte
 
 The pinned development image includes these automatic embedding profiles and the `openai`/`qwen` options. Configure `models.embedding.max_input_tokens`, `max_request_tokens` and `max_request_items` to match the service, and verify the embedding dimension. If no supported counter matches the model, treat the count as an approximation and allow a safety margin; it cannot guarantee that input fits the provider's limit. Changing the embedding model or tokenizer may change chunking, embeddings and results, so report it rather than presenting the rerun as identical to the historical campaign.
 
-The native BEAM workflow provisions a dedicated index after each conversation's embedded search units exist. Both profiles verify the expected index against the actual dense-discovery query plan before scoring. Small synthetic samples have exercised real ingestion, recall, answering, judging and offline HTML inspection; they are separate from historical and full-dataset results. See the [workflow guide](docs/native-oam.md) for exact commands, artifact boundaries and current limitations.
+The native BEAM workflow provisions a dedicated index after each conversation's embedded search units exist, then proceeds to retrieval, answering and judging. Small synthetic samples have exercised real ingestion, recall, answering, judging and offline HTML inspection; they are separate from historical and full-dataset results. See the [workflow guide](docs/native-oam.md) for exact commands, artifact boundaries and current limitations.
 
 ## Evaluate OAM on LME-500 and BEAM-10M
 
@@ -94,7 +94,7 @@ After preparing the inputs and the two deployments, run the full configurations 
 
 Each output directory contains `report.html`, `summary.json` and retained per-question evidence. Resume an interrupted evaluation with `./run.sh --oam <output-directory> --resume`. Use the corresponding `*-smoke.yml` configuration with a fresh output directory for a small synthetic diagnostic before a full run.
 
-For failed first-pass questions, complete the generated `retry-eligibility.json` source/context/gold review before resuming. Incorrect gold blocks retry. The completed retry becomes policy-final even when its score falls. Pending reviews remain visible and prevent a complete policy-final claim; see the [review and resume procedure](docs/native-oam.md#3-full-datasets-budgets-and-resume).
+For failed first-pass questions, complete the generated `retry-eligibility.json` source/context/gold review before resuming. Incorrect gold blocks retry. The completed retry becomes policy-final even when its score falls. Pending reviews remain visible and prevent a complete policy-final claim; see the [review and resume procedure](docs/native-oam.md#3-full-datasets-and-resume).
 
 ## Quick start: LME-60 comparison
 

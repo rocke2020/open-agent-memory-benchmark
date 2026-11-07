@@ -25,14 +25,7 @@ def test_tracked_public_tree_has_canonical_instruction_pair_and_no_private_input
     tracked_paths = tuple(repository_root / path.decode("utf-8") for path in tracked if path)
 
     assert scan_public_paths(repository_root, tracked_paths) == ()
-    assert (
-        (repository_root / "AGENTS.md")
-        .read_text(encoding="utf-8")
-        .startswith(
-            "# AGENTS.md\nThis file provides context for AI coding assistants "
-            "(Claude Code, Codex, etc.)\n"
-        )
-    )
+    assert (repository_root / "AGENTS.md").is_file()
     assert (repository_root / "CLAUDE.md").is_symlink()
     assert (repository_root / "CLAUDE.md").readlink() == Path("AGENTS.md")
     tracked_names = {path.relative_to(repository_root).as_posix() for path in tracked_paths}

@@ -11,7 +11,6 @@ import os
 import subprocess
 import time
 from collections.abc import Callable
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -23,9 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from oamb.artifacts.atomic import atomic_replace_bytes, atomic_write_bytes
 from oamb.contracts.ids import canonical_sha256
-from oamb.contracts.specifications import BudgetScopeKind, BudgetSpec
 from oamb.memory_systems.oam import OAMAdapter, pack_messages
-from oamb.memory_systems.oam_index_plan import capture_index_plan
 from oamb.runtime.provider_env import load_t10_provider_environment
 from oamb.workloads.longmemeval import render_lme_answer_prompt, render_lme_judge_prompt
 from oamb.workloads.oam_inputs import BEAM_CATEGORIES, History, Question, load_histories
@@ -39,29 +36,21 @@ from oamb.workloads.oam_protocol import (
     validate_retry_review,
 )
 
+_CONTAINER_CONFIG = "/opt/oam-eval/config.yaml"
+
 
 class OAMRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     dataset: Literal["lme500", "beam10m"]
     source: str
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     question_ids: list[str] = Field(default_factory=list)
     diagnostic: bool = False
     model: str = "deepseek-flash"
     embedding_model: str = EMBEDDING_MODEL
-    answer_model_env: str = "LLM_DEEP_MODEL"
-    judge_model_env: str = "LLM_LIGHT_MODEL"
     answer_effort: Literal["low", "high", "max"] = "high"
     judge_effort: Literal["low", "high", "max"] = "high"
-    embedding_model_env: str = "OAMB_EMBEDDING_MODEL"
     embedding_dimensions: int = Field(default=1024, ge=1)
-    max_model_calls: int = Field(ge=1)
-    max_model_tokens: int = Field(ge=1024)
-    max_indexing_tokens: int = Field(ge=1)
-    max_output_tokens: int = Field(default=8192, ge=1024)
     timeout_seconds: int = Field(default=900, ge=1)
-    tenant_id_env: str = "OAMB_OAM_TENANT_ID"
-    container_config: str = "/opt/oam-eval/config.yaml"
 
 
 def _write(path: Path, value: Any, *, replace: bool = False) -> None:
@@ -114,12 +103,10 @@ class CompletionCache:
         base_url: str,
         key: str,
         *,
-        max_calls: int,
-        max_tokens: int,
         timeout: float,
     ) -> None:
         self.root, self.http, self.url, self.key = root, http, base_url.rstrip("/"), key
-        self.max_calls, self.max_tokens, self.timeout = max_calls, max_tokens, timeout
+        self.timeout = timeout
 
     def complete(
         self,
@@ -127,16 +114,14 @@ class CompletionCache:
         effort: str,
         prompt: str,
         stage: str,
-        max_output: int,
         *,
         validator: Callable[[str], object] | None = None,
         schema: dict[str, Any] | None = None,
     ) -> str:
-        payload = completion_payload(model, effort, prompt, max_output, schema)
+        payload = completion_payload(model, effort, prompt, schema)
         identity = hashlib.sha256(_json_bytes({"payload": payload, "stage": stage})).hexdigest()
         directory = self.root / "model-calls"
         saved = sorted(directory.glob("*.json"))
-        charged = 0
         for path in saved:
             attempt = _read(path)
             if (
@@ -155,21 +140,11 @@ class CompletionCache:
                     return content
                 except (KeyError, TypeError, ValueError, IndexError):
                     pass
-            # Unknown and failed attempts retain their full reservation.
-            body = attempt.get("response")
-            usage = body.get("usage", {}) if isinstance(body, dict) else {}
-            total = usage.get("total_tokens") if isinstance(usage, dict) else None
-            charged += total if type(total) is int and total >= 0 else attempt["reserved_tokens"]
-        # UTF-8 bytes bound prompt tokens without assuming a model's tokenizer.
-        reservation = len(_json_bytes(payload)) + 2048 + max_output
-        if len(saved) >= self.max_calls or charged + reservation > self.max_tokens:
-            raise ValueError("model budget exhausted before dispatch")
         path = directory / f"{len(saved):08d}-{identity}.json"
         attempt = {
             "identity": identity,
             "stage": stage,
             "request": payload,
-            "reserved_tokens": reservation,
             "state": "dispatched",
         }
         _write(path, attempt)
@@ -213,26 +188,9 @@ _ENV_KEYS = frozenset(
 )
 
 
-def _environment(path: Path, config: OAMRunConfig) -> dict[str, str]:
-    keys = _ENV_KEYS | {
-        config.answer_model_env,
-        config.judge_model_env,
-        config.embedding_model_env,
-        config.tenant_id_env,
-    }
-    env = {**load_t10_provider_environment(path, expected_keys=keys), **os.environ}
-    required = keys - {
-        "OAMB_EMBEDDING_API_KEY",
-        "LLM_LIGHT_MODEL",
-        "LLM_DEEP_MODEL",
-        "OAMB_EMBEDDING_MODEL",
-    }
-    required |= {
-        config.answer_model_env,
-        config.judge_model_env,
-        config.embedding_model_env,
-        config.tenant_id_env,
-    }
+def _environment(path: Path) -> dict[str, str]:
+    env = {**load_t10_provider_environment(path, expected_keys=_ENV_KEYS), **os.environ}
+    required = _ENV_KEYS - {"OAMB_EMBEDDING_API_KEY"}
     if any(not env.get(k) or env[k].startswith("change-me") for k in required):
         raise ValueError("configure the OAM, embedding and model environment variables")
     return env
@@ -252,11 +210,11 @@ def _operator(env: dict[str, str], args: list[str]) -> dict[str, Any]:
     return value
 
 
-def _runtime_config(env: dict[str, str], config: OAMRunConfig) -> dict[str, Any]:
+def _runtime_config(env: dict[str, str]) -> dict[str, Any]:
     code = (
         "import json,os;from oam.config import load_config;"
         "from oam.models.bindings import resolve_model_binding;"
-        f"r=load_config({config.container_config!r});"
+        f"r=load_config({_CONTAINER_CONFIG!r});"
         "b={k:resolve_model_binding(r.config.models,k,os.environ).model for k in ('extraction','embedding')};"
         "print(json.dumps({'config_sha256':r.sha256,'config':r.config.model_dump(mode='json'),'models':b}))"
     )
@@ -270,7 +228,7 @@ def _embedding_probe(
     response = http.post(
         env["OAMB_EMBEDDING_BASE_URL"].rstrip("/") + "/embeddings",
         headers={"Authorization": f"Bearer {key}"} if key else {},
-        json={"model": env[config.embedding_model_env], "input": ["OAMB readiness"]},
+        json={"model": env["OAMB_EMBEDDING_MODEL"], "input": ["OAMB readiness"]},
     )
     response.raise_for_status()
     body = response.json()
@@ -279,21 +237,12 @@ def _embedding_probe(
         type(v) in (float, int) and math.isfinite(v) for v in vector
     ):
         raise ValueError("embedding must be one finite vector with the configured dimension")
-    return {"model": env[config.embedding_model_env], "dimensions": len(vector)}
+    return {"model": env["OAMB_EMBEDDING_MODEL"], "dimensions": len(vector)}
 
 
 def _protocol_hash() -> str:
     root = Path(__file__).parent
     paths = sorted((root / "workloads/prompt_templates").rglob("*.txt"))
-    paths.extend(
-        root / name
-        for name in (
-            "oam_workflow.py",
-            "workloads/oam_protocol.py",
-            "workloads/oam_inputs.py",
-            "memory_systems/oam.py",
-        )
-    )
     return canonical_sha256(
         ["oam-native-v1", *[hashlib.sha256(p.read_bytes()).hexdigest() for p in paths]]
     )
@@ -314,14 +263,14 @@ def validate_models(
 ) -> None:
     if (
         config.model not in MODEL_REQUEST_NAMES
-        or env[config.answer_model_env] != config.model
-        or env[config.judge_model_env] != config.model
+        or env["LLM_DEEP_MODEL"] != config.model
+        or env["LLM_LIGHT_MODEL"] != config.model
         or extraction not in MODEL_REQUEST_NAMES
         or (
             not resumed
             and (
                 config.embedding_model != EMBEDDING_MODEL
-                or env[config.embedding_model_env] != config.embedding_model
+                or env["OAMB_EMBEDDING_MODEL"] != config.embedding_model
                 or embedding != config.embedding_model
                 or config.embedding_dimensions != 1024
             )
@@ -345,33 +294,20 @@ def validate_coverage(dataset: str, histories: list[History], *, diagnostic: boo
         )
 
 
-def admit_indexing_source(root: Path, *, source_ceiling: int, total_ceiling: int) -> None:
-    charged = 0
-    for receipt in (root / "owners").glob("*/source-*.json"):
-        ready_path = receipt.with_name(receipt.name.replace("source-", "ready-"))
-        usage = _read(ready_path).get("usage", {}) if ready_path.exists() else {}
-        total = usage.get("total_tokens")
-        charged += (
-            total
-            if usage.get("coverage") == "complete" and type(total) is int and total >= 0
-            else source_ceiling
-        )
-    if charged + source_ceiling > total_ceiling:
-        raise ValueError("indexing budget exhausted before source dispatch")
-
-
 def precheck(config_path: Path, output: Path, env_file: Path) -> None:
     config = OAMRunConfig.model_validate(yaml.safe_load(config_path.read_text()))
-    env = _environment(env_file, config)
+    env = _environment(env_file)
     source = Path(config.source).resolve()
-    histories = load_histories(config.dataset, source, config.source_sha256, config.question_ids)
+    with source.open("rb") as stream:
+        source_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+    histories = load_histories(config.dataset, source, source_sha256, config.question_ids)
     validate_coverage(config.dataset, histories, diagnostic=config.diagnostic)
     if output.exists():
         raise ValueError("precheck output already exists; use a fresh directory")
     with httpx.Client(timeout=config.timeout_seconds, trust_env=False) as http:
         adapter = OAMAdapter(http, env["OAMB_OAM_BASE_URL"], lambda *a: None)
         capabilities = adapter.preflight()
-        runtime = _runtime_config(env, config)
+        runtime = _runtime_config(env)
         validate_models(
             config, env, runtime["models"]["extraction"], runtime["models"]["embedding"]
         )
@@ -385,34 +321,17 @@ def precheck(config_path: Path, output: Path, env_file: Path) -> None:
             or effective["models"]["reasoning_effort"]["extraction"] != "low"
             or effective["models"]["reasoning_effort"].get("planner") is not None
             or effective["index"]["embedding_dimensions"] != config.embedding_dimensions
-            or type(effective["index"].get("generation_token_budget")) is not int
-            or effective["index"]["generation_token_budget"] > config.max_indexing_tokens
         ):
             raise ValueError("OAM runtime does not match the dataset evaluation profile")
         embedding = _embedding_probe(http, env, config)
     question_ids = [q.question_id for h in histories for q in h.questions]
     run_id = uuid4().hex
-    budget = BudgetSpec(
-        budget_id="oam-answer-judge",
-        scope_kind=BudgetScopeKind.RUN,
-        scope_id=run_id,
-        max_attempts=config.max_model_calls,
-        max_input_tokens=config.max_model_tokens,
-        max_output_tokens=config.max_model_tokens,
-        max_wall_seconds=Decimal(config.timeout_seconds * config.max_model_calls),
-        max_cost=None,
-        currency=None,
-    )
     plan = {
         "profile": "oam-native-v1",
         "run_id": run_id,
-        "answer_judge_budget": budget.model_dump(mode="json"),
-        "indexing_budget": {
-            "max_generation_tokens": config.max_indexing_tokens,
-            "per_source_ceiling": effective["index"]["generation_token_budget"],
-        },
         "config": config.model_dump(),
         "source": str(source),
+        "source_sha256": source_sha256,
         "env_file": str(env_file.resolve()),
         "diagnostic": config.diagnostic,
         "question_ids": question_ids,
@@ -423,9 +342,9 @@ def precheck(config_path: Path, output: Path, env_file: Path) -> None:
         "bindings": {
             "oam": env["OAMB_OAM_BASE_URL"],
             "llm": env["LLM_BASE_URL"],
-            "answer": env[config.answer_model_env],
-            "judge": env[config.judge_model_env],
-            "tenant": env[config.tenant_id_env],
+            "answer": env["LLM_DEEP_MODEL"],
+            "judge": env["LLM_LIGHT_MODEL"],
+            "tenant": env["OAMB_OAM_TENANT_ID"],
         },
     }
     _write(output / "plan.json", plan)
@@ -534,22 +453,20 @@ def evaluate_question(
 
     def attempt(effort: str) -> dict[str, Any]:
         content = cache.complete(
-            env[config.answer_model_env],
+            env["LLM_DEEP_MODEL"],
             effort,
             prompt,
             "answer",
-            config.max_output_tokens,
             schema=schema,
             validator=lambda text: answer_text(text, config.dataset),
         )
         answer = answer_text(content, config.dataset)
         judgments = [
             cache.complete(
-                env[config.judge_model_env],
+                env["LLM_LIGHT_MODEL"],
                 config.judge_effort,
                 text,
                 "judge",
-                config.max_output_tokens,
                 schema=judge_schema,
                 validator=lambda text: _score_judgments([text], config.dataset),
             )
@@ -623,7 +540,7 @@ def validate_results(
     if histories is None:
         config = plan["config"]
         histories = load_histories(
-            config["dataset"], Path(plan["source"]), config["source_sha256"], config["question_ids"]
+            config["dataset"], Path(plan["source"]), plan["source_sha256"], config["question_ids"]
         )
     questions = {q.question_id: q for h in histories for q in h.questions}
     calls = set()
@@ -708,7 +625,6 @@ def validate_results(
                     plan["bindings"][stage],
                     stage_effort,
                     prompt,
-                    plan["config"].get("max_output_tokens", 8192),
                     schema,
                 )
                 if (stage, canonical_sha256(payload), content) not in calls:
@@ -769,19 +685,19 @@ owners; embedding tokens are excluded. This run is separate from historical evid
 def run(root: Path, *, resume: bool) -> None:
     plan = _read(root / "plan.json")
     config = OAMRunConfig.model_validate(plan["config"])
-    env = _environment(Path(plan["env_file"]), config)
+    env = _environment(Path(plan["env_file"]))
     if plan["protocol_sha256"] != _protocol_hash():
-        raise ValueError("workflow implementation changed; use a fresh precheck scope")
+        raise ValueError("evaluation prompts changed; use a fresh precheck scope")
     current = {
         "oam": env["OAMB_OAM_BASE_URL"],
         "llm": env["LLM_BASE_URL"],
-        "answer": env[config.answer_model_env],
-        "judge": env[config.judge_model_env],
-        "tenant": env[config.tenant_id_env],
+        "answer": env["LLM_DEEP_MODEL"],
+        "judge": env["LLM_LIGHT_MODEL"],
+        "tenant": env["OAMB_OAM_TENANT_ID"],
     }
     if current != plan["bindings"]:
         raise ValueError("runtime/model binding changed")
-    runtime = _runtime_config(env, config)
+    runtime = _runtime_config(env)
     validate_models(
         config,
         env,
@@ -792,7 +708,7 @@ def run(root: Path, *, resume: bool) -> None:
     if runtime["models"]["extraction"] != plan["runtime"]["models"]["extraction"]:
         raise ValueError("OAM extraction model binding changed")
     histories = load_histories(
-        config.dataset, Path(plan["source"]), config.source_sha256, config.question_ids
+        config.dataset, Path(plan["source"]), plan["source_sha256"], config.question_ids
     )
     if (root / "started.json").exists() and not resume:
         raise ValueError("run already started; use --resume")
@@ -817,8 +733,6 @@ def run(root: Path, *, resume: bool) -> None:
             http,
             env["LLM_BASE_URL"],
             env["LLM_API_KEY"],
-            max_calls=config.max_model_calls,
-            max_tokens=config.max_model_tokens,
             timeout=config.timeout_seconds,
         )
         for history in histories:
@@ -891,11 +805,6 @@ def _run_history(
         if path.exists():
             receipt = _read(path)
         else:
-            admit_indexing_source(
-                root,
-                source_ceiling=plan["indexing_budget"]["per_source_ceiling"],
-                total_ceiling=config.max_indexing_tokens,
-            )
             receipt = {"state": "dispatching", "payload_sha256": canonical_sha256(messages)}
             _write(path, receipt)
         if "operation_id" not in receipt:
@@ -917,10 +826,10 @@ def _run_history(
                 "oam",
                 "vector-indexes",
                 "--config",
-                config.container_config,
+                _CONTAINER_CONFIG,
                 "--once",
                 "--tenant-id",
-                env[config.tenant_id_env],
+                env["OAMB_OAM_TENANT_ID"],
                 "--user-id",
                 owner,
             ],
@@ -930,19 +839,11 @@ def _run_history(
             report.get("busy")
             or len(owners) != 1
             or owners[0].get("state") != "ready"
-            or owners[0].get("tenant_id") != env[config.tenant_id_env]
+            or owners[0].get("tenant_id") != env["OAMB_OAM_TENANT_ID"]
             or owners[0].get("user_id") != owner
         ):
             raise ValueError("BEAM dedicated owner index is not ready")
         _write(directory / "vector-index.json", report, replace=True)
-    index_plan = capture_index_plan(
-        env["OAMB_OAM_CONTAINER"],
-        config.container_config,
-        env[config.tenant_id_env],
-        owner,
-        "small" if config.dataset == "lme500" else "large",
-    )
-    _write(directory / "index-plan.json", index_plan, replace=True)
     for question in history.questions:
         result_path = root / "results" / (canonical_sha256(question.question_id) + ".json")
         saved = _read(result_path) if result_path.exists() else None

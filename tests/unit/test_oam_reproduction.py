@@ -12,10 +12,6 @@ def test_keyless_embedding_precheck_omits_empty_bearer_header():
     config = workflow.OAMRunConfig(
         dataset="lme500",
         source="unused",
-        source_sha256="0" * 64,
-        max_model_calls=4,
-        max_model_tokens=100000,
-        max_indexing_tokens=1,
     )
 
     def respond(request):
@@ -107,16 +103,10 @@ def test_retry_uses_same_prompt_max_effort_and_reuses_completed_work(tmp_path):
     config = workflow.OAMRunConfig(
         dataset="lme500",
         source="unused",
-        source_sha256="0" * 64,
-        max_model_calls=4,
-        max_model_tokens=100000,
-        max_indexing_tokens=1,
     )
     env = {"LLM_DEEP_MODEL": "deepseek-flash", "LLM_LIGHT_MODEL": "deepseek-flash"}
     with httpx.Client(transport=httpx.MockTransport(respond)) as http:
-        cache = workflow.CompletionCache(
-            tmp_path, http, "http://model/v1", "key", max_calls=4, max_tokens=100000, timeout=1
-        )
+        cache = workflow.CompletionCache(tmp_path, http, "http://model/v1", "key", timeout=1)
         first = workflow.evaluate_question(tmp_path, config, env, cache, question, "red")
         assert first["score"] == 0
         review = {
@@ -149,10 +139,6 @@ def test_lower_beam_retry_becomes_policy_result_and_reports_both_passes(tmp_path
     config = workflow.OAMRunConfig(
         dataset="beam10m",
         source="unused",
-        source_sha256="0" * 64,
-        max_model_calls=6,
-        max_model_tokens=100000,
-        max_indexing_tokens=1,
     )
     env = {"LLM_DEEP_MODEL": "deepseek-flash", "LLM_LIGHT_MODEL": "deepseek-flash"}
     contents = iter(
@@ -176,9 +162,7 @@ def test_lower_beam_retry_becomes_policy_result_and_reports_both_passes(tmp_path
             )
         )
     ) as http:
-        cache = workflow.CompletionCache(
-            tmp_path, http, "http://model/v1", "key", max_calls=6, max_tokens=100000, timeout=1
-        )
+        cache = workflow.CompletionCache(tmp_path, http, "http://model/v1", "key", timeout=1)
         first = workflow.evaluate_question(tmp_path, config, env, cache, question, "red")
         assert hasattr(workflow, "summarize_results"), (
             "first-pass/policy-final reporting is missing"
@@ -214,13 +198,11 @@ def test_unknown_paid_outcome_never_redispatches_automatically(tmp_path):
         raise httpx.ReadTimeout("unknown remote outcome")
 
     with httpx.Client(transport=httpx.MockTransport(timeout)) as http:
-        cache = workflow.CompletionCache(
-            tmp_path, http, "http://model/v1", "key", max_calls=2, max_tokens=100000, timeout=1
-        )
+        cache = workflow.CompletionCache(tmp_path, http, "http://model/v1", "key", timeout=1)
         with pytest.raises(httpx.ReadTimeout):
-            cache.complete("m", "high", "held prompt", "answer", 1024)
+            cache.complete("m", "high", "held prompt", "answer")
         with pytest.raises(ValueError, match="unknown model call outcome"):
-            cache.complete("m", "high", "held prompt", "answer", 1024)
+            cache.complete("m", "high", "held prompt", "answer")
     assert len(requests) == 1
 
 
@@ -230,10 +212,6 @@ def test_interrupted_retry_reuses_max_answer_before_resuming_judgment(tmp_path, 
     config = workflow.OAMRunConfig(
         dataset="lme500",
         source="unused",
-        source_sha256="0" * 64,
-        max_model_calls=5,
-        max_model_tokens=100000,
-        max_indexing_tokens=1,
     )
     env = {"LLM_DEEP_MODEL": "deepseek-flash", "LLM_LIGHT_MODEL": "deepseek-flash"}
     outputs = iter([(200, "red"), (200, "no"), (200, "blue"), (503, ""), (200, "yes")])
@@ -251,9 +229,7 @@ def test_interrupted_retry_reuses_max_answer_before_resuming_judgment(tmp_path, 
         )
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as http:
-        cache = workflow.CompletionCache(
-            tmp_path, http, "http://model/v1", "key", max_calls=5, max_tokens=100000, timeout=1
-        )
+        cache = workflow.CompletionCache(tmp_path, http, "http://model/v1", "key", timeout=1)
         first = workflow.evaluate_question(tmp_path, config, env, cache, question, "red")
         review = {
             "eligible": True,
@@ -291,10 +267,6 @@ def test_validation_binds_structured_beam_request_and_first_pass(tmp_path, tampe
     config = workflow.OAMRunConfig(
         dataset="beam10m",
         source="unused",
-        source_sha256="0" * 64,
-        max_model_calls=2,
-        max_model_tokens=100000,
-        max_indexing_tokens=1,
     )
     env = {"LLM_DEEP_MODEL": "deepseek-flash", "LLM_LIGHT_MODEL": "deepseek-flash"}
     question = Question("q", "Color?", "information_extraction", "red", ("red",))
@@ -310,9 +282,7 @@ def test_validation_binds_structured_beam_request_and_first_pass(tmp_path, tampe
             )
         )
     ) as http:
-        cache = workflow.CompletionCache(
-            tmp_path, http, "http://model/v1", "key", max_calls=2, max_tokens=100000, timeout=1
-        )
+        cache = workflow.CompletionCache(tmp_path, http, "http://model/v1", "key", timeout=1)
         result = workflow.evaluate_question(tmp_path, config, env, cache, question, "red")
     result["recall"] = {
         "context": "red",
@@ -355,10 +325,6 @@ def test_reproduction_rejects_different_role_models():
     config = workflow.OAMRunConfig(
         dataset="lme500",
         source="unused",
-        source_sha256="0" * 64,
-        max_model_calls=4,
-        max_model_tokens=100000,
-        max_indexing_tokens=1,
     )
     env = {
         "LLM_DEEP_MODEL": "deepseek-flash",
@@ -373,10 +339,6 @@ def test_embedding_alias_changes_do_not_expand_the_resume_gate():
     config = workflow.OAMRunConfig(
         dataset="lme500",
         source="unused",
-        source_sha256="0" * 64,
-        max_model_calls=4,
-        max_model_tokens=100000,
-        max_indexing_tokens=1,
     )
     env = {
         "LLM_DEEP_MODEL": "deepseek-flash",

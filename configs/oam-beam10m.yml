@@ -1,11 +1,6 @@
 dataset: beam10m
 source: datasets/beam/10m.json
-source_sha256: c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8
 model: deepseek-flash  # Gateway request name for deepseek-v4.1-flash.
 embedding_model: qwen3-embedding:0.6b
 answer_effort: high
 judge_effort: high
-max_output_tokens: 32768
-max_model_calls: 3000
-max_model_tokens: 100000000
-max_indexing_tokens: 500000000

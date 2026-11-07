@@ -12,11 +12,11 @@ The LME answer and judge template bytes already match the recorded campaign. The
 
 ## 2. Execution
 
-`./precheck.sh --oam CONFIG --output DIR` freezes dataset, selection, prompts, model request name, runtime configuration and budgets. The same configured generative model request name must resolve for OAM extraction, answering and judging. Its documented model identity is `deepseek-v4.1-flash`; the provider may require the recorded `deepseek-flash` gateway alias. Embedding remains `qwen3-embedding:0.6b`, 1,024 dimensions. Record supplier model metadata in raw receipts.
+`./precheck.sh --oam CONFIG --output DIR` records dataset, selection, prompts, model request name and runtime configuration. It derives the input fingerprint automatically; YAML does not require a manual checksum. Environment variable names and the container configuration path follow the documented service setup without per-run alias settings. The same configured generative model request name must resolve for OAM extraction, answering and judging. Its documented model identity is `deepseek-v4.1-flash`; the provider may require the recorded `deepseek-flash` gateway alias. Embedding remains `qwen3-embedding:0.6b`, 1,024 dimensions. Record supplier model metadata in raw receipts.
 
-`./run.sh --oam DIR` reuses existing serial history ingestion, query readiness and index-plan checks. LME uses fast recall and BEAM normal recall. OAM owns extraction prompts inside its pinned image; OAMB owns benchmark prompts. Current OAM tokenizer/index changes are disclosed rather than reverted.
+`./run.sh --oam DIR` ingests each history, waits for query readiness, retrieves, answers and judges. LME uses fast recall and BEAM normal recall. BEAM provisions the required owner index through OAM's operator command; evaluation does not inspect database query plans. OAM owns extraction prompts inside its pinned image; OAMB owns benchmark prompts. Current OAM tokenizer/index changes are disclosed rather than reverted.
 
-For each question, save the high-effort first answer and high-effort judgment atomically before any policy retry. The existing completion cache and budgets own all attempts and reuse complete valid outputs; there is no new retry executor or queue.
+For each question, save the high-effort first answer and high-effort judgment atomically before any policy retry. Reuse complete valid model responses and retain failed or interrupted attempts. The operator owns evaluation cost; native OAM adds no run-wide call/token ceilings, token reservations, per-source spending override or budget records. Use the provider's default response allowance and retain the operation timeout; native model requests add no output-token cap. Reject truncated or malformed responses rather than scoring incomplete output.
 
 ## 3. Reviewed policy retry and resume
 
@@ -24,11 +24,13 @@ Failed first-pass questions require a source/context/gold review before one max-
 
 On `./run.sh --oam DIR --resume`, eligible failed questions reuse the exact frozen context/prompt/model and obtain one max-effort answer plus high-effort judgments. A dispatched complete retry becomes the policy result even if its score falls. An interrupted retry reuses the existing paid-call cache. Original first-pass results remain unchanged.
 
+Resume verifies dataset bytes, selected configuration, model/runtime bindings and prompt identity. It does not hash implementation source files or require unchanged evaluator code. Embedding resume verifies one finite vector of the recorded dimension.
+
 ## 4. Validation and reporting
 
 The result validator binds both first-pass and retry outputs to actual model receipts, efforts, exact prompts, context hash, rubric coverage and recomputed scores. The report shows first-pass and policy-final scores separately and keeps all original questions in the denominator. Pending eligibility prevents claiming a complete policy-final result.
 
-Implementation owners are [the public workflow](../../src/oamb/oam_workflow.py), [input loading](../../src/oamb/workloads/oam_inputs.py), [the OAM adapter](../../src/oamb/memory_systems/oam.py), [prompt templates](../../src/oamb/workloads/prompt_templates/) and [download scripts](../../scripts/download/). [The focused protocol helper](../../src/oamb/workloads/oam_protocol.py) owns model request schemas and retry-review admission; the existing completion cache and runner own execution and budgets.
+Implementation owners are [the public workflow](../../src/oamb/oam_workflow.py), [input loading](../../src/oamb/workloads/oam_inputs.py), [the OAM adapter](../../src/oamb/memory_systems/oam.py), [prompt templates](../../src/oamb/workloads/prompt_templates/) and [download scripts](../../scripts/download/). [The focused protocol helper](../../src/oamb/workloads/oam_protocol.py) owns model request schemas and retry-review admission; the existing completion cache and runner own execution and resume.
 
 ## 5. Acceptance
 

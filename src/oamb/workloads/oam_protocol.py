@@ -36,12 +36,11 @@ JUDGE_SCHEMA = {
 
 
 def completion_payload(
-    model: str, effort: str, prompt: str, max_output: int, schema: dict[str, Any] | None = None
+    model: str, effort: str, prompt: str, schema: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
         "reasoning_effort": effort,
-        "max_tokens": max_output,
         "messages": [{"role": "user", "content": prompt}],
     }
     if schema is None:
