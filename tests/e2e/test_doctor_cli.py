@@ -513,11 +513,13 @@ def test_model_endpoint_and_evaluation_control_changes_change_cell_identity(tmp_
     )
 
 
-def test_doctor_rejects_mab_or_invalid_retrieval_without_output(tmp_path: Path) -> None:
+def test_doctor_rejects_unknown_workload_or_invalid_retrieval_without_output(
+    tmp_path: Path,
+) -> None:
     for original, replacement in (
         (
             "workload_id: lme60-balanced-v1",
-            "workload_id: memoryagentbench",
+            "workload_id: unsupported-workload",
         ),
         ("generation: disabled", "generation: enabled"),
     ):

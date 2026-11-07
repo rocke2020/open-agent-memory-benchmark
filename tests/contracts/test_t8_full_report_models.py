@@ -44,7 +44,7 @@ def _source(root: str, identity: str) -> SourceEvidenceBinding:
 def test_completion_summary_keeps_logical_rows_physical_plans_and_cases_distinct() -> None:
     reporting = _reporting()
     summary = reporting.CompletionSummaryV3(
-        run_id="mab65-fixture",
+        run_id="multi-context-fixture",
         intended_logical_contexts=29,
         intended_ingestion_plans=25,
         ready_ingestion_plans=25,

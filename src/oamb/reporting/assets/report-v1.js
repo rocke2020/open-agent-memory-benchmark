@@ -40,7 +40,6 @@
     ["metric_id", "metric"],
     ["proof_status", "proof"],
   ]);
-  const mab65 = model.mab65_reduction;
   const records = [];
   let stableIndex = 0;
 
@@ -183,62 +182,6 @@
 
   kind.textContent = model.schema_name;
   origin.textContent = model.origin_kind || model.origin_class || model.schema_name;
-
-  function exactText(value) {
-    return `${value.numerator}/${value.denominator}`;
-  }
-
-  function appendExactItems(listElement, items, labels, key) {
-    for (const item of items) {
-      const row = document.createElement("li");
-      const label = labels[item[key]] || item[key];
-      row.textContent = `${label}: ${exactText(item.score)}`;
-      listElement.append(row);
-    }
-  }
-
-  if (mab65) {
-    const container = document.getElementById("oamb-mab65");
-    const boundary = document.getElementById("oamb-mab65-boundary");
-    const components = document.getElementById("oamb-mab65-components");
-    const capabilities = document.getElementById("oamb-mab65-capabilities");
-    const index = document.getElementById("oamb-mab65-index");
-    container.hidden = false;
-    if (mab65.available) {
-      boundary.textContent =
-        "Complete 29 logical rows → 25 physical plans → 65 metric-eligible cases. " +
-        "Grouped FactConsolidation SH/MH membership and ReDial resolution evidence are preserved.";
-      appendExactItems(
-        components,
-        mab65.components,
-        {
-          ar: "EventQA SubEM",
-          icl: "ICL Exact Match",
-          recsys: "ReDial Recall@5",
-          lru: "DetectiveQA Exact Match",
-          cr_sf: "FactConsolidation SubEM",
-        },
-        "component",
-      );
-      appendExactItems(
-        capabilities,
-        mab65.capabilities,
-        {
-          ar: "Accurate Retrieval",
-          ttl: "Test-Time Learning (equal ICL/ReDial contribution)",
-          lru: "Long-Range Understanding",
-          cr_sf: "Conflict Resolution and Synthesis",
-        },
-        "capability",
-      );
-      index.textContent =
-        `MAB-65 Capability-Balanced Index: ${exactText(mab65.index_value)} ` +
-        "(secondary; complete evidence only).";
-    } else {
-      boundary.textContent = `MAB-65 secondary index unavailable: ${mab65.unavailable_reason}.`;
-      index.remove();
-    }
-  }
 
   function selectedFacetMatches(record) {
     for (const [facetName, select] of facetFilters) {

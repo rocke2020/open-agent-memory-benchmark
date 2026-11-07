@@ -19,14 +19,8 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 | huggingface_hub | Pinned benchmark dataset downloads | Apache-2.0 | Download dependency |
 | HTTPX with SOCKS support | Hub transport through configured proxies | BSD-3-Clause | Download dependency |
 | LongMemEval prompt excerpts | Attributed judge PromptPack templates | MIT | Embedded runtime PromptPack data |
-| MemoryAgentBench prompt excerpts | Attributed MAB-65 answer PromptPack templates | MIT | Embedded runtime PromptPack data |
 | Mem0-origin BEAM prompt excerpts | Recorded AMB answer and nugget-judge variants | Apache-2.0 upstream; [provenance](prompt-packs/README.md#native-oam-campaign-prompts) | Embedded native OAM prompt templates and [license](prompt-packs/LICENSE.Mem0) |
 | Mem0 extraction parser excerpts | Regression fixture for pinned native ingestion | Apache-2.0 | Test-only excerpt and [license](provider-services/tests/fixtures/LICENSE.Mem0) |
-
-MemoryAgentBench inputs and prompt excerpts are preserved for deferred research
-and license compliance. v0.1.0 selects the balanced LME-60 LongMemEval screen;
-distribution of these assets does not imply an active MAB profile, result, or
-release claim.
 
 The packaged AMB historical view contains only factual identifiers,
 categories, verdicts, measurements, aggregates, and immutable producer/source
@@ -43,3 +37,5 @@ workflow does not relicense them under Apache-2.0.
 The complete notices for distributed prompt excerpts are installed from
 `prompt-packs/`. Prompt manifests bind the exact upstream revision, source-file
 SHA-256, extracted-template SHA-256, and OAMB-rendered template SHA-256.
+
+Published LME-500 and LME-60 question/context evidence retains the [LongMemEval MIT notice](eval_results/lme500/LICENSES/LongMemEval-MIT.txt). Published BEAM-10M question/context evidence and its derived per-question result bundles retain [BEAM attribution and CC BY-SA 4.0 terms](eval_results/beam10m/LICENSES/BEAM-CC-BY-SA-4.0.md). These result bundles are distinct from the compact historical projection described above and retain their separate prompt notices.

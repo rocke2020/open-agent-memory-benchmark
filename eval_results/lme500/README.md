@@ -2,11 +2,13 @@
 
 ## Overview
 
+Open the [interactive offline report](report.html) to browse all 500 questions, full injected contexts, answers, golds, judgments and recorded retries. Its AMB-inspired layout supports category, text and outcome filters and separate first-pass / policy-final views. Download `report.html` and open it directly in a current browser; no setup or evaluation calls are needed. Full request/response archive links use the adjacent evidence files. See [rebuild instructions](../README.md).
+
 **OAM achieves 94.0% accuracy (470/500)** on the 500 distinct questions in LongMemEval cleaned S, using the historical campaign's recorded single-retry policy. This report reuses the completed `lme-v261026` results and failure reviews. No ingestion, retrieval, answer generation, judging, or model-based review is rerun for this addition.
 
 This is a historical evaluation of OAM v0.0.1 development snapshots, consolidated from six cohorts. It provides a useful performance reference without paying to repeat the campaign. It is not a fresh test of the current checkout or a newly matched comparison against another provider.
 
-After this campaign, OAM added shared and dedicated approximate-nearest-neighbor index policies for large collections. The saved LME-500 scores were not rerun against that change; its effect on these results is unmeasured. The separate [BEAM-10M report](oam-v0.0.1-beam10m.md) covers long histories under its own recorded configuration.
+After this campaign, OAM added shared and dedicated approximate-nearest-neighbor index policies for large collections. The saved LME-500 scores were not rerun against that change; its effect on these results is unmeasured. The separate [BEAM-10M report](../beam10m/README.md) covers long histories under its own recorded configuration.
 
 ## Performance
 
@@ -73,3 +75,13 @@ These findings coexist with OAM context-selection weaknesses, including unrelate
 The authoritative source is the [LME-500 summary](https://github.com/rocke2020/agent-memories/blob/54c3b12c3a9154d37e91ae95cb85b68335f222e1/eval/lme/lme-v261026/lme500-summary.md) and its linked cohort reports, selections, and consolidated failure review, pinned here to source repository revision `54c3b12c3a9154d37e91ae95cb85b68335f222e1`. OAMB reuses the reported measurements and reconciles selection coverage and aggregate arithmetic offline; it does not independently rescore raw answers or reconstruct complete billing.
 
 Full-500 source-reviewed context-noise coverage is unavailable, so this report presents no aggregate noise percentage. The existing native three-provider LME-60 workflow remains separate; the historical OAM result does not imply an implemented OAM adapter, a native OAMB capsule, or a controlled provider-performance win.
+
+## Public per-question evidence
+
+The [manifest](manifest.json) lists six compressed `oam/*.json.gz` shards covering all 500 distinct question IDs. They contain the original question and gold answer, the exact saved answer-visible context and its SHA-256, recorded context tokens and retrieval time, first-pass answer/judge messages and outputs, any recorded max-effort retry, and the policy-final answer and score. The three pilot-only questions and the LME-42 contribution are disjoint; the nine reused pilot IDs are counted only in LME-42.
+
+`first_pass` and `retry` preserve both attempts. `policy_final_attempt` selects the retry whenever one was recorded, including any lower-scoring outcome; `answer`, `score` and `correct` expose that selected result. The saved LME judge output is a yes/no verdict, so no richer judging explanation is invented. Supplier usage included in an attempt is that receipt's measurement, not complete campaign billing.
+
+Historical runtime revisions and the reported protocol are recorded in the manifest; unavailable revisions remain null. Exact saved LME answer and judge message bodies are included, while credentials, endpoints and private storage identities are omitted. This is a public projection of historical evidence, not a native execution capsule or a fresh run. LongMemEval content retains its [upstream MIT notice](LICENSES/LongMemEval-MIT.txt).
+
+From the repository root, run `uv run pytest -q tests/test_published_oam_evidence.py` to recompute coverage, scores, policy selection and exact context-token counts from the public shards. Python's standard `gzip` and `json` modules can open each shard without OAM, a database or model credentials.

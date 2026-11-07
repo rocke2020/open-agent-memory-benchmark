@@ -5,11 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import cast
 
 from oamb.artifacts.atomic import read_regular_file
 from oamb.artifacts.validation.native import validate_native_capsule
@@ -40,8 +39,6 @@ from oamb.contracts.ids import canonical_sha256
 from oamb.contracts.reporting import (
     CompletionSummaryV3,
     DisplayPreview,
-    Mab65ReportReduction,
-    MabPlanEvidenceBinding,
     MetricSummary,
     ReportRecordProjection,
     RunReportModelV3,
@@ -68,18 +65,14 @@ from oamb.reporting.accounting import (
 )
 from oamb.reporting.previews import build_display_preview
 from oamb.reporting.public import (
-    build_mab65_report_reduction,
     build_metric_summary,
     build_report_record_projection,
     build_run_report_model,
     build_validation_claim_boundary,
 )
-from oamb.workloads.mab65_reduction import reduce_mab65
-from oamb.workloads.memoryagentbench import MAB65_WORKLOAD_ID, MabManifestBundle
 
 TokenRecord = TokenUsageRecord | TokenUsageRecordV2 | TokenUsageRecordV3
 NativePlanRecord = IngestionPlanRecordV2 | IngestionPlanRecordV3
-RecordT = TypeVar("RecordT")
 
 
 class NativeReportReductionError(ValueError):
@@ -124,40 +117,12 @@ NATIVE_REPORT_REDUCER_CONTRACT = {
     "accounting_algorithm": "owner scoped attempted/final/not-applicable reduction",
 }
 
-MAB65_REPORT_REDUCER_CONTRACT = {
-    "reducer_id": "mab65-capability-balanced-index-v1",
-    "version": 1,
-    "input_schemas": (
-        "mab_manifest_bundle",
-        "ingestion_plan_record@2|3",
-        "case_record@3",
-    ),
-    "output_schema": "mab65_report_reduction@1",
-    "plan_order": "component ar,icl,recsys,lru,cr_sf then frozen manifest order",
-    "algorithm": "complete-only plan macro and exact-rational capability weighting",
-    "control_boundary": "sealed comparison controls required",
-}
-
 
 def native_report_reducer_implementation_hash() -> str:
     return canonical_sha256(
         [
             NATIVE_REPORT_REDUCER_CONTRACT,
             hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        ]
-    )
-
-
-def mab65_report_reducer_implementation_hash() -> str:
-    reporting_root = Path(__file__).parent
-    package_root = reporting_root.parent
-    return canonical_sha256(
-        [
-            MAB65_REPORT_REDUCER_CONTRACT,
-            hashlib.sha256(
-                (package_root / "workloads" / "mab65_reduction.py").read_bytes()
-            ).hexdigest(),
-            hashlib.sha256((reporting_root / "public.py").read_bytes()).hexdigest(),
         ]
     )
 
@@ -217,13 +182,6 @@ def reduce_native_run_report(
         records.history_attempts,
     )
     metrics = _metric_summaries(cases)
-    mab65_reduction = _build_native_mab65_report_reduction(
-        workload_id=case_manifest.workload_id,
-        manifest_id=case_manifest.manifest_id,
-        validation_target=validation_target,
-        plans=plans,
-        cases=cases,
-    )
     record_projections = _record_projections(
         records,
         plans,
@@ -285,17 +243,6 @@ def reduce_native_run_report(
                 1,
                 native_report_reducer_implementation_hash(),
             ),
-            *(
-                (
-                    (
-                        "mab65-capability-balanced-index-v1",
-                        1,
-                        mab65_report_reducer_implementation_hash(),
-                    ),
-                )
-                if mab65_reduction is not None
-                else ()
-            ),
         ),
         audience=report_spec.audience,
         origin_kind="native",
@@ -321,7 +268,6 @@ def reduce_native_run_report(
         ),
         summary=summary,
         metric_summaries=metrics,
-        mab65_reduction=mab65_reduction,
         measurement_lines=accounting.lines,
         logical_context_ids=tuple(
             item.context_manifest_entry_id
@@ -334,147 +280,6 @@ def reduce_native_run_report(
         record_projections=record_projections,
         limitations=tuple(limitations),
     )
-
-
-def _build_native_mab65_report_reduction(
-    *,
-    workload_id: str = MAB65_WORKLOAD_ID,
-    manifest_id: str = MAB65_WORKLOAD_ID,
-    validation_target: object | None,
-    plans: tuple[NativePlanRecord, ...],
-    cases: tuple[CaseRecordV3, ...],
-) -> Mab65ReportReduction | None:
-    if workload_id != MAB65_WORKLOAD_ID or manifest_id != MAB65_WORKLOAD_ID:
-        return None
-
-    from oamb.artifacts.validation.run_evidence import (
-        NativeRunEvidenceValidationInput,
-    )
-
-    if not isinstance(validation_target, NativeRunEvidenceValidationInput):
-        raise NativeReportReductionError(
-            "MAB-65 report reduction requires the composite validation target"
-        )
-    if validation_target.workload_profile_id != "oamb-t8-workload-mab65-v1":
-        raise NativeReportReductionError(
-            "MAB-65 report reduction requires the exact workload profile"
-        )
-    bundle = cast(MabManifestBundle, validation_target.workload_target)
-    if bundle.case_manifest.workload_id != MAB65_WORKLOAD_ID:
-        raise NativeReportReductionError("MAB-65 validation target names another workload")
-
-    plan_records_by_id = _unique_records_by(
-        plans,
-        key=lambda item: item.ingestion_plan_id,
-        label="MAB-65 physical ingestion plan",
-    )
-    case_records_by_id = _unique_records_by(
-        cases,
-        key=lambda item: item.case_manifest_entry_id,
-        label="MAB-65 case",
-    )
-    expected_plan_ids = tuple(plan.manifest.ingestion_plan_id for plan in bundle.plans)
-    expected_case_ids = tuple(case.entry.case_manifest_entry_id for case in bundle.cases)
-    if set(plan_records_by_id) != set(expected_plan_ids) or set(case_records_by_id) != set(
-        expected_case_ids
-    ):
-        raise NativeReportReductionError(
-            "MAB-65 sealed record inventory does not close the validated workload"
-        )
-
-    case_metrics = {
-        case_id: Fraction(record.metric_numerator, record.metric_denominator)
-        for case_id, record in case_records_by_id.items()
-        if (
-            record.state == CaseState.COMPLETED
-            and record.evaluation_disposition == CaseEvaluationDisposition.DETERMINISTIC_EVALUATED
-            and record.metric_numerator is not None
-            and record.metric_denominator is not None
-        )
-    }
-    ready_plan_manifest_ids = frozenset(
-        plan.manifest.plan_manifest_entry_id
-        for plan in bundle.plans
-        if plan_records_by_id[plan.manifest.ingestion_plan_id].state == IngestionPlanState.SEALED
-    )
-    query_state_unchanged = all(
-        record.query_mutation_status == "unchanged"
-        and record.pre_query_state_sha256 is not None
-        and record.pre_query_state_sha256 == record.post_query_state_sha256
-        for record in case_records_by_id.values()
-    )
-    reduction = reduce_mab65(
-        bundle,
-        case_metrics=case_metrics,
-        ready_plan_manifest_ids=ready_plan_manifest_ids,
-        capsule_valid=True,
-        query_state_unchanged=query_state_unchanged,
-        expected_catalog_sha256=bundle.entity_catalog_sha256,
-        expected_unicode_fingerprint=bundle.unicode_fingerprint,
-        expected_interaction_fingerprint=canonical_sha256(
-            ["oamb-mab65-sealed-interaction-controls-required-v1"]
-        ),
-        observed_interaction_fingerprint=canonical_sha256(
-            ["oamb-mab65-sealed-interaction-controls-unavailable-v1"]
-        ),
-        comparison_controls_closed=False,
-    )
-    if not reduction.available:
-        return build_mab65_report_reduction(reduction)
-
-    plan_evidence_bindings: list[MabPlanEvidenceBinding] = []
-    for plan in bundle.plans:
-        plan_record = plan_records_by_id[plan.manifest.ingestion_plan_id]
-        expected_case_occurrence_ids = tuple(
-            case_records_by_id[case_id].case_occurrence_id
-            for case_id in plan.manifest.ordered_case_manifest_entry_ids
-        )
-        if (
-            plan_record.ordered_member_context_manifest_entry_ids
-            != plan.manifest.ordered_member_context_manifest_entry_ids
-            or plan_record.ordered_case_occurrence_ids != expected_case_occurrence_ids
-        ):
-            raise NativeReportReductionError(
-                "MAB-65 plan evidence does not close its sealed membership"
-            )
-        plan_cases = tuple(
-            case_records_by_id[case_id] for case_id in plan.manifest.ordered_case_manifest_entry_ids
-        )
-        metric_ids = tuple(dict.fromkeys(case.metric_id for case in plan_cases))
-        if len(metric_ids) != 1 or metric_ids[0] is None:
-            raise NativeReportReductionError("MAB-65 plan evidence does not name one exact metric")
-        plan_evidence_bindings.append(
-            MabPlanEvidenceBinding(
-                plan_manifest_entry_id=plan.manifest.plan_manifest_entry_id,
-                ingestion_plan_id=plan.manifest.ingestion_plan_id,
-                ingestion_occurrence_id=plan_record.ingestion_occurrence_id,
-                ordered_logical_context_ids=(plan_record.ordered_member_context_manifest_entry_ids),
-                member_labels=plan.member_labels,
-                ordered_case_occurrence_ids=plan_record.ordered_case_occurrence_ids,
-                metric_id=metric_ids[0],
-                resolution_evidence_references=(
-                    tuple(cast(str, case.evaluation_raw_ref) for case in plan_cases)
-                    if plan.component == "recsys"
-                    else ()
-                ),
-            )
-        )
-    return build_mab65_report_reduction(
-        reduction,
-        plan_evidence_bindings=tuple(plan_evidence_bindings),
-    )
-
-
-def _unique_records_by(
-    values: tuple[RecordT, ...],
-    *,
-    key: Callable[[RecordT], str],
-    label: str,
-) -> dict[str, RecordT]:
-    keyed = {key(item): item for item in values}
-    if len(keyed) != len(values):
-        raise NativeReportReductionError(f"duplicate {label} identity")
-    return keyed
 
 
 def _load_report_records(

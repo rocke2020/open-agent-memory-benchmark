@@ -10,7 +10,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DOWNLOAD_SCRIPTS = REPOSITORY_ROOT / "scripts" / "download"
 LONGMEMEVAL_REVISION = "98d7416c24c778c2fee6e6f3006e7a073259d48f"
 LONGMEMEVAL_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
-MEMORY_AGENT_BENCH_REVISION = "7ea066982b140a19337e17e60d45d4076e042faf"
 
 
 def _write_fake_huggingface_hub(fake_python_root: Path) -> None:
@@ -192,9 +191,6 @@ def _capture_wrapper_environment(tmp_path: Path, wrapper_name: str) -> dict[str,
     download_directory = repository / "scripts" / "download"
     download_directory.mkdir(parents=True)
     shutil.copy2(DOWNLOAD_SCRIPTS / wrapper_name, download_directory / wrapper_name)
-    source_manifest = DOWNLOAD_SCRIPTS / "memoryagentbench.sha256"
-    if source_manifest.exists():
-        shutil.copy2(source_manifest, download_directory / source_manifest.name)
 
     capture_file = tmp_path / "environment.txt"
     (download_directory / "hf_dataset.sh").write_text(

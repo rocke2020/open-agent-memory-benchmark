@@ -211,7 +211,7 @@ def reconstruct_openviking_scope(
     )
     plan_key = hashlib.sha256(b"plan\0" + plan.ingestion_plan_id.encode("utf-8")).hexdigest()
     peer_root = f"viking://user/{runtime_identity.user_id}/peers/{actor_peer_id}"
-    root_uri = f"{peer_root}/resources/oamb/mab65-v1/{plan_key}"
+    root_uri = f"{peer_root}/resources/oamb/plans/{plan_key}"
     if plan.scope_id != root_uri:
         raise ValueError("OpenViking scope does not match the sealed plan identity")
     if len(plan.scope_raw_refs) != 3:

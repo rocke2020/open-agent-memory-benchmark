@@ -161,15 +161,6 @@ def _render_offline_report(
 <h2 id="quality-heading">Quality and review</h2>
 <p class="muted">{quality_summary}</p>
 <ul id="oamb-quality-summaries">{quality_items}</ul>
-<div id="oamb-mab65" hidden>
-<h3>MAB-65 exact reduction</h3>
-<p id="oamb-mab65-boundary" class="muted"></p>
-<h4>Primary components</h4>
-<ol id="oamb-mab65-components"></ol>
-<h4>Capabilities</h4>
-<ol id="oamb-mab65-capabilities"></ol>
-<p id="oamb-mab65-index"></p>
-</div>
 </section>
 <section id="usage-cost" aria-labelledby="usage-cost-heading">
 <h2 id="usage-cost-heading">Usage and cost</h2>

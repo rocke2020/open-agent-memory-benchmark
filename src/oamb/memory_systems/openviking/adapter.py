@@ -1012,7 +1012,7 @@ class OpenVikingRestAdapter:
         )
         plan_key = hashlib.sha256(b"plan\0" + request.ingestion_plan_id.encode("utf-8")).hexdigest()
         peer_root = f"viking://user/{self._benchmark_user}/peers/{actor_peer_id}"
-        root_uri = f"{peer_root}/resources/oamb/mab65-v1/{plan_key}"
+        root_uri = f"{peer_root}/resources/oamb/plans/{plan_key}"
         return _ScopeBinding(
             ingestion_occurrence_id=request.ingestion_occurrence_id,
             ingestion_plan_id=request.ingestion_plan_id,

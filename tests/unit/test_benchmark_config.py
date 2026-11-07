@@ -382,15 +382,15 @@ def test_loader_rejects_duplicate_yaml_keys(
     (
         (
             "  workload_id: lme60-balanced-v1",
-            "  workload_id: memoryagentbench",
+            "  workload_id: unsupported-workload",
         ),
-        ("  dataset_id: longmemeval-s-cleaned", "  dataset_id: memoryagentbench-mab5"),
+        ("  dataset_id: longmemeval-s-cleaned", "  dataset_id: unsupported-dataset"),
         ("    provider_id: hindsight", "    provider_id: unknown"),
         ("    adapter_profile_id: hindsight-rest-v1", "    adapter_profile_id: unknown-v1"),
         ("    producer_role: hindsight_extraction", "    producer_role: mem0_extraction"),
     ),
 )
-def test_loader_rejects_mab_unknown_profiles_and_wrong_role_routes(
+def test_loader_rejects_unknown_workloads_profiles_and_wrong_role_routes(
     tmp_path: Path,
     original: str,
     replacement: str,

@@ -26,9 +26,7 @@ TARGET_HASH = "a" * 64
 EXPECTED_PROFILE_IDS = (
     "oamb-t8-workload-lme6-v1",
     "oamb-t8-workload-lme60-v1",
-    "oamb-t8-workload-mab5-v1",
     "oamb-t8-workload-lme30-v1",
-    "oamb-t8-workload-mab65-v1",
     "oamb-t8-adapter-hindsight-rest-v1",
     "oamb-t8-adapter-mem0-rest-v1",
     "oamb-t8-adapter-mem0-sdk-v1",
@@ -50,11 +48,6 @@ LME_COMMON_RULE_IDS = (
     "workload.lme.prompt-answer-parser.v1",
     "workload.lme.judge-metric.v1",
 )
-MAB_COMMON_RULE_IDS = (
-    "workload.mab.source-manifest.v1",
-    "workload.mab.prompt-answer-parser.v1",
-    "workload.mab.metric-strata.v1",
-)
 EXPORT_RULE_IDS = (
     "report.export.payload-closure.v1",
     "report.export.canonical-bindings.v1",
@@ -73,22 +66,10 @@ EXPECTED_RULE_IDS_BY_PROFILE = {
         "workload.lme60.selector-membership.v1",
         "workload.lme60.denominator.v1",
     ),
-    "oamb-t8-workload-mab5-v1": (
-        *MAB_COMMON_RULE_IDS,
-        "workload.mab5.selector-grouping.v1",
-        "workload.mab5.smoke-isolation.v1",
-        "workload.mab5.no-aggregate.v1",
-    ),
     "oamb-t8-workload-lme30-v1": (
         *LME_COMMON_RULE_IDS,
         "workload.lme30.selector-coverage.v1",
         "workload.lme30.denominator.v1",
-    ),
-    "oamb-t8-workload-mab65-v1": (
-        *MAB_COMMON_RULE_IDS,
-        "workload.mab65.selector-grouping.v1",
-        "workload.mab65.complete-reducer.v1",
-        "workload.mab65.capability-index.v1",
     ),
     "oamb-t8-adapter-hindsight-rest-v1": (
         "adapter.hindsight.runtime-profile.v1",

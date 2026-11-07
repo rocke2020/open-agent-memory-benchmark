@@ -8,9 +8,9 @@ Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for O
 
 Native OAM evaluates full LME-500 and BEAM-10M using the published procedure and models. The goal is comparable scores while allowing model variability and disclosed OAM changes. Preserve dataset identity, prompts, model roles, reasoning efforts, recall modes, scoring and retry rules; record the evaluated OAM revision and configuration.
 
-The separate REST comparison evaluates Hindsight, Mem0 and OpenViking on balanced LME-60: ten questions from each of six types, producing 180 provider-specific results. Its settings and artifacts are separate from native OAM. Mem0's optional SDK profile is non-default and cannot substitute for REST evidence. MemoryAgentBench is deferred.
+The separate REST comparison evaluates Hindsight, Mem0 and OpenViking on balanced LME-60: ten questions from each of six types, producing 180 provider-specific results. Its settings and artifacts are separate from native OAM. Mem0's optional SDK profile is non-default and cannot substitute for REST evidence.
 
-Published results and their provenance belong in [the LME report](docs/evaluations/oam-v0.0.1-lme500.md) and [the BEAM report](docs/evaluations/oam-v0.0.1-beam10m.md). Preserve those historical campaigns; new evaluations produce separate outputs. Do not rerun a completed campaign merely to update documentation.
+Published results and their provenance belong in [the LME report](eval_results/lme500/README.md) and [the BEAM report](eval_results/beam10m/README.md). Preserve those historical campaigns; new evaluations produce separate outputs. Do not rerun a completed campaign merely to update documentation.
 
 ## Public workflows
 

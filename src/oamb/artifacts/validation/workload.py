@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from fractions import Fraction
 from typing import Any
 
 from oamb.artifacts.validation.registry import ValidationRule
 from oamb.contracts.evidence import ValidationIssue, ValidationSeverity
 from oamb.contracts.ids import (
-    canonical_json_bytes,
     canonical_sha256,
     context_content_id,
     context_manifest_entry_id,
@@ -56,62 +53,6 @@ from oamb.workloads.longmemeval import (
     LongMemEvalBundle,
     render_lme_session_document,
 )
-from oamb.workloads.mab65_reduction import Mab65Reduction, reduce_mab65
-from oamb.workloads.memoryagentbench import (
-    MAB5_CASE_MANIFEST_HASH,
-    MAB5_MANIFEST_ID,
-    MAB5_SELECTED_CASE_DIGEST,
-    MAB5_SELECTED_PLAN_DIGEST,
-    MAB65_CASE_MANIFEST_HASH,
-    MAB65_SELECTED_CASE_DIGEST,
-    MAB65_SELECTED_PLAN_DIGEST,
-    MAB65_WORKLOAD_ID,
-    MAB_DATASET_ID,
-    MAB_DATASET_MANIFEST_HASH,
-    MAB_DATASET_REVISION,
-    MAB_DATASET_SPLIT,
-    MAB_ENTITY_SOURCE_FILE,
-    MAB_PAYLOAD_POLICY,
-    MAB_PINNED_SOURCE_FILES,
-    MAB_PROMPT_PACKS,
-    MAB_SOURCE_LICENSE_ID,
-    MabManifestBundle,
-)
-from oamb.workloads.redial import MovieCatalog
-
-_MAB_METRIC_BY_COMPONENT = {
-    "ar": "mab-substring-em-v1",
-    "icl": "mab-exact-v1",
-    "recsys": "mab-redial-recall-at-5-v1",
-    "lru": "mab-exact-v1",
-    "cr_sf": "mab-substring-em-v1",
-}
-_MAB5_LABELS = (
-    "eventqa_65536@q6",
-    "recsys_redial_full@q33",
-    "icl_banking77_5900shot_balance@q56",
-    "detective_qa@q8",
-    "factconsolidation_mh_262k@q21",
-)
-_MAB65_COMPONENT_COUNTS = {
-    "ar": 15,
-    "icl": 10,
-    "recsys": 10,
-    "lru": 15,
-    "cr_sf": 15,
-}
-_MAB65_VALIDATION_SCORE_BY_COMPONENT = {
-    "ar": Fraction(1),
-    "icl": Fraction(0),
-    "recsys": Fraction(1, 2),
-    "lru": Fraction(1, 4),
-    "cr_sf": Fraction(3, 4),
-}
-_MAB65_VALIDATION_INDEX = Fraction(225, 4)
-_MAB_ENTITY_CATALOG_CONTENT_DIGEST = (
-    "eb4b6336039b0d812e97ad4ed169bcbb2f169856378649b17fae8e878d67dc81"
-)
-_MAB_UNICODE_FINGERPRINT = "1a846dffe314101b43cb68132979e8a1f052b7d2115532981d9866db1eeb352a"
 
 
 def _lme_source_manifest_rule(target: Any) -> tuple[ValidationIssue, ...]:
@@ -300,47 +241,6 @@ def _lme60_denominator_rule(target: Any) -> tuple[ValidationIssue, ...]:
     )
 
 
-def _mab_source_manifest_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab.source-manifest.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    dataset = target.dataset_manifest
-    source_files = tuple(
-        DatasetFile(
-            relative_path=relative_path,
-            sha256=sha256,
-            byte_count=byte_count,
-            license_id=MAB_SOURCE_LICENSE_ID,
-        )
-        for relative_path, sha256, _split, byte_count in (
-            *MAB_PINNED_SOURCE_FILES,
-            (
-                MAB_ENTITY_SOURCE_FILE[0],
-                MAB_ENTITY_SOURCE_FILE[1],
-                "catalog",
-                MAB_ENTITY_SOURCE_FILE[2],
-            ),
-        )
-    )
-    expected_dataset = DatasetManifest(
-        dataset_id=MAB_DATASET_ID,
-        revision=MAB_DATASET_REVISION,
-        split=MAB_DATASET_SPLIT,
-        manifest_hash=MAB_DATASET_MANIFEST_HASH,
-        source_files=source_files,
-        payload_policy=MAB_PAYLOAD_POLICY,
-    )
-    exact = bool(
-        _canonical_dataset_manifest(dataset) == expected_dataset
-        and _canonical_case_manifest(target.case_manifest) is not None
-        and target.case_manifest.workload_id == MAB65_WORKLOAD_ID
-        and _mab_catalog_closes(target)
-        and _mab_case_provenance_closes(target)
-        and _mab_runtime_sources_close(target)
-    )
-    return () if exact else (_issue(rule_id, dataset.manifest_hash, "mab-source-drift"),)
-
-
 def _canonical_dataset_manifest(dataset: object) -> DatasetManifest | None:
     try:
         if not isinstance(dataset, DatasetManifest):
@@ -359,218 +259,6 @@ def _canonical_case_manifest(case_manifest: object) -> CaseManifest | None:
         return None
 
 
-def _mab_prompt_answer_parser_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab.prompt-answer-parser.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    bindings = {
-        item.pack.manifest.prompt_pack_id: (
-            item.pack.manifest.output_contract_id,
-            item.max_output_tokens,
-        )
-        for item in MAB_PROMPT_PACKS
-    }
-    exact = bool(
-        target.cases
-        and all(
-            _case_plan_closes(case.entry, case.case_plan)
-            and _mab_reference_payload_closes(case.entry, case.case_plan)
-            and bindings.get(case.case_plan.prompt_binding_id)
-            == (case.case_plan.output_contract_id, case.case_plan.answer_max_output_tokens)
-            for case in target.cases
-        )
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab-prompt-parser-drift"),)
-    )
-
-
-def _mab_metric_strata_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab.metric-strata.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    exact = bool(
-        target.cases
-        and all(
-            case.case_plan.metric_id == _MAB_METRIC_BY_COMPONENT.get(case.component)
-            and case.case_plan.judge_binding_id is None
-            for case in target.cases
-        )
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab-metric-strata-drift"),)
-    )
-
-
-def _mab5_selector_grouping_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab5.selector-grouping.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    exact = bool(
-        target.case_manifest.manifest_id == MAB5_MANIFEST_ID
-        and target.case_manifest.manifest_hash == MAB5_CASE_MANIFEST_HASH
-        and target.selected_case_digest == MAB5_SELECTED_CASE_DIGEST
-        and target.selected_plan_digest == MAB5_SELECTED_PLAN_DIGEST
-        and target.selected_case_digest
-        == canonical_sha256(
-            [
-                "oamb-mab5-selected-case-ids-v1",
-                tuple(case.entry.case_manifest_entry_id for case in target.cases),
-            ]
-        )
-        and target.selected_plan_digest
-        == canonical_sha256(
-            [
-                "oamb-mab5-selected-plan-manifest-ids-v1",
-                tuple(plan.manifest.plan_manifest_entry_id for plan in target.plans),
-            ]
-        )
-        and tuple(case.logical_case_label for case in target.cases) == _MAB5_LABELS
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab5-selector-drift"),)
-    )
-
-
-def _mab5_smoke_isolation_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab5.smoke-isolation.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    exact = bool(
-        len(target.plans) == len(target.cases) == 5
-        and all(len(plan.manifest.ordered_case_manifest_entry_ids) == 1 for plan in target.plans)
-        and len(target.plans[-1].manifest.ordered_member_context_manifest_entry_ids) == 2
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab5-isolation-drift"),)
-    )
-
-
-def _mab5_no_aggregate_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab5.no-aggregate.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    exact = bool(
-        target.case_manifest.manifest_id == MAB5_MANIFEST_ID
-        and target.case_manifest.manifest_hash != MAB65_CASE_MANIFEST_HASH
-        and len(target.cases) == 5
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab5-aggregate-boundary-drift"),)
-    )
-
-
-def _mab65_selector_grouping_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab65.selector-grouping.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    actual_counts = {
-        component: sum(case.component == component for case in target.cases)
-        for component in _MAB65_COMPONENT_COUNTS
-    }
-    exact = bool(
-        target.case_manifest.manifest_id == MAB65_WORKLOAD_ID
-        and target.case_manifest.manifest_hash == MAB65_CASE_MANIFEST_HASH
-        and target.selected_case_digest == MAB65_SELECTED_CASE_DIGEST
-        and target.selected_plan_digest == MAB65_SELECTED_PLAN_DIGEST
-        and target.selected_case_digest
-        == canonical_sha256(
-            [
-                "oamb-mab65-selected-case-ids-v1",
-                tuple(case.entry.case_manifest_entry_id for case in target.cases),
-            ]
-        )
-        and target.selected_plan_digest
-        == canonical_sha256(
-            [
-                "oamb-mab65-selected-plan-manifest-ids-v1",
-                tuple(plan.manifest.plan_manifest_entry_id for plan in target.plans),
-            ]
-        )
-        and len(target.case_manifest.logical_contexts) == 29
-        and len(target.plans) == 25
-        and len(target.cases) == 65
-        and actual_counts == _MAB65_COMPONENT_COUNTS
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab65-selector-drift"),)
-    )
-
-
-def _mab65_reduction(target: MabManifestBundle) -> Mab65Reduction:
-    return reduce_mab65(
-        target,
-        case_metrics={
-            case.entry.case_manifest_entry_id: _MAB65_VALIDATION_SCORE_BY_COMPONENT[case.component]
-            for case in target.cases
-        },
-        ready_plan_manifest_ids=frozenset(
-            plan.manifest.plan_manifest_entry_id for plan in target.plans
-        ),
-        capsule_valid=True,
-        query_state_unchanged=True,
-        expected_catalog_sha256=target.entity_catalog_sha256,
-        expected_unicode_fingerprint=target.unicode_fingerprint,
-        expected_interaction_fingerprint="f" * 64,
-        observed_interaction_fingerprint="f" * 64,
-        comparison_controls_closed=True,
-    )
-
-
-def _mab65_complete_reducer_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab65.complete-reducer.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    reduced = _mab65_reduction(target)
-    exact = bool(
-        reduced.available
-        and len(reduced.plans) == 25
-        and len(reduced.components) == 5
-        and tuple(item.score for item in reduced.components)
-        == tuple(
-            _MAB65_VALIDATION_SCORE_BY_COMPONENT[component]
-            for component in ("ar", "icl", "recsys", "lru", "cr_sf")
-        )
-        and reduced.index_value == _MAB65_VALIDATION_INDEX
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab65-reducer-unavailable"),)
-    )
-
-
-def _mab65_capability_index_rule(target: Any) -> tuple[ValidationIssue, ...]:
-    rule_id = "workload.mab65.capability-index.v1"
-    if not isinstance(target, MabManifestBundle):
-        return _wrong_target(rule_id)
-    reduced = _mab65_reduction(target)
-    exact = bool(
-        reduced.available
-        and tuple(item.capability for item in reduced.capabilities) == ("ar", "ttl", "lru", "cr_sf")
-        and all(item.weight == Fraction(1, 4) for item in reduced.capabilities)
-        and reduced.ttl_score == Fraction(1, 4)
-        and reduced.index_value == _MAB65_VALIDATION_INDEX
-    )
-    return (
-        ()
-        if exact
-        else (_issue(rule_id, target.case_manifest.manifest_hash, "mab65-capability-index-drift"),)
-    )
-
-
 def _case_plan_closes(entry: CaseManifestEntry, plan: CasePlan) -> bool:
     reference_hash = hashlib.sha256(plan.reference_payload).hexdigest()
     return bool(
@@ -579,21 +267,6 @@ def _case_plan_closes(entry: CaseManifestEntry, plan: CasePlan) -> bool:
         and plan.source_question_number_1_indexed == entry.source_question_number_1_indexed
         and hashlib.sha256(plan.question_bytes).hexdigest() == entry.question_bytes_sha256
         and reference_hash == plan.reference_payload_sha256
-    )
-
-
-def _mab_reference_payload_closes(entry: CaseManifestEntry, plan: CasePlan) -> bool:
-    try:
-        values = json.loads(plan.reference_payload)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    return bool(
-        isinstance(values, list)
-        and values
-        and all(isinstance(value, str) and value for value in values)
-        and canonical_json_bytes(values) == plan.reference_payload
-        and tuple(hashlib.sha256(value.encode("utf-8")).hexdigest() for value in values)
-        == entry.answer_value_sha256
     )
 
 
@@ -722,115 +395,6 @@ def _lme_runtime_sources_close(target: LongMemEvalBundle) -> bool:
         return False
 
 
-def _mab_case_provenance_closes(target: MabManifestBundle) -> bool:
-    try:
-        source_sha256_by_path = {
-            source.relative_path: source.sha256 for source in target.dataset_manifest.source_files
-        }
-        contexts_by_id = {
-            context.context_manifest_entry_id: context
-            for context in target.case_manifest.logical_contexts
-        }
-        if len(target.cases) != len(target.case_manifest.cases):
-            return False
-        for manifest_case, case in zip(
-            target.case_manifest.cases,
-            target.cases,
-            strict=True,
-        ):
-            context = contexts_by_id[manifest_case.context_manifest_entry_id]
-            source_sha256 = source_sha256_by_path[case.source_relative_path]
-            expected_context_id = context_manifest_entry_id(
-                target.dataset_manifest.manifest_hash,
-                source_sha256,
-                case.source_row_number_1_indexed,
-                context.context_content_id,
-            )
-            if not (
-                case.entry == manifest_case
-                and context.source_file_sha256 == source_sha256
-                and context.source_row_number_1_indexed == case.source_row_number_1_indexed
-                and context.context_manifest_entry_id == expected_context_id
-            ):
-                return False
-        return True
-    except Exception:
-        return False
-
-
-def _mab_catalog_closes(target: MabManifestBundle) -> bool:
-    try:
-        entity_map = {movie.source_uri: movie.entity_id for movie in target.movie_catalog.movies}
-        if len(entity_map) != len(target.movie_catalog.movies):
-            return False
-        rebuilt_catalog = MovieCatalog.from_entity_map(entity_map)
-        content_digest = canonical_sha256(
-            [
-                "oamb-mab-entity-catalog-content-v1",
-                tuple(
-                    sorted(
-                        entity_map.items(),
-                        key=lambda item: (item[0].encode("utf-8"), item[1]),
-                    )
-                ),
-            ]
-        )
-        unicode_fingerprint = canonical_sha256(
-            ["oamb-mab-redial-unicode-v1", rebuilt_catalog.unicode_version]
-        )
-        return bool(
-            target.entity_catalog_sha256 == MAB_ENTITY_SOURCE_FILE[1]
-            and content_digest == _MAB_ENTITY_CATALOG_CONTENT_DIGEST
-            and target.movie_catalog == rebuilt_catalog
-            and unicode_fingerprint == _MAB_UNICODE_FINGERPRINT
-            and target.unicode_fingerprint == unicode_fingerprint
-        )
-    except Exception:
-        return False
-
-
-def _mab_runtime_sources_close(target: MabManifestBundle) -> bool:
-    try:
-        contexts_by_id = {
-            context.context_manifest_entry_id: context
-            for context in target.case_manifest.logical_contexts
-        }
-        if len(target.plans) != len(target.case_manifest.ingestion_plans):
-            return False
-        for manifest, plan in zip(
-            target.case_manifest.ingestion_plans,
-            target.plans,
-            strict=True,
-        ):
-            runtime = plan.runtime_plan
-            payload_hashes = tuple(
-                hashlib.sha256(unit.payload_bytes).hexdigest()
-                for unit in runtime.ordered_source_units
-            )
-            expected_source_ids = tuple(
-                canonical_sha256([manifest.ingestion_plan_id, ordinal, payload_hash])
-                for ordinal, payload_hash in enumerate(payload_hashes, start=1)
-            )
-            member_context_hashes = {
-                contexts_by_id[context_id].context_bytes_sha256
-                for context_id in manifest.ordered_member_context_manifest_entry_ids
-            }
-            if not (
-                plan.manifest == manifest
-                and len(member_context_hashes) == 1
-                and _runtime_plan_closes(
-                    manifest,
-                    runtime,
-                    expected_source_unit_ids=expected_source_ids,
-                    expected_shared_context_sha256=next(iter(member_context_hashes)),
-                )
-            ):
-                return False
-        return True
-    except Exception:
-        return False
-
-
 def _wrong_target(rule_id: str) -> tuple[ValidationIssue, ...]:
     return (_issue(rule_id, "target", "validation-target-type-mismatch"),)
 
@@ -856,15 +420,6 @@ WORKLOAD_RULES: tuple[ValidationRule, ...] = (
     ValidationRule("workload.lme30.denominator.v1", 1, _lme30_denominator_rule),
     ValidationRule("workload.lme60.selector-membership.v1", 1, _lme60_selector_membership_rule),
     ValidationRule("workload.lme60.denominator.v1", 1, _lme60_denominator_rule),
-    ValidationRule("workload.mab.source-manifest.v1", 1, _mab_source_manifest_rule),
-    ValidationRule("workload.mab.prompt-answer-parser.v1", 1, _mab_prompt_answer_parser_rule),
-    ValidationRule("workload.mab.metric-strata.v1", 1, _mab_metric_strata_rule),
-    ValidationRule("workload.mab5.selector-grouping.v1", 1, _mab5_selector_grouping_rule),
-    ValidationRule("workload.mab5.smoke-isolation.v1", 1, _mab5_smoke_isolation_rule),
-    ValidationRule("workload.mab5.no-aggregate.v1", 1, _mab5_no_aggregate_rule),
-    ValidationRule("workload.mab65.selector-grouping.v1", 1, _mab65_selector_grouping_rule),
-    ValidationRule("workload.mab65.complete-reducer.v1", 1, _mab65_complete_reducer_rule),
-    ValidationRule("workload.mab65.capability-index.v1", 1, _mab65_capability_index_rule),
 )
 
 

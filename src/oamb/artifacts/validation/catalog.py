@@ -110,7 +110,6 @@ def _production_target_hash(target: Any) -> str:
     from oamb.contracts.external import ExternalHistoricalEvidence
     from oamb.memory_systems.mem0.profiles import mem0_zero_dispatch_audit_binding
     from oamb.workloads.longmemeval import LongMemEvalBundle
-    from oamb.workloads.memoryagentbench import MabManifestBundle
 
     if isinstance(target, Path):
         manifest_path = target / "capsule-manifest.json"
@@ -132,21 +131,6 @@ def _production_target_hash(target: Any) -> str:
                 _canonical_target_value(target.selected_rows),
                 _canonical_target_value(target.ingestion_plans),
                 _canonical_target_value(target.case_plans),
-            ]
-        )
-    if isinstance(target, MabManifestBundle):
-        return canonical_sha256(
-            [
-                "oamb-memoryagentbench-validation-target-v3",
-                target.dataset_manifest,
-                target.case_manifest,
-                _canonical_target_value(target.movie_catalog),
-                target.entity_catalog_sha256,
-                target.unicode_fingerprint,
-                target.selected_case_digest,
-                target.selected_plan_digest,
-                _canonical_target_value(target.cases),
-                _canonical_target_value(target.plans),
             ]
         )
     if isinstance(target, Mem0AdapterValidationInput):

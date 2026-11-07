@@ -35,7 +35,6 @@ from oamb.workloads.longmemeval import (
     LME60_MANIFEST_ID,
     LongMemEvalBundle,
 )
-from oamb.workloads.memoryagentbench import MAB5_MANIFEST_ID, MAB65_WORKLOAD_ID, MabManifestBundle
 
 NATIVE_RUN_EVIDENCE_PROFILE_ID = "oamb-t8-native-run-evidence-v1"
 NATIVE_RUN_EVIDENCE_RULE_INVENTORY: tuple[tuple[str, int], ...] = (
@@ -50,8 +49,6 @@ _WORKLOAD_MANIFEST_IDS = {
     "oamb-t8-workload-lme6-v1": LME6_MANIFEST_ID,
     "oamb-t8-workload-lme60-v1": LME60_MANIFEST_ID,
     "oamb-t8-workload-lme30-v1": f"{LME30_WORKLOAD_ID}-manifest-v1",
-    "oamb-t8-workload-mab5-v1": MAB5_MANIFEST_ID,
-    "oamb-t8-workload-mab65-v1": MAB65_WORKLOAD_ID,
 }
 _ADAPTER_PROFILE_IDS = {
     "oamb-t8-adapter-hindsight-rest-v1": "hindsight-rest-v1",
@@ -64,7 +61,7 @@ _ADAPTER_PROFILE_IDS = {
 class NativeRunEvidenceValidationInput:
     capsule_root: Path
     workload_profile_id: str
-    workload_target: LongMemEvalBundle | MabManifestBundle
+    workload_target: LongMemEvalBundle
     adapter_profile_id: str
     accounting_target: Any
 
@@ -73,7 +70,7 @@ def native_run_evidence_validation_input(
     *,
     capsule_root: Path,
     workload_profile_id: str,
-    workload_target: LongMemEvalBundle | MabManifestBundle,
+    workload_target: LongMemEvalBundle,
     adapter_profile_id: str,
 ) -> NativeRunEvidenceValidationInput:
     if workload_profile_id not in _WORKLOAD_MANIFEST_IDS:

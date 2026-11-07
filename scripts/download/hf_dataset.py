@@ -92,7 +92,7 @@ def install_verified_file(cached_path, destination_path, expected_sha256):
 
 
 def main():
-    repository = os.environ.get("DATASET_REPOSITORY", "ai-hyz/MemoryAgentBench")
+    repository = os.environ.get("DATASET_REPOSITORY", "xiaowu0162/longmemeval-cleaned")
     requested_revision = os.environ.get("DATASET_REVISION", "main")
     requested_file = os.environ.get("DATASET_FILE", "")
     expected_sha256 = os.environ.get("EXPECTED_SHA256", "").lower()

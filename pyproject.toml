@@ -30,7 +30,7 @@ dependencies = [
   "httpx>=0.28,<1",
   # T6: protocol-frozen o200k_base encode_ordinary context accounting.
   "tiktoken==0.14.0",
-  # T6: direct, schema-preserving reads of pinned MemoryAgentBench Parquet files.
+  # Schema-preserving reads of the pinned BEAM-10M Parquet download shards.
   "pyarrow>=19,<24",
 ]
 

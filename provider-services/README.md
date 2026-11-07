@@ -13,7 +13,7 @@ mixed with REST evidence.
 This bundle prepares exact-pinned services; it does not establish benchmark
 profile support. v0.1 targets the same balanced LME-60 LongMemEval manifest for
 all three providers. OpenViking requires a separately verified
-session/message/commit adapter, while MemoryAgentBench remains deferred.
+session/message/commit adapter.
 
 ## Fixed releases
 
@@ -39,7 +39,7 @@ The Mem0 image includes a small [extraction-response normalization and retry pat
 Each `OAMB_PROVIDER_PROJECT` owns new Compose volumes. The project never mounts an existing `~/.openviking`, Mem0 history directory, provider checkout, or database. Only four HTTP API ports bind to `127.0.0.1`; PostgreSQL remains private. `stop` force-stops this attested project's containers, preserves volumes and data, then clears only ephemeral lifecycle markers after provider execution has ended.
 
 The commands in this directory do not run benchmark memory ingestion,
-retrieval, LongMemEval, or deferred MAB research workloads. `verify --services`
+retrieval or LongMemEval workloads. `verify --services`
 may provision Mem0 configuration and an OpenViking
 account/key, then proves restart persistence, non-ROOT auth, and OpenViking's
 storage layout with a network-disabled read-only one-shot probe. Memory

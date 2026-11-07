@@ -65,7 +65,7 @@ def test_case_manifest_closes_exact_parentage_and_identity_formulas() -> None:
     question_hash = "c" * 64
     answer_hashes = ("d" * 64,)
     case_id = ids.case_manifest_entry_id(context_a, 1, question_hash, "question-1")
-    plan_manifest_id = ids.plan_manifest_entry_id("mab65-v1", (context_b,))
+    plan_manifest_id = ids.plan_manifest_entry_id("grouped-workload-v1", (context_b,))
     payload_hash = ids.ingestion_payload_hash(("e" * 64,))
     plan_id = ids.ingestion_plan_id(plan_manifest_id, payload_hash)
     logical_contexts = (
@@ -96,7 +96,7 @@ def test_case_manifest_closes_exact_parentage_and_identity_formulas() -> None:
         plan_manifest_entry_id=plan_manifest_id,
         ingestion_payload_hash=payload_hash,
         ingestion_plan_id=plan_id,
-        workload_id="mab65-v1",
+        workload_id="grouped-workload-v1",
         ordered_member_context_manifest_entry_ids=(context_b,),
         ordered_source_unit_bytes_sha256=("e" * 64,),
         ordered_case_manifest_entry_ids=(case_id,),
@@ -106,7 +106,7 @@ def test_case_manifest_closes_exact_parentage_and_identity_formulas() -> None:
         specifications.CaseManifest(
             manifest_id="manifest-1",
             manifest_hash="f" * 64,
-            workload_id="mab65-v1",
+            workload_id="grouped-workload-v1",
             logical_contexts=logical_contexts,
             ingestion_plans=(wrong_plan,),
             cases=(case,),
@@ -116,7 +116,7 @@ def test_case_manifest_closes_exact_parentage_and_identity_formulas() -> None:
         specifications.CaseManifest(
             manifest_id="manifest-1",
             manifest_hash="f" * 64,
-            workload_id="mab65-v1",
+            workload_id="grouped-workload-v1",
             logical_contexts=logical_contexts,
             ingestion_plans=(
                 wrong_plan.model_copy(update={"ordered_case_manifest_entry_ids": ()}),

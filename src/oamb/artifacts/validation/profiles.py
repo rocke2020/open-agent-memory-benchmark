@@ -64,28 +64,12 @@ T8_WORKLOAD_RULE_INVENTORIES: dict[str, tuple[tuple[str, int], ...]] = {
         ("workload.lme60.selector-membership.v1", 1),
         ("workload.lme60.denominator.v1", 1),
     ),
-    "mab5-live-smoke-v1": (
-        ("workload.mab.source-manifest.v1", 1),
-        ("workload.mab.prompt-answer-parser.v1", 1),
-        ("workload.mab.metric-strata.v1", 1),
-        ("workload.mab5.selector-grouping.v1", 1),
-        ("workload.mab5.smoke-isolation.v1", 1),
-        ("workload.mab5.no-aggregate.v1", 1),
-    ),
     "lme30-native-smoke-plus-v1": (
         ("workload.lme.source-manifest.v1", 1),
         ("workload.lme.prompt-answer-parser.v1", 1),
         ("workload.lme.judge-metric.v1", 1),
         ("workload.lme30.selector-coverage.v1", 1),
         ("workload.lme30.denominator.v1", 1),
-    ),
-    "mab65-v1": (
-        ("workload.mab.source-manifest.v1", 1),
-        ("workload.mab.prompt-answer-parser.v1", 1),
-        ("workload.mab.metric-strata.v1", 1),
-        ("workload.mab65.selector-grouping.v1", 1),
-        ("workload.mab65.complete-reducer.v1", 1),
-        ("workload.mab65.capability-index.v1", 1),
     ),
 }
 
@@ -277,12 +261,6 @@ def t8_profile_catalog() -> dict[str, ClosedProfileDefinition]:
             applicability=("component=workload", "workload=lme60-balanced-v1"),
         ),
         _closed_profile(
-            profile_id="oamb-t8-workload-mab5-v1",
-            stage=ValidationStage.EVIDENCE,
-            rule_inventory=T8_WORKLOAD_RULE_INVENTORIES["mab5-live-smoke-v1"],
-            applicability=("component=workload", "workload=mab5-live-smoke-v1"),
-        ),
-        _closed_profile(
             profile_id="oamb-t8-workload-lme30-v1",
             stage=ValidationStage.EVIDENCE,
             rule_inventory=T8_WORKLOAD_RULE_INVENTORIES["lme30-native-smoke-plus-v1"],
@@ -290,12 +268,6 @@ def t8_profile_catalog() -> dict[str, ClosedProfileDefinition]:
                 "component=workload",
                 "workload=lme30-native-smoke-plus-v1",
             ),
-        ),
-        _closed_profile(
-            profile_id="oamb-t8-workload-mab65-v1",
-            stage=ValidationStage.EVIDENCE,
-            rule_inventory=T8_WORKLOAD_RULE_INVENTORIES["mab65-v1"],
-            applicability=("component=workload", "workload=mab65-v1"),
         ),
         _closed_profile(
             profile_id="oamb-t8-adapter-hindsight-rest-v1",

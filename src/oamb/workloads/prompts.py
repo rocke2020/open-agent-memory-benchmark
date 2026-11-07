@@ -16,11 +16,6 @@ _PLACEHOLDER = re.compile(rb"\{\{([a-z][a-z0-9_]*)\}\}")
 ALL_PROMPT_PACK_IDS = (
     "oamb-lme-answer-v1",
     "oamb-lme-judge-v1",
-    "oamb-mab-eventqa-rag-v1",
-    "oamb-mab-icl-rag-v1",
-    "oamb-mab-redial-rag-v1",
-    "oamb-mab-detectiveqa-rag-v1",
-    "oamb-mab-factconsolidation-rag-v1",
 )
 
 

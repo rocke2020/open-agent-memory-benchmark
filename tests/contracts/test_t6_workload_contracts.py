@@ -81,21 +81,21 @@ def test_prompt_pack_identity_and_closed_variables_are_public_contracts() -> Non
 
 def test_output_and_metric_contracts_reject_implicit_or_unknown_semantics() -> None:
     output = OutputContract(
-        output_contract_id="mab-redial-ranked-movies-v1",
+        output_contract_id="example-ranked-movies-v1",
         representation="ranked_text_list",
-        parser_id="mab-redial-ranked-movies-v1",
+        parser_id="example-ranked-movies-v1",
         max_output_tokens=512,
         required_candidate_count=1,
         accepted_finish_dispositions=("normal_stop",),
         parse_failure_policy="terminal_error",
     )
     metric = MetricSpec(
-        metric_id="mab-redial-recall-at-5-v1",
+        metric_id="example-recall-at-5-v1",
         output_contract_id=output.output_contract_id,
-        normalizer_id="mab-redial-title-normalizer-v1",
-        scorer_id="mab-redial-recall-at-5-v1",
+        normalizer_id="example-title-normalizer-v1",
+        scorer_id="example-recall-at-5-v1",
         answer_set_policy="preserve_occurrences",
-        input_fields=("resolved_predictions", "gold_entity_ids"),
+        input_fields=("resolved_predictions", "gold_item_ids"),
         judge_prompt_pack_id=None,
         failure_semantics="unavailable",
         unjudged_semantics="not_applicable",
@@ -110,7 +110,7 @@ def test_output_and_metric_contracts_reject_implicit_or_unknown_semantics() -> N
                 metric.model_dump()
                 | {
                     "judge_prompt_pack_id": "unexpected-judge",
-                    "scorer_id": "mab-redial-recall-at-5-v1",
+                    "scorer_id": "example-recall-at-5-v1",
                 }
             )
         )

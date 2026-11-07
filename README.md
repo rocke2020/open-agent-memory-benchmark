@@ -6,9 +6,11 @@ Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for O
 
 The goal is for another engineer to evaluate OAM on LME-500 and BEAM-10M using the published procedure and the same models, obtaining scores close to the published results. Exact scores can vary with model outputs and OAM revisions. Record the evaluated OAM revision and configuration changes while preserving the dataset, prompts, reasoning efforts, recall modes, judging and retry rules.
 
-The saved OAM v0.0.1 development evaluations cover [LongMemEval's 500 questions](docs/evaluations/oam-v0.0.1-lme500.md) and [BEAM-10M's 10 conversations and 200 questions](docs/evaluations/oam-v0.0.1-beam10m.md). LME-500 achieved **94.0% (470/500)**; BEAM-10M's policy-final mean rubric score was **61.56%**, with **142/200** questions meeting the 0.5 threshold. These reports reuse completed campaigns and require no setup or new evaluation calls.
+The saved OAM v0.0.1 development evaluations cover [LongMemEval's 500 questions](eval_results/lme500/README.md) and [BEAM-10M's 10 conversations and 200 questions](eval_results/beam10m/README.md). LME-500 achieved **94.0% (470/500)**; BEAM-10M's policy-final mean rubric score was **61.56%**, with **142/200** questions meeting the 0.5 threshold. These reports reuse completed campaigns and require no setup or new evaluation calls.
 
-**We use only `deepseek-v4.1-flash` for extraction, answering and judging, prioritizing everyday agent tasks over peak leaderboard scores. Model choice matters:** Hindsight [reports **64.1%** on BEAM-10M](https://vectorize.io/benchmarks) using **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`) for answering; our [DeepSeek replay of its saved contexts scored **52.16%** after 43 eligible max-effort answer retries](docs/evaluations/oam-v0.0.1-beam10m.md), a gap of **about 12 percentage points** in mean rubric score.
+Browse the saved questions, answers, judgments and full injected contexts in the offline HTML reports: [LME-500](eval_results/lme500/report.html) · [BEAM-10M, including Hindsight saved-context replay](eval_results/beam10m/report.html). Download either file and open it directly in a current browser.
+
+**We use only `deepseek-v4.1-flash` for extraction, answering and judging, prioritizing everyday agent tasks over peak leaderboard scores. Model choice matters:** Hindsight [reports **64.1%** on BEAM-10M](https://vectorize.io/benchmarks) using **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`) for answering; our [DeepSeek replay of its saved contexts scored **52.16%** after 43 eligible max-effort answer retries](eval_results/beam10m/README.md), a gap of **about 12 percentage points** in mean rubric score.
 
 The [native OAM workflows](docs/native-oam.md) provide LME-500 and BEAM-10M execution through `./precheck.sh --oam` and `./run.sh --oam`. This repository includes pinned dataset download/export scripts, the recorded answer and judge prompts, same-model checks, and the reviewed single max-effort answer-retry procedure. Reports preserve first-pass and policy-final scores separately. Small diagnostics verify execution; full-dataset score parity remains a separate quality measurement.
 
@@ -36,7 +38,7 @@ BEAM covers abstention, contradiction resolution, event ordering, information ex
 
 LongMemEval is downloaded by `./precheck.sh` for the comparison workflow, or separately with `./scripts/download/longmemeval.sh`. Run `./scripts/download/beam10m.sh` to download the pinned official BEAM-10M Parquet shards and export `datasets/beam/10m.json` with the campaign's exact JSON serialization and SHA-256. Both helpers preserve existing mismatched files and reject them. Downloaded datasets remain outside Git; see [dataset provenance](DATASETS.md).
 
-Use the [native OAM guide](docs/native-oam.md) to prepare an isolated deployment and run either full dataset through `./precheck.sh --oam` followed by `./run.sh --oam`. Synthetic diagnostic configurations are provided for both datasets. New runs record the evaluated OAM revision and settings; the saved [LME-500](docs/evaluations/oam-v0.0.1-lme500.md) and [BEAM-10M](docs/evaluations/oam-v0.0.1-beam10m.md) reports retain their historical results.
+Use the [native OAM guide](docs/native-oam.md) to prepare an isolated deployment and run either full dataset through `./precheck.sh --oam` followed by `./run.sh --oam`. Synthetic diagnostic configurations are provided for both datasets. New runs record the evaluated OAM revision and settings; the saved [LME-500](eval_results/lme500/README.md) and [BEAM-10M](eval_results/beam10m/README.md) reports retain their historical results.
 
 ## Provider versions
 
@@ -98,7 +100,7 @@ For failed first-pass questions, complete the generated `retry-eligibility.json`
 
 ## Quick start: LME-60 comparison
 
-The commands below start a separate native provider comparison. They are unnecessary for reading the saved [LME-500](docs/evaluations/oam-v0.0.1-lme500.md) and [BEAM-10M](docs/evaluations/oam-v0.0.1-beam10m.md) evaluations.
+The commands below start a separate native provider comparison. They are unnecessary for reading the saved [LME-500](eval_results/lme500/README.md) and [BEAM-10M](eval_results/beam10m/README.md) evaluations.
 
 You need Git, Python 3.11+, `uv`, Docker with Compose, `curl`, `jq`, `shasum`, and credentials for an OpenAI-compatible model endpoint. Preparation and evaluation can make billable model calls. They create isolated provider state and preserve existing provider/database data.
 

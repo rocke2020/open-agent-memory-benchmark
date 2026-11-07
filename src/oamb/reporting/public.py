@@ -15,11 +15,6 @@ from oamb.contracts.reporting import (
     DisplayPreview,
     EvaluationReportModel,
     ExactRational,
-    Mab65ReportReduction,
-    MabCapabilityMetricSummary,
-    MabComponentMetricSummary,
-    MabPlanEvidenceBinding,
-    MabPlanMetricSummary,
     MeasurementSummaryLine,
     MetricSummary,
     ReducerBinding,
@@ -47,7 +42,6 @@ from oamb.contracts.specifications import (
     SourceEvidenceBinding,
     evaluation_model_closure_hash,
 )
-from oamb.workloads.mab65_reduction import Mab65Reduction
 
 
 def _exact(value: Fraction) -> ExactRational:
@@ -164,7 +158,6 @@ def build_run_report_model(
     claim_boundary: ValidationClaimBoundary,
     summary: CompletionSummaryV3,
     metric_summaries: tuple[MetricSummary, ...],
-    mab65_reduction: Mab65ReportReduction | None = None,
     measurement_lines: tuple[MeasurementSummaryLine, ...],
     logical_context_ids: tuple[str, ...],
     ingestion_occurrence_ids: tuple[str, ...],
@@ -197,7 +190,6 @@ def build_run_report_model(
         claim_boundary=claim_boundary,
         summary=summary,
         metric_summaries=metric_summaries,
-        mab65_reduction=mab65_reduction,
         measurement_lines=measurement_lines,
         logical_context_ids=logical_context_ids,
         ingestion_occurrence_ids=ingestion_occurrence_ids,
@@ -241,81 +233,6 @@ def build_diagnostic_run_report_model(
     }
     return DiagnosticRunReportModel.model_validate(
         {"report_id": diagnostic_run_report_model_id(**fields), **fields}
-    )
-
-
-def build_mab65_report_reduction(
-    reduction: Mab65Reduction,
-    *,
-    plan_evidence_bindings: tuple[MabPlanEvidenceBinding, ...] = (),
-) -> Mab65ReportReduction:
-    if not reduction.available:
-        if plan_evidence_bindings:
-            raise ValueError("unavailable MAB-65 reduction cannot bind partial plan evidence")
-        return Mab65ReportReduction(
-            reducer_id="mab65-capability-balanced-index-v1",
-            available=False,
-            unavailable_reason=reduction.unavailable_reason,
-            plans=(),
-            components=(),
-            ttl_score=None,
-            capabilities=(),
-            index_value=None,
-        )
-    if reduction.ttl_score is None or reduction.index_value is None:
-        raise ValueError("available MAB-65 reduction is missing exact values")
-    bindings_by_plan = {item.plan_manifest_entry_id: item for item in plan_evidence_bindings}
-    reduction_plan_ids = tuple(item.plan_manifest_entry_id for item in reduction.plans)
-    if (
-        len(bindings_by_plan) != len(plan_evidence_bindings)
-        or len(set(reduction_plan_ids)) != len(reduction_plan_ids)
-        or set(reduction_plan_ids) != set(bindings_by_plan)
-    ):
-        raise ValueError("available MAB-65 plan evidence inventory is incomplete")
-    component_order = {
-        component: index for index, component in enumerate(("ar", "icl", "recsys", "lru", "cr_sf"))
-    }
-    ordered_plans = tuple(sorted(reduction.plans, key=lambda item: component_order[item.component]))
-    return Mab65ReportReduction(
-        reducer_id="mab65-capability-balanced-index-v1",
-        available=True,
-        unavailable_reason=None,
-        plans=tuple(
-            MabPlanMetricSummary.model_validate(
-                {
-                    "plan_manifest_entry_id": item.plan_manifest_entry_id,
-                    "component": item.component,
-                    "case_count": item.case_count,
-                    "score": _exact(item.score),
-                    "evidence_binding": bindings_by_plan[item.plan_manifest_entry_id],
-                }
-            )
-            for item in ordered_plans
-        ),
-        components=tuple(
-            MabComponentMetricSummary.model_validate(
-                {
-                    "component": item.component,
-                    "plan_count": item.plan_count,
-                    "case_count": item.case_count,
-                    "score": _exact(item.score),
-                }
-            )
-            for item in reduction.components
-        ),
-        ttl_score=_exact(reduction.ttl_score),
-        capabilities=tuple(
-            MabCapabilityMetricSummary.model_validate(
-                {
-                    "capability": item.capability,
-                    "score": _exact(item.score),
-                    "weight": _exact(item.weight),
-                    "weighted_contribution": _exact(item.weighted_contribution),
-                }
-            )
-            for item in reduction.capabilities
-        ),
-        index_value=_exact(reduction.index_value),
     )
 
 
@@ -575,7 +492,6 @@ __all__ = [
     "build_diagnostic_run_report_model",
     "build_evaluation_model_closure",
     "build_evaluation_report_model",
-    "build_mab65_report_reduction",
     "build_metric_summary",
     "build_release_report_model",
     "build_report_artifact_manifest_v2",
