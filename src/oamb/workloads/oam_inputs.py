@@ -24,6 +24,7 @@ BEAM_CATEGORIES = (
     "summarization",
     "temporal_reasoning",
 )
+BEAM_DOCUMENT_MAX_CHARS = 100_000
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,7 @@ def _beam_histories(path: Path) -> list[History]:
                 sessions.append((plan.get("time_anchor"), [plan]))
             else:
                 for batches in plan.values():
-                    for batch in batches:
+                    for batch in batches or []:
                         turns = []
                         for group in batch["turns"]:
                             turns.extend(group if isinstance(group, list) else [group])
@@ -118,7 +119,34 @@ def _beam_histories(path: Path) -> list[History]:
                 )
             if not messages:
                 raise ValueError("empty BEAM source session")
-            sources.append(messages)
+            user_info = (row.get("user_profile") or {}).get("user_info", "")
+            context = f"Conversation {owner}" + (f" — {user_info}" if user_info else "")
+            context += f" (session {index + 1}/{len(sessions)})"
+            start = 0
+            while start < len(messages):
+                end = start + 1
+                while (
+                    end < len(messages)
+                    and len("\n\n".join(m["content"] for m in messages[start : end + 1]))
+                    <= BEAM_DOCUMENT_MAX_CHARS
+                ):
+                    end += 1
+                chunk = [
+                    {**message, "content": message["content"] + ("\n\n" if i < end - 1 else "")}
+                    for i, message in enumerate(messages[start:end], start)
+                ]
+                sources.append(
+                    [
+                        {
+                            "role": "user",
+                            "content": "[AMB document context]\n" + context,
+                            "event_time": chunk[0]["event_time"],
+                            "learning_eligible": True,
+                        },
+                        *chunk,
+                    ]
+                )
+                start = end
         probing = row["probing_questions"]
         if isinstance(probing, str):
             try:

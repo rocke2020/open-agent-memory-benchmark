@@ -35,6 +35,7 @@ def test_beam_nested_turns_dates_roles_and_shared_owner(tmp_path):
         "conversation_id": "c",
         "chat": [
             {
+                "plan-unused": None,
                 "plan-0": [
                     {
                         "time_anchor": "March-15-2024",
@@ -45,7 +46,7 @@ def test_beam_nested_turns_dates_roles_and_shared_owner(tmp_path):
                             ]
                         ],
                     }
-                ]
+                ],
             }
         ],
         "probing_questions": {
@@ -60,9 +61,13 @@ def test_beam_nested_turns_dates_roles_and_shared_owner(tmp_path):
     histories = load_histories("beam10m", path, hashlib.sha256(path.read_bytes()).hexdigest(), [])
     assert len(histories) == 1
     assert len(histories[0].questions) == 2
-    assert [m["role"] for m in histories[0].sources[0]] == ["user", "assistant"]
+    assert [m["role"] for m in histories[0].sources[0]] == ["user", "user", "assistant"]
+    assert (
+        histories[0].sources[0][0]["content"]
+        == "[AMB document context]\nConversation c (session 1/1)"
+    )
     assert histories[0].sources[0][0]["event_time"] == "2024-03-15T00:00:00+00:00"
-    assert "Turn 0" in histories[0].sources[0][0]["content"]
+    assert "Turn 0" in histories[0].sources[0][1]["content"]
     assert histories[0].questions[1].question_id == "c_information_extraction_1"
 
 

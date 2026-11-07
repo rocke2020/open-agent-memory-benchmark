@@ -20,6 +20,7 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 | HTTPX with SOCKS support | Hub transport through configured proxies | BSD-3-Clause | Download dependency |
 | LongMemEval prompt excerpts | Attributed judge PromptPack templates | MIT | Embedded runtime PromptPack data |
 | MemoryAgentBench prompt excerpts | Attributed MAB-65 answer PromptPack templates | MIT | Embedded runtime PromptPack data |
+| Mem0-origin BEAM prompt excerpts | Recorded AMB answer and nugget-judge variants | Apache-2.0 upstream; [provenance](prompt-packs/README.md#native-oam-campaign-prompts) | Embedded native OAM prompt templates and [license](prompt-packs/LICENSE.Mem0) |
 | Mem0 extraction parser excerpts | Regression fixture for pinned native ingestion | Apache-2.0 | Test-only excerpt and [license](provider-services/tests/fixtures/LICENSE.Mem0) |
 
 MemoryAgentBench inputs and prompt excerpts are preserved for deferred research
@@ -29,7 +30,7 @@ release claim.
 
 The packaged AMB historical view contains only factual identifiers,
 categories, verdicts, measurements, aggregates, and immutable producer/source
-provenance. OAMB distributes no AMB code, prompt, question, answer, context,
+provenance. That historical evidence pack distributes no AMB code, prompt, question, answer, context,
 reasoning, raw response, UI, or documentation expression, and does not relicense
 the producer artifact. The external evidence record pins its producer
 repository/revisions, source path/hash/byte count, attestation hash/revision,

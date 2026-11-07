@@ -218,6 +218,11 @@ def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mu
                     "request": {
                         "model": "m",
                         "reasoning_effort": "low",
+                        "max_tokens": 8192,
+                        "n": 1,
+                        "temperature": 0,
+                        "top_p": 1,
+                        "stop": None,
                         "messages": [{"role": "user", "content": text}],
                     },
                     "response": {
@@ -232,8 +237,15 @@ def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mu
         "question": "Drink?",
         "context": "tea",
         "answer": "tea",
+        "answer_response": "tea",
         "score": 1.0,
         "judgments": ["yes"],
+        "first_pass": {
+            "answer": "tea",
+            "answer_response": "tea",
+            "score": 1.0,
+            "judgments": ["yes"],
+        },
         "context_sha256": hashlib.sha256(b"tea").hexdigest(),
         "recall": {
             "context": "tea",

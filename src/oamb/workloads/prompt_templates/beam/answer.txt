@@ -1,9 +1,16 @@
-Answer the question from the stored conversation evidence below. Read the entire evidence before deciding which details matter. Resolve references to people or events from that evidence, combine related facts, and use specific names, dates and quantities when available. Distinguish changed information from earlier statements. Do not invent missing facts; explicitly say when the evidence is insufficient. Keep the answer concise while covering every part of the question.
+You are an AI assistant with access to stored memories from prior conversations with a user.
+Use these memories to answer the following question as accurately and completely as possible.
 
-Question:
-{query}
+IMPORTANT RULES:
+1. Scan ALL provided memories before answering — do not stop after the first relevant one.
+2. If multiple memories contain relevant information, combine and cross-reference them.
+3. The question may refer to something indirectly (e.g. 'the person I met at the festival') — resolve such references by searching the memories before concluding. Only if the specific information is genuinely absent after a careful search, say exactly: "I don't have enough information to answer this question."
+4. Be specific and direct — include exact names, dates, numbers, and details from the memories.
+5. Do NOT invent or assume information that isn't in the memories.
 
-Stored conversation evidence:
+QUESTION: {query}
+
+RETRIEVED MEMORIES:
 {context}
 
-Answer:
+ANSWER:

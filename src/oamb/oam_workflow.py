@@ -29,6 +29,15 @@ from oamb.memory_systems.oam_index_plan import capture_index_plan
 from oamb.runtime.provider_env import load_t10_provider_environment
 from oamb.workloads.longmemeval import render_lme_answer_prompt, render_lme_judge_prompt
 from oamb.workloads.oam_inputs import BEAM_CATEGORIES, History, Question, load_histories
+from oamb.workloads.oam_protocol import (
+    ANSWER_SCHEMA,
+    EMBEDDING_MODEL,
+    JUDGE_SCHEMA,
+    MODEL_REQUEST_NAMES,
+    answer_text,
+    completion_payload,
+    validate_retry_review,
+)
 
 
 class OAMRunConfig(BaseModel):
@@ -38,6 +47,8 @@ class OAMRunConfig(BaseModel):
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     question_ids: list[str] = Field(default_factory=list)
     diagnostic: bool = False
+    model: str = "deepseek-flash"
+    embedding_model: str = EMBEDDING_MODEL
     answer_model_env: str = "LLM_DEEP_MODEL"
     judge_model_env: str = "LLM_LIGHT_MODEL"
     answer_effort: Literal["low", "high", "max"] = "high"
@@ -119,20 +130,23 @@ class CompletionCache:
         max_output: int,
         *,
         validator: Callable[[str], object] | None = None,
+        schema: dict[str, Any] | None = None,
     ) -> str:
-        payload = {
-            "model": model,
-            "reasoning_effort": effort,
-            "temperature": 0.0,
-            "max_tokens": max_output,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        payload = completion_payload(model, effort, prompt, max_output, schema)
         identity = hashlib.sha256(_json_bytes({"payload": payload, "stage": stage})).hexdigest()
         directory = self.root / "model-calls"
         saved = sorted(directory.glob("*.json"))
         charged = 0
         for path in saved:
             attempt = _read(path)
+            if (
+                attempt["identity"] == identity
+                and attempt.get("state") == "dispatched"
+                and "status" not in attempt
+            ):
+                raise ValueError(
+                    "unknown model call outcome; reconcile the retained receipt before resuming"
+                )
             if attempt["identity"] == identity and attempt.get("status") == 200:
                 try:
                     content = parse_completion(attempt["response"])
@@ -240,9 +254,11 @@ def _operator(env: dict[str, str], args: list[str]) -> dict[str, Any]:
 
 def _runtime_config(env: dict[str, str], config: OAMRunConfig) -> dict[str, Any]:
     code = (
-        "import json;from oam.config import load_config;"
+        "import json,os;from oam.config import load_config;"
+        "from oam.models.bindings import resolve_model_binding;"
         f"r=load_config({config.container_config!r});"
-        "print(json.dumps({'config_sha256':r.sha256,'config':r.config.model_dump(mode='json')}))"
+        "b={k:resolve_model_binding(r.config.models,k,os.environ).model for k in ('extraction','embedding')};"
+        "print(json.dumps({'config_sha256':r.sha256,'config':r.config.model_dump(mode='json'),'models':b}))"
     )
     return _operator(env, ["python", "-c", code])
 
@@ -250,9 +266,10 @@ def _runtime_config(env: dict[str, str], config: OAMRunConfig) -> dict[str, Any]
 def _embedding_probe(
     http: httpx.Client, env: dict[str, str], config: OAMRunConfig
 ) -> dict[str, Any]:
+    key = env.get("OAMB_EMBEDDING_API_KEY", "")
     response = http.post(
         env["OAMB_EMBEDDING_BASE_URL"].rstrip("/") + "/embeddings",
-        headers={"Authorization": f"Bearer {env.get('OAMB_EMBEDDING_API_KEY', '')}"},
+        headers={"Authorization": f"Bearer {key}"} if key else {},
         json={"model": env[config.embedding_model_env], "input": ["OAMB readiness"]},
     )
     response.raise_for_status()
@@ -268,6 +285,15 @@ def _embedding_probe(
 def _protocol_hash() -> str:
     root = Path(__file__).parent
     paths = sorted((root / "workloads/prompt_templates").rglob("*.txt"))
+    paths.extend(
+        root / name
+        for name in (
+            "oam_workflow.py",
+            "workloads/oam_protocol.py",
+            "workloads/oam_inputs.py",
+            "memory_systems/oam.py",
+        )
+    )
     return canonical_sha256(
         ["oam-native-v1", *[hashlib.sha256(p.read_bytes()).hexdigest() for p in paths]]
     )
@@ -276,6 +302,32 @@ def _protocol_hash() -> str:
 def validate_embedding_resume(current: dict[str, Any], previous: dict[str, Any]) -> None:
     if current["dimensions"] != previous["dimensions"]:
         raise ValueError("embedding dimension changed")
+
+
+def validate_models(
+    config: OAMRunConfig,
+    env: dict[str, str],
+    extraction: str,
+    embedding: str,
+    *,
+    resumed: bool = False,
+) -> None:
+    if (
+        config.model not in MODEL_REQUEST_NAMES
+        or env[config.answer_model_env] != config.model
+        or env[config.judge_model_env] != config.model
+        or extraction not in MODEL_REQUEST_NAMES
+        or (
+            not resumed
+            and (
+                config.embedding_model != EMBEDDING_MODEL
+                or env[config.embedding_model_env] != config.embedding_model
+                or embedding != config.embedding_model
+                or config.embedding_dimensions != 1024
+            )
+        )
+    ):
+        raise ValueError("model bindings differ from the published reproduction model setup")
 
 
 def validate_coverage(dataset: str, histories: list[History], *, diagnostic: bool) -> None:
@@ -320,6 +372,9 @@ def precheck(config_path: Path, output: Path, env_file: Path) -> None:
         adapter = OAMAdapter(http, env["OAMB_OAM_BASE_URL"], lambda *a: None)
         capabilities = adapter.preflight()
         runtime = _runtime_config(env, config)
+        validate_models(
+            config, env, runtime["models"]["extraction"], runtime["models"]["embedding"]
+        )
         effective = runtime["config"]
         expected_mode = "small" if config.dataset == "lme500" else "large"
         if (
@@ -428,14 +483,126 @@ def _score_judgments(judgments: list[str], dataset: str) -> float:
             parsed = json.loads(judgment)
             if (
                 type(parsed.get("score")) not in (int, float)
-                or parsed["score"] not in (0, 0.5, 1)
+                or not math.isfinite(parsed["score"])
+                or not 0 <= parsed["score"] <= 1
                 or not parsed.get("reason")
             ):
                 raise ValueError("BEAM rubric judge returned an invalid score")
-            scores.append(float(parsed["score"]))
+            raw = float(parsed["score"])
+            scores.append(1.0 if raw >= 0.75 else 0.5 if raw >= 0.25 else 0.0)
     if not scores:
         raise ValueError("missing judgments")
     return sum(scores) / len(scores)
+
+
+def _review_for(root: Path, question_id: str, context: str) -> dict[str, Any] | None:
+    path = root / "retry-eligibility.json"
+    if not path.exists():
+        return None
+    reviews = _read(path)
+    if not isinstance(reviews, dict):
+        raise ValueError("retry eligibility must be a question-to-review mapping")
+    review = reviews.get(question_id)
+    if review is None:
+        return None
+    if not isinstance(review, dict):
+        raise ValueError("invalid retry eligibility review")
+    # A generated draft stays pending until the operator completes the review.
+    if review.get("gold_status") == "unreviewed":
+        if review.get("eligible") is True:
+            raise ValueError("unreviewed gold cannot authorize a retry")
+        return None
+    validate_retry_review(review, context)
+    return dict(review)
+
+
+def evaluate_question(
+    root: Path,
+    config: OAMRunConfig,
+    env: dict[str, str],
+    cache: CompletionCache,
+    question: Question,
+    context: str,
+    *,
+    saved: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One held-context first pass and at most one explicitly reviewed policy retry."""
+    path = root / "results" / (canonical_sha256(question.question_id) + ".json")
+    schema = ANSWER_SCHEMA if config.dataset == "beam10m" else None
+    judge_schema = JUDGE_SCHEMA if config.dataset == "beam10m" else None
+    prompt = _answer_prompt(question, context, config.dataset)
+
+    def attempt(effort: str) -> dict[str, Any]:
+        content = cache.complete(
+            env[config.answer_model_env],
+            effort,
+            prompt,
+            "answer",
+            config.max_output_tokens,
+            schema=schema,
+            validator=lambda text: answer_text(text, config.dataset),
+        )
+        answer = answer_text(content, config.dataset)
+        judgments = [
+            cache.complete(
+                env[config.judge_model_env],
+                config.judge_effort,
+                text,
+                "judge",
+                config.max_output_tokens,
+                schema=judge_schema,
+                validator=lambda text: _score_judgments([text], config.dataset),
+            )
+            for text in _judge_prompts(question, answer, config.dataset)
+        ]
+        return {
+            "answer": answer,
+            "answer_response": content,
+            "judgments": judgments,
+            "score": _score_judgments(judgments, config.dataset),
+        }
+
+    if saved is None:
+        first = attempt(config.answer_effort)
+        saved = {
+            "question_id": question.question_id,
+            "question": question.text,
+            "context": context,
+            "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
+            "first_pass": first,
+            **first,
+        }
+        _write(path, saved)
+    if (
+        saved["context"] != context
+        or saved["context_sha256"] != hashlib.sha256(context.encode()).hexdigest()
+    ):
+        raise ValueError("retry context differs from the saved first pass")
+    if saved.get("retry") is not None:
+        return saved
+    threshold = 1.0 if config.dataset == "lme500" else 0.5
+    if saved["first_pass"]["score"] >= threshold:
+        return saved
+    review_path = root / "retry-reviews" / (canonical_sha256(question.question_id) + ".json")
+    if review_path.exists():
+        review = _read(review_path)
+        validate_retry_review(review, context)
+        if review["eligible"] is not True:
+            raise ValueError("accepted retry review must remain eligible")
+    else:
+        review = _review_for(root, question.question_id, context)
+    if review is None:
+        return saved
+    if not review["eligible"]:
+        result = {**saved, "retry_review": review}
+    else:
+        # Admission owns an in-flight retry even if the editable draft later changes or disappears.
+        if not review_path.exists():
+            _write(review_path, review)
+        retry = attempt("max")
+        result = {**saved, **retry, "retry": retry, "retry_review": review}
+    _write(path, result, replace=True)
+    return result
 
 
 def validate_results(
@@ -470,9 +637,7 @@ def validate_results(
             calls.add(
                 (
                     call["stage"],
-                    request["model"],
-                    request["reasoning_effort"],
-                    hashlib.sha256(request["messages"][0]["content"].encode()).hexdigest(),
+                    canonical_sha256(request),
                     content,
                 )
             )
@@ -493,35 +658,97 @@ def validate_results(
             or diagnostics.get("recall_level") != ("fast" if dataset == "lme500" else "normal")
         ):
             raise ValueError("saved recall identity/readiness differs from frozen input")
-        answer_prompt = _answer_prompt(question, result["context"], dataset)
-        expected = [("answer", answer_prompt, result["answer"])]
-        judge_prompts = _judge_prompts(question, result["answer"], dataset)
-        if len(judge_prompts) != len(result["judgments"]):
-            raise ValueError("rubric judgment coverage is incomplete")
-        expected.extend(
-            ("judge", p, j) for p, j in zip(judge_prompts, result["judgments"], strict=True)
-        )
-        for stage, prompt, content in expected:
-            key = (
-                stage,
-                plan["bindings"][stage],
-                plan["config"][f"{stage}_effort"],
-                hashlib.sha256(prompt.encode()).hexdigest(),
-                content,
-            )
-            if key not in calls:
-                raise ValueError("saved result differs from the actual complete model input/output")
-        if not math.isclose(
-            _score_judgments(result["judgments"], dataset), result["score"], abs_tol=1e-12
+        first = result["first_pass"]
+        attempts = [(first, plan["config"]["answer_effort"])]
+        retry = result.get("retry")
+        if retry is not None:
+            review = result["retry_review"]
+            validate_retry_review(review, result["context"])
+            if not review["eligible"] or first["score"] >= (1 if dataset == "lme500" else 0.5):
+                raise ValueError("saved retry is not an eligible failed first pass")
+            admitted = root / "retry-reviews" / (canonical_sha256(question.question_id) + ".json")
+            if not admitted.exists() or _read(admitted) != review:
+                raise ValueError("saved retry differs from its accepted review")
+            attempts.append((retry, "max"))
+        elif result.get("retry_review") is not None:
+            validate_retry_review(result["retry_review"], result["context"])
+            if result["retry_review"]["eligible"]:
+                raise ValueError("eligible review has no completed retry")
+        final = retry if retry is not None else first
+        if any(
+            result[name] != final[name]
+            for name in ("answer", "answer_response", "judgments", "score")
         ):
-            raise ValueError("saved score differs from the actual judgments")
+            raise ValueError("policy result differs from the last completed attempt")
+        for attempt, effort in attempts:
+            if answer_text(attempt["answer_response"], dataset) != attempt["answer"]:
+                raise ValueError("answer differs from the structured model response")
+            judge_prompts = _judge_prompts(question, attempt["answer"], dataset)
+            if len(judge_prompts) != len(attempt["judgments"]):
+                raise ValueError("rubric judgment coverage is incomplete")
+            expected = [
+                (
+                    "answer",
+                    _answer_prompt(question, result["context"], dataset),
+                    attempt["answer_response"],
+                    effort,
+                )
+            ]
+            expected.extend(
+                ("judge", p, j, plan["config"]["judge_effort"])
+                for p, j in zip(judge_prompts, attempt["judgments"], strict=True)
+            )
+            for stage, prompt, content, stage_effort in expected:
+                schema = (
+                    (ANSWER_SCHEMA if stage == "answer" else JUDGE_SCHEMA)
+                    if dataset == "beam10m"
+                    else None
+                )
+                payload = completion_payload(
+                    plan["bindings"][stage],
+                    stage_effort,
+                    prompt,
+                    plan["config"].get("max_output_tokens", 8192),
+                    schema,
+                )
+                if (stage, canonical_sha256(payload), content) not in calls:
+                    raise ValueError(
+                        "saved result differs from the actual complete model input/output"
+                    )
+            if not math.isclose(
+                _score_judgments(attempt["judgments"], dataset), attempt["score"], abs_tol=1e-12
+            ):
+                raise ValueError("saved score differs from the actual judgments")
     return results
 
 
+def summarize_results(results: list[dict[str, Any]], config: OAMRunConfig) -> dict[str, Any]:
+    threshold = 1 if config.dataset == "lme500" else 0.5
+    pending = [
+        r["question_id"]
+        for r in results
+        if r["first_pass"]["score"] < threshold and not r.get("retry_review")
+    ]
+    mean = sum(r["score"] for r in results) / len(results)
+    return {
+        "validated_questions": len(results),
+        "diagnostic": config.diagnostic,
+        "first_pass_mean_score": sum(r["first_pass"]["score"] for r in results) / len(results),
+        "mean_score": mean,
+        "policy_final_mean_score": None if pending else mean,
+        "policy_final_complete": not pending,
+        "pending_review": pending,
+        "first_pass_threshold_passes": sum(r["first_pass"]["score"] >= threshold for r in results),
+        "policy_threshold_passes": sum(r["score"] >= threshold for r in results),
+        "max_effort_retries": sum(r.get("retry") is not None for r in results),
+    }
+
+
 def _report(root: Path, plan: dict[str, Any], results: list[dict[str, Any]]) -> None:
+    summary = summarize_results(results, OAMRunConfig.model_validate(plan["config"]))
     rows = "".join(
         f"<article><h2>{html.escape(r['question_id'])}</h2>"
-        f"<p>Score: {r['score']}</p><p>{html.escape(r['question'])}</p>"
+        f"<p>First pass: {r['first_pass']['score']}; current policy: {r['score']}</p><p>{html.escape(r['question'])}</p>"
         f"<p>{html.escape(r['answer'])}</p><details><summary>Exact retrieved context</summary>"
         f"<pre>{html.escape(r['context'])}</pre></details></article>"
         for r in results
@@ -533,8 +760,8 @@ def _report(root: Path, plan: dict[str, Any], results: list[dict[str, Any]]) -> 
 @media(prefers-color-scheme:dark){{:root{{--bg:#14171b;--fg:#eee;--line:#555}}}}
 body{{background:var(--bg);color:var(--fg);font:16px/1.6 system-ui;max-width:960px;margin:2rem auto;padding:1rem}}
 article{{border-top:1px solid var(--line);padding:1rem 0}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}
-</style><h1>{title}</h1><p>{len(results)} unique questions. Mean score:
-{sum(r["score"] for r in results) / len(results):.3f}.</p><p>Generation-only usage is in model-calls and
+</style><h1>{title}</h1><p>{len(results)} unique questions. First-pass mean:
+{summary["first_pass_mean_score"]:.3f}; policy-final mean: {summary["policy_final_mean_score"] if summary["policy_final_complete"] else "pending source/context/gold review"}.</p><p>Generation-only usage is in model-calls and
 owners; embedding tokens are excluded. This run is separate from historical evidence.</p>{rows}</html>"""
     atomic_replace_bytes(root / "report.html", document.encode())
 
@@ -554,6 +781,16 @@ def run(root: Path, *, resume: bool) -> None:
     }
     if current != plan["bindings"]:
         raise ValueError("runtime/model binding changed")
+    runtime = _runtime_config(env, config)
+    validate_models(
+        config,
+        env,
+        runtime["models"]["extraction"],
+        runtime["models"]["embedding"],
+        resumed=resume and (root / "started.json").exists(),
+    )
+    if runtime["models"]["extraction"] != plan["runtime"]["models"]["extraction"]:
+        raise ValueError("OAM extraction model binding changed")
     histories = load_histories(
         config.dataset, Path(plan["source"]), config.source_sha256, config.question_ids
     )
@@ -590,14 +827,30 @@ def run(root: Path, *, resume: bool) -> None:
     _report(root, plan, results)
     _write(
         root / "summary.json",
-        {
-            "validated_questions": len(results),
-            "diagnostic": config.diagnostic,
-            "mean_score": sum(r["score"] for r in results) / len(results),
-        },
+        summarize_results(results, config),
         replace=True,
     )
-    print(f"run: PASS ({len(results)} validated questions); report: {root / 'report.html'}")
+    review_path = root / "retry-eligibility.json"
+    threshold = 1 if config.dataset == "lme500" else 0.5
+    if not review_path.exists():
+        _write(
+            review_path,
+            {
+                r["question_id"]: {
+                    "eligible": False,
+                    "coverage_review_complete": False,
+                    "gold_review_complete": False,
+                    "gold_status": "unreviewed",
+                    "rationale": "",
+                    "context_sha256": r["context_sha256"],
+                }
+                for r in results
+                if r["first_pass"]["score"] < threshold
+            },
+        )
+    pending = summarize_results(results, config)["pending_review"]
+    status = "FIRST PASS COMPLETE; REVIEW PENDING" if pending else "PASS"
+    print(f"run: {status} ({len(results)} validated questions); report: {root / 'report.html'}")
 
 
 def _run_history(
@@ -692,8 +945,7 @@ def _run_history(
     _write(directory / "index-plan.json", index_plan, replace=True)
     for question in history.questions:
         result_path = root / "results" / (canonical_sha256(question.question_id) + ".json")
-        if result_path.exists():
-            continue
+        saved = _read(result_path) if result_path.exists() else None
         capture_path = directory / (canonical_sha256(question.question_id) + "-recall.json")
         if capture_path.exists():
             recall = _read(capture_path)
@@ -708,44 +960,23 @@ def _run_history(
             )
             _write(capture_path, recall)
         context = recall["context"]
-        prompt = _answer_prompt(question, context, config.dataset)
-        answer = cache.complete(
-            env[config.answer_model_env],
-            config.answer_effort,
-            prompt,
-            "answer",
-            config.max_output_tokens,
-        )
-        judgments = [
-            cache.complete(
-                env[config.judge_model_env],
-                config.judge_effort,
-                prompt,
-                "judge",
-                config.max_output_tokens,
-                validator=lambda text: _score_judgments([text], config.dataset),
-            )
-            for prompt in _judge_prompts(question, answer, config.dataset)
-        ]
-        score = _score_judgments(judgments, config.dataset)
+        result = evaluate_question(root, config, env, cache, question, context, saved=saved)
         _write(
             result_path,
             {
-                "question_id": question.question_id,
-                "question": question.text,
+                **result,
                 "owner": owner,
-                "context": context,
-                "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
                 "context_tokens_o200k": len(
                     tiktoken.get_encoding("o200k_base").encode_ordinary(context)
                 ),
-                "answer": answer,
-                "judgments": judgments,
-                "score": score,
                 "recall": recall,
             },
+            replace=True,
         )
-        print(f"question: {question.question_id} scored {score:.3f}", flush=True)
+        print(
+            f"question: {question.question_id} first={result['first_pass']['score']:.3f} policy={result['score']:.3f}",
+            flush=True,
+        )
 
 
 def main() -> None:

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The native OAM workflows run chronological interaction ingestion, operation polling, non-generative retrieval, answering and judging through the public `./precheck.sh` → `./run.sh` interface. They require Docker, Compose, Python 3.11+, `uv`, an OAM image and configured model endpoints. No product checkout, private runner or provider SDK is imported during evaluation. A separate PostgreSQL volume, API and worker belong to each deployment.
+OAMB is OAM's standalone evaluation repository. Its native workflows run chronological interaction ingestion, operation polling, non-generative retrieval, answering and judging through the public `./precheck.sh` → `./run.sh` interface. They require Docker, Compose, Python 3.11+, `uv`, an OAM image and configured model endpoints. No product checkout, private runner or provider SDK is imported during evaluation. A separate PostgreSQL volume, API and worker belong to each deployment.
 
 | Profile | Recall | Vector index | Question isolation | Scoring |
 | --- | --- | --- | --- | --- |
@@ -11,7 +11,7 @@ The native OAM workflows run chronological interaction ingestion, operation poll
 
 Both profiles disable Insights, Profile and the planner and use low extraction reasoning. The full profiles are [LME-500](../configs/oam-lme500.yml) and [BEAM-10M](../configs/oam-beam10m.yml). The small [LME diagnostic](../configs/oam-lme500-smoke.yml) and [BEAM diagnostic](../configs/oam-beam10m-smoke.yml) use original synthetic fixtures; their results establish execution, not benchmark accuracy.
 
-These are new OAMB protocols. BEAM uses OAMB-owned answer and rubric prompts. The workflows do not implement the historical campaign's max-effort answer-retry policy, inject document-context metadata or reproduce its tokenizer settings. They preserve conversation turns, roles, source dates, original questions and provider-returned context. Keep their results separate from the saved [LME](evaluations/oam-v0.0.1-lme500.md) and [BEAM](evaluations/oam-v0.0.1-beam10m.md) campaigns.
+The reproduction target is the published evaluation procedure with the same models and scores close to the published results, allowing model variability and disclosed OAM version changes. The workflow includes the recorded LME templates and BEAM answer/nugget prompts, BEAM's structured JSON answer format and document-context metadata, and the reviewed max-effort retry procedure. It preserves conversation turns, roles, source dates, original questions and provider-returned context. Current OAM owns its extraction prompts, tokenizer and index behavior; record the evaluated revision and configuration. Keep new measurements separate from the saved [LME](evaluations/oam-v0.0.1-lme500.md) and [BEAM](evaluations/oam-v0.0.1-beam10m.md) campaigns. See [prompt provenance](../prompt-packs/README.md) and [the mainflow](designs/native-oam-reproduction.md).
 
 ## 1. Prepare the image and model environment
 
@@ -19,12 +19,14 @@ Install the locked dependencies and build the development image from committed O
 
 ```bash
 uv sync --locked --all-groups
-./provider-services/oam/build-image.sh /path/to/open-agent-memory d41fd439956a7ec4e92d0d67185250be4e86ee35
-cp .env.example .env.oam
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 32f97cca5c5c1fd2546ed0364d2279063afc81b6
+cp .env.oam.example .env.oam
 chmod 600 .env.oam
 ```
 
-Set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_LIGHT_MODEL` and `LLM_DEEP_MODEL` in `.env.oam`. The native workflow uses OpenAI-compatible Chat Completions. The light model performs extraction and judging; the deep model answers. Also set `OAMB_EMBEDDING_BASE_URL`, optional `OAMB_EMBEDDING_API_KEY`, and `OAMB_EMBEDDING_MODEL`. The supplied OAM overrides expect 1,024-dimensional embeddings. Adjust the runtime override and benchmark's `embedding_dimensions` together for another dimension.
+Set `LLM_BASE_URL` and `LLM_API_KEY` in `.env.oam`. For the published evaluation's model setup, set both `LLM_LIGHT_MODEL` and `LLM_DEEP_MODEL` to the provider's identifier for **`deepseek-v4.1-flash`**. The native workflow uses OpenAI-compatible Chat Completions. The light binding performs extraction and judging; the deep binding answers, using the same model. If the endpoint uses a gateway alias such as `deepseek-flash`, verify that it resolves to the required model.
+
+Set `OAMB_EMBEDDING_BASE_URL`, optional `OAMB_EMBEDDING_API_KEY`, and **`OAMB_EMBEDDING_MODEL=qwen3-embedding:0.6b`** with 1,024-dimensional vectors. Using another embedding model or dimension is a separate evaluation configuration; adjust the runtime override and benchmark's `embedding_dimensions` together and disclose the change.
 
 Use model endpoints reachable from both the host and the containers. The preparation helper maps loopback endpoints to `host.docker.internal`, as verified on Docker Desktop. On Linux, provide a container-reachable endpoint or configure the host-gateway mapping. Linux host-local model routing has not been live-verified here. Endpoints and keys remain together in private environment files; never commit those files.
 
@@ -37,7 +39,7 @@ Use a fresh output directory and Compose project name. The setup helper rejects 
 ```bash
 uv run --locked python provider-services/oam/start.py \
   --dataset lme500 --env-file .env.oam \
-  --image oamb/oam:0.0.1-d41fd439956a \
+  --image oamb/oam:0.0.1-32f97cca5c5c \
   --project oamb-native-lme-example \
   --output outputs/oam-services/lme-example
 
@@ -60,11 +62,11 @@ After indexing, BEAM provisions each exact conversation owner's dedicated index.
 No full evaluation is required to verify the adapter. To intentionally start a future full run, supply the inputs and review the ceilings before choosing the corresponding full configuration:
 
 1. Download LME using `./scripts/download/longmemeval.sh`; its full profile uses the pinned 500-question source.
-2. Supply BEAM-10M's JSON export at `datasets/beam/10m.json`, retaining its nested conversation/plan/batch/turn and probing-question fields. The full profile identifies the recorded input by SHA-256 `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8`, from dataset revision `9b2096193fe74e2837e4713e483351e19817773c`. The export is not distributed or automatically downloaded. A differently serialized export requires an explicitly updated source hash before precheck; it is a new input identity.
+2. Download/export BEAM-10M using `./scripts/download/beam10m.sh`. It reads the two official Parquet shards at revision `9b2096193fe74e2837e4713e483351e19817773c`, preserves row/shard order and nested fields, and writes `datasets/beam/10m.json` using the campaign's JSON serialization. The resulting SHA-256 must be `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8`. Existing verified output is reused; mismatched output is preserved and rejected. The download is about 344 MB and the export about 1.03 GB.
 3. Review model names, reasoning efforts, output allowance, operation timeout and budgets in the selected YAML. Full LME requires 500 complete histories. Full BEAM requires ten conversation owners with two questions in each of ten categories. A smaller selection must set `diagnostic: true` and must not be reported as full coverage.
 4. Use that full YAML with the same precheck/run commands and a fresh output directory. This starts a new evaluation; it does not reproduce or replace the historical scores.
 
-`max_model_calls` and `max_model_tokens` bound answer/judge dispatches, including failed, interrupted and resumed attempts. Every dispatch reserves its allowance before the HTTP call. Complete valid responses are reused unchanged; truncated, empty, refused or semantically invalid judge responses are retained and may receive a new attempt only on an explicit resume within the same allowance. There are no automatic harness retries. An unknown billed outcome retains its reservation. The output cap includes reasoning and the complete visible body and is never used to trim content.
+`max_model_calls` and `max_model_tokens` bound answer/judge dispatches, including failed, interrupted and resumed attempts. Every dispatch reserves its allowance before the HTTP call. Complete valid responses are reused unchanged; truncated, empty, refused or semantically invalid responses are retained and may receive a new attempt only on explicit resume within the same allowance. A dispatch without a known HTTP outcome blocks redispatch until its receipt is reconciled; preserve it and investigate the provider outcome rather than deleting it. The output cap includes reasoning and the complete visible body and is never used to trim content. Full LME allows 2,000 model calls, covering first answers/judges and at most one answer/judge retry per failed question; these are ceilings, not a spending prediction.
 
 `max_indexing_tokens` separately bounds generation triggered by ingestion. OAM's `index.generation_token_budget` enforces a per-source ceiling internally. The serial runner reserves that full source ceiling before dispatch; after successful completion, complete reported generation usage replaces that reservation. Missing/partial usage retains the ceiling. Embedding tokens are excluded. A budget failure stops before another source or model dispatch; do not edit a frozen plan to bypass it.
 
@@ -74,7 +76,13 @@ Resume the same run with:
 ./run.sh --oam outputs/oam-lme-example --resume
 ```
 
+The first pass saves every answer and judgment before policy retries and generates `retry-eligibility.json` with one draft per failed question. LME failure means score below 1; BEAM failure means mean rubric score below 0.5. Review the original source, retrieved context, question, gold and rubric. For each draft, retain `context_sha256`, set `coverage_review_complete` and `gold_review_complete` to `true`, set `gold_status` to `correct`, `ambiguous` or `incorrect`, and write a nonempty `rationale`. Set `eligible: true` only when the substantive coverage and gold review allow an answer retry; incorrect gold requires `eligible: false`. A reviewed ineligible question retains its first-pass score and stays in the denominator.
+
+Resume after completing those reviews. Each eligible question gets one max-effort answer using the identical prompt, context and model, then high-effort judging. The accepted review is saved before dispatch and remains authoritative for that retry; later draft edits or deletion do not discard an admitted retry. Completed answers/judges are reused if execution stops between stages. A completed retry replaces the policy result even when its score is lower; the first pass is retained unchanged. `summary.json` and HTML show first-pass and policy-final means separately. Unreviewed failures appear in `pending_review`, leave `policy_final_mean_score` null, and print `FIRST PASS COMPLETE; REVIEW PENDING`; they are not a completed policy-final evaluation.
+
 Resume checks the dataset, model/runtime bindings, prompt identity and embedding dimension, reuses accepted source receipts and completed source/model/question results, and executes unfinished work. If owner creation committed before its key was saved, root-authorized credential issuance recovers access to that same owner. It does not automatically retry a terminally failed indexing operation or treat a partial source as complete. Keep the isolated service and private environment files; stop/restart that exact Compose project when necessary. A stopped service's data is retained. Concurrent processes must not operate the same run directory.
+
+Fresh precheck verifies the published embedding model setup and its agreement with OAM's extraction embedding binding. On resume, the embedding gate remains one finite vector with the frozen dimension; it adds no URL or alias-ownership audit.
 
 ## 4. Inspect the result
 
