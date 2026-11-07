@@ -16,7 +16,7 @@
 
 索引 token 的覆盖情况不同：Hindsight 为部分覆盖，Mem0 不可用，OpenViking 为完整覆盖，因此这些总量不能构成完整的三方排名。检索延迟是本次负载中观测到的提供方请求耗时，并非与环境无关的产品基准。
 
-**[打开完整的 v0.1.0 报告](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/v0.1.0/comparison-20260913-133717-82378/report.html)** · [浏览完整的公开评测快照](eval_results/v0.1.0/)
+**[打开完整的 v0.1.0 报告](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/lme60/comparison-20260913-133717-82378/report.html)** · [浏览完整的公开评测快照](eval_results/lme60/)
 
 **覆盖范围：** 三个提供方共同评测 60 个 LongMemEval 问题，产生 180/180 个已判定的提供方结果。
 
@@ -34,7 +34,7 @@ Mem0 Cloud（Platform v3）与自托管 Mem0 OSS 2.0.19 之间也存在重要的
 
 Open Agent Memory Benchmark（OAMB）在同一套评测协议下，通过原生 REST API 比较 Hindsight、Mem0 和 OpenViking。v0.1.0 对每个提供方使用同一组平衡选取的 60 个 LongMemEval 问题：六种问题类型各十题，共产生 180 个提供方结果。
 
-OAMB 的亮点之一是五指标视图：**答案准确率**、**答案可见上下文 tokens**、**索引 tokens**、**检索延迟**和**索引耗时**。定义和详细结果请参阅[完整的 v0.1.0 报告](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/v0.1.0/comparison-20260913-133717-82378/report.html)。
+OAMB 的亮点之一是五指标视图：**答案准确率**、**答案可见上下文 tokens**、**索引 tokens**、**检索延迟**和**索引耗时**。定义和详细结果请参阅[完整的 v0.1.0 报告](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/lme60/comparison-20260913-133717-82378/report.html)。
 
 在 OAMB 之前，我使用 AMB 完成了[完整 500 题 Hindsight 复现](https://github.com/rocke2020/agent-memory-benchmark/tree/deepseek-provider)。该实验复现了公开的 Hindsight 0.4.17 设置，仅替换了外部模型栈：抽取和评判使用 DeepSeek V4 Flash 0731，答案生成使用 DeepSeek V4 Pro 0813。这项研究进一步表明，模型选择会改变被评测的系统，而逐次运行的非确定性也会改变结果；LongMemEval 中少数题目存在歧义，但该数据集整体上仍足以支持广泛比较。为控制成本，OAMB 使用平衡的 LME-60 比较固定版本的提供方（包括 Hindsight 0.9.2），而没有重新运行全部 500 题。
 
@@ -139,7 +139,7 @@ OAMB_EMBEDDING_API_KEY=
 当 Hindsight、Mem0 和 OpenViking 已分别完成并作为独立快照保存在同一目录下时，可以在不重新运行提供方的情况下生成报告：
 
 ```bash
-./run.sh --generate-report --result-dir=./eval_results/v0.1.0
+./run.sh --generate-report --result-dir=./eval_results/lme60
 ```
 
 该目录必须恰好包含每个提供方的一份完整 60 题快照，并且每份快照中都包含 `resolved-plan.json` 和 `results/<provider>.json`。带版本的历史快照还可以在根目录包含 `case-manifest.json`，以便在新运行使用当前清单时保留当时评测的问题 ID。该命令需要根目录 `.env` 提供固定评判模型的连接；如果没有匹配的分析缓存，它会进行一次有界的 LLM 分析调用。当报告输入和分析配置不变时，它会复用 `<result-dir>/report-analysis-cache` 中按内容寻址的缓存，不再调用模型。该命令不需要预检或提供方服务，不会修改源快照，并会创建一次写入的 `comparison/` 目录（如果该名称已存在，则创建带时间戳的后继目录）。它会记录每个源计划/结果的哈希；如果保存的计划不能证明使用了相同的比较控制项，则抑制受影响的领先者声明。

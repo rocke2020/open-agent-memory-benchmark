@@ -16,7 +16,7 @@
 
 インデックス作成トークンのカバレッジは、Hindsight が一部、Mem0 が取得不能、OpenViking が完全であるため、これらの合計値だけで 3 プロバイダーを完全に順位付けすることはできません。検索レイテンシは、このワークロードで観測されたプロバイダーリクエストの所要時間であり、環境に依存しない製品ベンチマークではありません。
 
-**[v0.1.0 の完全なレポートを開く](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/v0.1.0/comparison-20260913-133717-82378/report.html)** · [公開評価スナップショット全体を見る](eval_results/v0.1.0/)
+**[v0.1.0 の完全なレポートを開く](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/lme60/comparison-20260913-133717-82378/report.html)** · [公開評価スナップショット全体を見る](eval_results/lme60/)
 
 **カバレッジ：** 3 つのプロバイダーで共通する 60 問の LongMemEval を評価し、180/180 件の判定済みプロバイダー別結果を生成しました。
 
@@ -34,7 +34,7 @@ Mem0 Cloud（Platform v3）とセルフホスト型 Mem0 OSS 2.0.19 の間にも
 
 Open Agent Memory Benchmark（OAMB）は、1 つの共通評価プロトコルの下で、ネイティブ REST API を通じて Hindsight、Mem0、OpenViking を比較します。v0.1.0 プロファイルでは、各プロバイダーに同じ均衡選択された 60 問の LongMemEval を使用します。6 種類の質問タイプから各 10 問を選び、合計 180 件のプロバイダー別結果を生成します。
 
-OAMB の特長の 1 つは、**回答精度**、**回答可視コンテキストトークン**、**インデックス作成トークン**、**検索レイテンシ**、**インデックス作成時間**という 5 指標のビューです。定義と詳細な結果は、[v0.1.0 の完全なレポート](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/v0.1.0/comparison-20260913-133717-82378/report.html)を参照してください。
+OAMB の特長の 1 つは、**回答精度**、**回答可視コンテキストトークン**、**インデックス作成トークン**、**検索レイテンシ**、**インデックス作成時間**という 5 指標のビューです。定義と詳細な結果は、[v0.1.0 の完全なレポート](https://rocke2020.github.io/open-agent-memory-benchmark/eval_results/lme60/comparison-20260913-133717-82378/report.html)を参照してください。
 
 OAMB に先立ち、私は AMB で[全 500 問の Hindsight 再現](https://github.com/rocke2020/agent-memory-benchmark/tree/deepseek-provider)を実施しました。この実験では、公開された Hindsight 0.4.17 の構成を再現し、外部モデルスタックだけを変更しました。抽出と判定には DeepSeek V4 Flash 0731、回答には DeepSeek V4 Pro 0813 を使用しました。この研究により、モデル選択は評価対象そのものを変え、実行ごとの非決定性も結果を変え得ることを再確認しました。LongMemEval には曖昧な問題が少数ありますが、データセット全体としては幅広い比較に十分有用です。コストを抑えるため、OAMB は全 500 問を再実行せず、Hindsight 0.9.2 を含む固定バージョンの各プロバイダーを均衡 LME-60 で比較します。
 
@@ -139,7 +139,7 @@ URL が未設定、または `change-me` のままの場合、事前チェック
 Hindsight、Mem0、OpenViking が個別に完了し、1 つのディレクトリ配下に別々のスナップショットとして保存されている場合、プロバイダーを再実行せずにレポートを生成できます。
 
 ```bash
-./run.sh --generate-report --result-dir=./eval_results/v0.1.0
+./run.sh --generate-report --result-dir=./eval_results/lme60
 ```
 
 ディレクトリには、各プロバイダーにつき完全な 60 問のスナップショットが正確に 1 つずつ必要で、それぞれに `resolved-plan.json` と `results/<provider>.json` が含まれていなければなりません。バージョン付きの履歴スナップショットでは、ルートに `case-manifest.json` を置き、新規実行が現在のマニフェストを使う場合でも評価済み ID を保持できます。このコマンドは、固定された判定モデルへの接続にルートの `.env` を必要とします。一致する分析キャッシュがない場合は、有界の LLM 分析呼び出しを 1 回行います。レポート入力と分析設定が変わらなければ、`<result-dir>/report-analysis-cache` のコンテンツアドレス型キャッシュを再利用し、モデルを再度呼び出しません。事前チェックやプロバイダーサービスは不要で、元のスナップショットを変更せず、新規作成専用の `comparison/` ディレクトリを書き込みます。その名前がすでに存在する場合は、タイムスタンプ付きの後続ディレクトリを作成します。すべてのソースプラン/結果ハッシュを記録し、保存済みプランから同じ比較制御を証明できない場合は、該当する首位の主張を抑制します。
