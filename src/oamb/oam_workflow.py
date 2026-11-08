@@ -25,12 +25,11 @@ from oamb.contracts.ids import canonical_sha256
 from oamb.memory_systems.oam import OAMAdapter, pack_messages
 from oamb.runtime.provider_env import load_t10_provider_environment
 from oamb.workloads.longmemeval import render_lme_answer_prompt, render_lme_judge_prompt
+from oamb.workloads.model_parameters import ReasoningEffort
 from oamb.workloads.oam_inputs import BEAM_CATEGORIES, History, Question, load_histories
 from oamb.workloads.oam_protocol import (
     ANSWER_SCHEMA,
-    EMBEDDING_MODEL,
     JUDGE_SCHEMA,
-    MODEL_REQUEST_NAMES,
     answer_text,
     completion_payload,
     validate_retry_review,
@@ -45,12 +44,32 @@ class OAMRunConfig(BaseModel):
     source: str
     question_ids: list[str] = Field(default_factory=list)
     diagnostic: bool = False
-    model: str = "deepseek-flash"
-    embedding_model: str = EMBEDDING_MODEL
-    answer_effort: Literal["low", "high", "max"] = "high"
-    judge_effort: Literal["low", "high", "max"] = "high"
+    model: str | None = None
+    embedding_model: str | None = None
+    answer_model: str | None = None
+    judge_model: str | None = None
+    answer_effort: ReasoningEffort = "high"
+    judge_effort: ReasoningEffort = "high"
     embedding_dimensions: int = Field(default=1024, ge=1)
     timeout_seconds: int = Field(default=900, ge=1)
+
+
+def scoring_models(config: OAMRunConfig, env: dict[str, str]) -> dict[str, str]:
+    selected = {}
+    for role, variable in (("answer", "LLM_DEEP_MODEL"), ("judge", "LLM_LIGHT_MODEL")):
+        requested = getattr(config, role + "_model")
+        selected[role] = (
+            requested
+            if requested is not None
+            else config.model
+            if config.model is not None
+            else env[variable]
+        )
+    return selected
+
+
+def _request_identity(payload: dict[str, Any]) -> str:
+    return canonical_sha256({k: v for k, v in payload.items() if k != "model"})
 
 
 def _write(path: Path, value: Any, *, replace: bool = False) -> None:
@@ -119,20 +138,21 @@ class CompletionCache:
         schema: dict[str, Any] | None = None,
     ) -> str:
         payload = completion_payload(model, effort, prompt, schema)
+        request_identity = _request_identity(payload)
         identity = hashlib.sha256(_json_bytes({"payload": payload, "stage": stage})).hexdigest()
         directory = self.root / "model-calls"
         saved = sorted(directory.glob("*.json"))
         for path in saved:
             attempt = _read(path)
-            if (
-                attempt["identity"] == identity
-                and attempt.get("state") == "dispatched"
-                and "status" not in attempt
-            ):
+            same_request = (
+                attempt["stage"] == stage
+                and _request_identity(attempt["request"]) == request_identity
+            )
+            if same_request and attempt.get("state") == "dispatched" and "status" not in attempt:
                 raise ValueError(
                     "unknown model call outcome; reconcile the retained receipt before resuming"
                 )
-            if attempt["identity"] == identity and attempt.get("status") == 200:
+            if same_request and attempt.get("status") == 200:
                 try:
                     content = parse_completion(attempt["response"])
                     if validator:
@@ -225,10 +245,18 @@ def _embedding_probe(
     http: httpx.Client, env: dict[str, str], config: OAMRunConfig
 ) -> dict[str, Any]:
     key = env.get("OAMB_EMBEDDING_API_KEY", "")
+    model = (
+        config.embedding_model
+        if config.embedding_model is not None
+        else env["OAMB_EMBEDDING_MODEL"]
+    )
     response = http.post(
         env["OAMB_EMBEDDING_BASE_URL"].rstrip("/") + "/embeddings",
         headers={"Authorization": f"Bearer {key}"} if key else {},
-        json={"model": env["OAMB_EMBEDDING_MODEL"], "input": ["OAMB readiness"]},
+        json={
+            "model": model,
+            "input": ["OAMB readiness"],
+        },
     )
     response.raise_for_status()
     body = response.json()
@@ -237,7 +265,7 @@ def _embedding_probe(
         type(v) in (float, int) and math.isfinite(v) for v in vector
     ):
         raise ValueError("embedding must be one finite vector with the configured dimension")
-    return {"model": env["OAMB_EMBEDDING_MODEL"], "dimensions": len(vector)}
+    return {"model": model, "dimensions": len(vector)}
 
 
 def _protocol_hash() -> str:
@@ -251,32 +279,6 @@ def _protocol_hash() -> str:
 def validate_embedding_resume(current: dict[str, Any], previous: dict[str, Any]) -> None:
     if current["dimensions"] != previous["dimensions"]:
         raise ValueError("embedding dimension changed")
-
-
-def validate_models(
-    config: OAMRunConfig,
-    env: dict[str, str],
-    extraction: str,
-    embedding: str,
-    *,
-    resumed: bool = False,
-) -> None:
-    if (
-        config.model not in MODEL_REQUEST_NAMES
-        or env["LLM_DEEP_MODEL"] != config.model
-        or env["LLM_LIGHT_MODEL"] != config.model
-        or extraction not in MODEL_REQUEST_NAMES
-        or (
-            not resumed
-            and (
-                config.embedding_model != EMBEDDING_MODEL
-                or env["OAMB_EMBEDDING_MODEL"] != config.embedding_model
-                or embedding != config.embedding_model
-                or config.embedding_dimensions != 1024
-            )
-        )
-    ):
-        raise ValueError("model bindings differ from the published reproduction model setup")
 
 
 def validate_coverage(dataset: str, histories: list[History], *, diagnostic: bool) -> None:
@@ -308,9 +310,6 @@ def precheck(config_path: Path, output: Path, env_file: Path) -> None:
         adapter = OAMAdapter(http, env["OAMB_OAM_BASE_URL"], lambda *a: None)
         capabilities = adapter.preflight()
         runtime = _runtime_config(env)
-        validate_models(
-            config, env, runtime["models"]["extraction"], runtime["models"]["embedding"]
-        )
         effective = runtime["config"]
         expected_mode = "small" if config.dataset == "lme500" else "large"
         if (
@@ -342,8 +341,7 @@ def precheck(config_path: Path, output: Path, env_file: Path) -> None:
         "bindings": {
             "oam": env["OAMB_OAM_BASE_URL"],
             "llm": env["LLM_BASE_URL"],
-            "answer": env["LLM_DEEP_MODEL"],
-            "judge": env["LLM_LIGHT_MODEL"],
+            **scoring_models(config, env),
             "tenant": env["OAMB_OAM_TENANT_ID"],
         },
     }
@@ -450,10 +448,11 @@ def evaluate_question(
     schema = ANSWER_SCHEMA if config.dataset == "beam10m" else None
     judge_schema = JUDGE_SCHEMA if config.dataset == "beam10m" else None
     prompt = _answer_prompt(question, context, config.dataset)
+    models = scoring_models(config, env)
 
     def attempt(effort: str) -> dict[str, Any]:
         content = cache.complete(
-            env["LLM_DEEP_MODEL"],
+            models["answer"],
             effort,
             prompt,
             "answer",
@@ -463,7 +462,7 @@ def evaluate_question(
         answer = answer_text(content, config.dataset)
         judgments = [
             cache.complete(
-                env["LLM_LIGHT_MODEL"],
+                models["judge"],
                 config.judge_effort,
                 text,
                 "judge",
@@ -543,7 +542,7 @@ def validate_results(
             config["dataset"], Path(plan["source"]), plan["source_sha256"], config["question_ids"]
         )
     questions = {q.question_id: q for h in histories for q in h.questions}
-    calls = set()
+    calls: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for path in (root / "model-calls").glob("*.json"):
         call = _read(path)
         if call.get("status") != 200:
@@ -551,13 +550,7 @@ def validate_results(
         try:
             content = parse_completion(call["response"])
             request = call["request"]
-            calls.add(
-                (
-                    call["stage"],
-                    canonical_sha256(request),
-                    content,
-                )
-            )
+            calls.setdefault((call["stage"], content), []).append(request)
         except (KeyError, TypeError, ValueError, IndexError):
             continue
     dataset = plan["config"]["dataset"]
@@ -621,13 +614,13 @@ def validate_results(
                     if dataset == "beam10m"
                     else None
                 )
-                payload = completion_payload(
-                    plan["bindings"][stage],
-                    stage_effort,
-                    prompt,
-                    schema,
-                )
-                if (stage, canonical_sha256(payload), content) not in calls:
+                if not any(
+                    _request_identity(request)
+                    == _request_identity(
+                        completion_payload(request["model"], stage_effort, prompt, schema)
+                    )
+                    for request in calls.get((stage, content), [])
+                ):
                     raise ValueError(
                         "saved result differs from the actual complete model input/output"
                     )
@@ -688,25 +681,11 @@ def run(root: Path, *, resume: bool) -> None:
     env = _environment(Path(plan["env_file"]))
     if plan["protocol_sha256"] != _protocol_hash():
         raise ValueError("evaluation prompts changed; use a fresh precheck scope")
-    current = {
-        "oam": env["OAMB_OAM_BASE_URL"],
-        "llm": env["LLM_BASE_URL"],
-        "answer": env["LLM_DEEP_MODEL"],
-        "judge": env["LLM_LIGHT_MODEL"],
-        "tenant": env["OAMB_OAM_TENANT_ID"],
-    }
-    if current != plan["bindings"]:
-        raise ValueError("runtime/model binding changed")
-    runtime = _runtime_config(env)
-    validate_models(
-        config,
-        env,
-        runtime["models"]["extraction"],
-        runtime["models"]["embedding"],
-        resumed=resume and (root / "started.json").exists(),
-    )
-    if runtime["models"]["extraction"] != plan["runtime"]["models"]["extraction"]:
-        raise ValueError("OAM extraction model binding changed")
+    if (
+        env["OAMB_OAM_BASE_URL"] != plan["bindings"]["oam"]
+        or env["OAMB_OAM_TENANT_ID"] != plan["bindings"]["tenant"]
+    ):
+        raise ValueError("OAM scope changed")
     histories = load_histories(
         config.dataset, Path(plan["source"]), plan["source_sha256"], config.question_ids
     )
@@ -890,10 +869,24 @@ def main() -> None:
     execute = sub.add_parser("run")
     execute.add_argument("directory", type=Path)
     execute.add_argument("--resume", action="store_true")
+    offline = execute.add_mutually_exclusive_group()
+    offline.add_argument("--export-review", type=Path)
+    offline.add_argument("--review-report", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "precheck":
             precheck(args.config, args.output, args.env_file)
+        elif args.export_review or args.review_report:
+            from oamb.workloads.oam_review import export_review, summarize_review
+
+            if args.export_review:
+                exported = export_review(args.directory, args.export_review)
+                print(f"review: exported {len(exported['cases'])} cases to {args.export_review}")
+            else:
+                report = summarize_review(args.directory, args.review_report)
+                destination = args.review_report.with_suffix(".report.json")
+                _write(destination, report, replace=True)
+                print(f"review: {report['status']}; report: {destination}")
         else:
             run(args.directory, resume=args.resume)
     except (ValueError, KeyError, OSError, httpx.HTTPError, subprocess.SubprocessError) as error:

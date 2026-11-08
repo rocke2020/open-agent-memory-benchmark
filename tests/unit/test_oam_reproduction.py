@@ -84,7 +84,10 @@ def test_reviewed_retry_is_context_bound_and_blocks_incorrect_gold():
             workflow.validate_retry_review({**review, **patch}, "red")
 
 
-def test_retry_uses_same_prompt_max_effort_and_reuses_completed_work(tmp_path):
+@pytest.mark.parametrize("answer_effort,judge_effort", [("high", "high"), ("adaptive", "none")])
+def test_retry_uses_same_prompt_max_effort_and_reuses_completed_work(
+    tmp_path, answer_effort, judge_effort
+):
     assert hasattr(workflow, "evaluate_question"), "policy retry integration is missing"
     requests = []
     contents = iter(["red", "no", "blue", "no"])
@@ -103,6 +106,8 @@ def test_retry_uses_same_prompt_max_effort_and_reuses_completed_work(tmp_path):
     config = workflow.OAMRunConfig(
         dataset="lme500",
         source="unused",
+        answer_effort=answer_effort,
+        judge_effort=judge_effort,
     )
     env = {"LLM_DEEP_MODEL": "deepseek-flash", "LLM_LIGHT_MODEL": "deepseek-flash"}
     with httpx.Client(transport=httpx.MockTransport(respond)) as http:
@@ -125,8 +130,18 @@ def test_retry_uses_same_prompt_max_effort_and_reuses_completed_work(tmp_path):
         assert final["answer"] == "blue"
         assert final["retry"]["score"] == 0
         assert requests[0]["messages"] == requests[2]["messages"]
-        assert requests[0]["reasoning_effort"] == "high"
+        if answer_effort == "adaptive":
+            assert requests[0]["thinking"] == {"type": "adaptive"}
+            assert "reasoning_effort" not in requests[0]
+        else:
+            assert requests[0]["reasoning_effort"] == "high"
         assert requests[2]["reasoning_effort"] == "max"
+        for request in (requests[1], requests[3]):
+            if judge_effort == "none":
+                assert request["thinking"] == {"type": "disabled"}
+                assert "reasoning_effort" not in request
+            else:
+                assert request["reasoning_effort"] == "high"
         assert (
             workflow.evaluate_question(tmp_path, config, env, cache, question, "red", saved=final)
             == final
@@ -190,7 +205,8 @@ def test_lower_beam_retry_becomes_policy_result_and_reports_both_passes(tmp_path
         assert summary["pending_review"] == []
 
 
-def test_unknown_paid_outcome_never_redispatches_automatically(tmp_path):
+@pytest.mark.parametrize("resumed_model", ["m", "another-provider/m"])
+def test_unknown_paid_outcome_never_redispatches_automatically(tmp_path, resumed_model):
     requests = []
 
     def timeout(request):
@@ -202,7 +218,7 @@ def test_unknown_paid_outcome_never_redispatches_automatically(tmp_path):
         with pytest.raises(httpx.ReadTimeout):
             cache.complete("m", "high", "held prompt", "answer")
         with pytest.raises(ValueError, match="unknown model call outcome"):
-            cache.complete("m", "high", "held prompt", "answer")
+            cache.complete(resumed_model, "high", "held prompt", "answer")
     assert len(requests) == 1
 
 
@@ -320,35 +336,38 @@ def test_validation_binds_structured_beam_request_and_first_pass(tmp_path, tampe
         workflow.validate_results(tmp_path, plan, histories)
 
 
-def test_reproduction_rejects_different_role_models():
-    assert hasattr(workflow, "validate_models"), "same-model reproduction gate is missing"
+@pytest.mark.parametrize("vector", [[0.1, 0.2, 0.3], [0.1, 0.2], [float("nan"), 0.2, 0.3]])
+def test_embedding_accepts_user_model_names_but_requires_a_finite_vector(vector):
     config = workflow.OAMRunConfig(
         dataset="lme500",
         source="unused",
+        embedding_model="user/embedding-model",
+        embedding_dimensions=3,
     )
-    env = {
-        "LLM_DEEP_MODEL": "deepseek-flash",
-        "LLM_LIGHT_MODEL": "another-model",
-        "OAMB_EMBEDDING_MODEL": "qwen3-embedding:0.6b",
-    }
-    with pytest.raises(ValueError, match="model"):
-        workflow.validate_models(config, env, "deepseek-flash", "qwen3-embedding:0.6b")
 
+    def respond(request):
+        assert json.loads(request.content)["model"] == "user/embedding-model"
+        # NaN cannot be serialized by HTTPX's JSON helper; model input is intentionally malformed.
+        return httpx.Response(200, content=json.dumps({"data": [{"embedding": vector}]}))
 
-def test_embedding_alias_changes_do_not_expand_the_resume_gate():
-    config = workflow.OAMRunConfig(
-        dataset="lme500",
-        source="unused",
-    )
-    env = {
-        "LLM_DEEP_MODEL": "deepseek-flash",
-        "LLM_LIGHT_MODEL": "deepseek-flash",
-        "OAMB_EMBEDDING_MODEL": "new-request-alias",
-    }
-    workflow.validate_models(config, env, "deepseek-flash", "new-runtime-alias", resumed=True)
-    workflow.validate_embedding_resume(
-        {"model": "new-request-alias", "dimensions": 1024},
-        {"model": "old-alias", "dimensions": 1024},
-    )
-    with pytest.raises(ValueError, match="model"):
-        workflow.validate_models(config, env, "deepseek-flash", "new-runtime-alias")
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        if len(vector) != 3 or any(value != value for value in vector):
+            with pytest.raises(ValueError, match="finite vector"):
+                workflow._embedding_probe(
+                    http,
+                    {
+                        "OAMB_EMBEDDING_BASE_URL": "http://embedding/v1",
+                        "OAMB_EMBEDDING_MODEL": "different-environment-name",
+                    },
+                    config,
+                )
+        else:
+            result = workflow._embedding_probe(
+                http,
+                {
+                    "OAMB_EMBEDDING_BASE_URL": "http://embedding/v1",
+                    "OAMB_EMBEDDING_MODEL": "different-environment-name",
+                },
+                config,
+            )
+            assert result == {"model": "user/embedding-model", "dimensions": 3}

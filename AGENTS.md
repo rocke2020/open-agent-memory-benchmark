@@ -32,13 +32,14 @@ Keep secrets and machine-local endpoints in private environment files. Native se
 
 ## Evaluation behavior
 
-- Use the published `deepseek-v4.1-flash` model for native extraction, answering and judging; gateway aliases must resolve to that model. Extraction uses low reasoning, initial answers and judges use high reasoning, and an eligible policy retry uses max reasoning for its answer.
-- Native embedding uses `qwen3-embedding:0.6b` with 1,024-dimensional vectors. Record tokenizer or embedding changes because they can affect chunking and results. On resume, verify one finite vector with the recorded dimension; do not add endpoint-ownership or embedding-migration audits.
+- Model names and defaults belong in the selected configuration and run evidence; model/provider choice and result comparability belong to the operator. Published profiles use low extraction reasoning, high initial answer/judge reasoning and max reasoning for an eligible answer retry. Scoring supports `none`/`low`/`high`/`max`/`adaptive`; preserve the selected profile and record resolved roles. Native adaptive thinking and the reviewed max-retry policy are separate behaviors.
+- Embedding model and dimensions come from the selected configuration. Record tokenizer or embedding changes because they can affect chunking and results. On resume, verify one finite vector with the recorded dimension; do not add endpoint-ownership or embedding-migration audits.
 - Preserve chronological source order, roles, timestamps, original questions, golds and rubrics. Wait for complete extraction and query readiness before evaluating that history. Partial extraction is not successful ingestion even when the operation status is `succeeded`.
 - LME uses fast recall with the shared `small` index; BEAM uses normal recall with `large` per-owner indexes. Both disable Insights, Profile and planning. Provision BEAM's owner index before retrieval.
 - Retrieval is non-generative. Query embedding is allowed; query rewriting, reflection, generative reranking and other generative memory-query operations are prohibited. Preserve provider-returned retrieval order; OAMB adds no reranker.
 - Save first-pass answers and judgments before retries. A failed question may receive one source/context/gold-reviewed answer retry on the same prompt, context and model. Incorrect gold blocks retry. The completed retry becomes policy-final even when its score is lower; keep first-pass and policy-final results separately.
 - Resume reuses accepted ingestion receipts and completed model/question results and runs unfinished work. Preserve failed and ambiguous attempts; do not silently redispatch a model call with an unknown outcome or operate the same run directory concurrently.
+- Treat model names as opaque user configuration. Do not normalize aliases, infer equivalence, enforce model-name agreement or block resume on names/endpoint/key changes. Pass chosen strings unchanged and record provenance; the operator decides comparability. Preserve completed work and unknown-outcome guards using stage and non-model request settings.
 - Keep accuracy, context tokens, indexing tokens, retrieval latency and indexing time separate. BEAM mean rubric score differs from the fraction of questions meeting its threshold. Missing measurements remain unavailable. Attribute indexing usage to the physical history, not every question sharing it.
 
 ## Codes Architecture
@@ -49,6 +50,7 @@ The native execution path is `precheck.sh` / `run.sh` → `oam_workflow.py` → 
 | --- | --- |
 | `src/oamb/oam_workflow.py` | Native precheck, chronological execution, checkpoints, retry integration, validation and HTML/JSON results |
 | `src/oamb/workloads/` | Dataset loading, published prompt templates, model request formats, scoring and retry-review rules |
+| `src/oamb/workloads/model_parameters.py`, `context_noise.py`, `oam_review.py` | Migrated reasoning adaptation and offline source/span review; no dependency on the private OAM evaluation checkout |
 | `src/oamb/memory_systems/` | Provider adapters; `oam.py` owns native OAM HTTP operations and request packing |
 | `src/oamb/model_clients/` | Comparison model transports; optional clients load only when selected |
 | `src/oamb/runtime/` | Comparison execution, attempts, readiness, resume and lifecycle |

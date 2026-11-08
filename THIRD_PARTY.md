@@ -21,6 +21,7 @@ Transitive dependency details and exact versions are frozen in `uv.lock`.
 | LongMemEval prompt excerpts | Attributed judge PromptPack templates | MIT | Embedded runtime PromptPack data |
 | Mem0-origin BEAM prompt excerpts | Recorded AMB answer and nugget-judge variants | Apache-2.0 upstream; [provenance](prompt-packs/README.md#native-oam-campaign-prompts) | Embedded native OAM prompt templates and [license](prompt-packs/LICENSE.Mem0) |
 | Mem0 extraction parser excerpts | Regression fixture for pinned native ingestion | Apache-2.0 | Test-only excerpt and [license](provider-services/tests/fixtures/LICENSE.Mem0) |
+| OAM private-evaluator helpers | Reasoning request adaptation and offline context-noise accounting/tests | MIT, copyright 2026 Rocke Dong | Adapted into native evaluation; [retained license](src/oamb/workloads/LICENSE.OAM-eval) |
 
 The packaged AMB historical view contains only factual identifiers,
 categories, verdicts, measurements, aggregates, and immutable producer/source

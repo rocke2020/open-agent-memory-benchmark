@@ -38,7 +38,7 @@ usage() {
   cat <<'EOF'
 Usage: ./run.sh [--smoke_test | --full_test] [--resume] [--dry-run]
        ./run.sh --generate-report --result-dir=DIR
-       ./run.sh --oam DIR [--resume]
+       ./run.sh --oam DIR [--resume | --export-review PATH | --review-report PATH]
 
 --smoke_test  Run one LME-60 question on every provider (default).
 --full_test   Run all 60 questions on every provider in parallel.

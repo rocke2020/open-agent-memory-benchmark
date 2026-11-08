@@ -6,9 +6,8 @@ import hashlib
 import json
 from typing import Any
 
-PUBLISHED_MODEL = "deepseek-v4.1-flash"
-MODEL_REQUEST_NAMES = frozenset({PUBLISHED_MODEL, "deepseek-flash", "deepseek/deepseek-flash"})
-EMBEDDING_MODEL = "qwen3-embedding:0.6b"
+from oamb.workloads.model_parameters import model_request_parameters
+
 ANSWER_SCHEMA = {
     "type": "object",
     "properties": {
@@ -40,7 +39,7 @@ def completion_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
-        "reasoning_effort": effort,
+        **model_request_parameters(model, effort, thinking="enabled" if schema else None),
         "messages": [{"role": "user", "content": prompt}],
     }
     if schema is None:
@@ -53,7 +52,7 @@ def completion_payload(
                 "content": "Return only a JSON object matching this schema: " + json.dumps(schema),
             },
         )
-        payload.update(thinking={"type": "enabled"}, response_format={"type": "json_object"})
+        payload["response_format"] = {"type": "json_object"}
     return payload
 
 

@@ -259,27 +259,39 @@ def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mu
         assert validate_results(tmp_path, plan, histories)[0]["score"] == 1.0
 
 
-def test_native_evaluation_and_resume_without_spending_or_sql_audits(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "scoring",
+    [
+        {},
+        {"answer_model": "minimax-m3.1-flash", "answer_effort": "adaptive"},
+        {"judge_model": "fixture-judge", "judge_effort": "none"},
+    ],
+)
+def test_native_evaluation_and_resume_without_spending_or_sql_audits(
+    tmp_path, monkeypatch, scoring
+):
     from oamb import oam_workflow as workflow
 
     source = tmp_path / "input.json"
     source.write_bytes(Path("tests/fixtures/oam/lme500-smoke.json").read_bytes())
     config_path = tmp_path / "config.yml"
     config_path.write_text(f"dataset: lme500\nsource: {source}\ndiagnostic: true\n")
+    with config_path.open("a") as stream:
+        stream.write("".join(f"{key}: {value}\n" for key, value in scoring.items()))
     env = {
         "OAMB_OAM_BASE_URL": "http://oam",
         "LLM_BASE_URL": "http://model/v1",
         "LLM_API_KEY": "key",
         "OAMB_OAM_ROOT_KEY": "root-key",
-        "LLM_DEEP_MODEL": "deepseek-flash",
-        "LLM_LIGHT_MODEL": "deepseek-flash",
+        "LLM_DEEP_MODEL": "provider/user-selected-answer",
+        "LLM_LIGHT_MODEL": "user-selected-extractor-and-judge",
         "OAMB_OAM_TENANT_ID": "benchmark",
         "OAMB_EMBEDDING_BASE_URL": "http://model/v1",
-        "OAMB_EMBEDDING_MODEL": "qwen3-embedding:0.6b",
+        "OAMB_EMBEDDING_MODEL": "provider/user-selected-embedding",
     }
-    runtime = {
+    runtime: dict[str, Any] = {
         "config_sha256": "cfg",
-        "models": {"extraction": "deepseek-flash", "embedding": "qwen3-embedding:0.6b"},
+        "models": {"extraction": "runtime-extractor-name", "embedding": "runtime-embedding-name"},
         "config": {
             "database": {"vector_index_mode": "small"},
             "index": {
@@ -365,7 +377,11 @@ def test_native_evaluation_and_resume_without_spending_or_sql_audits(tmp_path, m
     workflow.precheck(config_path, output, tmp_path / "unused.env")
     plan = json.loads((output / "plan.json").read_text())
     assert plan["question_ids"] == ["oam-smoke-lme"]
+    assert plan["bindings"]["answer"] == scoring.get("answer_model", env["LLM_DEEP_MODEL"])
+    assert plan["bindings"]["judge"] == scoring.get("judge_model", env["LLM_LIGHT_MODEL"])
     assert plan["runtime"]["config"]["index"]["generation_token_budget"] is None
+    env["LLM_DEEP_MODEL"] = "minimax-operator-answer"
+    env["LLM_LIGHT_MODEL"] = "minimax-operator-judge"
     workflow.run(output, resume=False)
     summary = json.loads((output / "summary.json").read_text())
     assert summary["first_pass_mean_score"] == summary["policy_final_mean_score"] == 1.0
@@ -375,6 +391,19 @@ def test_native_evaluation_and_resume_without_spending_or_sql_audits(tmp_path, m
     before = list(calls)
     workflow.run(output, resume=True)
     assert calls == before
+    env["LLM_DEEP_MODEL"] = "operator-chosen-answer"
+    env["LLM_LIGHT_MODEL"] = "operator-chosen-extraction-and-judge"
+    env["LLM_BASE_URL"] = "http://another-provider/v1"
+    env["LLM_API_KEY"] = "rotated-key"
+    runtime["models"]["extraction"] = "operator-chosen-extractor"
+    workflow.run(output, resume=True)
+    assert calls == before
+    plan["config"]["judge_model"] = "changed-judge"
+    (output / "plan.json").write_text(json.dumps(plan))
+    workflow.run(output, resume=True)
+    assert calls == before
+    plan["config"]["judge_model"] = scoring.get("judge_model")
+    (output / "plan.json").write_text(json.dumps(plan))
     source.write_text("[]")
     with pytest.raises(ValueError, match="checksum"):
         workflow.run(output, resume=True)
