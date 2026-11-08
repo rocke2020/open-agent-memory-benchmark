@@ -1,4 +1,4 @@
-# Open Agent Memory v0.0.1 — LME-500
+# Open Agent Memory (OAM) v0.0.1 — LME-500
 
 ## Overview
 
@@ -6,7 +6,7 @@ Open the [interactive offline report](report.html) to browse all 500 questions, 
 
 **OAM achieves 94.0% accuracy (470/500)** on the 500 distinct questions in LongMemEval cleaned S, using the historical campaign's recorded single-retry policy. This report reuses the completed `lme-v261026` results and failure reviews. No ingestion, retrieval, answer generation, judging, or model-based review is rerun for this addition.
 
-This is a historical evaluation of OAM v0.0.1 development snapshots, consolidated from six cohorts. It provides a useful performance reference without paying to repeat the campaign. It is not a fresh test of the current checkout or a newly matched comparison against another provider.
+This completed LME-500 evaluation covers OAM v0.0.1 development snapshots. Each question contributes one policy-final outcome. It is a historical performance reference, not a fresh test of the current checkout or a newly matched comparison against another provider.
 
 After this campaign, OAM added shared and dedicated approximate-nearest-neighbor index policies for large collections. The saved LME-500 scores were not rerun against that change; its effect on these results is unmeasured. The separate [BEAM-10M report](../beam10m/README.md) covers long histories under its own recorded configuration.
 
@@ -15,11 +15,11 @@ After this campaign, OAM added shared and dedicated approximate-nearest-neighbor
 | Metric | Recorded result | Meaning |
 | --- | ---: | --- |
 | Answer accuracy | **94.0% (470/500)** | Final official outcomes under the recorded retry policy; all 30 remaining failures stay in the denominator. |
-| Question coverage | **500 unique IDs** | Six cohort selections cover the complete pinned cleaned-S dataset. Nine shared LME-12/LME-42 IDs are counted once. |
-| Indexing generation tokens | **618,864,325** | Selected-history input plus output tokens; excludes embeddings and is not total campaign billing. |
+| Question coverage | **500 unique IDs** | Complete coverage of the pinned cleaned-S dataset, with each question counted once. |
+| Indexing generation tokens | **618,864,325** total; **1,237,729** mean per question | Selected-history input plus output tokens; excludes embeddings and is not total campaign billing. |
 | Answer-visible context tokens | **6,201,308** total; **12,402.62** mean | Exact saved answer-context counts using tiktoken 0.14.0, `o200k_base.encode_ordinary`; context size is separate from billed usage. |
-| Mean retrieval latency | **Approximately 748.25 ms** | Weighted from reported cohort raw means with three samples per question; descriptive across different runtime conditions. |
-| Full-campaign indexing duration | Unavailable | Resumed histories lack some original timing measurements; overlapping per-history durations cannot supply campaign wall time. |
+| Mean retrieval latency | **Approximately 748.25 ms** | Weighted from reported raw means with three samples per question; descriptive across different runtime conditions. |
+| Full-campaign indexing duration | Unavailable | No complete wall-clock measurement is available; overlapping per-history durations cannot supply it. |
 | Total campaign cost | Unknown | Failed/abandoned scopes, uncertain external outcomes, evaluation overhead, and other usage are not completely captured. |
 
 The saved accuracy is an outcome of the complete memory → answer → judge pipeline. Context size, indexing generation tokens, retrieval latency, and monetary cost measure different things and must not be combined into one score. Reasoning usage is already included in output tokens.
@@ -32,12 +32,12 @@ The saved accuracy is an outcome of the complete memory → answer → judge pip
 | Dataset revision | `98d7416c24c778c2fee6e6f3006e7a073259d48f` |
 | Dataset SHA-256 | `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` |
 | OAM indexing and retrieval | Phase-one indexing; fast recall; L2 Insights and Profile disabled. |
-| Models | DeepSeek Flash for extraction, answering, and judging; actual endpoint/configuration changes remain in the source cohort reports. |
+| Models | DeepSeek Flash for extraction, answering, and judging. |
 | Embedding and tokenization | Qwen3 embedding with a 32K-token input limit; OAM used its approximate tokenizer during the evaluation. |
 | Reasoning | Extraction low; original answer high; eligible single answer retry max; judge high. |
 | Retry policy | A reviewed eligible failure may receive one max-effort answer on the unchanged original context and standard prompt, followed by high-effort judging. Clearly incorrect gold blocks retry; the official denominator remains unchanged. |
 
-The v0.0.1 label identifies the development version, not one immutable release across every cohort. For example, the first LME-120 records product revision `1d8554b3e9fcaf8b169b7c542146dfd6e074f361`, whose [package metadata](https://github.com/rocke2020/open-agent-memory/blob/1d8554b3e9fcaf8b169b7c542146dfd6e074f361/pyproject.toml) declares version `0.0.1`. Preserve each cohort's runtime identity when using its results.
+The OAM v0.0.1 label identifies the evaluated development version. Saved runtime revisions and protocol settings are recorded in the [manifest](manifest.json); unavailable revisions remain null.
 
 <details>
 <summary>Supplementary: original-answer accuracy and model limitations</summary>
@@ -48,9 +48,24 @@ DeepSeek Flash's answer capability is a relevant limitation when interpreting th
 
 </details>
 
+## Reference comparison
+
+The [referenced Agent Memory Benchmark report](https://github.com/rocke2020/agent-memory-benchmark/blob/b6eac3dbd41de03fb6ac31486b342f4d1b556dde/README.md) provides two Hindsight results. The saved local DeepSeek reproduction covers the same 500 distinct question IDs as OAM.
+
+| Pipeline and outcome | Score | Recorded model roles and policy |
+| --- | ---: | --- |
+| OAM, first pass | **453/500 (90.6%)** | DeepSeek Flash; high-effort answer and judge. |
+| OAM, policy final | **470/500 (94.0%)** | Includes one eligible max-effort answer retry, followed by high-effort judging. |
+| Hindsight, official published result | 473/500 (94.6%) | Reference reports Gemini extraction, answer and judge roles. |
+| Hindsight, DeepSeek reproduction | 448/500 (89.6%) | Reference reports Flash extraction and judge with Pro answers on Hindsight API 0.4.17. |
+
+These are descriptive whole-pipeline outcomes. Providers, versions, models, contexts and retry policies differ; the scores do not isolate memory-system or model effects or establish a matched performance win. The same question IDs alone do not establish identical dataset bytes, prompts or generation settings.
+
+Token accounting also differs. The Hindsight [token-accounting analysis](https://github.com/rocke2020/agent-memory-benchmark/blob/b6eac3dbd41de03fb6ac31486b342f4d1b556dde/docs/hindsight_eval/longmemeval/20260-0822/model-token-summary.md) combines extraction, answer and judge usage, while OAM's indexing subtotal excludes evaluation calls. Its displayed context size uses `cl100k_base` on a formatted recall view that differs from the serialized answer input; OAM counts its saved answer-visible context with `o200k_base`. These figures do not support a direct token ratio.
+
 ## Answer-model failures supported by the saved reviews
 
-The following examples come from the existing [consolidated failure review](https://github.com/rocke2020/agent-memories/blob/54c3b12c3a9154d37e91ae95cb85b68335f222e1/eval/lme/lme-v261026/lme500-failure-review.md). They demonstrate that some judged failures arise in evidence use or answer interpretation even when the necessary source material reached the answer model.
+The local [failure review](lme500-failure-review.md) gives detailed attribution for all 30 policy-final failures and supplementary recovered-answer analyses. The following examples demonstrate that some judged failures arise in evidence use or answer interpretation even when the necessary source material reached the answer model.
 
 | Case | Evidence available to the answer | Observed answer issue |
 | --- | --- | --- |
@@ -60,25 +75,15 @@ The following examples come from the existing [consolidated failure review](http
 
 These findings coexist with OAM context-selection weaknesses, including unrelated and repetitive material. Evidence presence does not establish optimal retrieval or prove that context noise had no effect. Other reviewed failures involve ambiguous or incorrect gold answers; the original official scores remain unchanged. No exclusive cause or count of all answer-model failures is inferred from these examples.
 
-## Cohort reconciliation and source
+## Source
 
-| Disjoint contribution | Questions | Final correct | Indexing generation tokens | Answer-context tokens |
-| --- | ---: | ---: | ---: | ---: |
-| Original pilot IDs outside LME-42 | 3 | 3 | 3,474,809 | 39,153 |
-| LME-42, including nine reused pilot IDs | 42 | 40 | 52,497,277 | 521,504 |
-| First LME-120 | 120 | 112 | 147,953,673 | 1,494,986 |
-| LME-5 | 5 | 4 | 6,358,416 | 57,868 |
-| Next LME-120 | 120 | 113 | 147,985,495 | 1,471,023 |
-| Final LME-210 | 210 | 198 | 260,594,655 | 2,616,774 |
-| **Total** | **500** | **470** | **618,864,325** | **6,201,308** |
+This README incorporates the aggregate results and interpretation from the [source LME-500 summary](https://github.com/rocke2020/agent-memories/blob/c62006748ec7a1a10ced6bedd811d27227274861/eval/lme/lme-v261026/lme500-summary.md), with the [detailed failure review](lme500-failure-review.md) kept alongside it. Both source documents are pinned to repository revision `c62006748ec7a1a10ced6bedd811d27227274861` and retain the [source MIT notice](../../src/oamb/workloads/LICENSE.OAM-eval). OAMB reuses saved measurements and evidence; this documentation update makes no evaluation or model calls.
 
-The authoritative source is the [LME-500 summary](https://github.com/rocke2020/agent-memories/blob/54c3b12c3a9154d37e91ae95cb85b68335f222e1/eval/lme/lme-v261026/lme500-summary.md) and its linked cohort reports, selections, and consolidated failure review, pinned here to source repository revision `54c3b12c3a9154d37e91ae95cb85b68335f222e1`. OAMB reuses the reported measurements and reconciles selection coverage and aggregate arithmetic offline; it does not independently rescore raw answers or reconstruct complete billing.
-
-Full-500 source-reviewed context-noise coverage is unavailable, so this report presents no aggregate noise percentage. The historical OAM result is separate from both the three-provider LME-60 comparison and new runs through the [native OAM workflow](../../docs/native-oam.md). It is not a native OAMB execution capsule or a controlled provider-performance win.
+Context-noise assessments used a mix of source-assisted reviews and context-only approximations, with incomplete coverage. Full-500 source-reviewed context-noise coverage is unavailable, so this report presents no aggregate noise percentage. The historical OAM result is separate from both the three-provider LME-60 comparison and new runs through the [native OAM workflow](../../docs/native-oam.md). It is not a native OAMB execution capsule or a controlled provider-performance win.
 
 ## Public per-question evidence
 
-The [manifest](manifest.json) lists six compressed `oam/*.json.gz` shards covering all 500 distinct question IDs. They contain the original question and gold answer, the exact saved answer-visible context and its SHA-256, recorded context tokens and retrieval time, first-pass answer/judge messages and outputs, any recorded max-effort retry, and the policy-final answer and score. The three pilot-only questions and the LME-42 contribution are disjoint; the nine reused pilot IDs are counted only in LME-42.
+The [manifest](manifest.json) lists compressed `oam/*.json.gz` shards covering all 500 distinct question IDs. They contain the original question and gold answer, the exact saved answer-visible context and its SHA-256, recorded context tokens and retrieval time, first-pass answer/judge messages and outputs, any recorded max-effort retry, and the policy-final answer and score.
 
 `first_pass` and `retry` preserve both attempts. `policy_final_attempt` selects the retry whenever one was recorded, including any lower-scoring outcome; `answer`, `score` and `correct` expose that selected result. The saved LME judge output is a yes/no verdict, so no richer judging explanation is invented. Supplier usage included in an attempt is that receipt's measurement, not complete campaign billing.
 
