@@ -1045,7 +1045,11 @@ def test_fake_execution_rejects_a_parent_referenced_unknown_attempt_stage(
         output_root=tmp_path / "capsules",
         run_id="fake-unknown-attempt-stage",
     )
-    case_path = next((completed.capsule_root / "source" / "cases").glob("*.json"))
+    case_path = next(
+        path
+        for path in (completed.capsule_root / "source" / "cases").glob("*.json")
+        if json.loads(path.read_bytes())["attempt_ids"]
+    )
     case_document = json.loads(case_path.read_bytes())
     original_attempt = next(
         json.loads(path.read_bytes())

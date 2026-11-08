@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-agent-memory-benchmark"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-first reproducible benchmark for self-hosted agent-memory systems"
 readme = "README.md"
 requires-python = ">=3.11"

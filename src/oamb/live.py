@@ -212,7 +212,7 @@ def load_live_environment(
     environment["OAMB_EMBEDDING_MODEL"] = _model_plan(plan, "embedding").model
     environment["OAMB_EMBEDDING_BASE_URL"] = plan.embedding_endpoint.effective_endpoint
     if environment.get(_LLM_URL_TYPE_VARIABLE) != _SUPPORTED_LLM_URL_TYPE:
-        raise LiveConfigurationError("LLM_URL_TYPE must be openai_chat in OAMB v0.1.0")
+        raise LiveConfigurationError("LLM_URL_TYPE must be openai_chat")
     aliases = {
         "OAMB_HINDSIGHT_LLM_BASE_URL": "LLM_BASE_URL",
         "OAMB_HINDSIGHT_LLM_API_KEY": "LLM_API_KEY",
