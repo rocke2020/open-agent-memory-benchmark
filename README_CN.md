@@ -46,7 +46,7 @@ OAMB 首先面向 **OAM v0.0.1**，同时保留以下对比提供方版本和源
 
 | 提供方 | 发布版本 | 源码提交 |
 |---|---|---|
-| Open Agent Memory（OAM） | **0.0.1 开发快照** | `32f97cca5c5c1fd2546ed0364d2279063afc81b6` |
+| Open Agent Memory（OAM） | **0.0.1 开发快照** | `8c5c0c6a4b94b81c725263bbf682dabaac6e0877` |
 | Hindsight | [0.9.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.9.2) | [`ebad478240d3171bb88201ececda5e8d9883d22d`](https://github.com/vectorize-io/hindsight/commit/ebad478240d3171bb88201ececda5e8d9883d22d) |
 | Mem0 | [2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19) | [`dc82354e143c2581d505d581a00286d6ef8c3605`](https://github.com/mem0ai/mem0/commit/dc82354e143c2581d505d581a00286d6ef8c3605) |
 | OpenViking | [0.4.19](https://github.com/volcengine/OpenViking/releases/tag/v0.4.19) | [`f3afef11637f2d7c11e4b1f36ed2f90630737cdc`](https://github.com/volcengine/OpenViking/commit/f3afef11637f2d7c11e4b1f36ed2f90630737cdc) |
@@ -58,8 +58,8 @@ OAMB 首先面向 **OAM v0.0.1**，同时保留以下对比提供方版本和源
 从包含记录提交的 OAM 检出目录构建 v0.0.1 开发镜像：
 
 ```bash
-./provider-services/oam/build-image.sh /path/to/open-agent-memory 32f97cca5c5c1fd2546ed0364d2279063afc81b6
-docker run --rm oamb/oam:0.0.1-32f97cca5c5c --version
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 8c5c0c6a4b94b81c725263bbf682dabaac6e0877
+docker run --rm oamb/oam:0.0.1-8c5c0c6a4b94 --version
 ```
 
 构建使用已提交源码和 OAM 锁文件，不包含本地未提交文件。生成的本地镜像是开发快照，并非正式发布镜像。可用的 OAM 部署还需要隔离的 PostgreSQL 数据库、相应凭据和已配置的模型服务。参见[原生 OAM 设置与执行指南](docs/native-oam.md)，准备隔离的 PostgreSQL/API/worker，并了解输入与模型绑定检查、检查点和续跑。

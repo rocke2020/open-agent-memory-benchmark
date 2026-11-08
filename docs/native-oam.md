@@ -21,7 +21,7 @@ Install the locked dependencies and build the development image from committed O
 
 ```bash
 uv sync --locked --all-groups
-./provider-services/oam/build-image.sh /path/to/open-agent-memory 32f97cca5c5c1fd2546ed0364d2279063afc81b6
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 8c5c0c6a4b94b81c725263bbf682dabaac6e0877
 cp .env.oam.example .env.oam
 chmod 600 .env.oam
 ```
@@ -41,7 +41,7 @@ Use a fresh output directory and Compose project name. The setup helper rejects 
 ```bash
 uv run --locked python provider-services/oam/start.py \
   --dataset lme500 --env-file .env.oam \
-  --image oamb/oam:0.0.1-32f97cca5c5c \
+  --image oamb/oam:0.0.1-8c5c0c6a4b94 \
   --project oamb-native-lme-example \
   --output outputs/oam-services/lme-example
 

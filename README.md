@@ -46,7 +46,7 @@ OAMB targets **OAM v0.0.1** first, alongside these comparison-provider releases 
 
 | Provider | Release | Source commit |
 |---|---|---|
-| Open Agent Memory (OAM) | **0.0.1 development snapshot** | `32f97cca5c5c1fd2546ed0364d2279063afc81b6` |
+| Open Agent Memory (OAM) | **0.0.1 development snapshot** | `8c5c0c6a4b94b81c725263bbf682dabaac6e0877` |
 | Hindsight | [0.9.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.9.2) | [`ebad478240d3171bb88201ececda5e8d9883d22d`](https://github.com/vectorize-io/hindsight/commit/ebad478240d3171bb88201ececda5e8d9883d22d) |
 | Mem0 | [2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19) | [`dc82354e143c2581d505d581a00286d6ef8c3605`](https://github.com/mem0ai/mem0/commit/dc82354e143c2581d505d581a00286d6ef8c3605) |
 | OpenViking | [0.4.19](https://github.com/volcengine/OpenViking/releases/tag/v0.4.19) | [`f3afef11637f2d7c11e4b1f36ed2f90630737cdc`](https://github.com/volcengine/OpenViking/commit/f3afef11637f2d7c11e4b1f36ed2f90630737cdc) |
@@ -58,8 +58,8 @@ OAMB targets **OAM v0.0.1** first, alongside these comparison-provider releases 
 Build the OAM v0.0.1 development image from a checkout containing the recorded commit:
 
 ```bash
-./provider-services/oam/build-image.sh /path/to/open-agent-memory 32f97cca5c5c1fd2546ed0364d2279063afc81b6
-docker run --rm oamb/oam:0.0.1-32f97cca5c5c --version
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 8c5c0c6a4b94b81c725263bbf682dabaac6e0877
+docker run --rm oamb/oam:0.0.1-8c5c0c6a4b94 --version
 ```
 
 The build uses committed source and the OAM lockfile, excluding local uncommitted files. The resulting local image is a development snapshot, not the published release image. A working OAM deployment still requires an isolated PostgreSQL database, appropriate credentials and configured model services. Use the [native OAM setup and execution guide](docs/native-oam.md) for isolated PostgreSQL/API/worker preparation, input and model binding checks, checkpoints and resume.
@@ -215,6 +215,12 @@ jq -r '
 Every run prints `run: log=<path>` and saves terminal output under `outputs/tmp/`. Follow it with `tail -f <path>`. Full-run progress comes from saved `results/{hindsight,mem0,openviking}.json`; resume counts include earlier completed questions.
 
 See the [Investigations](docs/investigations/README.md) for observed provider behavior and failures.
+
+[Hindsight implementation comparison](docs/investigations/hindsight-implementation-comparison.md) compares the pinned OAMB LME-60 REST path with the reference AMB implementation, including recall levels, token limits and evidence boundaries.
+
+[Mem0 evaluation and temporal inputs](docs/investigations/mem0-longmemeval-evaluation-and-temporal-parity.md) compares the saved LME-60 OSS result with managed Mem0 evaluation and explains the historical-timestamp adaptation.
+
+[OpenViking evaluation comparison](docs/investigations/openviking-longmemeval-evaluation-comparison-and-design.md) compares the OAMB LME-60 path with the pinned official self-evaluation, including prompts, retrieval and result coverage.
 
 ## Acknowledgments
 
