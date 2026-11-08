@@ -1,5 +1,7 @@
 # OAMB provider API services
 
+OAMB's primary task is native OAM evaluation on full LME-500 and BEAM-10M. Follow the [native OAM guide](../docs/native-oam.md) for its image build, isolated PostgreSQL/API/worker setup and evaluation commands. The comparison-service bundle described below serves the secondary Hindsight, Mem0 and OpenViking LME-60 workflow; it does not prepare OAM.
+
 This bundle prepares exact-pinned local REST services for the Open Agent Memory
 Benchmark (OAMB). It does not run LongMemEval, prove provider workload support,
 or prove generation-free retrieval; those require the benchmark runner, runtime

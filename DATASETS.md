@@ -2,7 +2,9 @@
 
 Full downloaded benchmark payloads stay under ignored `datasets/`. Repository scripts fetch frozen LongMemEval S and BEAM-10M inputs and reject bytes that do not match their pinned SHA-256 values. Versioned release evidence under `eval_results/` may include selected question content needed to audit a report when the upstream license permits redistribution.
 
-The provider comparison uses the balanced LME-60 selection from LongMemEval S: ten questions from each of six types, with the same ordered 60-question manifest for every provider. Native OAM evaluates full LME-500 and BEAM-10M.
+**Native OAM evaluates full LME-500 and BEAM-10M. This is OAMB's primary task.** Use the [native OAM guide](docs/native-oam.md) to prepare and run these evaluations.
+
+The secondary task is the separate Hindsight, Mem0 and OpenViking provider comparison using the balanced LME-60 selection from LongMemEval S: ten questions from each of six types, with the same ordered 60-question manifest for every provider. See the [LME-60 comparison workflow](README.md#quick-start-lme-60-comparison).
 
 OAMB does not treat benchmark data as project-owned source code. Every dataset binding must identify its authoritative source, exact revision, file hashes, license, redistribution policy, and any required local download procedure.
 

@@ -1,10 +1,10 @@
 # Open Agent Memory Benchmark
 
+English | [简体中文](README_CN.md) | [日本語](README_JA.md)
+
 ## Overview
 
-Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for Open Agent Memory (OAM). OAM implements the memory system; OAMB owns dataset preparation, evaluation procedures, execution and reporting. Hindsight, Mem0 and OpenViking are comparison systems.
-
-The goal is for another engineer to evaluate OAM on LME-500 and BEAM-10M using the published procedure and the same models, obtaining scores close to the published results. Exact scores can vary with model outputs and OAM revisions. Record the evaluated OAM revision and configuration changes while preserving the dataset, prompts, reasoning efforts, recall modes, judging and retry rules.
+Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for Open Agent Memory (OAM), with a publicly documented workflow for LME-500 and BEAM-10M. It covers dataset preparation, execution and reporting, with separate comparisons against Hindsight, Mem0 and OpenViking.
 
 The saved OAM v0.0.1 development evaluations cover [LongMemEval's 500 questions](eval_results/lme500/README.md) and [BEAM-10M's 10 conversations and 200 questions](eval_results/beam10m/README.md). LME-500 achieved **94.0% (470/500)**; BEAM-10M's policy-final mean rubric score was **61.56%**, with **142/200** questions meeting the 0.5 threshold. These reports reuse completed campaigns and require no setup or new evaluation calls.
 
@@ -14,7 +14,7 @@ Browse the saved questions, answers, judgments and full injected contexts in the
 
 The [native OAM workflows](docs/native-oam.md) provide LME-500 and BEAM-10M execution through `./precheck.sh --oam` and `./run.sh --oam`. This repository includes pinned dataset download/export scripts, the recorded answer and judge prompts, configurable answer/judge models, and the reviewed single max-effort answer-retry procedure. Reports preserve first-pass and policy-final scores separately. Small diagnostics verify execution; full-dataset score parity remains a separate quality measurement.
 
-The separate comparison profile uses the native REST APIs of Hindsight, Mem0 and OpenViking on the same balanced selection of 60 LongMemEval questions: ten questions from each of six question types, producing 180 provider-specific results.
+Native OAM evaluation on full LME-500 and BEAM-10M is OAMB's primary task. The secondary comparison profile uses the native REST APIs of Hindsight, Mem0 and OpenViking on the same balanced selection of 60 LongMemEval questions: ten questions from each of six question types, producing 180 provider-specific results.
 
 The offline report presents five metrics separately:
 
@@ -30,9 +30,9 @@ OAMB fixes questions, model roles, answer/judge policy, and comparison settings 
 
 | Dataset | Evaluation coverage | Execution workflow | Scoring |
 |---|---|---|---|
-| LongMemEval S, balanced LME-60 | 60 questions: ten from each of six question types | Hindsight, Mem0, and OpenViking REST comparison; 180 provider-specific results | Category-specific correctness judgments |
 | LongMemEval S, full LME-500 | 500 questions | Native OAM with [the LME-500 configuration](configs/oam-lme500.yml) | Category-specific correctness judgments |
 | BEAM-10M | 10 complete conversations, 200 questions across ten categories | Native OAM with [the BEAM-10M configuration](configs/oam-beam10m.yml) | Mean rubric-item score per question, then an equally weighted mean across questions |
+| LongMemEval S, balanced LME-60 | 60 questions: ten from each of six question types | Secondary Hindsight, Mem0, and OpenViking REST comparison; 180 provider-specific results | Category-specific correctness judgments |
 
 BEAM covers abstention, contradiction resolution, event ordering, information extraction, instruction following, knowledge updates, multi-session reasoning, preference following, summarization, and temporal reasoning. Its mean rubric score is separate from the fraction of questions scoring at least 0.5.
 
@@ -100,7 +100,7 @@ For failed first-pass questions, complete the generated `retry-eligibility.json`
 
 ## Quick start: LME-60 comparison
 
-The commands below start a separate native provider comparison. They are unnecessary for reading the saved [LME-500](eval_results/lme500/README.md) and [BEAM-10M](eval_results/beam10m/README.md) evaluations.
+The commands below start the secondary provider comparison. For the primary full-dataset OAM task, use the [native evaluation workflow above](#evaluate-oam-on-lme-500-and-beam-10m). Reading the saved [LME-500](eval_results/lme500/README.md) and [BEAM-10M](eval_results/beam10m/README.md) evaluations requires no setup.
 
 You need Git, Python 3.11+, `uv`, Docker with Compose, `curl`, `jq`, `shasum`, and credentials for an OpenAI-compatible model endpoint. Preparation and evaluation can make billable model calls. They create isolated provider state and preserve existing provider/database data.
 
@@ -164,6 +164,8 @@ Set concurrency under `execution` in [configs/benchmark.yml](configs/benchmark.y
 
 Set the shared native candidate ceiling with `retrieval.top_k` in the same configuration. The value is frozen into the resolved plan and used by every provider adapter: Mem0 sends it as `top_k`, OpenViking sends it as `limit`, and Hindsight keeps only the first N provider-ranked normalized candidates because its recall endpoint has no item-count parameter.
 
+See [provider retrieval semantics](docs/designs/retrieval-top-k-provider-semantics.md) for the request and validation boundaries.
+
 Sessions within one history remain sequential. These limits do not cap a provider's internal embedding/model requests. Fresh runs use the prechecked plan. Each `--resume` reads the current YAML's history and question caps for unfinished work; changing those two values does not invalidate completed results. Other plan settings stay frozen, and already-running processes do not reload YAML. Do not edit `resolved-plan.json`.
 
 Retry and per-attempt timeout settings are documented alongside these controls in the configuration. They are not whole-run or spending caps. A local timeout does not prove remote processing or billing stopped.
@@ -178,7 +180,7 @@ Press `Ctrl-C` once to stop an active full run and its provider containers. To s
 
 Stopping preserves Docker volumes, provider/database data, saved results, logs, and evidence. It clears ephemeral lifecycle markers after provider execution ends. Use the resume command above to continue an interrupted full run.
 
-## Results and troubleshooting
+## LME-60 results and troubleshooting
 
 Full reports are written under `outputs/full-test/<run-label>/`; smoke reports use `outputs/smoke-test/<run-label>/`. The self-contained HTML opens automatically. Set `OAMB_NO_OPEN=1` for headless use; the report is still generated and its path printed.
 

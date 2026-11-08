@@ -1,8 +1,10 @@
 # PromptPack Notices
 
-> **TL;DR:** OAMB distributes its own answer wrappers and small, attributed MIT-
-> licensed prompt excerpts. Versioned runtime manifests bind every executed
-> template byte; downloaded datasets and private user packs are not included.
+## Overview
+
+OAMB distributes answer templates and attributed LongMemEval and BEAM prompt excerpts. LongMemEval excerpts retain their MIT notice; the Mem0-origin BEAM excerpts retain their Apache-2.0 notice. Executed template bytes are bound in run evidence; downloaded datasets and private user packs are not included. The [native OAM workflows](../docs/native-oam.md) use the recorded campaign prompts described below; the separate LME-60 comparison uses the adapted extraction context and answer wrapper described next.
+
+## LME-60 comparison prompts
 
 The LongMemEval judge templates come from `src/evaluation/evaluate_qa.py` at
 revision `9e0b455f4ef0e2ab8f2e582289761153549043fc`. The source file SHA-256 is

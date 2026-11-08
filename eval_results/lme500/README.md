@@ -74,7 +74,7 @@ These findings coexist with OAM context-selection weaknesses, including unrelate
 
 The authoritative source is the [LME-500 summary](https://github.com/rocke2020/agent-memories/blob/54c3b12c3a9154d37e91ae95cb85b68335f222e1/eval/lme/lme-v261026/lme500-summary.md) and its linked cohort reports, selections, and consolidated failure review, pinned here to source repository revision `54c3b12c3a9154d37e91ae95cb85b68335f222e1`. OAMB reuses the reported measurements and reconciles selection coverage and aggregate arithmetic offline; it does not independently rescore raw answers or reconstruct complete billing.
 
-Full-500 source-reviewed context-noise coverage is unavailable, so this report presents no aggregate noise percentage. The existing native three-provider LME-60 workflow remains separate; the historical OAM result does not imply an implemented OAM adapter, a native OAMB capsule, or a controlled provider-performance win.
+Full-500 source-reviewed context-noise coverage is unavailable, so this report presents no aggregate noise percentage. The historical OAM result is separate from both the three-provider LME-60 comparison and new runs through the [native OAM workflow](../../docs/native-oam.md). It is not a native OAMB execution capsule or a controlled provider-performance win.
 
 ## Public per-question evidence
 
