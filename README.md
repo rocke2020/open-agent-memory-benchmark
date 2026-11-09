@@ -48,7 +48,7 @@ OAMB targets **OAM v0.0.1** first, alongside these comparison-provider releases 
 
 | Provider | Release | Source commit |
 |---|---|---|
-| Open Agent Memory (OAM) | **0.0.1 development snapshot** | `c0f2d2e1f62decf3af188d7c5dff2a529134610e` |
+| Open Agent Memory (OAM) | [0.0.1](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.1) | `c0f2d2e1f62decf3af188d7c5dff2a529134610e` |
 | Hindsight | [0.9.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.9.2) | [`ebad478240d3171bb88201ececda5e8d9883d22d`](https://github.com/vectorize-io/hindsight/commit/ebad478240d3171bb88201ececda5e8d9883d22d) |
 | Mem0 | [2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19) | [`dc82354e143c2581d505d581a00286d6ef8c3605`](https://github.com/mem0ai/mem0/commit/dc82354e143c2581d505d581a00286d6ef8c3605) |
 | OpenViking | [0.4.19](https://github.com/volcengine/OpenViking/releases/tag/v0.4.19) | [`f3afef11637f2d7c11e4b1f36ed2f90630737cdc`](https://github.com/volcengine/OpenViking/commit/f3afef11637f2d7c11e4b1f36ed2f90630737cdc) |
