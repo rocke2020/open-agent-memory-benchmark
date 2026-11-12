@@ -6,11 +6,20 @@
 
 Open Agent Memory Benchmark（OAMB）は、Open Agent Memory（OAM）の独立した評価リポジトリで、LME-500 と BEAM-10M の評価手順を公開しています。データセットの準備、実行、レポートを扱い、Hindsight、Mem0、OpenViking との比較評価も別に提供します。
 
-保存済みの OAM v0.0.1 開発版評価は、[LongMemEval の全 500 問](eval_results/lme500/README.md)と [BEAM-10M の完全な 10 会話、200 問](eval_results/beam10m/README.md)を対象にしています。LME-500 の精度は **94.0%（470/500）**、BEAM-10M の再試行ポリシー適用後の最終平均ルーブリックスコアは **61.56%** で、**142/200** 問が 0.5 のしきい値に達しました。これらのレポートは完了済み評価を再利用しており、セットアップや新たな評価呼び出しは不要です。
+## OAM と Hindsight：DeepSeek を用いた結果
 
-保存済みの質問、回答、判定、注入されたコンテキスト全文は、オフライン HTML レポートで閲覧できます：[LME-500](eval_results/lme500/report.html) · [BEAM-10M、Hindsight の保存済みコンテキストの再評価を含む](eval_results/beam10m/report.html)。いずれかのファイルをダウンロードして、現在のブラウザーで直接開いてください。
+これらの記録済み評価は、LongMemEval S と BEAM-10M の全質問について、OAM v0.0.1 の開発スナップショットと Hindsight を比較したものです。評価パイプライン全体の結果であり、モデル設定と実行方法に重要な違いがあるため、メモリエンジンだけを対象にした統制比較ではありません。
 
-**公開された OAM v0.0.1 評価は、抽出、回答、判定に `deepseek-v4.1-flash` を使用し、ランキングの最高点より日常の Agent タスクを重視しています。モデルの選択は結果に影響します：** Hindsight は回答に **Gemini 3.1 Pro**（`gemini-3.1-pro-preview`）を使用し、[BEAM-10M で **64.1%** と報告しています](https://vectorize.io/benchmarks)。保存済みコンテキストを DeepSeek で再評価した結果は、[条件を満たした 43 件の max 思考強度での回答再試行後に **52.16%**](eval_results/beam10m/README.md)で、平均ルーブリックスコアには約 **12 ポイント**の差があります。
+| 評価 | OAM | DeepSeek を用いた Hindsight | 観測された差 |
+| --- | ---: | ---: | ---: |
+| [LME-500 回答精度](eval_results/lme500/README.md#reference-comparison) | **94.0%（470/500）** | **89.6%（448/500）** | **+4.4 ポイント** |
+| [BEAM-10M 平均ルーブリックスコア](eval_results/beam10m/README.md#1-evaluation-and-results) | **61.56%** | **52.16%**（保存済みコンテキストの再評価） | **+9.40 ポイント** |
+
+**LME-500：** OAM は抽出、回答、判定に DeepSeek Flash を使用し、初回回答は high 思考強度、条件を満たす失敗にはレビュー後に max 強度で 1 回の再試行を行いました。[Hindsight の再現評価](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde)は抽出と判定に DeepSeek V4 Flash 0731、回答に V4 Pro 0813 を使用しました。モデルのバージョン、回答設定、再試行ポリシーは異なります。500 件の質問 ID が同じでも、データセットのバイト列やプロンプトが同一とは限りません。
+
+**BEAM-10M：** 両方とも同じ 200 問に対し、条件を満たす失敗への max 強度での回答再試行を最大 1 回含む、同じ DeepSeek Flash の回答・判定ポリシーを使用しました。Hindsight は保存済みコンテキストを再評価しており、インデックス作成と検索は再実行していません。OAM が回答モデルに渡したコンテキストは 17.43% 大きいものでした。この結果からエンジン単独の効果や、条件を揃えたインデックス作成・遅延・コストの比較は導けません。[Hindsight の元の結果](eval_results/beam10m/README.md#1-evaluation-and-results)は Gemini モデルと異なる採点ポリシーを使用しました。
+
+保存済みの質問、回答、判定、注入されたコンテキスト全文はオフライン HTML レポートで閲覧できます：[LME-500](eval_results/lme500/report.html) · [BEAM-10M、Hindsight の再評価を含む](eval_results/beam10m/report.html)。ダウンロード後、セットアップや新たな評価呼び出しなしでブラウザーから直接開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はポリシー適用後の 58 件の失敗を検討していますが、公式スコアや全 200 問の分母は変更していません。
 
 [ネイティブ OAM ワークフロー](docs/native-oam.md)は、`./precheck.sh --oam` と `./run.sh --oam` による LME-500 と BEAM-10M の実行を提供します。リポジトリには、固定されたデータセットのダウンロード/エクスポートスクリプト、記録済みの回答・判定プロンプト、設定可能な回答・判定モデル、およびレビュー後に max 思考強度で 1 回だけ回答を再試行する手順が含まれています。レポートは初回とポリシー適用後の最終スコアを分けて保持します。小規模診断は実行経路を確認するもので、全データセットで公開スコアに近づくかは別途測定する必要があります。
 
