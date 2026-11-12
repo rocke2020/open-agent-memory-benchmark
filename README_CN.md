@@ -6,11 +6,20 @@
 
 Open Agent Memory Benchmark（OAMB）是 Open Agent Memory（OAM）的独立评测仓库，提供公开的 LME-500 和 BEAM-10M 评测流程。仓库涵盖数据集准备、执行和报告，并提供与 Hindsight、Mem0 和 OpenViking 的独立对比评测。
 
-已保存的 OAM v0.0.1 开发版评测覆盖 [LongMemEval 全部 500 题](eval_results/lme500/README.md)和 [BEAM-10M 的 10 段完整对话、200 题](eval_results/beam10m/README.md)。LME-500 达到 **94.0%（470/500）**；BEAM-10M 按重试策略确定的最终平均评分为 **61.56%**，其中 **142/200** 题达到 0.5 阈值。这些报告复用已完成的评测，无需配置环境或发起新的评测调用。
+## OAM 与 Hindsight：基于 DeepSeek 的结果
 
-离线 HTML 报告可浏览已保存的问题、答案、评判及完整注入上下文：[LME-500](eval_results/lme500/report.html) · [BEAM-10M，含 Hindsight 已保存上下文的回放](eval_results/beam10m/report.html)。下载任一文件后，即可在当前浏览器中直接打开。
+这些历史评测比较了 OAM v0.0.1 开发快照与 Hindsight 在完整 LongMemEval S 和 BEAM-10M 问题集上的结果。这些是整个评测流程的结果，模型设置和执行方式存在重要差异，不能视为仅针对记忆引擎的受控测量。
 
-**已发布的 OAM v0.0.1 评测在抽取、回答和评判阶段均使用 `deepseek-v4.1-flash`，侧重日常 Agent 任务，而非追求排行榜最高分。模型选择会影响结果：** Hindsight 使用 **Gemini 3.1 Pro**（`gemini-3.1-pro-preview`）回答时，[报告的 BEAM-10M 分数为 **64.1%**](https://vectorize.io/benchmarks)；我们使用 DeepSeek 回放其已保存上下文，[经过 43 次符合条件的 max 思考强度答案重试后，分数为 **52.16%**](eval_results/beam10m/README.md)，平均评分相差约 **12 个百分点**。
+| 评测 | OAM | 使用 DeepSeek 的 Hindsight | 观察到的差值 |
+| --- | ---: | ---: | ---: |
+| [LME-500 答案准确率](eval_results/lme500/README.md#reference-comparison) | **94.0%（470/500）** | **89.6%（448/500）** | **+4.4 个百分点** |
+| [BEAM-10M 评分项平均分](eval_results/beam10m/README.md#1-evaluation-and-results) | **61.56%** | **52.16%**（已保存上下文回放） | **+9.40 个百分点** |
+
+**LME-500：** OAM 在抽取、回答和评判中使用 DeepSeek Flash，首次回答使用 high 思考强度，符合条件的失败经审查后可使用 max 强度重试一次。[Hindsight 复现](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde)在抽取和评判中使用 DeepSeek V4 Flash 0731，回答使用 V4 Pro 0813。模型版本、回答设置和重试策略不同；500 个问题 ID 相同并不代表数据集字节或提示词相同。
+
+**BEAM-10M：** 两组在相同的 200 个问题上使用相同的 DeepSeek Flash 回答和评判策略，包括对符合条件的失败最多进行一次 max 强度答案重试。Hindsight 使用已保存上下文回放，没有重新执行索引和检索。OAM 提供给回答模型的上下文大 17.43%。这些结果不能单独归因于记忆引擎，也不能构成匹配条件下的索引、延迟或成本对比。[Hindsight 原始结果](eval_results/beam10m/README.md#1-evaluation-and-results)使用 Gemini 模型和不同的评分策略。
+
+离线 HTML 报告可浏览已保存的问题、答案、评判和完整注入上下文：[LME-500](eval_results/lme500/report.html) · [BEAM-10M，含 Hindsight 回放](eval_results/beam10m/report.html)。下载后可在当前浏览器中直接打开，无需配置环境或发起评测调用。[BEAM 失败分析](eval_results/beam10m/beam10m-failure-review.md)讨论了策略最终结果中的 58 个失败，不改变官方分数或 200 题的分母。
 
 [原生 OAM 工作流](docs/native-oam.md)通过 `./precheck.sh --oam` 和 `./run.sh --oam` 执行 LME-500 和 BEAM-10M 评测。仓库提供固定版本的数据集下载/导出脚本、记录的回答与评判提示词、可配置的回答/评判模型，以及经审查后允许单次 max 思考强度答案重试的流程。报告分别保留首次与策略最终分数。小规模诊断验证执行路径；完整数据集上的分数接近程度仍需单独测量。
 
