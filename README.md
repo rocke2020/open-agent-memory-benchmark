@@ -6,13 +6,20 @@ English | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
 Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for Open Agent Memory (OAM), with a publicly documented workflow for LME-500 and BEAM-10M. It covers dataset preparation, execution and reporting, with separate comparisons against Hindsight, Mem0 and OpenViking.
 
-The saved OAM v0.0.1 development evaluations cover [LongMemEval's 500 questions](eval_results/lme500/README.md) and [BEAM-10M's 10 conversations and 200 questions](eval_results/beam10m/README.md). LME-500 achieved **94.0% (470/500)**; BEAM-10M's policy-final mean rubric score was **61.56%**, with **142/200** questions meeting the 0.5 threshold. These reports reuse completed campaigns and require no setup or new evaluation calls.
+## OAM vs Hindsight: DeepSeek-based results
 
-Browse the saved questions, answers, judgments and full injected contexts in the offline HTML reports: [LME-500](eval_results/lme500/report.html) · [BEAM-10M, including Hindsight saved-context replay](eval_results/beam10m/report.html). Download either file and open it directly in a current browser.
+These recorded evaluations compare OAM v0.0.1 development snapshots with Hindsight on full LongMemEval S and BEAM-10M question sets. They are whole-pipeline results with important differences in model settings and execution, not controlled measurements of the memory engines alone.
 
-Our [source-assisted BEAM-10M failure review](eval_results/beam10m/beam10m-failure-review.md) groups the 58 policy-final failures into **14 retrieval misses, 32 dataset reference-answer issues (55.2%), and 12 other or unresolved cases**. The 32 comprise 30 ambiguous and 2 incorrect gold answers; the 12 comprise 1 answer-handling error and 11 unresolved cases. Official scores and all 200 questions remain unchanged.
+| Evaluation | OAM | Hindsight with DeepSeek | Observed difference |
+| --- | ---: | ---: | ---: |
+| [LME-500 answer accuracy](eval_results/lme500/README.md#reference-comparison) | **94.0% (470/500)** | **89.6% (448/500)** | **+4.4 percentage points** |
+| [BEAM-10M mean rubric score](eval_results/beam10m/README.md#1-evaluation-and-results) | **61.56%** | **52.16%** (saved-context replay) | **+9.40 percentage points** |
 
-**The published OAM v0.0.1 evaluations use `deepseek-v4.1-flash` for extraction, answering and judging, prioritizing everyday agent tasks over peak leaderboard scores. Model choice matters:** Hindsight [reports **64.1%** on BEAM-10M](https://vectorize.io/benchmarks) using **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`) for answering; our [DeepSeek replay of its saved contexts scored **52.16%** after 43 eligible max-effort answer retries](eval_results/beam10m/README.md), a gap of **about 12 percentage points** in mean rubric score.
+**LME-500:** OAM used DeepSeek Flash for extraction, answering and judging, with high-effort first answers and a reviewed max-effort retry for eligible failures. The [Hindsight reproduction](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde) used DeepSeek V4 Flash 0731 for extraction and judging and V4 Pro 0813 for answers. Model versions, answer settings and retry policies differ; the same 500 question IDs do not establish identical dataset bytes or prompts.
+
+**BEAM-10M:** Both arms used the same DeepSeek Flash answer/judge policy on the same 200 questions, including one eligible max-effort answer retry. Hindsight's saved contexts were replayed; its indexing and retrieval were not rerun. OAM's answer-visible context was 17.43% larger. This does not isolate an engine effect or establish a matched indexing, latency or cost comparison. The original [Hindsight result](eval_results/beam10m/README.md#1-evaluation-and-results) used Gemini models and a different scoring policy.
+
+Browse saved questions, answers, judgments and full injected contexts in the offline HTML reports: [LME-500](eval_results/lme500/report.html) · [BEAM-10M, including Hindsight replay](eval_results/beam10m/report.html). Download either file and open it in a current browser; no setup or evaluation calls are needed. The [BEAM failure review](eval_results/beam10m/beam10m-failure-review.md) discusses the 58 policy-final failures without changing official scores or the 200-question denominator.
 
 The [native OAM workflows](docs/native-oam.md) provide LME-500 and BEAM-10M execution through `./precheck.sh --oam` and `./run.sh --oam`. This repository includes pinned dataset download/export scripts, the recorded answer and judge prompts, configurable answer/judge models, and the reviewed single max-effort answer-retry procedure. Reports preserve first-pass and policy-final scores separately. Small diagnostics verify execution; full-dataset score parity remains a separate quality measurement.
 
