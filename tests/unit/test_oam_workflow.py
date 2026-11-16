@@ -167,7 +167,7 @@ def test_embedding_resume_gate_checks_dimension_only(model, dimension, rejected)
         validate_embedding_resume(current, previous)
 
 
-@pytest.mark.parametrize("mutation", [None, "score", "context", "answer"])
+@pytest.mark.parametrize("mutation", [None, "score", "context", "answer", "effort"])
 def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mutation):
     import hashlib
 
@@ -216,12 +216,6 @@ def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mu
         "answer_response": "tea",
         "score": 1.0,
         "judgments": ["yes"],
-        "first_pass": {
-            "answer": "tea",
-            "answer_response": "tea",
-            "score": 1.0,
-            "judgments": ["yes"],
-        },
         "context_sha256": hashlib.sha256(b"tea").hexdigest(),
         "recall": {
             "context": "tea",
@@ -245,12 +239,14 @@ def test_validation_binds_result_to_actual_model_input_and_judgment(tmp_path, mu
         result["context_sha256"] = hashlib.sha256(b"coffee").hexdigest()
     (tmp_path / "results").mkdir()
     (tmp_path / "results/q.json").write_text(json.dumps(result))
-    plan = {
+    plan: dict[str, Any] = {
         "question_ids": ["q"],
         "config": {"dataset": "lme500", "answer_effort": "low", "judge_effort": "low"},
         "bindings": {"answer": "m", "judge": "m"},
         "capabilities": {"index_generation_id": "g"},
     }
+    if mutation == "effort":
+        plan["config"]["answer_effort"] = "max"
     histories = [History("q", [], (question,))]
     if mutation:
         with pytest.raises(ValueError):
@@ -384,7 +380,7 @@ def test_native_evaluation_and_resume_without_spending_or_sql_audits(
     env["LLM_LIGHT_MODEL"] = "minimax-operator-judge"
     workflow.run(output, resume=False)
     summary = json.loads((output / "summary.json").read_text())
-    assert summary["first_pass_mean_score"] == summary["policy_final_mean_score"] == 1.0
+    assert summary["mean_score"] == 1.0
     assert "green tea" in (output / "report.html").read_text()
     assert calls.count("/v1/retain") == 2
     assert calls.count("/v1/chat/completions") == 2
@@ -429,3 +425,15 @@ def test_resume_prompt_identity_ignores_implementation_edits(tmp_path, monkeypat
     assert workflow._protocol_hash() == original
     prompt.write_text("different prompt")
     assert workflow._protocol_hash() != original
+
+
+def test_single_answer_summary_finalizes_failed_questions():
+    from oamb import oam_workflow as workflow
+
+    config = workflow.OAMRunConfig(dataset="lme500", source="unused")
+    assert workflow.summarize_results([{"question_id": "q", "score": 0}], config) == {
+        "validated_questions": 1,
+        "diagnostic": False,
+        "mean_score": 0,
+        "threshold_passes": 0,
+    }

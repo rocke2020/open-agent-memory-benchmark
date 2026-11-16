@@ -6,22 +6,17 @@
 
 Open Agent Memory Benchmark（OAMB）は、Open Agent Memory（OAM）の独立した評価リポジトリで、LME-500 と BEAM-10M の評価手順を公開しています。データセットの準備、実行、レポートを扱い、Hindsight、Mem0、OpenViking との比較評価も別に提供します。
 
-## OAM と Hindsight：DeepSeek を用いた結果
+## OAM の評価結果
 
-これらの記録済み評価は、LongMemEval S と BEAM-10M の全質問について、OAM v0.0.1 の開発スナップショットと Hindsight を比較したものです。評価パイプライン全体の結果であり、モデル設定と実行方法に重要な違いがあるため、メモリエンジンだけを対象にした統制比較ではありません。
+**OAM は LME-500 で 93.2%（466/500）**：MiniMax M3.1 Flash のネイティブ adaptive 回答と DeepSeek Flash high の判定を使用しました。
 
-| 評価 | OAM | DeepSeek を用いた Hindsight | 観測された差 |
-| --- | ---: | ---: | ---: |
-| [LME-500 回答精度](eval_results/lme500/README.md#reference-comparison) | **94.0%（470/500）** | **89.6%（448/500）** | **+4.4 ポイント** |
-| [BEAM-10M 平均ルーブリックスコア](eval_results/beam10m/README.md#1-evaluation-and-results) | **61.56%** | **52.16%**（保存済みコンテキストの再評価） | **+9.40 ポイント** |
+LME 評価では L1 メモリと fast 検索を使い、回答コンテキストは平均 11,481.10 トークンです。[詳しい結果と出典](eval_results/lme500/README.md)を参照してください。
 
-**LME-500：** OAM は抽出、回答、判定に DeepSeek Flash を使用し、初回回答は high 思考強度、条件を満たす失敗にはレビュー後に max 強度で 1 回の再試行を行いました。[Hindsight の再現評価](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde)は抽出と判定に DeepSeek V4 Flash 0731、回答に V4 Pro 0813 を使用しました。モデルのバージョン、回答設定、再試行ポリシーは異なります。500 件の質問 ID が同じでも、データセットのバイト列やプロンプトが同一とは限りません。
+**BEAM-10M：OAM は 61.56%、Hindsight の保存済みコンテキスト再評価は 52.16%（差は 9.40 ポイント）です。** 200 問の保存された選択回答と DeepSeek Flash の判定を使用しました。Hindsight のエンジンは再実行せず、OAM の回答コンテキストは 17.43% 多いものでした。これらの保存済み測定は現在の max 回答プロファイルと分けて示しています。[BEAM の結果と比較条件](eval_results/beam10m/README.md#1-recorded-results)を参照してください。
 
-**BEAM-10M：** 両方とも同じ 200 問に対し、条件を満たす失敗への max 強度での回答再試行を最大 1 回含む、同じ DeepSeek Flash の回答・判定ポリシーを使用しました。Hindsight は保存済みコンテキストを再評価しており、インデックス作成と検索は再実行していません。OAM が回答モデルに渡したコンテキストは 17.43% 大きいものでした。この結果からエンジン単独の効果や、条件を揃えたインデックス作成・遅延・コストの比較は導けません。[Hindsight の元の結果](eval_results/beam10m/README.md#1-evaluation-and-results)は Gemini モデルと異なる採点ポリシーを使用しました。
+オフライン HTML に全文のコンテキスト、回答、判定を保存しています：[LME-500](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。セットアップや評価呼び出しなしでダウンロードして開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はしきい値未満の選択回答 58 件を保持しています。
 
-保存済みの質問、回答、判定、注入されたコンテキスト全文はオフライン HTML レポートで閲覧できます：[LME-500](eval_results/lme500/report.html) · [BEAM-10M、Hindsight の再評価を含む](eval_results/beam10m/report.html)。ダウンロード後、セットアップや新たな評価呼び出しなしでブラウザーから直接開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はポリシー適用後の 58 件の失敗を検討していますが、公式スコアや全 200 問の分母は変更していません。
-
-[ネイティブ OAM ワークフロー](docs/native-oam.md)は、`./precheck.sh --oam` と `./run.sh --oam` による LME-500 と BEAM-10M の実行を提供します。リポジトリには、固定されたデータセットのダウンロード/エクスポートスクリプト、記録済みの回答・判定プロンプト、設定可能な回答・判定モデル、およびレビュー後に max 思考強度で 1 回だけ回答を再試行する手順が含まれています。レポートは初回とポリシー適用後の最終スコアを分けて保持します。小規模診断は実行経路を確認するもので、全データセットで公開スコアに近づくかは別途測定する必要があります。
+[ネイティブ OAM ワークフロー](docs/native-oam.md)は `./precheck.sh --oam` と `./run.sh --oam` で両データセットを実行します。DeepSeek Flash の回答は **max** 推論、MiniMax M3.1 Flash の LME 回答は**ネイティブ adaptive** 推論、判定は high を使います。各実行に実際の OAM リビジョンとモデル設定を記録します。新しいデプロイだけでは記録済みスコアの一致を証明できません。
 
 **全 LME-500 と BEAM-10M に対するネイティブ OAM 評価が OAMB の主目的です。** 副次的な比較プロファイルは、Hindsight、Mem0、OpenViking のネイティブ REST API を使用します。共通の均衡選択された LongMemEval 60 問、6 種類から各 10 問を評価し、180 件のプロバイダー別結果を生成します。
 
@@ -47,7 +42,7 @@ BEAM は、回答の差し控え、矛盾の解消、イベント順序、情報
 
 比較ワークフローでは `./precheck.sh` が LongMemEval をダウンロードします。単独で `./scripts/download/longmemeval.sh` を実行することもできます。`./scripts/download/beam10m.sh` は、固定された公式 BEAM-10M Parquet シャードをダウンロードし、評価時と同じ JSON シリアライズと SHA-256 で `datasets/beam/10m.json` をエクスポートします。両ヘルパーは、既存ファイルが一致しなければ保持したまま拒否します。ダウンロードしたデータセットは Git に含めません。[データセットの出典](DATASETS.md)を参照してください。
 
-[ネイティブ OAM ガイド](docs/native-oam.md)で隔離されたデプロイを準備し、`./precheck.sh --oam`、`./run.sh --oam` の順にいずれかの全データセットを実行します。両データセット用の合成診断設定もあります。新規実行は評価した OAM のリビジョンと設定を記録し、保存済みの [LME-500](eval_results/lme500/README.md) と [BEAM-10M](eval_results/beam10m/README.md) レポートは過去の結果を保持します。
+[ネイティブ OAM ガイド](docs/native-oam.md)で隔離されたデプロイを準備し、`./precheck.sh --oam`、`./run.sh --oam` の順にいずれかの全データセットを実行します。両データセット用の合成診断設定もあります。新規実行は評価した OAM のリビジョンと設定を記録し、保存済みの [LME-500](eval_results/lme500/README.md) と [BEAM-10M](eval_results/beam10m/README.md) レポートは測定対象のパイプラインを明示します。
 
 ## プロバイダーのバージョン
 
@@ -87,12 +82,12 @@ docker run --rm oamb/oam:0.0.1-c0f2d2e1f62d --version
 
 [ネイティブ OAM 設定ガイド](docs/native-oam.md)に従って OAM イメージをビルドし、非公開の `.env.oam` にモデルエンドポイントを設定して、各データセット用に別の隔離されたデプロイを起動します。別の OAM チェックアウトが製品イメージを提供し、評価はこのリポジトリから実行します。
 
-抽出、回答、判定には **`deepseek-v4.1-flash`**、埋め込みには **`qwen3-embedding:0.6b` と 1,024 次元ベクトル**を使用します。[.env.oam.example](.env.oam.example) を非公開の `.env.oam` にコピーし、エンドポイントとキーを設定して、両方のモデル役割を選択した YAML の `model` に合わせてください。`deepseek-flash` などのゲートウェイ別名は、対象モデルに解決される場合にこの再現目的に適しています。抽出は low、初回回答と判定は high の思考強度を使用します。失敗した質問はレビュー後に、同じコンテキストとプロンプトで 1 回だけ max 思考強度の回答再試行を行い、その後 high で判定できます。
+LME 回答には [DeepSeek Flash max](configs/oam-lme500.yml) または [MiniMax M3.1 Flash ネイティブ adaptive](configs/oam-lme500-minimax-native-adaptive.yml) を選択します。両方とも DeepSeek Flash high 判定を使い、BEAM の回答も DeepSeek Flash max を使います。抽出は運用者が設定し low 推論を使います。記録されたクエリ埋め込みは Qwen3-Embedding-0.6B、1,024 次元です。[.env.oam.example](.env.oam.example) を非公開の `.env.oam` にコピーし、回答・判定で共有するエンドポイントとキー、および各役割のモデルを設定してください。エンドポイントは両方の選択モデルに対応する必要があります。モデル名は変更せず送信します。
 
 入力と 2 つのデプロイを準備したら、以下の全データセット設定を実行します。これらのコマンドは課金対象の呼び出しを行います。クライアント環境のパスは、各デプロイが出力したものに置き換えてください。
 
 ```bash
-./precheck.sh --oam configs/oam-lme500.yml \
+./precheck.sh --oam configs/oam-lme500-minimax-native-adaptive.yml \
   --env-file outputs/oam-services/lme-example/client.env \
   --output outputs/oam-lme500
 ./run.sh --oam outputs/oam-lme500
@@ -105,7 +100,7 @@ docker run --rm oamb/oam:0.0.1-c0f2d2e1f62d --version
 
 各出力ディレクトリには `report.html`、`summary.json`、保持された質問ごとのエビデンスが含まれます。中断した評価は `./run.sh --oam <output-directory> --resume` で再開します。全データセットの実行前に、対応する `*-smoke.yml` 設定と新しい出力ディレクトリで小規模な合成診断を実行できます。
 
-初回に失敗した質問については、生成された `retry-eligibility.json` のソース、コンテキスト、正解のレビューを完了してから再開してください。明らかに誤った正解は再試行を禁止します。再試行が完了すると、スコアが下がった場合もその結果がポリシー適用後の最終結果になります。レビュー待ちは可視化され、最終評価の完了を主張できません。[レビューと再開手順](docs/native-oam.md#3-full-datasets-and-resume)を参照してください。
+再開時は完了済みの回答と判定を再利用し、未完了の処理を続けます。有効な応答、失敗した試行、結果不明の試行を保持します。[設定と再開](docs/native-oam.md#3-full-datasets-and-resume)を参照してください。
 
 ## クイックスタート：LME-60 比較
 

@@ -37,7 +37,6 @@ _QUESTION_FIELDS = (
     "context_tokens",
     "context_tokenizer",
     "retrieve_time_ms",
-    "policy_final_attempt",
     "source",
     "cohort",
     "conversation_id",
@@ -48,8 +47,8 @@ def _digest(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-def _summary(records: list[dict[str, Any]], dataset: str, first: bool) -> dict[str, Any]:
-    attempts = [q["first_pass"] if first else q["retry"] or q["first_pass"] for q in records]
+def _summary(records: list[dict[str, Any]], dataset: str) -> dict[str, Any]:
+    attempts = [q["selected_answer"] for q in records]
     return {
         "mean": statistics.mean(a["score"] for a in attempts),
         "passes": sum(a["score"] >= (1 if dataset == "lme500" else 0.5) for a in attempts),
@@ -57,7 +56,6 @@ def _summary(records: list[dict[str, Any]], dataset: str, first: bool) -> dict[s
         "context_mean": statistics.mean(q["context_tokens"] for q in records),
         "context_total": sum(q["context_tokens"] for q in records),
         "retrieval_median_ms": statistics.median(q["retrieve_time_ms"] for q in records),
-        "retries": sum(q["retry"] is not None for q in records),
     }
 
 
@@ -108,6 +106,9 @@ def _evidence(root: Path) -> dict[str, Any]:
                     q[key]["metadata_projection"] = bool(
                         attempt.get("answer_call", {}).get("metadata_projection")
                     )
+                first = q.pop("first_pass")
+                recorded = q.pop("retry")
+                q["selected_answer"] = recorded or first
                 records.append(q)
         if len(records) != arm["questions"] or len({q["question_id"] for q in records}) != len(
             records
@@ -115,10 +116,7 @@ def _evidence(root: Path) -> dict[str, Any]:
             raise ValueError("question coverage is incomplete or duplicated")
         arms[name] = {
             "results": records,
-            "summary": {
-                "first_pass": _summary(records, dataset, True),
-                "policy_final": _summary(records, dataset, False),
-            },
+            "summary": _summary(records, dataset),
         }
     primary = {q["question_id"]: q for q in arms["oam"]["results"]}
     for arm in arms.values():
@@ -137,6 +135,16 @@ def render_historical_report(root: Path) -> bytes:
     assets = resources.files("oamb.reporting").joinpath("assets")
     css = assets.joinpath("report.css").read_text() + assets.joinpath("historical.css").read_text()
     script = assets.joinpath("historical.js").read_text()
+    # Paired arms share exact contexts; embed each context once and restore in browser.
+    if data["dataset"] == "lme500" and len(data["arms"]) > 1:
+        primary = {q["question_id"]: q for q in data["arms"]["oam"]["results"]}
+        for name, arm in data["arms"].items():
+            if name == "oam":
+                continue
+            for q in arm["results"]:
+                if q["context"] == primary[q["question_id"]]["context"]:
+                    del q["context"]
+                    q["context_ref"] = q["question_id"]
     css_hash = base64.b64encode(hashlib.sha256(css.encode()).digest()).decode()
     script_hash = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
     payload = base64.b64encode(
@@ -147,7 +155,7 @@ def render_historical_report(root: Path) -> bytes:
         )
     ).decode()
     title = "LME-500" if data["dataset"] == "lme500" else "BEAM-10M"
-    mean = data["arms"]["oam"]["summary"]["policy_final"]["mean"]
+    mean = data["arms"]["oam"]["summary"]["mean"]
     csp = (
         "default-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; "
         f"script-src 'sha256-{script_hash}'; style-src 'sha256-{css_hash}'; form-action 'none'"
@@ -156,7 +164,7 @@ def render_historical_report(root: Path) -> bytes:
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="{html.escape(csp, quote=True)}">
 <title>{title} · OAM evaluation report</title><style>{css}</style></head>
-<body class="historical"><header class="topbar"><a href="../README.md">OAMB</a><span>/</span><strong>{title}</strong><span class="top-note">Historical evaluation</span><a class="report-link" href="README.md">Report &amp; provenance ↗</a></header>
+<body class="historical"><header class="topbar"><a href="../README.md">OAMB</a><span>/</span><strong>{title}</strong><span class="top-note">Recorded evaluation</span><a class="report-link" href="README.md">Report &amp; provenance ↗</a></header>
 <div id="app"><aside><div class="side-head"><p class="eyebrow">OAM · {title}</p><h1>{mean:.2%}</h1><p id="loading" role="status">Opening saved question evidence…</p></div></aside><main><noscript>Enable JavaScript to browse the embedded evidence. The complete Markdown report and compressed result files remain available beside this file.</noscript></main></div>
 <script id="evidence" type="application/octet-stream">{payload}</script><script>{script}</script></body></html>'''
     body = page.encode()

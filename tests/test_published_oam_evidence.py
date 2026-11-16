@@ -15,7 +15,8 @@ RESULTS = Path(__file__).resolve().parents[1] / "eval_results"
 @pytest.mark.parametrize(
     ("dataset", "arm", "count", "first_score", "final_score", "first_passes", "final_passes"),
     [
-        ("lme500", "oam", 500, 0.906, 0.94, 453, 470),
+        ("lme500", "oam", 500, 0.932, 0.932, 466, 466),
+        ("lme500", "deepseek-max", 500, 0.926, 0.926, 463, 463),
         ("beam10m", "oam", 200, 0.5989232503607503, 0.6155621392496391, 136, 142),
         (
             "beam10m",
@@ -61,8 +62,19 @@ def test_public_question_evidence_reproduces_historical_scores(
                 continue
             assert attempt["answer"].strip()
             assert 0 <= attempt["score"] <= 1
-            assert attempt["answer_effort"] in {"high", "max"}
+            assert attempt["answer_effort"] in {"high", "max", "adaptive"}
             assert attempt["judge_effort"] == "high"
+        if dataset == "lme500":
+            answer_call = selected["answer_call"]
+            judge_call = selected["judge_call"]
+            assert answer_call["response"]["finish_reason"] == "stop"
+            assert judge_call["response"]["finish_reason"] == "stop"
+            assert q["context"] in answer_call["request"]["messages"][0]["content"]
+            assert selected["answer"] == answer_call["response"]["content"]
+            assert selected["answer"] in judge_call["request"]["messages"][0]["content"]
+            assert judge_call["response"]["content"].strip().lower() == (
+                "yes" if selected["correct"] else "no"
+            )
         if dataset == "beam10m":
             assert q["rubric"]
             for attempt in (q["first_pass"], q["retry"]):
@@ -97,7 +109,28 @@ def test_public_question_evidence_reproduces_historical_scores(
     assert sum(q["first_pass"]["correct"] for q in records) == first_passes
     assert sum(q["correct"] for q in records) == final_passes
     if dataset == "lme500":
-        assert sum(q["context_tokens"] for q in records) == 6_201_308
+        assert sum(q["context_tokens"] for q in records) == 5_740_548
     else:
         assert {str(q["conversation_id"]) for q in records} == {str(i) for i in range(1, 11)}
         assert sum(q["retry"] is not None for q in records) == (44 if arm == "oam" else 43)
+
+
+def test_lme_paired_contexts_and_outcomes_are_identical_units():
+    root = RESULTS / "lme500"
+    manifest = json.loads((root / "manifest.json").read_bytes())
+    arms = {}
+    for name, arm in manifest["arms"].items():
+        arms[name] = {
+            q["question_id"]: q
+            for relative in arm["files"]
+            for q in json.loads(gzip.decompress((root / relative).read_bytes()))["results"]
+        }
+    assert set(arms["oam"]) == set(arms["deepseek-max"])
+    paired: dict[tuple[bool, bool], int] = {}
+    for qid, q in arms["oam"].items():
+        other = arms["deepseek-max"][qid]
+        assert q["context"] == other["context"]
+        assert q["context_tokens"] == other["context_tokens"]
+        key = (q["correct"], other["correct"])
+        paired[key] = paired.get(key, 0) + 1
+    assert paired == {(True, True): 448, (True, False): 18, (False, True): 15, (False, False): 19}

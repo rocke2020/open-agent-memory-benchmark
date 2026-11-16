@@ -1,0 +1,7 @@
+dataset: lme500
+source: datasets/longmemeval-cleaned/longmemeval_s_cleaned.json
+answer_model: minimax-m3.1-flash
+judge_model: deepseek-flash
+embedding_model: qwen3-embedding:0.6b
+answer_effort: adaptive
+judge_effort: high

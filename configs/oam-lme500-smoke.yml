@@ -2,5 +2,5 @@ dataset: lme500
 source: tests/fixtures/oam/lme500-smoke.json
 diagnostic: true
 timeout_seconds: 300
-answer_effort: low
-judge_effort: low
+answer_effort: max
+judge_effort: high

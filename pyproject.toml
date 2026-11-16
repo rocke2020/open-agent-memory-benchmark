@@ -1,25 +1,6 @@
-[build-system]
-requires = ["hatchling>=1.27,<2"]
-build-backend = "hatchling.build"
-
-[project]
-name = "open-agent-memory-benchmark"
-version = "0.2.0"
-description = "Evidence-first reproducible benchmark for self-hosted agent-memory systems"
-readme = "README.md"
-requires-python = ">=3.11"
-license = "Apache-2.0"
-authors = [{ name = "OAMB contributors" }]
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "License :: OSI Approved :: Apache Software License",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-  "Typing :: Typed",
-]
-dependencies = [
+# OAMB runs from the checkout; uv manages dependencies without a distribution.
+[dependency-groups]
+runtime = [
   # Strict immutable runtime contracts and fail-closed version dispatch.
   "pydantic>=2.12,<3",
   # Strict duplicate-aware loading of the benchmark's closed YAML shape.
@@ -34,14 +15,6 @@ dependencies = [
   "pyarrow>=19,<24",
 ]
 
-[project.optional-dependencies]
-# Comparison-ineligible Mem0 SDK profile; imported only after explicit selection.
-mem0-sdk = ["mem0ai==2.0.19"]
-
-[project.scripts]
-oamb = "oamb.cli:main"
-
-[dependency-groups]
 dev = [
   "hypothesis>=6.140,<7",
   "mypy>=1.18,<2",
@@ -54,31 +27,19 @@ download = [
   "huggingface-hub>=1.29,<2",
 ]
 
-[tool.hatch.build.targets.sdist]
-include = [
-  "/AGENTS.md",
-  "/CLAUDE.md",
-  "/DATASETS.md",
-  "/LICENSE",
-  "/prompt-packs",
-  "/README.md",
-  "/SECURITY.md",
-  "/THIRD_PARTY.md",
-  "/pyproject.toml",
-  "/scripts/download",
-  "/src",
-  "/uv.lock",
-]
+# Comparison-ineligible Mem0 SDK profile; selected with --group mem0-sdk.
+mem0-sdk = ["mem0ai==2.0.19"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/oamb"]
+[tool.uv]
+default-groups = ["runtime", "dev"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"prompt-packs" = "oamb/prompt-packs"
+[tool.uv.workspace]
+members = []
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100

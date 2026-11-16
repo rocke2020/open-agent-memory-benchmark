@@ -32,11 +32,9 @@ from tests.unit.test_longmemeval import (
 FORBIDDEN_PUBLIC_TERMS = ("t10", "phase", "approval", "signature")
 
 
-def _installed_oamb(*arguments: str) -> subprocess.CompletedProcess[str]:
-    executable = Path(sys.executable).with_name("oamb")
-    assert executable.is_file()
+def _source_oamb(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(executable), *arguments],
+        [sys.executable, "-m", "oamb.cli", *arguments],
         check=False,
         capture_output=True,
         text=True,
@@ -97,7 +95,7 @@ def _run_lme_identity_fixture_capsule(tmp_path: Path) -> NativeRunArtifacts:
     )
     return run_native_vertical_slice(
         output_root=tmp_path / "capsules",
-        run_id="installed-lme-identity-source-root",
+        run_id="source-lme-identity-source-root",
         adapter_profile_id="recorded-native-fixture-v1",
         workload=LongMemEvalWorkload(bundle),
         visible_evidence_policy=LME_VISIBLE_EVIDENCE_POLICY,
@@ -110,13 +108,13 @@ def _run_lme_identity_fixture_capsule(tmp_path: Path) -> NativeRunArtifacts:
     )
 
 
-def test_installed_native_source_root_validates_and_builds_deterministic_offline_report(
+def test_source_native_source_root_validates_and_builds_deterministic_offline_report(
     tmp_path: Path,
 ) -> None:
-    completed = _run_fixture_capsule(tmp_path, "installed-native-source-root")
+    completed = _run_fixture_capsule(tmp_path, "source-native-source-root")
     validation_path = tmp_path / "native-validation.json"
 
-    validation = _installed_oamb(
+    validation = _source_oamb(
         "capsule",
         "validate",
         str(completed.capsule_root),
@@ -129,7 +127,7 @@ def test_installed_native_source_root_validates_and_builds_deterministic_offline
     assert result.disposition == ValidationDisposition.VALIDATED
     assert result.validation_profile_id == "oamb-t8-native-evidence-v1"
 
-    first = _installed_oamb(
+    first = _source_oamb(
         "report",
         "build",
         str(completed.capsule_root),
@@ -138,7 +136,7 @@ def test_installed_native_source_root_validates_and_builds_deterministic_offline
         "--output-root",
         str(tmp_path / "reports-first"),
     )
-    second = _installed_oamb(
+    second = _source_oamb(
         "report",
         "build",
         str(completed.capsule_root),
@@ -160,12 +158,12 @@ def test_installed_native_source_root_validates_and_builds_deterministic_offline
     assert all(term.encode() not in lowered for term in FORBIDDEN_PUBLIC_TERMS)
 
 
-def test_installed_native_report_uses_the_actual_validation_profile_not_the_workload_name(
+def test_source_native_report_uses_the_actual_validation_profile_not_the_workload_name(
     tmp_path: Path,
 ) -> None:
     completed = _run_lme_identity_fixture_capsule(tmp_path)
     validation_path = tmp_path / "lme-validation.json"
-    validation = _installed_oamb(
+    validation = _source_oamb(
         "capsule",
         "validate",
         str(completed.capsule_root),
@@ -174,7 +172,7 @@ def test_installed_native_report_uses_the_actual_validation_profile_not_the_work
     )
 
     assert validation.returncode == 0, validation.stdout + validation.stderr
-    report = _installed_oamb(
+    report = _source_oamb(
         "report",
         "build",
         str(completed.capsule_root),
@@ -188,12 +186,12 @@ def test_installed_native_report_uses_the_actual_validation_profile_not_the_work
     assert _report_path(report).is_file()
 
 
-def test_installed_report_reopens_native_source_root_and_rejects_stale_validation(
+def test_source_report_reopens_native_source_root_and_rejects_stale_validation(
     tmp_path: Path,
 ) -> None:
-    completed = _run_fixture_capsule(tmp_path, "installed-native-stale-validation")
+    completed = _run_fixture_capsule(tmp_path, "source-native-stale-validation")
     validation_path = tmp_path / "native-validation.json"
-    validated = _installed_oamb(
+    validated = _source_oamb(
         "capsule",
         "validate",
         str(completed.capsule_root),
@@ -209,7 +207,7 @@ def test_installed_report_reopens_native_source_root_and_rejects_stale_validatio
     source_path.write_bytes(source_path.read_bytes() + b"\n")
 
     report_root = tmp_path / "stale-report"
-    report = _installed_oamb(
+    report = _source_oamb(
         "report",
         "build",
         str(completed.capsule_root),
@@ -223,17 +221,17 @@ def test_installed_report_reopens_native_source_root_and_rejects_stale_validatio
     assert not (report_root / "derivations").exists()
 
 
-def test_installed_report_rejects_invalid_result_even_with_diagnostic_opt_in(
+def test_source_report_rejects_invalid_result_even_with_diagnostic_opt_in(
     tmp_path: Path,
 ) -> None:
     completed = run_generated_fake_vertical_slice(
         output_root=tmp_path / "capsules",
-        run_id="installed-invalid-fake-source-root",
+        run_id="source-invalid-fake-source-root",
     )
-    run_path = completed.capsule_root / "source" / "run" / "installed-invalid-fake-source-root.json"
+    run_path = completed.capsule_root / "source" / "run" / "source-invalid-fake-source-root.json"
     run_path.write_bytes(run_path.read_bytes() + b"\n")
     validation_path = tmp_path / "invalid-validation.json"
-    validation = _installed_oamb(
+    validation = _source_oamb(
         "capsule",
         "validate",
         str(completed.capsule_root),
@@ -248,7 +246,7 @@ def test_installed_report_rejects_invalid_result_even_with_diagnostic_opt_in(
     )
 
     report_root = tmp_path / "invalid-report"
-    report = _installed_oamb(
+    report = _source_oamb(
         "report",
         "build",
         str(completed.capsule_root),

@@ -1,67 +1,55 @@
-# Open Agent Memory v0.0.1: BEAM-10M
+# Open Agent Memory: BEAM-10M
 
 ## Overview
 
-Open the [interactive offline report](report.html) to inspect all 200 questions with OAM and Hindsight saved-context replay side by side, including complete injected contexts, answers, rubrics, judgments and retries. Its AMB-inspired layout supports category, text and outcome filters and separate first-pass / policy-final views. Download `report.html` and open it directly in a current browser; no setup or evaluation calls are needed. Full request/response archive links use the adjacent evidence files. See [rebuild instructions](../README.md).
+The recorded selected OAM answers yield **61.56% mean rubric score**, with **142/200 questions (71.0%)** scoring at least 0.5. The result covers ten complete conversations and 200 distinct questions. Recorded selected-answer settings include high and max; these measurements are separate from the current DeepSeek max profile and are not a fresh max-profile evaluation. Exact answer settings are preserved in the evidence.
 
-The saved OAM BEAM-10M evaluation covers **10 complete conversations and 200 distinct questions**. Its policy-final mean rubric score is **61.56%**, and **142/200 questions (71.0%)** score at least 0.5. The first-pass mean is **59.89%**, with **136/200** threshold passes. Mean rubric score and threshold pass rate measure different things.
+Open the [offline report](report.html) to inspect selected saved answers, complete contexts, references, rubrics and judgments for OAM and Hindsight saved-context replay side by side. Category, text and outcome filters work without a server or network. Full saved requests and responses are available in the adjacent compressed files. Packaging the report makes no model, retrieval, ingestion or database calls.
 
-This report reuses the completed November 2026 development campaign. It makes no new ingestion, retrieval, answer, judge or review calls. The result describes the saved OAM configurations and contexts, not a fresh test of the final release artifact.
+## 1. Recorded results
 
-## 1. Evaluation and results
+A question score is the mean of its rubric-item scores, and the reported mean weights all 200 questions equally. A threshold pass means a question score of at least 0.5. Mean score and threshold pass rate measure different things. Original questions, gold answers and rubrics remain in the denominator, including disputed cases.
 
-BEAM-10M tests memory over long conversation histories using questions with rubric items. Each question's score is the mean of its rubric-item scores; the reported mean weights questions equally. A threshold pass means a question score of at least 0.5. Original questions, gold and rubrics remain in the denominator, including disputed cases.
-
-| Result | First pass | Policy final |
+| Arm | Mean rubric score | Questions scoring at least 0.5 |
 | --- | ---: | ---: |
-| OAM mean rubric score | 0.598923250 | 0.615562139 |
-| OAM threshold passes | 136/200 | 142/200 |
-| Hindsight saved-context replay mean | 0.504018308 | 0.521573864 |
-| Hindsight saved-context replay threshold passes | 108/200 | 112/200 |
+| OAM selected saved answers | **61.56%** | **142/200 (71.0%)** |
+| Hindsight saved-context replay | 52.16% | 112/200 (56.0%) |
 
-First answers and judges used high reasoning. An eligible failure could receive one max-effort answer on the unchanged saved context and prompt, followed by high-effort judging; the dispatched retry determines the policy-final result even when its score falls. OAM used 44 such retries, and the saved-context replay used 43.
+The replay uses historical Hindsight contexts with recorded DeepSeek answers and judgments. It does not rerun Hindsight indexing or retrieval and does not isolate the effect of either memory engine. The upstream Hindsight result used Gemini 3.1 Pro answers and Gemini 2.5 Flash Lite judging, reporting 64.08% mean score and 147/200 threshold passes. Those model settings differ from this replay, so OAM's result does not establish superiority over the upstream result.
 
-The comparison reuses historical Hindsight contexts and applies the same recorded answer and judge policy to the same question set. It does not rerun Hindsight indexing or retrieval and is not a fresh matched engine comparison. It does not isolate the effect of either memory engine, nor establish a comparison to results produced with different models or scoring policies.
+### 1.1 Selected results by conversation
 
-The archived upstream Hindsight result used **Gemini 3.1 Pro for answers and Gemini 2.5 Flash Lite for judging**, reporting **64.08% mean rubric score and 147/200 threshold passes**. Our **52.16% DeepSeek saved-context replay** is a different answer/judge experiment. Comparing OAM's 61.56% against this replay does not establish that OAM exceeds the upstream result; preserve the model and scoring-policy distinctions.
+Both arms contain the same 20 questions per conversation.
 
-### 1.1 Results by conversation
-
-Each conversation contributes the same 20 questions in both arms. Mean rubric scores are percentages; pass counts use the 0.5 threshold. These rows use the complete published policy snapshot, including every selected retry.
-
-| Conversation | OAM first mean | Replay first mean | OAM policy-final mean | Replay policy-final mean | OAM passes: first → final | Replay passes: first → final |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 60.1288% | 37.2917% | 63.8788% | 44.5417% | 14/20 → 15/20 | 9/20 → 10/20 |
-| 2 | 45.2917% | 49.2917% | 54.2500% | 49.2917% | 10/20 → 14/20 | 11/20 → 11/20 |
-| 3 | 54.8750% | 52.7500% | 54.6250% | 53.7500% | 12/20 → 12/20 | 10/20 → 10/20 |
-| 4 | 73.0871% | 59.1919% | 73.0871% | 59.8169% | 16/20 → 16/20 | 13/20 → 14/20 |
-| 5 | 52.0000% | 40.7500% | 52.0000% | 40.7500% | 13/20 → 13/20 | 9/20 → 9/20 |
-| 6 | 72.1865% | 60.5556% | 71.4921% | 61.1111% | 15/20 → 15/20 | 14/20 → 14/20 |
-| 7 | 60.4375% | 48.1250% | 60.9375% | 53.1250% | 14/20 → 14/20 | 12/20 → 13/20 |
-| 8 | 59.5417% | 45.5625% | 58.7917% | 47.2292% | 13/20 → 13/20 | 8/20 → 8/20 |
-| 9 | 51.7500% | 43.1250% | 52.7500% | 43.9583% | 13/20 → 13/20 | 9/20 → 9/20 |
-| 10 | 69.6250% | 67.3750% | 73.7500% | 68.0000% | 16/20 → 17/20 | 13/20 → 14/20 |
-
-A high-to-max recovery is an observed outcome, not proof that reasoning effort caused the improvement. The policy also retains score decreases; it never chooses the better attempt.
+| Conversation | OAM mean score | Replay mean score | OAM threshold passes | Replay threshold passes |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 63.8788% | 44.5417% | 15/20 | 10/20 |
+| 2 | 54.2500% | 49.2917% | 14/20 | 11/20 |
+| 3 | 54.6250% | 53.7500% | 12/20 | 10/20 |
+| 4 | 73.0871% | 59.8169% | 16/20 | 14/20 |
+| 5 | 52.0000% | 40.7500% | 13/20 | 9/20 |
+| 6 | 71.4921% | 61.1111% | 15/20 | 14/20 |
+| 7 | 60.9375% | 53.1250% | 14/20 | 13/20 |
+| 8 | 58.7917% | 47.2292% | 13/20 | 8/20 |
+| 9 | 52.7500% | 43.9583% | 13/20 | 9/20 |
+| 10 | 73.7500% | 68.0000% | 17/20 | 14/20 |
 
 ## 2. Configuration and evidence
 
 | Setting | Recorded campaign |
 | --- | --- |
-| Dataset | BEAM-10M, 10 conversations and 200 unique questions. |
+| Dataset | BEAM-10M, ten conversations and 200 distinct questions |
 | Dataset revision | `9b2096193fe74e2837e4713e483351e19817773c` |
 | Dataset SHA-256 | `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8` |
-| OAM path | Native L1 indexing and normal recall; extraction reasoning low; Profile disabled; L2 excluded from scored contexts. |
-| Embedding and tokenization | Qwen3 embedding with a 32K-token input limit; OAM used its approximate tokenizer during the evaluation. |
-| Answer and judge | DeepSeek Flash; high-effort first answer and judge, with one eligible max-effort answer retry. |
-| Date convention | Source batch reference dates; one previously approved next-batch date imputation for the first undated batch of conversation 7. |
-| Evaluation evidence | Saved question selections, contexts, answers, judgments, retries, source-assisted failure reviews and validation receipts. |
+| OAM path | Native L1 indexing and normal recall, low extraction reasoning, Profile disabled, L2 absent from scored contexts |
+| Embedding/tokenization | Qwen3 embedding with a 32K-token input limit; approximate OAM tokenizer during evaluation |
+| Recorded answer settings | DeepSeek Flash, high and max as recorded per selected answer |
+| Judge | DeepSeek Flash, high reasoning |
+| Dates | Source batch reference dates; retained next-batch date imputation for the first undated batch of conversation 7 |
 
-All 200 OAM first-pass answers and judgments and approximate full-context noise assessments were retained. All 58 policy-final failures received source-assisted source/index/context/answer/judge reviews under the available-evidence method. Of those reviews, 57 have canonical exact noise ratios and one has an explicitly uncertain ratio. Historical stages that were unavailable, ambiguous gold and incomplete billing remain disclosed limitations; they are not assumed to be successful or zero.
+All selected answers, scores, contexts and actual request settings remain unchanged. The [failure review](beam10m-failure-review.md) retains the 58-case source-assisted classifications: 30 ambiguous gold answers, two incorrect gold answers, 14 retrieval misses, one answer-handling error and 11 unresolved. Reference issues account for 32/58 failures (55.2%) under that review. Official scores and the denominator are unchanged. This public summary reuses existing review findings; it is not a new audit of all original source conversations.
 
-The [complete failure review](beam10m-failure-review.md) assigns one primary cause per failed question: 30 ambiguous gold answers, 2 incorrect gold answers, 14 retrieval misses, 1 answer-handling error and 11 unresolved. Reference-answer issues account for **32/58 failures (55.2%)** under this review; overlapping secondary findings remain separate. Official scores and the 200-question denominator are unchanged. The public copy retains the detailed analysis and embedded evidence; unpublished source/index audit artifacts are identified by filename rather than inaccessible local links.
-
-The saved final summary SHA-256 is `40564e93d22a316ba77d7763bb25a345d54af1ceafa1853be6d9ca982779e9f5`; the paired policy snapshot SHA-256 is `1c2da27f3c9677223ea0b41641203c90ce70b776b568a6e89561bb2a2db60c99`. A content-bearing public projection is now available below. The original private transport and operational artifacts remain separate; their hashes identify checked source artifacts rather than certifying a new evaluation.
+All 200 OAM contexts have retained approximate noise assessments. Of 58 failed-question contexts, 57 have canonical exact source-assisted noise ratios; one remains uncertain. Unavailable historical stages and incomplete billing are limitations, never assumed successes or zeros. The saved final-summary hash is `40564e93d22a316ba77d7763bb25a345d54af1ceafa1853be6d9ca982779e9f5`; the saved outcome-selection snapshot hash is `1c2da27f3c9677223ea0b41641203c90ce70b776b568a6e89561bb2a2db60c99`.
 
 ## 3. Performance and release boundary
 
@@ -103,25 +91,16 @@ Across the 57 failed-question contexts with exact source-assisted labels, unrela
 | Matched indexing elapsed time | Unverified against the +20% target; resumed readiness checks and historical ingestion metadata do not establish complete comparable durations. |
 | Monetary cost / complete billing | Unknown; retained usage is not an invoice-quality total. |
 
-### 3.3 Retained answer/judge generation usage
+### 3.3 Retained answer/judge usage
 
-These totals sum unique completed answer/judge receipts published with all 200 questions in each arm. Generation tokens mean input plus output; reasoning is already included in output, and cached input is already included in input. They exclude native indexing, embeddings, source/context reviews, additional failed or unknown attempts not represented in these public receipts, and assistant/reviewer inference. They do not establish total campaign spend.
-
-| Receipt scope | OAM calls / generation tokens | Replay calls / generation tokens | Included reasoning tokens: OAM / replay |
-| --- | ---: | ---: | ---: |
-| First-pass answers and judges | 821 / 7,732,359 | 821 / 6,525,773 | 506,377 / 416,118 |
-| Selected max answers and high-effort judges | 180 / 1,870,126 | 160 / 1,546,459 | 263,173 / 216,877 |
-
-The historical Hindsight archive records 5,504,578.7 ms of ingestion with `ingested_docs=1`; that field alone does not establish complete matched indexing duration. Source-recovery subtotals and calendar time across shutdowns/resumes are likewise not substitutes for full-cohort indexing usage or elapsed time.
+Published completed answer/judge receipts total 1,001 calls and 9,602,485 generation tokens for OAM, including 769,550 reasoning tokens within output, and 981 calls and 8,072,232 tokens for the replay, including 632,995 reasoning tokens within output. These totals cover all retained completed receipts, rather than only the selected answers. Generation tokens include input and output; cached input is included in input. Indexing, embeddings, reviews and failed or unknown attempts outside these receipts are excluded. This is not total campaign billing.
 
 ## 4. Public per-question evidence
 
-The [manifest](manifest.json) lists ten compressed conversation shards for OAM and ten for the Hindsight saved-context replay. Each arm covers the same 200 distinct question IDs. Every record includes the original question, gold and rubric, exact saved context and its SHA-256, `cl100k_base` context-token count, recorded retrieval time, first-pass answer and score, any selected max-effort retry, and policy-final answer and score.
+The [manifest](manifest.json) lists ten compressed conversation shards per arm. Each record preserves the original question, gold and rubric, exact saved context and SHA-256, `cl100k_base` context count, saved retrieval timing, recorded answer outputs, selected score and actual model settings. The report displays only the selected saved answer and its judgments. The frozen source files also retain additional recorded outputs needed to inspect the original measurements; they do not define the current evaluation workflow.
 
-`first_pass` and `retry` preserve both outcomes; `policy_final_attempt` follows the frozen paired-policy snapshot and selects the dispatched retry even when its score falls. The OAM and replay arms retain 44 and 43 retries, respectively. `correct` means rubric score at least 0.5; the mean rubric score is computed separately. Retrieval times remain their saved measurements and do not establish a matched engine comparison.
+Saved request/response projections preserve visible content, usage, finish reasons and original receipt hashes. Ordered rubric judgments retain each criterion, score and reason. Averaging normalized rubric scores reproduces every selected score. Missing runtime revision metadata remains null. Source receipt hashes identify original artifacts rather than projected public JSON.
 
-All 400 first-pass attempts and 87 selected retries include their actual saved `answer_call` request, visible response, usage and source receipt hash. The 1,495 ordered `judgments` retain each rubric criterion, raw and normalized score, reason, actual judge request and visible response. Each receipt is matched to the saved completed-input identity and output; duplicate transport attempts are not counted as extra rubric items. Applying the original 0/0.5/1 normalization and averaging the rubric scores reproduces every saved per-question score. The frozen policy snapshot independently confirms which attempt contributes to the reported result. The manifest also records saved runtime revisions, configuration/evaluator hashes and sanitized answer/judge bindings where available; unavailable revision metadata remains null.
+The data retain [BEAM attribution and CC BY-SA 4.0 terms](LICENSES/BEAM-CC-BY-SA-4.0.md), including applicable separate prompt notices. Two metadata-adjudicated records retain schema-invalid visible responses and recorded answer projections with unchanged answer text. Full source histories, credentials, endpoints, transport headers, hidden provider reasoning and operational logs are excluded. Visible reasoning requested by the benchmark remains in the saved response evidence. These records permit inspection and rescoring but do not recreate indexing or certify a fresh matched run.
 
-The data retain [BEAM attribution and CC BY-SA 4.0 terms](LICENSES/BEAM-CC-BY-SA-4.0.md), including the applicable separate prompt notices. The two metadata-adjudicated retries retain their original schema-invalid visible responses and recorded answer projections, with unchanged answer text and no replacement answer call. Full conversation shards, private service credentials, transport headers, hidden `reasoning_content` and operational logs are not included; visible reasoning fields explicitly requested by the benchmark remain in the response evidence. These files support question-level inspection and independent rescoring; they do not recreate historical indexing or certify a fresh matched run.
-
-From the repository root, run `uv run pytest -q tests/test_published_oam_evidence.py` to recompute both arms' question coverage, first-pass and policy-final scores, threshold counts, retry selection and exact context-token counts. Python's standard `gzip` and `json` modules open the shards without provider credentials.
+Run `uv run pytest -q tests/test_published_oam_evidence.py` to verify coverage, selected scores, threshold counts and exact context tokens. Python's `gzip` and `json` modules open the shards without provider credentials. Rebuild the offline report with `PYTHONPATH=src uv run python scripts/build_historical_reports.py eval_results/beam10m`.

@@ -270,7 +270,7 @@ def test_doctor_plan_closes_models_retrieval_recipients_and_limits(tmp_path: Pat
         ("LLM_LIGHT_MODEL", "low", 1, None),
         ("LLM_LIGHT_MODEL", "low", 1, None),
         ("LLM_LIGHT_MODEL", "low", 1, None),
-        ("LLM_DEEP_MODEL", "low", 1, None),
+        ("LLM_DEEP_MODEL", "max", 3, None),
         ("LLM_LIGHT_MODEL", "high", 2, None),
         (source_models["embedding"].model, "not_applicable", None, None),
     )
@@ -362,7 +362,7 @@ def test_doctor_prints_redacted_human_summary_only(tmp_path: Path) -> None:
     assert "cells: 3" in result.output
     assert "retrieval generation: disabled" in result.output
     assert "model hindsight_extraction: from LLM_LIGHT_MODEL / low (rank 1/3)" in result.output
-    assert "model answer: from LLM_DEEP_MODEL / low (rank 1/3)" in result.output
+    assert "model answer: from LLM_DEEP_MODEL / max (rank 3/3)" in result.output
     assert "model judge: from LLM_LIGHT_MODEL / high (rank 2/3)" in result.output
     assert "recipient=llm-api" in result.output
     assert "decision: accuracy delta >= 0.05 and exact McNemar p <= 0.05" in result.output

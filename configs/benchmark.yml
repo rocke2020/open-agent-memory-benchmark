@@ -98,13 +98,13 @@ models:
     usage_coverage: classified
   answer:
     model: *deep_model
-    thinking_effort: low
+    thinking_effort: max
     endpoint_variable: LLM_BASE_URL
     credential_variable: LLM_API_KEY
     recipient: llm-api
     execution_owner: harness
     proof_kind: sealed_outbound_request_and_response
-    proof_reference: reasoning_effort=low
+    proof_reference: reasoning_effort=max
     usage_coverage: classified
   # High is the middle rank 2/3, not maximum. It is reserved for offline judging.
   judge:

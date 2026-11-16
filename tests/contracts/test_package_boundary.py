@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import os
+import shutil
 import subprocess
 import sys
-import tarfile
-import zipfile
-from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -82,49 +81,41 @@ def test_artifact_validation_does_not_import_reporting_implementation() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_built_and_installed_distributions_expose_no_generated_schema_surface(
-    tmp_path: Path,
-    install_wheel_in_isolated_environment: Callable[[Path, Path], Path],
-) -> None:
+def test_source_checkout_runs_without_installing_a_versioned_distribution(tmp_path: Path) -> None:
     repository_root = Path(__file__).resolve().parents[2]
-    distribution_root = tmp_path / "dist"
-    build = subprocess.run(
-        ["uv", "build", "--out-dir", str(distribution_root)],
-        cwd=repository_root,
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    for name in ("src", "prompt-packs", "configs"):
+        shutil.copytree(
+            repository_root / name,
+            checkout / name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    for name in ("pyproject.toml", "uv.lock", "README.md", "precheck.sh", "run.sh"):
+        shutil.copy2(repository_root / name, checkout / name)
+    if (repository_root / ".python-version").is_file():
+        shutil.copy2(repository_root / ".python-version", checkout / ".python-version")
+    environment = os.environ | {"PYTHONPATH": str(checkout / "src")}
+    sync = subprocess.run(
+        ["uv", "sync", "--locked", "--offline", "--group", "download"],
+        cwd=checkout,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
     )
-    assert build.returncode == 0, build.stderr
-    wheel = next(distribution_root.glob("*.whl"))
-    source_distribution = next(distribution_root.glob("*.tar.gz"))
-    with zipfile.ZipFile(wheel) as archive:
-        wheel_names = tuple(archive.namelist())
-        wheel_root = tmp_path / "wheel"
-        archive.extractall(wheel_root)
-    with tarfile.open(source_distribution, "r:gz") as archive:
-        source_names = tuple(archive.getnames())
-        source_root = tmp_path / "source"
-        archive.extractall(source_root, filter="data")
-    for names in (wheel_names, source_names):
-        assert not any(name.endswith(".schema.json") for name in names)
-        assert not any("/schemas/" in f"/{name}/" for name in names)
-    for distribution_root in (wheel_root, source_root):
-        distribution_paths = tuple(
-            path for path in distribution_root.rglob("*") if path.is_file() or path.is_symlink()
-        )
-        assert scan_public_paths(distribution_root, distribution_paths) == ()
-
-    environment = tmp_path / "installed"
-    installed_python = install_wheel_in_isolated_environment(
-        wheel,
-        environment,
-    )
+    assert sync.returncode == 0, sync.stdout + sync.stderr
+    source_paths = tuple(path for path in (checkout / "src").rglob("*") if path.is_file())
+    assert scan_public_paths(checkout, source_paths) == ()
+    source_python = checkout / ".venv" / "bin" / "python"
     resource_probe = subprocess.run(
         [
-            str(installed_python),
+            str(source_python),
             "-c",
             (
+                "from importlib.metadata import distributions; "
+                "assert not any(d.metadata['Name'] == 'open-agent-memory-benchmark' "
+                "for d in distributions()), 'OAMB must run without distribution metadata'; "
                 "from importlib import resources; "
                 "from oamb.contracts.schema import CONTRACT_REGISTRY, parse_contract; "
                 "assert not resources.files('oamb').joinpath('schemas').is_dir(); "
@@ -146,14 +137,17 @@ def test_built_and_installed_distributions_expose_no_generated_schema_surface(
                 '"ComparisonControlSourceReference"'
             ),
         ],
+        cwd=checkout,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
     )
     assert resource_probe.returncode == 0, resource_probe.stderr
-    installed_cli = environment / "bin" / "oamb"
     help_result = subprocess.run(
-        [str(installed_cli), "--help"],
+        [str(source_python), "-m", "oamb.cli", "--help"],
+        cwd=checkout,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
@@ -161,9 +155,22 @@ def test_built_and_installed_distributions_expose_no_generated_schema_surface(
     assert help_result.returncode == 0, help_result.stderr
     assert "schema" not in help_result.stdout.lower()
     removed_command = subprocess.run(
-        [str(installed_cli), "schema", "--help"],
+        [str(source_python), "-m", "oamb.cli", "schema", "--help"],
+        cwd=checkout,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
     )
     assert removed_command.returncode != 0
+    for script in ("precheck.sh", "run.sh"):
+        help_result = subprocess.run(
+            [str(checkout / script), "--oam", "--help"],
+            cwd=tmp_path,
+            env=environment | {"PYTHONPATH": ""},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert help_result.returncode == 0, help_result.stdout + help_result.stderr
+        assert "usage:" in help_result.stdout.lower()

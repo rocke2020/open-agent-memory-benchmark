@@ -32,7 +32,6 @@ from oamb.workloads.oam_protocol import (
     JUDGE_SCHEMA,
     answer_text,
     completion_payload,
-    validate_retry_review,
 )
 
 _CONTAINER_CONFIG = "/opt/oam-eval/config.yaml"
@@ -48,7 +47,7 @@ class OAMRunConfig(BaseModel):
     embedding_model: str | None = None
     answer_model: str | None = None
     judge_model: str | None = None
-    answer_effort: ReasoningEffort = "high"
+    answer_effort: ReasoningEffort = "max"
     judge_effort: ReasoningEffort = "high"
     embedding_dimensions: int = Field(default=1024, ge=1)
     timeout_seconds: int = Field(default=900, ge=1)
@@ -412,27 +411,6 @@ def _score_judgments(judgments: list[str], dataset: str) -> float:
     return sum(scores) / len(scores)
 
 
-def _review_for(root: Path, question_id: str, context: str) -> dict[str, Any] | None:
-    path = root / "retry-eligibility.json"
-    if not path.exists():
-        return None
-    reviews = _read(path)
-    if not isinstance(reviews, dict):
-        raise ValueError("retry eligibility must be a question-to-review mapping")
-    review = reviews.get(question_id)
-    if review is None:
-        return None
-    if not isinstance(review, dict):
-        raise ValueError("invalid retry eligibility review")
-    # A generated draft stays pending until the operator completes the review.
-    if review.get("gold_status") == "unreviewed":
-        if review.get("eligible") is True:
-            raise ValueError("unreviewed gold cannot authorize a retry")
-        return None
-    validate_retry_review(review, context)
-    return dict(review)
-
-
 def evaluate_question(
     root: Path,
     config: OAMRunConfig,
@@ -443,7 +421,7 @@ def evaluate_question(
     *,
     saved: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One held-context first pass and at most one explicitly reviewed policy retry."""
+    """Score one configured answer and reuse its accepted result on resume."""
     path = root / "results" / (canonical_sha256(question.question_id) + ".json")
     schema = ANSWER_SCHEMA if config.dataset == "beam10m" else None
     judge_schema = JUDGE_SCHEMA if config.dataset == "beam10m" else None
@@ -485,7 +463,6 @@ def evaluate_question(
             "question": question.text,
             "context": context,
             "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
-            "first_pass": first,
             **first,
         }
         _write(path, saved)
@@ -493,32 +470,8 @@ def evaluate_question(
         saved["context"] != context
         or saved["context_sha256"] != hashlib.sha256(context.encode()).hexdigest()
     ):
-        raise ValueError("retry context differs from the saved first pass")
-    if saved.get("retry") is not None:
-        return saved
-    threshold = 1.0 if config.dataset == "lme500" else 0.5
-    if saved["first_pass"]["score"] >= threshold:
-        return saved
-    review_path = root / "retry-reviews" / (canonical_sha256(question.question_id) + ".json")
-    if review_path.exists():
-        review = _read(review_path)
-        validate_retry_review(review, context)
-        if review["eligible"] is not True:
-            raise ValueError("accepted retry review must remain eligible")
-    else:
-        review = _review_for(root, question.question_id, context)
-    if review is None:
-        return saved
-    if not review["eligible"]:
-        result = {**saved, "retry_review": review}
-    else:
-        # Admission owns an in-flight retry even if the editable draft later changes or disappears.
-        if not review_path.exists():
-            _write(review_path, review)
-        retry = attempt("max")
-        result = {**saved, **retry, "retry": retry, "retry_review": review}
-    _write(path, result, replace=True)
-    return result
+        raise ValueError("context differs from the saved answer")
+    return saved
 
 
 def validate_results(
@@ -568,88 +521,51 @@ def validate_results(
             or diagnostics.get("recall_level") != ("fast" if dataset == "lme500" else "normal")
         ):
             raise ValueError("saved recall identity/readiness differs from frozen input")
-        first = result["first_pass"]
-        attempts = [(first, plan["config"]["answer_effort"])]
-        retry = result.get("retry")
-        if retry is not None:
-            review = result["retry_review"]
-            validate_retry_review(review, result["context"])
-            if not review["eligible"] or first["score"] >= (1 if dataset == "lme500" else 0.5):
-                raise ValueError("saved retry is not an eligible failed first pass")
-            admitted = root / "retry-reviews" / (canonical_sha256(question.question_id) + ".json")
-            if not admitted.exists() or _read(admitted) != review:
-                raise ValueError("saved retry differs from its accepted review")
-            attempts.append((retry, "max"))
-        elif result.get("retry_review") is not None:
-            validate_retry_review(result["retry_review"], result["context"])
-            if result["retry_review"]["eligible"]:
-                raise ValueError("eligible review has no completed retry")
-        final = retry if retry is not None else first
-        if any(
-            result[name] != final[name]
-            for name in ("answer", "answer_response", "judgments", "score")
-        ):
-            raise ValueError("policy result differs from the last completed attempt")
-        for attempt, effort in attempts:
-            if answer_text(attempt["answer_response"], dataset) != attempt["answer"]:
-                raise ValueError("answer differs from the structured model response")
-            judge_prompts = _judge_prompts(question, attempt["answer"], dataset)
-            if len(judge_prompts) != len(attempt["judgments"]):
-                raise ValueError("rubric judgment coverage is incomplete")
-            expected = [
-                (
-                    "answer",
-                    _answer_prompt(question, result["context"], dataset),
-                    attempt["answer_response"],
-                    effort,
-                )
-            ]
-            expected.extend(
-                ("judge", p, j, plan["config"]["judge_effort"])
-                for p, j in zip(judge_prompts, attempt["judgments"], strict=True)
+        if answer_text(result["answer_response"], dataset) != result["answer"]:
+            raise ValueError("answer differs from the structured model response")
+        judge_prompts = _judge_prompts(question, result["answer"], dataset)
+        if len(judge_prompts) != len(result["judgments"]):
+            raise ValueError("rubric judgment coverage is incomplete")
+        expected = [
+            (
+                "answer",
+                _answer_prompt(question, result["context"], dataset),
+                result["answer_response"],
+                plan["config"]["answer_effort"],
             )
-            for stage, prompt, content, stage_effort in expected:
-                schema = (
-                    (ANSWER_SCHEMA if stage == "answer" else JUDGE_SCHEMA)
-                    if dataset == "beam10m"
-                    else None
+        ]
+        expected.extend(
+            ("judge", p, j, plan["config"]["judge_effort"])
+            for p, j in zip(judge_prompts, result["judgments"], strict=True)
+        )
+        for stage, prompt, content, stage_effort in expected:
+            schema = (
+                (ANSWER_SCHEMA if stage == "answer" else JUDGE_SCHEMA)
+                if dataset == "beam10m"
+                else None
+            )
+            if not any(
+                _request_identity(request)
+                == _request_identity(
+                    completion_payload(request["model"], stage_effort, prompt, schema)
                 )
-                if not any(
-                    _request_identity(request)
-                    == _request_identity(
-                        completion_payload(request["model"], stage_effort, prompt, schema)
-                    )
-                    for request in calls.get((stage, content), [])
-                ):
-                    raise ValueError(
-                        "saved result differs from the actual complete model input/output"
-                    )
-            if not math.isclose(
-                _score_judgments(attempt["judgments"], dataset), attempt["score"], abs_tol=1e-12
+                for request in calls.get((stage, content), [])
             ):
-                raise ValueError("saved score differs from the actual judgments")
+                raise ValueError("saved result differs from the actual complete model input/output")
+        if not math.isclose(
+            _score_judgments(result["judgments"], dataset), result["score"], abs_tol=1e-12
+        ):
+            raise ValueError("saved score differs from the actual judgments")
     return results
 
 
 def summarize_results(results: list[dict[str, Any]], config: OAMRunConfig) -> dict[str, Any]:
     threshold = 1 if config.dataset == "lme500" else 0.5
-    pending = [
-        r["question_id"]
-        for r in results
-        if r["first_pass"]["score"] < threshold and not r.get("retry_review")
-    ]
-    mean = sum(r["score"] for r in results) / len(results)
     return {
         "validated_questions": len(results),
         "diagnostic": config.diagnostic,
-        "first_pass_mean_score": sum(r["first_pass"]["score"] for r in results) / len(results),
-        "mean_score": mean,
-        "policy_final_mean_score": None if pending else mean,
-        "policy_final_complete": not pending,
-        "pending_review": pending,
-        "first_pass_threshold_passes": sum(r["first_pass"]["score"] >= threshold for r in results),
-        "policy_threshold_passes": sum(r["score"] >= threshold for r in results),
-        "max_effort_retries": sum(r.get("retry") is not None for r in results),
+        "mean_score": sum(r["score"] for r in results) / len(results),
+        "threshold_passes": sum(r["score"] >= threshold for r in results),
     }
 
 
@@ -657,7 +573,7 @@ def _report(root: Path, plan: dict[str, Any], results: list[dict[str, Any]]) -> 
     summary = summarize_results(results, OAMRunConfig.model_validate(plan["config"]))
     rows = "".join(
         f"<article><h2>{html.escape(r['question_id'])}</h2>"
-        f"<p>First pass: {r['first_pass']['score']}; current policy: {r['score']}</p><p>{html.escape(r['question'])}</p>"
+        f"<p>Score: {r['score']}</p><p>{html.escape(r['question'])}</p>"
         f"<p>{html.escape(r['answer'])}</p><details><summary>Exact retrieved context</summary>"
         f"<pre>{html.escape(r['context'])}</pre></details></article>"
         for r in results
@@ -669,8 +585,7 @@ def _report(root: Path, plan: dict[str, Any], results: list[dict[str, Any]]) -> 
 @media(prefers-color-scheme:dark){{:root{{--bg:#14171b;--fg:#eee;--line:#555}}}}
 body{{background:var(--bg);color:var(--fg);font:16px/1.6 system-ui;max-width:960px;margin:2rem auto;padding:1rem}}
 article{{border-top:1px solid var(--line);padding:1rem 0}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}
-</style><h1>{title}</h1><p>{len(results)} unique questions. First-pass mean:
-{summary["first_pass_mean_score"]:.3f}; policy-final mean: {summary["policy_final_mean_score"] if summary["policy_final_complete"] else "pending source/context/gold review"}.</p><p>Generation-only usage is in model-calls and
+</style><h1>{title}</h1><p>{len(results)} unique questions. Mean score: {summary["mean_score"]:.3f}.</p><p>Generation-only usage is in model-calls and
 owners; embedding tokens are excluded. This run is separate from historical evidence.</p>{rows}</html>"""
     atomic_replace_bytes(root / "report.html", document.encode())
 
@@ -723,27 +638,7 @@ def run(root: Path, *, resume: bool) -> None:
         summarize_results(results, config),
         replace=True,
     )
-    review_path = root / "retry-eligibility.json"
-    threshold = 1 if config.dataset == "lme500" else 0.5
-    if not review_path.exists():
-        _write(
-            review_path,
-            {
-                r["question_id"]: {
-                    "eligible": False,
-                    "coverage_review_complete": False,
-                    "gold_review_complete": False,
-                    "gold_status": "unreviewed",
-                    "rationale": "",
-                    "context_sha256": r["context_sha256"],
-                }
-                for r in results
-                if r["first_pass"]["score"] < threshold
-            },
-        )
-    pending = summarize_results(results, config)["pending_review"]
-    status = "FIRST PASS COMPLETE; REVIEW PENDING" if pending else "PASS"
-    print(f"run: {status} ({len(results)} validated questions); report: {root / 'report.html'}")
+    print(f"run: PASS ({len(results)} validated questions); report: {root / 'report.html'}")
 
 
 def _run_history(
@@ -854,7 +749,7 @@ def _run_history(
             replace=True,
         )
         print(
-            f"question: {question.question_id} first={result['first_pass']['score']:.3f} policy={result['score']:.3f}",
+            f"question: {question.question_id} score={result['score']:.3f}",
             flush=True,
         )
 

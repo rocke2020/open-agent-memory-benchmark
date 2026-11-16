@@ -537,7 +537,7 @@ case " $* " in
       exit 46
     fi
     ;;
-  *" oamb doctor "*)
+  *" python -m oamb.cli doctor "*)
     embedding_url="http://127.0.0.1:18000/v1"
     embedding_ownership="embedding_local_fallback"
     previous=""
@@ -706,7 +706,7 @@ def test_precheck_routes_default_local_embedding_by_operating_system(
     assert "OAMB_EMBEDDING_BASE_URL=change-me" in root_env
     assert "OAMB_EMBEDDING_BASE_URL=http://host.docker.internal:18000/v1" not in root_env
     assert "OAMB_EMBEDDING_API_KEY=" in root_env
-    assert "uv sync --locked --all-groups" in calls
+    assert "uv sync --locked --group download" in calls
     assert "provider-services verify --services" in calls
     assert "provider-services verify --model-readiness" in calls
     if system_name == "Linux":
@@ -1385,7 +1385,7 @@ def _write_fake_oamb(fake_bin: Path) -> None:
 	while ! mkdir "$trace_lock" 2>/dev/null; do /bin/sleep 0.01; done
 	trace_lock_owned=true
 	printf 'uv %s\n' "$*" >> "$OAMB_TEST_TRACE"
-	if [[ " $* " == *" oamb run "* ]]; then
+	if [[ " $* " == *" python -m oamb.cli run "* ]]; then
 	  printf 'run-owner-pid %s\n' "${OAMB_RUN_SH_PROCESS_ID:-missing}" >> "$OAMB_TEST_TRACE"
 	fi
 	rmdir "$trace_lock"
@@ -1408,7 +1408,7 @@ def _write_fake_oamb(fake_bin: Path) -> None:
 	  esac
 	fi
 	case " $* " in
-	  *" oamb run "*)
+	  *" python -m oamb.cli run "*)
 	    cells=()
 	    result_map=""
 	    output_root=""
@@ -1577,7 +1577,7 @@ PY
         "$hindsight" "$mem0" "$openviking" > "$result_map"
 	    fi
 	    ;;
-	  *" oamb capsule validate "*)
+	  *" python -m oamb.cli capsule validate "*)
     output=""
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--output" ]; then output=$2; break; fi
@@ -1586,7 +1586,7 @@ PY
     mkdir -p "$(dirname "$output")"
     printf '%s\n' '{"disposition":"validated"}' > "$output"
     ;;
-  *" oamb compare "*)
+  *" python -m oamb.cli compare "*)
     output_root=""
     diagnostic=false
     while [ "$#" -gt 0 ]; do
@@ -1615,7 +1615,7 @@ PY
       "$diagnostic" "$cases" "$results" > "$output_root/report.json"
     printf '%s\n' '<!doctype html><title>OAMB comparison report</title>' > "$output_root/report.html"
     ;;
-  *" oamb report saved-results "*)
+  *" python -m oamb.cli report saved-results "*)
     output_root=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -1840,9 +1840,9 @@ def test_run_dry_run_validates_without_dispatch(
     )
     assert "uv run --locked python -" in calls
     assert "longmemeval_s_cleaned.json" in calls
-    assert "oamb run" not in calls
-    assert "oamb capsule validate" not in calls
-    assert "oamb compare" not in calls
+    assert "python -m oamb.cli run" not in calls
+    assert "python -m oamb.cli capsule validate" not in calls
+    assert "python -m oamb.cli compare" not in calls
     assert "open " not in calls
     output_branch = "smoke-test" if expected_mode == "smoke" else "full-test"
     assert not (root / "outputs" / output_branch / "lme60-test").exists()
@@ -1872,7 +1872,7 @@ def test_run_full_input_encoding_failure_prevents_benchmark_dispatch(tmp_path: P
     calls = trace.read_text(encoding="utf-8")
     assert "provider-services doctor" in calls
     assert "longmemeval_s_cleaned.json" in calls
-    assert "oamb run" not in calls
+    assert "python -m oamb.cli run" not in calls
 
 
 def test_run_smoke_runs_the_dry_run_gate_before_dispatch(tmp_path: Path) -> None:
@@ -1895,7 +1895,9 @@ def test_run_smoke_runs_the_dry_run_gate_before_dispatch(tmp_path: Path) -> None
     readiness_index = next(
         index for index, line in enumerate(calls) if "uv run --locked python -" in line
     )
-    dispatch_index = next(index for index, line in enumerate(calls) if "oamb run" in line)
+    dispatch_index = next(
+        index for index, line in enumerate(calls) if "python -m oamb.cli run" in line
+    )
     assert doctor_index < readiness_index < dispatch_index
 
 
@@ -1945,7 +1947,7 @@ def test_run_without_resume_starts_a_fresh_execution_every_time(
     assert execution_roots[0] != execution_roots[1]
     assert "reusing-completed-capsule" not in second.stdout
     second_trace_lines = trace.read_text(encoding="utf-8").splitlines()[len(first_trace_lines) :]
-    assert any("oamb run" in line for line in second_trace_lines)
+    assert any("python -m oamb.cli run" in line for line in second_trace_lines)
     assert not any(f"{execution_roots[0]}/" in line for line in second_trace_lines)
 
 
@@ -1998,13 +2000,13 @@ def test_run_defaults_to_smoke_and_builds_one_question_comparison(tmp_path: Path
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8")
-    run_calls = [line for line in calls.splitlines() if "oamb run" in line]
+    run_calls = [line for line in calls.splitlines() if "python -m oamb.cli run" in line]
     assert len(run_calls) == 1
     for cell in ("hindsight-lme60", "mem0-lme60", "openviking-lme60"):
         assert f"--cell {cell}" in run_calls[0]
     assert "--question 72e3ee87" in run_calls[0]
-    assert calls.count("oamb capsule validate") == 3
-    assert "oamb compare" in calls and "--diagnostic" in calls
+    assert calls.count("python -m oamb.cli capsule validate") == 3
+    assert "python -m oamb.cli compare" in calls and "--diagnostic" in calls
     assert "open " in calls and "/outputs/smoke-test/lme60-test/comparison/report.html" in calls
     report = json.loads(
         (root / "outputs" / "smoke-test" / "lme60-test" / "comparison" / "report.json").read_bytes()
@@ -2285,7 +2287,9 @@ def test_run_dispatches_all_provider_cells_together(
 
     assert result.returncode == 0, result.stdout + result.stderr
     run_calls = [
-        line for line in trace.read_text(encoding="utf-8").splitlines() if "oamb run" in line
+        line
+        for line in trace.read_text(encoding="utf-8").splitlines()
+        if "python -m oamb.cli run" in line
     ]
     assert len(run_calls) == 1
     if expected_question:
@@ -2344,7 +2348,7 @@ def test_run_smoke_ignores_old_capsule_and_preserves_invalid_validation(
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8")
-    assert "oamb run" in calls
+    assert "python -m oamb.cli run" in calls
     assert "--cell hindsight-lme60" in calls
     assert "--cell mem0-lme60" in calls
     assert "--cell openviking-lme60" in calls
@@ -2388,7 +2392,7 @@ def test_run_smoke_starts_fresh_on_every_invocation(
     smoke_run_calls = [
         line
         for line in trace.read_text(encoding="utf-8").splitlines()
-        if "oamb run" in line and "--question 72e3ee87" in line
+        if "python -m oamb.cli run" in line and "--question 72e3ee87" in line
     ]
     assert len(smoke_run_calls) == 3
     assert json.loads(result_map.read_bytes())["status"] == "failed"
@@ -2416,18 +2420,22 @@ def test_run_full_test_runs_directly_and_validates_sixty_case_report(
     assert "--bounded-capsule" not in calls
     assert "--bounded-validation" not in calls
     full_run_call = next(
-        line for line in calls.splitlines() if "oamb run" in line and "--results-root" in line
+        line
+        for line in calls.splitlines()
+        if "python -m oamb.cli run" in line and "--results-root" in line
     )
     assert "--full-progress-root" not in full_run_call
     assert "--full-resume-lock" not in full_run_call
     assert "--full-resume-pointer" not in full_run_call
     assert "python -" in calls and "/results" in calls
-    assert calls.count("oamb capsule validate") == 3
+    assert calls.count("python -m oamb.cli capsule validate") == 3
     assert (
         "run: providers=hindsight,mem0,openviking status=starting (full, 60 questions each)"
         in result.stdout
     )
-    comparison_call = next(line for line in calls.splitlines() if "oamb compare" in line)
+    comparison_call = next(
+        line for line in calls.splitlines() if "python -m oamb.cli compare" in line
+    )
     assert "--diagnostic" not in comparison_call
     assert "--results-root" in comparison_call
     assert "--analysis-model-env" in comparison_call
@@ -2490,7 +2498,9 @@ def test_run_full_test_ignores_completed_old_capsules_and_preserves_validation(
     assert second.returncode == 0, second.stdout + second.stderr
     calls = trace.read_text(encoding="utf-8")
     full_run_calls = [
-        line for line in calls.splitlines() if "oamb run" in line and "--cell" not in line
+        line
+        for line in calls.splitlines()
+        if "python -m oamb.cli run" in line and "--cell" not in line
     ]
     assert len(full_run_calls) == 2
     assert full_validation.read_text(encoding="utf-8") == '{"disposition":"invalid"}\n'
@@ -2542,7 +2552,7 @@ def test_run_full_test_starts_fresh_instead_of_reusing_failed_result_map(
     full_run_calls = [
         line
         for line in trace.read_text(encoding="utf-8").splitlines()
-        if "oamb run" in line and "--cell" not in line
+        if "python -m oamb.cli run" in line and "--cell" not in line
     ]
     assert len(full_run_calls) == 3
     full_run_directories = tuple(sorted((root / "outputs" / "full-test").glob("lme60-test*")))
@@ -2594,7 +2604,7 @@ def test_run_rejects_resume_without_full_before_dispatch(
 
     assert result.returncode != 0
     assert "--resume requires --full_test" in result.stderr
-    assert not trace.exists() or "oamb run" not in trace.read_text(encoding="utf-8")
+    assert not trace.exists() or "python -m oamb.cli run" not in trace.read_text(encoding="utf-8")
 
 
 def test_run_full_resume_runs_once_and_compares_provider_results(
@@ -2625,8 +2635,8 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8").splitlines()
-    run_calls = [line for line in calls if "oamb run" in line]
-    compare_calls = [line for line in calls if "oamb compare" in line]
+    run_calls = [line for line in calls if "python -m oamb.cli run" in line]
+    compare_calls = [line for line in calls if "python -m oamb.cli compare" in line]
     doctor_calls = [line for line in calls if line == "provider-services doctor"]
     provider_up_calls = [line for line in calls if line == "provider-services up"]
     provider_verify_calls = [
@@ -2634,7 +2644,7 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
     ]
 
     assert len(run_calls) == 1
-    assert f"oamb run {full_root}/resolved-plan.json" in run_calls[0]
+    assert f"python -m oamb.cli run {full_root}/resolved-plan.json" in run_calls[0]
     assert f"--resume-concurrency-config {root}/configs/benchmark.yml" in run_calls[0]
     owner_lines = [line for line in calls if line.startswith("run-owner-pid ")]
     assert len(owner_lines) == 1
@@ -2662,7 +2672,7 @@ def test_run_full_resume_runs_once_and_compares_provider_results(
             "--recover-from",
             "--continue-from",
             "--recovery-analysis-output",
-            "oamb capsule compose",
+            "python -m oamb.cli capsule compose",
         )
     )
     assert tuple(path.read_bytes() for path in result_paths) == original_results
@@ -2699,15 +2709,15 @@ def test_run_generate_report_skips_precheck_services_and_provider_calls(tmp_path
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = trace.read_text(encoding="utf-8").splitlines()
-    report_calls = [line for line in calls if "oamb report saved-results" in line]
+    report_calls = [line for line in calls if "python -m oamb.cli report saved-results" in line]
     assert len(report_calls) == 1
     assert str(result_root) in report_calls[0]
     assert f"--output-root {result_root}/comparison" in report_calls[0]
     assert f"--analysis-model-env {root}/.env" in report_calls[0]
     assert f"--analysis-cache-root {result_root}/report-analysis-cache" in report_calls[0]
     assert not any("provider-services" in line for line in calls)
-    assert not any("oamb run" in line for line in calls)
-    assert not any("oamb compare" in line for line in calls)
+    assert not any("python -m oamb.cli run" in line for line in calls)
+    assert not any("python -m oamb.cli compare" in line for line in calls)
     assert "run: PASS (saved report, 60 questions, 180 provider results)" in result.stdout
     assert f"report: {result_root}/comparison/report.html" in result.stdout
 
@@ -2804,7 +2814,7 @@ def test_run_full_resume_ignores_embedding_ownership_state(
     assert "http://127.0.0.1:19001/v1/embeddings" in calls
     assert "embedding: PASS (finite 768-dimensional vector)" in result.stdout
     assert "provider-services up" in calls
-    assert "oamb run" in calls
+    assert "python -m oamb.cli run" in calls
 
 
 def test_run_full_resume_accepts_legacy_plan_without_embedding_identity(
@@ -2844,7 +2854,7 @@ def test_run_full_resume_accepts_legacy_plan_without_embedding_identity(
     calls = trace.read_text(encoding="utf-8")
     assert "embedding-start" not in calls
     assert "provider-services up" in calls
-    assert "oamb run" in calls
+    assert "python -m oamb.cli run" in calls
 
 
 def test_plan_loader_accepts_legacy_resume_with_runtime_embedding_endpoint(
@@ -2961,7 +2971,7 @@ fi
     calls = trace.read_text(encoding="utf-8").splitlines()
     assert "embedding-start" not in calls
     assert "provider-services up" not in calls
-    assert not any("oamb run" in line for line in calls)
+    assert not any("python -m oamb.cli run" in line for line in calls)
     assert not provider_ready.exists()
 
 
@@ -3019,7 +3029,7 @@ python3 -c 'import json; print(json.dumps({"data": [{"embedding": [0.0] * 1024}]
     assert calls.count("embedding-probe 1") == 1
     assert "embedding-probe 2" not in calls
     assert "embedding: waiting for existing startup" not in result.stdout
-    assert not any("oamb run" in line for line in calls)
+    assert not any("python -m oamb.cli run" in line for line in calls)
 
 
 def test_recorded_embedding_timeout_names_pid_without_claiming_a_new_log(
@@ -3073,7 +3083,7 @@ def test_run_full_resume_failure_stops_before_comparison(
 
     assert result.returncode != 0
     calls = trace.read_text(encoding="utf-8").splitlines()
-    run_calls = [line for line in calls if "oamb run" in line]
+    run_calls = [line for line in calls if "python -m oamb.cli run" in line]
     assert len(run_calls) == 1
     assert "--full-resume-rehearsal" not in run_calls[0]
     doctor_index = calls.index("provider-services doctor")
@@ -3081,7 +3091,7 @@ def test_run_full_resume_failure_stops_before_comparison(
     provider_verify_index = calls.index("provider-services verify --services")
     resume_index = calls.index(run_calls[0])
     assert doctor_index < provider_up_index < provider_verify_index < resume_index
-    assert not any("oamb compare" in line for line in calls)
+    assert not any("python -m oamb.cli compare" in line for line in calls)
 
 
 def test_run_sh_owner_death_stops_in_flight_comparison(tmp_path: Path) -> None:

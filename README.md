@@ -6,22 +6,17 @@ English | [简体中文](README_CN.md) | [日本語](README_JA.md)
 
 Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for Open Agent Memory (OAM), with a publicly documented workflow for LME-500 and BEAM-10M. It covers dataset preparation, execution and reporting, with separate comparisons against Hindsight, Mem0 and OpenViking.
 
-## OAM vs Hindsight: DeepSeek-based results
+## OAM results
 
-These recorded evaluations compare OAM v0.0.1 development snapshots with Hindsight on full LongMemEval S and BEAM-10M question sets. They are whole-pipeline results with important differences in model settings and execution, not controlled measurements of the memory engines alone.
+**OAM reaches 93.2% on LME-500 (466/500)** with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash high-effort judging.
 
-| Evaluation | OAM | Hindsight with DeepSeek | Observed difference |
-| --- | ---: | ---: | ---: |
-| [LME-500 answer accuracy](eval_results/lme500/README.md#reference-comparison) | **94.0% (470/500)** | **89.6% (448/500)** | **+4.4 percentage points** |
-| [BEAM-10M mean rubric score](eval_results/beam10m/README.md#1-evaluation-and-results) | **61.56%** | **52.16%** (saved-context replay) | **+9.40 percentage points** |
+The LME evaluation uses L1 memory and fast recall, with 11,481.10 mean answer-context tokens. See the [detailed results and provenance](eval_results/lme500/README.md).
 
-**LME-500:** OAM used DeepSeek Flash for extraction, answering and judging, with high-effort first answers and a reviewed max-effort retry for eligible failures. The [Hindsight reproduction](https://github.com/rocke2020/agent-memory-benchmark/tree/b6eac3dbd41de03fb6ac31486b342f4d1b556dde) used DeepSeek V4 Flash 0731 for extraction and judging and V4 Pro 0813 for answers. Model versions, answer settings and retry policies differ; the same 500 question IDs do not establish identical dataset bytes or prompts.
+**BEAM-10M: OAM 61.56%, Hindsight saved-context replay 52.16% (+9.40 percentage points).** The comparison uses 200 recorded selected answers and DeepSeek Flash judging. Hindsight's engine was not rerun, and OAM's answer context was 17.43% larger. These saved measurements are separate from the current max-effort answer profile. See the [BEAM results and comparison conditions](eval_results/beam10m/README.md#1-recorded-results).
 
-**BEAM-10M:** Both arms used the same DeepSeek Flash answer/judge policy on the same 200 questions, including one eligible max-effort answer retry. Hindsight's saved contexts were replayed; its indexing and retrieval were not rerun. OAM's answer-visible context was 17.43% larger. This does not isolate an engine effect or establish a matched indexing, latency or cost comparison. The original [Hindsight result](eval_results/beam10m/README.md#1-evaluation-and-results) used Gemini models and a different scoring policy.
+Browse full contexts, answers and judgments in the offline HTML reports: [LME-500](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html). Download and open either file without setup or evaluation calls. The [BEAM failure review](eval_results/beam10m/beam10m-failure-review.md) retains the 58 rejected selected answers.
 
-Browse saved questions, answers, judgments and full injected contexts in the offline HTML reports: [LME-500](eval_results/lme500/report.html) · [BEAM-10M, including Hindsight replay](eval_results/beam10m/report.html). Download either file and open it in a current browser; no setup or evaluation calls are needed. The [BEAM failure review](eval_results/beam10m/beam10m-failure-review.md) discusses the 58 policy-final failures without changing official scores or the 200-question denominator.
-
-The [native OAM workflows](docs/native-oam.md) provide LME-500 and BEAM-10M execution through `./precheck.sh --oam` and `./run.sh --oam`. This repository includes pinned dataset download/export scripts, the recorded answer and judge prompts, configurable answer/judge models, and the reviewed single max-effort answer-retry procedure. Reports preserve first-pass and policy-final scores separately. Small diagnostics verify execution; full-dataset score parity remains a separate quality measurement.
+The [native OAM workflow](docs/native-oam.md) runs both workloads through `./precheck.sh --oam` and `./run.sh --oam`. DeepSeek Flash answer profiles use **max** effort; the MiniMax M3.1 Flash LME profile uses **native adaptive** reasoning. Judges use high effort. Each run records the actual OAM revision and model bindings. These measurements cover the recorded pipelines; a new deployment does not establish score parity.
 
 Native OAM evaluation on full LME-500 and BEAM-10M is OAMB's primary task. The secondary comparison profile uses the native REST APIs of Hindsight, Mem0 and OpenViking on the same balanced selection of 60 LongMemEval questions: ten questions from each of six question types, producing 180 provider-specific results.
 
@@ -47,7 +42,7 @@ BEAM covers abstention, contradiction resolution, event ordering, information ex
 
 LongMemEval is downloaded by `./precheck.sh` for the comparison workflow, or separately with `./scripts/download/longmemeval.sh`. Run `./scripts/download/beam10m.sh` to download the pinned official BEAM-10M Parquet shards and export `datasets/beam/10m.json` with the campaign's exact JSON serialization and SHA-256. Both helpers preserve existing mismatched files and reject them. Downloaded datasets remain outside Git; see [dataset provenance](DATASETS.md).
 
-Use the [native OAM guide](docs/native-oam.md) to prepare an isolated deployment and run either full dataset through `./precheck.sh --oam` followed by `./run.sh --oam`. Synthetic diagnostic configurations are provided for both datasets. New runs record the evaluated OAM revision and settings; the saved [LME-500](eval_results/lme500/README.md) and [BEAM-10M](eval_results/beam10m/README.md) reports retain their historical results.
+Use the [native OAM guide](docs/native-oam.md) to prepare an isolated deployment and run either full dataset through `./precheck.sh --oam` followed by `./run.sh --oam`. Synthetic diagnostic configurations are provided for both datasets. New runs record the evaluated OAM revision and settings; the saved [LME-500](eval_results/lme500/README.md) and [BEAM-10M](eval_results/beam10m/README.md) reports identify the measured pipelines.
 
 ## Provider versions
 
@@ -87,12 +82,12 @@ The native BEAM workflow provisions a dedicated index after each conversation's 
 
 Follow the [native OAM setup guide](docs/native-oam.md) to build the OAM image, configure model endpoints in private `.env.oam`, and start a separate isolated deployment for each dataset. A separate OAM checkout supplies the product image; evaluation runs from this repository.
 
-Use **`deepseek-v4.1-flash` for extraction, answering and judging**, and **`qwen3-embedding:0.6b` with 1,024-dimensional vectors for embedding**. Copy [.env.oam.example](.env.oam.example) to private `.env.oam`, configure endpoints and keys, and keep both model roles aligned with `model` in the selected YAML. A gateway alias such as `deepseek-flash` is suitable only when it resolves to the required model. Extraction uses low reasoning; first answers and judges use high reasoning. A failed question may receive one reviewed max-effort answer retry on the unchanged context and prompt, followed by high-effort judging.
+Choose [DeepSeek Flash max](configs/oam-lme500.yml) or [MiniMax M3.1 Flash native adaptive](configs/oam-lme500-minimax-native-adaptive.yml) for LME answers; both use DeepSeek Flash high-effort judging. BEAM also uses DeepSeek Flash max-effort answers. Extraction remains operator-configured with low reasoning; the recorded query embedding is Qwen3-Embedding-0.6B with 1,024 dimensions. Copy [.env.oam.example](.env.oam.example) to private `.env.oam` and configure the shared scoring endpoint/key and each role's model. The scoring endpoint must serve both selected models. Model strings pass through unchanged.
 
 After preparing the inputs and the two deployments, run the full configurations below. These commands make billable calls. Replace the client environment paths with those printed by your two deployments.
 
 ```bash
-./precheck.sh --oam configs/oam-lme500.yml \
+./precheck.sh --oam configs/oam-lme500-minimax-native-adaptive.yml \
   --env-file outputs/oam-services/lme-example/client.env \
   --output outputs/oam-lme500
 ./run.sh --oam outputs/oam-lme500
@@ -105,7 +100,7 @@ After preparing the inputs and the two deployments, run the full configurations 
 
 Each output directory contains `report.html`, `summary.json` and retained per-question evidence. Resume an interrupted evaluation with `./run.sh --oam <output-directory> --resume`. Use the corresponding `*-smoke.yml` configuration with a fresh output directory for a small synthetic diagnostic before a full run.
 
-For failed first-pass questions, complete the generated `retry-eligibility.json` source/context/gold review before resuming. Incorrect gold blocks retry. The completed retry becomes policy-final even when its score falls. Pending reviews remain visible and prevent a complete policy-final claim; see the [review and resume procedure](docs/native-oam.md#3-full-datasets-and-resume).
+Resume reuses completed answers and judgments and continues unfinished work. Complete responses and failed or ambiguous attempts remain saved. See [configuration and resume](docs/native-oam.md#3-full-datasets-and-resume).
 
 ## Quick start: LME-60 comparison
 

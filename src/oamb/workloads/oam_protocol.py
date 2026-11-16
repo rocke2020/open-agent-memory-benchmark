@@ -1,8 +1,7 @@
-"""Published OAM model requests, structured answers and reviewed retry admission."""
+"""Published OAM model requests and structured answers."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any
 
@@ -74,18 +73,3 @@ def answer_text(content: str, dataset: str) -> str:
     ):
         raise ValueError("BEAM answer must contain reasoning and a nonempty answer")
     return str(value["answer"]).strip()
-
-
-def validate_retry_review(review: dict[str, Any], context: str) -> None:
-    if (
-        type(review.get("eligible")) is not bool
-        or review.get("coverage_review_complete") is not True
-        or review.get("gold_review_complete") is not True
-        or review.get("gold_status") not in {"correct", "ambiguous", "incorrect"}
-        or not isinstance(review.get("rationale"), str)
-        or not review["rationale"].strip()
-        or review.get("context_sha256") != hashlib.sha256(context.encode()).hexdigest()
-        or review["eligible"]
-        and review["gold_status"] == "incorrect"
-    ):
-        raise ValueError("source/context/gold review blocks this retry")

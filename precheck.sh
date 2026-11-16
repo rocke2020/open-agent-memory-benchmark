@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 if [[ "${1:-}" == "--oam" ]]; then
   shift
   cd "$ROOT"
@@ -212,7 +213,7 @@ ensure_model_environment() {
   local url_type light_model deep_model base_url api_key
   url_type="$(read_env_value "$ENV_FILE" LLM_URL_TYPE 2>/dev/null || true)"
   [[ "$url_type" == openai_chat ]] || \
-    die "LLM_URL_TYPE must be openai_chat in OAMB v0.1.0"
+    die "LLM_URL_TYPE must be openai_chat"
   light_model="$(read_env_value "$ENV_FILE" LLM_LIGHT_MODEL 2>/dev/null || true)"
   [[ -n "$light_model" && "$light_model" != change-me* ]] || \
     die "configure LLM_LIGHT_MODEL in .env, then rerun"
@@ -360,7 +361,7 @@ readonly DATASET_SOURCE="$ROOT/datasets/longmemeval-cleaned/longmemeval_s_cleane
 readonly PLAN="$WORK_DIR/plan/resolved-plan.json"
 mkdir -p "$WORK_DIR/plan" "$TMP_ROOT/provider-source"
 
-uv sync --locked --all-groups
+uv sync --locked --group download
 "$ROOT/scripts/download/longmemeval.sh"
 
 if [[ ! -d "$MEM0_CHECKOUT/.git" ]]; then
@@ -374,7 +375,7 @@ ensure_model_environment
 ensure_provider_environment "$RUN_LABEL" "$MEM0_CHECKOUT"
 
 doctor_arguments=(
-  uv run --locked oamb doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan" --model-env "$ENV_FILE"
+  uv run --locked python -m oamb.cli doctor "$ROOT/configs/benchmark.yml" --output "$WORK_DIR/plan" --model-env "$ENV_FILE"
 )
 if [[ -n "$EMBEDDING_API_URL" ]]; then
   doctor_arguments+=(--embedding-api-url "$EMBEDDING_API_URL")

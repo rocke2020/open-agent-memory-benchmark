@@ -2,5 +2,5 @@ dataset: beam10m
 source: datasets/beam/10m.json
 model: deepseek-flash  # Gateway request name for deepseek-v4.1-flash.
 embedding_model: qwen3-embedding:0.6b
-answer_effort: high
+answer_effort: max
 judge_effort: high

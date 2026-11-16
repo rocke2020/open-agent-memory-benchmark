@@ -20,12 +20,18 @@
     const data = JSON.parse(await new Response(stream).text());
     const isBeam = data.dataset === "beam10m";
     const names = Object.keys(data.arms);
-    const label = name => name === "oam" ? "OAM" : "Hindsight · saved-context replay";
+    const label = name => data.manifest.arms[name].label || (name === "oam" ? "OAM" : "Hindsight · saved-context replay");
     const primary = data.arms.oam.results;
+    const sharedContexts = new Map(primary.map(q => [q.question_id, q.context]));
+    for (const arm of Object.values(data.arms)) {
+      for (const q of arm.results) {
+        if (q.context_ref) q.context = sharedContexts.get(q.context_ref);
+      }
+    }
     const maps = Object.fromEntries(names.map(name => [name, new Map(data.arms[name].results.map(q => [q.question_id, q]))]));
     const params = new URLSearchParams(location.hash.slice(1));
-    const state = {view: params.get("view") === "first_pass" ? "first_pass" : "policy_final", id: params.get("id"), search: "", outcome: "all", category: ""};
-    const attempt = q => state.view === "first_pass" ? q.first_pass : q.retry || q.first_pass;
+    const state = {id: params.get("id"), search: "", outcome: "all", category: ""};
+    const attempt = q => q.selected_answer;
     const passed = q => attempt(q).score >= (isBeam ? 0.5 : 1);
     const statusClass = q => !passed(q) ? "fail" : attempt(q).score < 1 ? "partial" : "pass";
     const filtered = () => primary.filter(q => {
@@ -35,8 +41,6 @@
       if (state.outcome === "fail" && passed(q)) return false;
       if (state.outcome === "pass" && !passed(q)) return false;
       if (state.outcome === "partial" && !(score >= .5 && score < 1)) return false;
-      if (state.outcome === "retried" && !q.retry) return false;
-      if (state.outcome === "regressed" && !(q.retry && q.retry.score < q.first_pass.score)) return false;
       if (state.outcome === "any_fail" && names.every(name => passed(maps[name].get(q.question_id)))) return false;
       return true;
     });
@@ -52,7 +56,7 @@
     search.id = "search"; search.type = "search"; search.placeholder = "Search questions or IDs…";
     search.setAttribute("aria-label", "Search questions or IDs");
     const outcome = node("select"); outcome.id = "outcome"; outcome.setAttribute("aria-label", "Outcome filter");
-    const options = [["all", "All questions"], ["fail", isBeam ? "OAM below threshold" : "Incorrect"], ["pass", isBeam ? "OAM at least 0.5" : "Correct"], ["retried", "With recorded retry"], ["regressed", "Retry score decreased"]];
+    const options = [["all", "All questions"], ["fail", isBeam ? "OAM below threshold" : "Incorrect"], ["pass", isBeam ? "OAM at least 0.5" : "Correct"]];
     if (isBeam) options.push(["partial", "OAM partial score (0.5–1)"], ["any_fail", "Either arm below threshold"]);
     for (const [value, title] of options) { const option = node("option", title); option.value = value; outcome.append(option); }
     const counter = node("div", null, "filter-count"); counter.setAttribute("aria-live", "polite");
@@ -63,30 +67,31 @@
     app.replaceChildren(aside, main);
 
     function syncHash() {
-      const hash = new URLSearchParams({id: state.id || "", view: state.view});
+      const hash = new URLSearchParams({id: state.id || ""});
       history.replaceState(null, "", "#" + hash.toString());
     }
     function renderHead() {
-      const summary = data.arms.oam.summary[state.view];
-      head.replaceChildren(node("p", "OAM · " + (isBeam ? "BEAM-10M" : "LME-500"), "eyebrow"), node("h1", pct(summary.mean)));
+      const summary = data.arms.oam.summary;
+      head.replaceChildren(node("p", label("oam") + " · " + (isBeam ? "BEAM-10M" : "LME-500"), "eyebrow"), node("h1", pct(summary.mean)));
       head.append(node("p", isBeam ? "Mean rubric score" : "Answer accuracy", "primary-caption"));
       head.append(node("span", `${summary.passes} / ${summary.count} ${isBeam ? "at least 0.5" : "correct"}`, "secondary"));
       if (isBeam) head.append(node("p", `${pct(summary.passes / summary.count)} threshold pass rate`, "secondary"));
       if (isBeam) {
-        const replay = data.arms["hindsight-saved-context-replay"].summary[state.view];
+        const replay = data.arms["hindsight-saved-context-replay"].summary;
         head.append(node("p", `Replay ${pct(replay.mean)} · ${replay.passes}/${replay.count} at least 0.5`, "secondary"));
       }
+      if (!isBeam && names.length > 1) {
+        for (const name of names.filter(name => name !== "oam")) {
+          const other = data.arms[name].summary;
+          head.append(node("p", `${label(name)} · ${pct(other.mean)} · ${other.passes}/${other.count}`, "secondary"));
+        }
+      }
       const metrics = node("div", null, "metrics");
-      for (const [title, value] of [["Context · mean tokens", fmt(summary.context_mean)], ["Saved recall · median", fmt(summary.retrieval_median_ms) + " ms"], ["Context · total tokens", fmt(summary.context_total)], ["Recorded retries", summary.retries]]) {
+      for (const [title, value] of [["Context · mean tokens", fmt(summary.context_mean)], ["Saved recall · median", fmt(summary.retrieval_median_ms) + " ms"], ["Context · total tokens", fmt(summary.context_total)]]) {
         const box = node("div", null, "metric"); box.append(node("span", title), node("strong", value)); metrics.append(box);
       }
       head.append(metrics);
-      const modeLabel = node("label", "Show", "mode-label"); modeLabel.htmlFor = "view";
-      const mode = node("select"); mode.id = "view"; mode.setAttribute("aria-label", "Outcome policy");
-      for (const [value, title] of [["policy_final", "Policy final"], ["first_pass", "First pass"]]) { const option = node("option", title); option.value = value; mode.append(option); }
-      mode.value = state.view;
-      mode.addEventListener("change", () => { state.view = mode.value; renderHead(); renderCategories(); refresh(); });
-      modeLabel.append(mode); head.append(modeLabel);
+
     }
     function renderCategories() {
       categoryList.replaceChildren();
@@ -139,7 +144,7 @@
       heading.append(node("h2", label(name)), node("span", pct(current.score), "arm-quality " + statusClass(q)));
       card.append(heading);
       const panel = node("section", null, "answer-panel");
-      panel.append(node("p", "System answer", "eyebrow"), node("div", current.answer, "answer-text"));
+      panel.append(node("p", "Selected saved answer", "eyebrow"), node("div", current.answer, "answer-text"));
       panel.append(node("p", isBeam ? (passed(q) ? "At least 0.5" : "Below 0.5") : (passed(q) ? "Correct" : "Incorrect"), "verdict " + statusClass(q)));
       panel.append(node("p", `Answer ${current.answer_model || "recorded model"} · ${current.answer_effort}; judge ${current.judge_model || "recorded model"} · ${current.judge_effort}`, "binding"));
       if (current.judgments?.length) {
@@ -156,16 +161,6 @@
       details.append(node("p", `${q.context_tokenizer} · saved recall ${fmt(q.retrieve_time_ms)} ms`, "context-stats"));
       const pre = node("pre", q.context); pre.dataset.context = q.question_id; details.append(pre);
       details.append(node("p", "SHA-256 " + q.context_sha256, "context-stats")); context.append(details); card.append(context);
-      const history = node("section", null, "attempt-history");
-      const attempts = node("details"); attempts.append(node("summary", q.retry ? "First pass and max-effort retry" : "First-pass record · no retry"));
-      for (const [key, title] of [["first_pass", "First pass"], ["retry", "Max-effort retry"]]) {
-        const saved = q[key]; if (!saved) continue;
-        const article = node("article"); article.append(node("strong", `${title} · ${pct(saved.score)}`));
-        if ((q.policy_final_attempt === "retry" ? key === "retry" : key === "first_pass")) article.append(node("span", "Policy final", "badge"));
-        if (key === "retry" && saved.score < q.first_pass.score) article.append(node("span", "Recorded score regression", "badge fail"));
-        article.append(node("pre", saved.answer)); attempts.append(article);
-      }
-      history.append(attempts); card.append(history);
       const source = node("div", null, "source-panel");
       const link = node("a", "Full saved requests, responses and provenance (.json.gz) ↗"); link.href = q.source_file; source.append(link);
       source.append(node("span", "Original result SHA-256 " + q.source.record_sha256)); card.append(source);
@@ -179,10 +174,10 @@
       const nav = node("div", null, "navigator");
       const prev = node("button", "← Previous"); prev.disabled = index <= 0; prev.addEventListener("click", () => navigate(-1));
       const next = node("button", "Next →"); next.disabled = index >= rows.length - 1; next.addEventListener("click", () => navigate(1));
-      nav.append(prev, node("span", `${index + 1} / ${rows.length} · ${state.view === "first_pass" ? "First pass" : "Policy final"}`), next); inner.append(nav);
+      nav.append(prev, node("span", `${index + 1} / ${rows.length}`), next); inner.append(nav);
       const queryLabel = node("div", null, "query-label");
       queryLabel.append(node("strong", "QUESTION"), node("span", q.question_id));
-      const permalink = node("a", "Link to question ↗"); permalink.href = "#" + new URLSearchParams({id: q.question_id, view: state.view}); queryLabel.append(permalink);
+      const permalink = node("a", "Link to question ↗"); permalink.href = "#" + new URLSearchParams({id: q.question_id}); queryLabel.append(permalink);
       inner.append(queryLabel, node("section", q.question, "query-panel"));
       const reference = node("section", null, "reference"); reference.append(node("p", "Gold answer", "eyebrow"));
       reference.append(node("p", q.gold_answers.length ? q.gold_answers.map(text).join("\n\n") : "No standalone gold answer; evaluate against the original rubric below."));
@@ -192,7 +187,7 @@
       for (const name of names) arms.append(armCard(maps[name].get(state.id), name));
       inner.append(arms);
       const notice = node("footer", null, "notice");
-      notice.append(node("p", isBeam ? "Historical OAM L1 evaluation compared with Hindsight saved-context replay. The replay reuses historical contexts; it is not a matched rerun of Hindsight indexing or retrieval. Mean rubric score and threshold pass rate are separate metrics." : "Historical OAM development campaign, consolidated from six disjoint contributions. First-pass and recorded retry outcomes remain separate; policy final uses the dispatched retry even when its score falls."));
+      notice.append(node("p", isBeam ? "Recorded OAM L1 evaluation compared with Hindsight saved-context replay. Exact recorded answer settings are preserved; these measurements are not a fresh max-profile evaluation. The replay is not a matched rerun of Hindsight indexing or retrieval. Mean rubric score and threshold pass rate are separate metrics." : "OAM paired saved-context results: MiniMax native adaptive and DeepSeek max answers use identical saved contexts and the common DeepSeek high judge."));
       notice.append(node("p", "Context and latency statistics use the full saved question cohort. Tokenizers and saved runtime conditions differ between evaluations. Missing billing and indexing measurements remain unavailable."));
       const metadata = node("details", null, "metadata"); metadata.append(node("summary", "Dataset, runtime and evidence provenance"), node("pre", JSON.stringify(data.manifest, null, 2))); notice.append(metadata);
       const design = node("p"); const designLink = node("a", "AMB report design reference"); designLink.href = "https://github.com/vectorize-io/agent-memory-benchmark"; design.append(designLink); notice.append(design); inner.append(notice);
@@ -206,7 +201,6 @@
     window.addEventListener("hashchange", () => {
       const hash = new URLSearchParams(location.hash.slice(1));
       if (maps.oam.has(hash.get("id"))) state.id = hash.get("id");
-      state.view = hash.get("view") === "first_pass" ? "first_pass" : "policy_final";
       renderHead(); renderCategories(); refresh();
     });
     renderHead(); renderCategories(); refresh();

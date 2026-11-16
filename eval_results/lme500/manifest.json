@@ -1,1 +1,61 @@
-{"arms":{"oam":{"files":["oam/pilot3.json.gz","oam/lme42.json.gz","oam/lme120.json.gz","oam/lme5.json.gz","oam/lme120-next.json.gz","oam/lme210-final.json.gz"],"final_correct":470,"first_correct":453,"questions":500}},"cohorts":[{"cohort":"pilot3","count":3,"final_correct":3,"first_correct":3,"product_revision":"1d8554b3e9fcaf8b169b7c542146dfd6e074f361"},{"cohort":"lme42","count":42,"final_correct":40,"first_correct":38,"product_revision":"1d8554b3e9fcaf8b169b7c542146dfd6e074f361"},{"cohort":"lme120","count":120,"final_correct":112,"first_correct":107,"product_revision":"1d8554b3e9fcaf8b169b7c542146dfd6e074f361"},{"cohort":"lme5","count":5,"final_correct":4,"first_correct":4,"product_revision":"1d8554b3e9fcaf8b169b7c542146dfd6e074f361"},{"cohort":"lme120-next","count":120,"final_correct":113,"first_correct":108,"product_revision":"1d8554b3e9fcaf8b169b7c542146dfd6e074f361"},{"cohort":"lme210-final","count":210,"final_correct":198,"first_correct":193,"product_revision":null}],"dataset":"lme500","dataset_revision":"98d7416c24c778c2fee6e6f3006e7a073259d48f","dataset_sha256":"d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442","license":"MIT","limits":["Historical development snapshots; not a fresh evaluation.","Missing product revisions remain null; no uniform release revision is inferred.","Judge reasons are the saved yes/no verdict text; richer reasons were not recorded."],"policy":"Use the recorded retry whenever present, otherwise first pass; never select the better score.","prompt_evidence":"Exact saved answer and judge messages are included in each attempt.","reported_protocol":{"extraction_effort":"low","insights":false,"model":"deepseek-v4.1-flash","profile":false,"recall":"fast","source":"historical campaign reports"},"schema":"oamb-historical-question-results-v1"}
+{
+  "schema": "oamb-historical-question-results-v1",
+  "dataset": "lme500",
+  "dataset_revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+  "dataset_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "license": "MIT",
+  "policy": "Display the recorded selected answer and its exact saved settings.",
+  "reported_protocol": {
+    "recall": "fast",
+    "insights": false,
+    "profile": false,
+    "extraction_effort": "low",
+    "judge_effort": "high",
+    "extraction_model": "DeepSeek Flash (reported historical indexing role; exact configured name unavailable in this projection)"
+  },
+  "limits": [
+    "Saved-context replay across development snapshots; no uniform product revision is established.",
+    "MiniMax uses native-adaptive answers for all 500 IDs.",
+    "DeepSeek max includes 38 reused historical max receipts and 462 other max receipts; this is not a fresh blinded first trial.",
+    "Judge acceptance is not independently established true accuracy.",
+    "Full provider reasoning text is omitted; exact visible content, requests, usage and original receipt hashes are retained."
+  ],
+  "arms": {
+    "oam": {
+      "label": "OAM · MiniMax M3.1 Flash adaptive",
+      "files": [
+        "oam/questions-001-050.json.gz",
+        "oam/questions-051-100.json.gz",
+        "oam/questions-101-150.json.gz",
+        "oam/questions-151-200.json.gz",
+        "oam/questions-201-250.json.gz",
+        "oam/questions-251-300.json.gz",
+        "oam/questions-301-350.json.gz",
+        "oam/questions-351-400.json.gz",
+        "oam/questions-401-450.json.gz",
+        "oam/questions-451-500.json.gz"
+      ],
+      "questions": 500,
+      "final_correct": 466
+    },
+    "deepseek-max": {
+      "label": "OAM · DeepSeek Flash max",
+      "files": [
+        "deepseek-max/questions-001-050.json.gz",
+        "deepseek-max/questions-051-100.json.gz",
+        "deepseek-max/questions-101-150.json.gz",
+        "deepseek-max/questions-151-200.json.gz",
+        "deepseek-max/questions-201-250.json.gz",
+        "deepseek-max/questions-251-300.json.gz",
+        "deepseek-max/questions-301-350.json.gz",
+        "deepseek-max/questions-351-400.json.gz",
+        "deepseek-max/questions-401-450.json.gz",
+        "deepseek-max/questions-451-500.json.gz"
+      ],
+      "questions": 500,
+      "final_correct": 463
+    }
+  },
+  "recall_product_revision": "da89864ae1dbbb288157e86a7cdaf80b95abdf72",
+  "recall_source_hashes": "recall-source-hashes.json"
+}

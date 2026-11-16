@@ -192,15 +192,15 @@ def test_checked_in_configuration_closes_six_model_roles_and_recipients() -> Non
         (
             "answer",
             deep_model,
-            "low",
+            "max",
             EXPECTED_DEEPSEEK_EFFORT_SCALE,
-            1,
+            3,
             "LLM_BASE_URL",
             "LLM_API_KEY",
             "llm-api",
             "harness",
             "sealed_outbound_request_and_response",
-            "reasoning_effort=low",
+            "reasoning_effort=max",
             "classified",
         ),
         (

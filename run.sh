@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 if [[ "${1:-}" == "--oam" ]]; then
   shift
   cd "$ROOT"
@@ -384,7 +385,7 @@ if [[ "$GENERATE_REPORT" == true ]]; then
   fi
   cd "$ROOT"
   printf 'run: status=building-saved-report\n'
-  run_owned_command uv run --locked oamb report saved-results "$RESULT_DIR" \
+  run_owned_command uv run --locked python -m oamb.cli report saved-results "$RESULT_DIR" \
     --output-root "$REPORT_OUTPUT" \
     --analysis-model-env "$ENV_FILE" \
     --analysis-cache-root "$RESULT_DIR/report-analysis-cache"
@@ -631,7 +632,7 @@ validate_capsule_result() {
     printf 'run: capsule validation output already exists: %s\n' "$validation_path" >&2
     return 1
   fi
-  if ! run_owned_command uv run --locked oamb capsule validate \
+  if ! run_owned_command uv run --locked python -m oamb.cli capsule validate \
     "$capsule_root" --output "$validation_path"; then
     return 1
   fi
@@ -666,7 +667,7 @@ build_comparison() {
   fi
   printf 'run: status=building-comparison\n'
   if [[ "$MODE" == "smoke" ]]; then
-    run_owned_command uv run --locked oamb compare "$PLAN" \
+    run_owned_command uv run --locked python -m oamb.cli compare "$PLAN" \
       --cell-root "${CELLS[0]}=${roots[0]}" \
       --cell-root "${CELLS[1]}=${roots[1]}" \
       --cell-root "${CELLS[2]}=${roots[2]}" \
@@ -679,7 +680,7 @@ build_comparison() {
       --output-root "$comparison" \
       --diagnostic
   else
-    run_owned_command uv run --locked oamb compare "$PLAN" \
+    run_owned_command uv run --locked python -m oamb.cli compare "$PLAN" \
       --results-root "$MODE_DIR/results" \
       --dataset-source "$DATASET_SOURCE" \
       --analysis-model-env "$ROOT/.env" \
@@ -711,7 +712,7 @@ run_simple_resume() {
   mkdir -p "$MODE_DIR/capsules/resume"
   printf 'run: status=resuming-from-saved-question-results\n'
   run_provider_cells_with_status "$resume_output" "full resume, 60 questions each" 60 \
-    uv run --locked oamb run "$PLAN" \
+    uv run --locked python -m oamb.cli run "$PLAN" \
     --run-label "$resume_label" \
     --output-root "$resume_output" \
     --results-root "$MODE_DIR/results" \
@@ -731,7 +732,7 @@ fi
 run_result="$MODE_DIR/results/$MODE.json"
 run_output="$MODE_DIR/capsules/$MODE"
 run_arguments=(
-  uv run --locked oamb run "$PLAN"
+  uv run --locked python -m oamb.cli run "$PLAN"
   --run-label "$EXECUTION_LABEL-$MODE-$$"
   --output-root "$run_output"
   --result-map "$run_result"

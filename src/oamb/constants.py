@@ -1,7 +1,5 @@
 """Named protocol and report limits shared across implementation owners."""
 
-OAMB_VERSION = "0.2.0"
-
 REPORT_MAX_HTML_BYTES = 32 * 1024 * 1024
 REPORT_BUILD_MAX_SECONDS = 15
 REPORT_BUILD_MAX_RSS_BYTES = 640 * 1024 * 1024
