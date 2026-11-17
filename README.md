@@ -8,13 +8,15 @@ Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for O
 
 ## OAM results
 
-**OAM reaches 93.2% on LME-500 (466/500)** with MiniMax M3.1 Flash native-adaptive answers and DeepSeek Flash high-effort judging.
+**OAM reaches 95.2% on LME-500 (476/500)** with MiniMax M3.1 Flash native-adaptive answering and judging, using an **18,000-token retrieval-context limit**.
 
-The LME evaluation uses L1 memory and fast recall, with 11,481.10 mean answer-context tokens. See the [detailed results and provenance](eval_results/lme500/README.md).
+The latest evaluation uses L1 memory and normal recall, with **11,373.58 mean saved context tokens** across 497 scored cases. Three disputed-gold cases remain incorrect in the unchanged 500-question denominator. Hindsight records **473/500 (94.6%)** with different answer/judge models; OAM uses **73.63% fewer saved formatted context tokens**. See the [latest results, source pin and comparison limits](eval_results/lme500-20261117/README.md) and the preserved [earlier 466/463 paired comparison](eval_results/lme500/README.md).
 
 **BEAM-10M: OAM 61.56%, Hindsight saved-context replay 52.16% (+9.40 percentage points).** The comparison uses 200 recorded selected answers and DeepSeek Flash judging. Hindsight's engine was not rerun, and OAM's answer context was 17.43% larger. These saved measurements are separate from the current max-effort answer profile. See the [BEAM results and comparison conditions](eval_results/beam10m/README.md#1-recorded-results).
 
-Browse full contexts, answers and judgments in the offline HTML reports: [LME-500](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html). Download and open either file without setup or evaluation calls. The [BEAM failure review](eval_results/beam10m/beam10m-failure-review.md) retains the 58 rejected selected answers.
+Browse full contexts, answers and judgments in the offline HTML reports: [Latest LME-500](eval_results/lme500-20261117/report.html) · [Earlier paired LME-500](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html). Download and open either file without setup or evaluation calls. The [BEAM failure review](eval_results/beam10m/beam10m-failure-review.md) retains the 58 rejected selected answers.
+
+The latest 95.2% campaign is published as saved evidence; the current native LME execution profile uses a separate fast-recall/prompt protocol and does not reproduce it by changing model names alone. MiniMax lists USD 0.15/M input and USD 0.60/M output tokens; these vendor prices are not a reconciled Tencent Cloud AI campaign bill. [Official pricing](https://platform.minimax.io/docs/pricing/overview).
 
 The [native OAM workflow](docs/native-oam.md) runs both workloads through `./precheck.sh --oam` and `./run.sh --oam`. DeepSeek Flash answer profiles use **max** effort; the MiniMax M3.1 Flash LME profile uses **native adaptive** reasoning. Judges use high effort. Each run records the actual OAM revision and model bindings. These measurements cover the recorded pipelines; a new deployment does not establish score parity.
 
@@ -46,11 +48,11 @@ Use the [native OAM guide](docs/native-oam.md) to prepare an isolated deployment
 
 ## Provider versions
 
-OAMB targets **OAM v0.0.1** first, alongside these comparison-provider releases and source commits:
+OAMB pins the **final OAM main source** for the latest LME result. Comparison-provider pins below belong to the separate LME-60 workflow; they do not identify the AMB Hindsight 473/500 server.
 
 | Provider | Release | Source commit |
 |---|---|---|
-| Open Agent Memory (OAM) | [0.0.1](https://github.com/rocke2020/open-agent-memory/releases/tag/v0.0.1) | `c0f2d2e1f62decf3af188d7c5dff2a529134610e` |
+| Open Agent Memory (OAM) | Main source (0.0.3 product metadata) | `38bd45d82f24aa33932a7d4b7afdf6ee27585f72` |
 | Hindsight | [0.9.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.9.2) | [`ebad478240d3171bb88201ececda5e8d9883d22d`](https://github.com/vectorize-io/hindsight/commit/ebad478240d3171bb88201ececda5e8d9883d22d) |
 | Mem0 | [2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19) | [`dc82354e143c2581d505d581a00286d6ef8c3605`](https://github.com/mem0ai/mem0/commit/dc82354e143c2581d505d581a00286d6ef8c3605) |
 | OpenViking | [0.4.19](https://github.com/volcengine/OpenViking/releases/tag/v0.4.19) | [`f3afef11637f2d7c11e4b1f36ed2f90630737cdc`](https://github.com/volcengine/OpenViking/commit/f3afef11637f2d7c11e4b1f36ed2f90630737cdc) |
@@ -59,11 +61,11 @@ OAMB targets **OAM v0.0.1** first, alongside these comparison-provider releases 
 
 ### OAM development image
 
-Build the OAM v0.0.1 development image from a checkout containing the recorded commit:
+Build the OAM development image from a checkout containing the exact final main commit:
 
 ```bash
-./provider-services/oam/build-image.sh /path/to/open-agent-memory c0f2d2e1f62decf3af188d7c5dff2a529134610e
-docker run --rm oamb/oam:0.0.1-c0f2d2e1f62d --version
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 38bd45d82f24aa33932a7d4b7afdf6ee27585f72
+docker run --rm oamb/oam:source-38bd45d82f24 --version
 ```
 
 The build uses committed source and the OAM lockfile, excluding local uncommitted files. The resulting local image is a development snapshot, not the published release image. A working OAM deployment still requires an isolated PostgreSQL database, appropriate credentials and configured model services. Use the [native OAM setup and execution guide](docs/native-oam.md) for isolated PostgreSQL/API/worker preparation, input and model binding checks, checkpoints and resume.

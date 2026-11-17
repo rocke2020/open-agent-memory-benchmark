@@ -8,13 +8,15 @@ Open Agent Memory Benchmark（OAMB）是 Open Agent Memory（OAM）的独立评�
 
 ## OAM 评测结果
 
-**OAM 在 LME-500 达到 93.2%（466/500）**：使用 MiniMax M3.1 Flash 原生 adaptive 回答和 DeepSeek Flash high 强度评判。
+**OAM 在 LME-500 达到 95.2%（476/500）**：使用 MiniMax M3.1 Flash 原生 adaptive 回答和评判，**检索上下文上限为 18,000 tokens**。
 
-LME 评测使用 L1 记忆和 fast 召回，回答上下文平均 11,481.10 tokens。详见[完整结果与来源](eval_results/lme500/README.md)。
+最新评测使用 L1 记忆和 normal 召回，497 道实际评分问题的**已保存上下文平均为 11,373.58 tokens**。3 道参考答案存在争议的问题继续按错误计入原有 500 题分母。Hindsight 的记录为 **473/500（94.6%）**，两者的回答和评判模型不同；OAM 的已保存格式化上下文小 **73.63%**。详见[最新结果、源码固定版本与比较限制](eval_results/lme500-20261117/README.md)，早期[466/463 同上下文对比](eval_results/lme500/README.md)继续保留。
+
+最新 95.2% 结果以保存证据发布；当前原生 LME 执行配置仍使用另一套 fast 召回与提示词协议，仅更换模型名称不能复现该结果。MiniMax 官方定价为输入 USD 0.15/百万 tokens、输出 USD 0.60/百万 tokens，不代表已核对的腾讯云 AI 本次账单。[官方定价](https://platform.minimax.io/docs/pricing/overview)。
 
 **BEAM-10M：OAM 为 61.56%，Hindsight 已保存上下文回放为 52.16%（+9.40 个百分点）。** 比较使用 200 道题保存的选定回答和 DeepSeek Flash 评判。Hindsight 没有重新运行引擎，OAM 的回答上下文多 17.43%。这些已保存的测量与当前 max 回答配置分开呈现。详见[BEAM 结果与比较条件](eval_results/beam10m/README.md#1-recorded-results)。
 
-离线 HTML 展示完整上下文、回答和评判：[LME-500](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。下载即可打开，无需设置环境或发起评测调用。[BEAM 失败分析](eval_results/beam10m/beam10m-failure-review.md)保留 58 个低于阈值的选定回答。
+离线 HTML 展示完整上下文、回答和评判：[最新 LME-500](eval_results/lme500-20261117/report.html) · [早期 LME-500 对比](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。下载即可打开，无需设置环境或发起评测调用。[BEAM 失败分析](eval_results/beam10m/beam10m-failure-review.md)保留 58 个低于阈值的选定回答。
 
 [原生 OAM 工作流](docs/native-oam.md)通过 `./precheck.sh --oam` 和 `./run.sh --oam` 运行两个数据集。DeepSeek Flash 回答配置使用 **max** 推理强度，MiniMax M3.1 Flash 的 LME 回答配置使用**原生 adaptive** 推理，评判使用 high 强度。每次运行记录实际 OAM 版本和模型绑定。这些测量属于记录的评测流程，新部署不能自行证明分数一致。
 
@@ -46,11 +48,11 @@ BEAM 覆盖拒答、矛盾消解、事件排序、信息提取、指令遵循、
 
 ## 提供方版本
 
-OAMB 首先面向 **OAM v0.0.1**，同时保留以下对比提供方版本和源码提交：
+OAMB 为最新 LME 结果固定 **OAM 最终 main 源码提交**。下列其他提供方版本属于独立的 LME-60 流程，不代表 AMB 的 Hindsight 473/500 服务版本。
 
 | 提供方 | 发布版本 | 源码提交 |
 |---|---|---|
-| Open Agent Memory（OAM） | **0.0.1 开发快照** | `c0f2d2e1f62decf3af188d7c5dff2a529134610e` |
+| Open Agent Memory（OAM） | **main 源码（产品元数据 0.0.3）** | `38bd45d82f24aa33932a7d4b7afdf6ee27585f72` |
 | Hindsight | [0.9.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.9.2) | [`ebad478240d3171bb88201ececda5e8d9883d22d`](https://github.com/vectorize-io/hindsight/commit/ebad478240d3171bb88201ececda5e8d9883d22d) |
 | Mem0 | [2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19) | [`dc82354e143c2581d505d581a00286d6ef8c3605`](https://github.com/mem0ai/mem0/commit/dc82354e143c2581d505d581a00286d6ef8c3605) |
 | OpenViking | [0.4.19](https://github.com/volcengine/OpenViking/releases/tag/v0.4.19) | [`f3afef11637f2d7c11e4b1f36ed2f90630737cdc`](https://github.com/volcengine/OpenViking/commit/f3afef11637f2d7c11e4b1f36ed2f90630737cdc) |
@@ -59,11 +61,11 @@ OAMB 首先面向 **OAM v0.0.1**，同时保留以下对比提供方版本和源
 
 ### OAM 开发镜像
 
-从包含记录提交的 OAM 检出目录构建 v0.0.1 开发镜像：
+从包含最终 main 提交的 OAM 检出目录构建开发镜像：
 
 ```bash
-./provider-services/oam/build-image.sh /path/to/open-agent-memory c0f2d2e1f62decf3af188d7c5dff2a529134610e
-docker run --rm oamb/oam:0.0.1-c0f2d2e1f62d --version
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 38bd45d82f24aa33932a7d4b7afdf6ee27585f72
+docker run --rm oamb/oam:source-38bd45d82f24 --version
 ```
 
 构建使用已提交源码和 OAM 锁文件，不包含本地未提交文件。生成的本地镜像是开发快照，并非正式发布镜像。可用的 OAM 部署还需要隔离的 PostgreSQL 数据库、相应凭据和已配置的模型服务。参见[原生 OAM 设置与执行指南](docs/native-oam.md)，准备隔离的 PostgreSQL/API/worker，并了解输入与模型绑定检查、检查点和续跑。

@@ -2,6 +2,8 @@
 
 ## Overview
 
+The latest [476/500 at 18k saved-evidence campaign](../eval_results/lme500-20261117/README.md) pins final OAM main `38bd45d82f24aa33932a7d4b7afdf6ee27585f72` and uses normal recall with exact AMB 7021 prompts and MiniMax native adaptive for both roles. The executable native profiles below remain separate fast-recall/earlier-prompt LME profiles. Changing model settings alone does not reproduce the latest campaign.
+
 OAMB is OAM's standalone evaluation repository. Its native workflows run chronological interaction ingestion, operation polling, non-generative retrieval, answering and judging through the public `./precheck.sh` → `./run.sh` interface. They require Docker, Compose, Python 3.11+, `uv`, an OAM image and configured model endpoints. No product checkout, private runner or provider SDK is imported during evaluation. A separate PostgreSQL volume, API and worker belong to each deployment.
 
 | Profile | Recall | Vector index | Question isolation | Scoring |
@@ -9,7 +11,7 @@ OAMB is OAM's standalone evaluation repository. Its native workflows run chronol
 | LME-500 | Fast | Shared `small` | One owner per question history | Existing OAMB LME category-specific yes/no judge |
 | BEAM-10M | Normal | Dedicated `large` | One owner per conversation, reused by its questions | Mean of independent 0, 0.5 or 1 rubric-item scores |
 
-Both profiles disable Insights, Profile and the planner and use low extraction reasoning. The full LME profiles are [MiniMax native adaptive](../configs/oam-lme500-minimax-native-adaptive.yml), the headline profile, and [DeepSeek max](../configs/oam-lme500.yml), the secondary profile. [BEAM-10M](../configs/oam-beam10m.yml) uses DeepSeek max answers and high judges; recorded BEAM measurements retain their original settings. The small [LME diagnostic](../configs/oam-lme500-smoke.yml) and [BEAM diagnostic](../configs/oam-beam10m-smoke.yml) use original synthetic fixtures; their results establish execution, not benchmark accuracy.
+Both profiles disable Insights, Profile and the planner and use low extraction reasoning. The full LME profiles are [MiniMax native adaptive](../configs/oam-lme500-minimax-native-adaptive.yml), the earlier same-context comparison profile, and [DeepSeek max](../configs/oam-lme500.yml), the secondary profile. [BEAM-10M](../configs/oam-beam10m.yml) uses DeepSeek max answers and high judges; recorded BEAM measurements retain their original settings. The small [LME diagnostic](../configs/oam-lme500-smoke.yml) and [BEAM diagnostic](../configs/oam-beam10m-smoke.yml) use original synthetic fixtures; their results establish execution, not benchmark accuracy.
 
 The reproduction target is the published evaluation procedure with the same models and scores close to the published results, allowing model variability and disclosed OAM version changes. The workflow includes the recorded LME templates and BEAM answer/nugget prompts, BEAM's structured JSON answer format and document-context metadata. Each profile scores one configured answer per question ID. It preserves conversation turns, roles, source dates, original questions and provider-returned context. Current OAM owns its extraction prompts, tokenizer and index behavior; record the evaluated revision and configuration. Keep new measurements separate from the saved [LME](../eval_results/lme500/README.md) and [BEAM](../eval_results/beam10m/README.md) campaigns. See [prompt provenance](../prompt-packs/README.md) and [the mainflow](designs/native-oam-reproduction.md).
 
@@ -22,7 +24,7 @@ Install the locked dependencies and build the development image from committed O
 ```bash
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 uv sync --locked --group download
-./provider-services/oam/build-image.sh /path/to/open-agent-memory c0f2d2e1f62decf3af188d7c5dff2a529134610e
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 38bd45d82f24aa33932a7d4b7afdf6ee27585f72
 cp .env.oam.example .env.oam
 chmod 600 .env.oam
 ```
@@ -42,7 +44,7 @@ Use a fresh output directory and Compose project name. The setup helper rejects 
 ```bash
 uv run --locked python provider-services/oam/start.py \
   --dataset lme500 --env-file .env.oam \
-  --image oamb/oam:0.0.1-c0f2d2e1f62d \
+  --image oamb/oam:source-38bd45d82f24 \
   --project oamb-native-lme-example \
   --output outputs/oam-services/lme-example
 
@@ -68,7 +70,7 @@ To start a full evaluation, supply the inputs and choose the corresponding full 
 2. Download/export BEAM-10M using `./scripts/download/beam10m.sh`. It reads the two official Parquet shards at revision `9b2096193fe74e2837e4713e483351e19817773c`, preserves row/shard order and nested fields, and writes `datasets/beam/10m.json` using the campaign's JSON serialization. The resulting SHA-256 must be `c16643a7cc7d93c1ed5509568cdd9e4c387dcd60414e68dde740b54064e68ba8`. Existing verified output is reused; mismatched output is preserved and rejected. The download is about 344 MB and the export about 1.03 GB.
 3. Set model names, reasoning efforts and operation timeout in the selected YAML. Full LME requires 500 complete histories. Full BEAM requires ten conversation owners with two questions in each of ten categories. A smaller selection must set `diagnostic: true` and must not be reported as full coverage.
 
-The headline LME configuration selects `minimax-m3.1-flash` with native adaptive answer thinking and `deepseek-flash` with high judge reasoning; the secondary LME configuration selects `deepseek-flash` with max answer and high judge reasoning. BEAM also uses DeepSeek max answers and high judges. For a separate scoring experiment, YAML accepts optional `answer_model` and `judge_model` overrides; selection uses the role override first, common YAML `model` second, and the existing deep/light environment value otherwise. Overrides affect scoring only; OAM extraction keeps its runtime configuration. Embedding requests use YAML `embedding_model` when provided, otherwise `OAMB_EMBEDDING_MODEL`. No names are compared or restricted. Both scoring roles share the private `LLM_BASE_URL` and `LLM_API_KEY`. Configure another endpoint in a separate client environment when needed. For example:
+The earlier paired LME configuration selects `minimax-m3.1-flash` with native adaptive answer thinking and `deepseek-flash` with high judge reasoning; the secondary LME configuration selects `deepseek-flash` with max answer and high judge reasoning. BEAM also uses DeepSeek max answers and high judges. For a separate scoring experiment, YAML accepts optional `answer_model` and `judge_model` overrides; selection uses the role override first, common YAML `model` second, and the existing deep/light environment value otherwise. Overrides affect scoring only; OAM extraction keeps its runtime configuration. Embedding requests use YAML `embedding_model` when provided, otherwise `OAMB_EMBEDDING_MODEL`. No names are compared or restricted. Both scoring roles share the private `LLM_BASE_URL` and `LLM_API_KEY`. Configure another endpoint in a separate client environment when needed. For example:
 
 ```yaml
 answer_model: minimax-m3.1-flash

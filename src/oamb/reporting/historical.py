@@ -37,10 +37,27 @@ _QUESTION_FIELDS = (
     "context_tokens",
     "context_tokenizer",
     "retrieve_time_ms",
+    "retrieval_samples_ms",
     "source",
     "cohort",
     "conversation_id",
 )
+_CARRIED_STATUS = "carried_incorrect_gold_no"
+_CARRIED_FIELDS = {
+    "question_id",
+    "question",
+    "gold_answers",
+    "rubric",
+    "question_type",
+    "source",
+    "cohort",
+    "conversation_id",
+    "evaluation_status",
+    "score",
+    "correct",
+    "first_pass",
+    "retry",
+}
 
 
 def _digest(body: bytes) -> str:
@@ -48,15 +65,32 @@ def _digest(body: bytes) -> str:
 
 
 def _summary(records: list[dict[str, Any]], dataset: str) -> dict[str, Any]:
-    attempts = [q["selected_answer"] for q in records]
-    return {
-        "mean": statistics.mean(a["score"] for a in attempts),
-        "passes": sum(a["score"] >= (1 if dataset == "lme500" else 0.5) for a in attempts),
+    scores = [
+        q["selected_answer"]["score"] if q["selected_answer"] else q["score"] for q in records
+    ]
+    measured = [q for q in records if q["selected_answer"] is not None]
+    samples = [
+        sample
+        for q in measured
+        for sample in q.get("retrieval_samples_ms", [q["retrieve_time_ms"]])
+    ]
+    summary = {
+        "mean": statistics.mean(scores),
+        "passes": sum(score >= (1 if dataset == "lme500" else 0.5) for score in scores),
         "count": len(records),
-        "context_mean": statistics.mean(q["context_tokens"] for q in records),
-        "context_total": sum(q["context_tokens"] for q in records),
-        "retrieval_median_ms": statistics.median(q["retrieve_time_ms"] for q in records),
+        "context_mean": statistics.mean(q["context_tokens"] for q in measured)
+        if measured
+        else None,
+        "context_total": sum(q["context_tokens"] for q in measured) if measured else None,
+        "retrieval_median_ms": statistics.median(samples) if samples else None,
     }
+    if len(measured) != len(records) or any("retrieval_samples_ms" in q for q in records):
+        summary.update(
+            context_count=len(measured),
+            carried_count=len(records) - len(measured),
+            retrieval_sample_count=len(samples),
+        )
+    return summary
 
 
 def _evidence(root: Path) -> dict[str, Any]:
@@ -82,9 +116,43 @@ def _evidence(root: Path) -> dict[str, Any]:
                 raise ValueError("shard differs from manifest dataset or arm")
             for original in document["results"]:
                 q = {key: original[key] for key in _QUESTION_FIELDS if key in original}
+                q["source_file"] = relative
+                if original.get("evaluation_status") == _CARRIED_STATUS:
+                    if (
+                        dataset != "lme500"
+                        or type(original.get("score")) not in (int, float)
+                        or original["score"] != 0
+                        or original.get("correct") is not False
+                        or original.get("first_pass") is not None
+                        or original.get("retry") is not None
+                        or original.keys() - _CARRIED_FIELDS
+                    ):
+                        raise ValueError(
+                            "invalid carried No: requires fixed LME No without current evidence"
+                        )
+                    q.update(
+                        evaluation_status=_CARRIED_STATUS,
+                        score=0,
+                        correct=False,
+                        selected_answer=None,
+                    )
+                    records.append(q)
+                    continue
                 if _digest(q["context"].encode()) != q["context_sha256"]:
                     raise ValueError("saved context hash mismatch")
-                q["source_file"] = relative
+                if "retrieval_samples_ms" in q:
+                    samples = q["retrieval_samples_ms"]
+                    if (
+                        not isinstance(samples, list)
+                        or not samples
+                        or any(
+                            type(sample) not in (int, float)
+                            or not math.isfinite(sample)
+                            or sample < 0
+                            for sample in samples
+                        )
+                    ):
+                        raise ValueError("invalid saved retrieval samples")
                 for key in ("first_pass", "retry"):
                     attempt = original[key]
                     q[key] = (
@@ -142,7 +210,7 @@ def render_historical_report(root: Path) -> bytes:
             if name == "oam":
                 continue
             for q in arm["results"]:
-                if q["context"] == primary[q["question_id"]]["context"]:
+                if "context" in q and q["context"] == primary[q["question_id"]].get("context"):
                     del q["context"]
                     q["context_ref"] = q["question_id"]
     css_hash = base64.b64encode(hashlib.sha256(css.encode()).digest()).decode()

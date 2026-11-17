@@ -8,5 +8,5 @@ context=$(mktemp -d "${TMPDIR:-/tmp}/oamb-oam-image.XXXXXXXX")
 trap 'rm -rf -- "$context"' EXIT
 git -C "$source_dir" archive "$commit" | tar -x -C "$context"
 docker build --label "org.opencontainers.image.revision=$commit" \
-  -t "oamb/oam:0.0.1-${commit:0:12}" \
+  -t "oamb/oam:source-${commit:0:12}" \
   -f "$(dirname "$0")/Dockerfile" "$context"

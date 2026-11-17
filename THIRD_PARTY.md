@@ -40,3 +40,5 @@ The complete notices for distributed prompt excerpts are installed from
 SHA-256, extracted-template SHA-256, and OAMB-rendered template SHA-256.
 
 Published LME-500 and LME-60 question/context evidence retains the [LongMemEval MIT notice](eval_results/lme500/LICENSES/LongMemEval-MIT.txt). Published BEAM-10M question/context evidence and its derived per-question result bundles retain [BEAM attribution and CC BY-SA 4.0 terms](eval_results/beam10m/LICENSES/BEAM-CC-BY-SA-4.0.md). These result bundles are distinct from the compact historical projection described above and retain their separate prompt notices.
+
+The [November 17 LME-500 projection](eval_results/lme500-20261117/README.md) retains the LongMemEval MIT notice and publishes OAM contexts, visible model outputs and factual call metadata. Its AMB revision `7021c59c3497d1dd08d61f12fa4629be983fcfb1` request-message expression is not redistributed because no explicit repository license is present at that revision. Request-message and source hashes preserve provenance without relicensing the prompts.

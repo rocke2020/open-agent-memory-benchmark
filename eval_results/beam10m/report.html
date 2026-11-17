@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; connect-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; script-src &#x27;sha256-k45ZckXU/Xf/qkmLRSn3yoEack9dIoOjqaE0ZkKgoh0=&#x27;; style-src &#x27;sha256-QSWDCDJqXwfyOGogm7GV9bxNDfrm6Z+gkk/c4v0BRC4=&#x27;; form-action &#x27;none&#x27;">
+<meta name="color-scheme" content="light dark"><meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; connect-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; script-src &#x27;sha256-wARh0YbbnddE4Ls91WZZyqvcIIbNId7etsEPmM//6to=&#x27;; style-src &#x27;sha256-QSWDCDJqXwfyOGogm7GV9bxNDfrm6Z+gkk/c4v0BRC4=&#x27;; form-action &#x27;none&#x27;">
 <title>BEAM-10M · OAM evaluation report</title><style>:root {
   color-scheme: light dark;
   --background: #f7f8fa;
@@ -174,7 +174,7 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
     return element;
   };
   const text = value => typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  const fmt = value => Number(value).toLocaleString("en-US", {maximumFractionDigits: 0});
+  const fmt = value => value === null ? "Unavailable" : Number(value).toLocaleString("en-US", {maximumFractionDigits: 0});
   const pct = value => (value * 100).toFixed(2) + "%";
   try {
     if (typeof DecompressionStream !== "function") throw new Error("This browser does not support offline gzip decoding. Open this report in a current Chrome, Edge, Firefox or Safari, or read README.md and the JSON evidence.");
@@ -198,15 +198,16 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
     const params = new URLSearchParams(location.hash.slice(1));
     const state = {id: params.get("id"), search: "", outcome: "all", category: ""};
     const attempt = q => q.selected_answer;
-    const passed = q => attempt(q).score >= (isBeam ? 0.5 : 1);
-    const statusClass = q => !passed(q) ? "fail" : attempt(q).score < 1 ? "partial" : "pass";
+    const score = q => attempt(q)?.score ?? q.score;
+    const passed = q => score(q) >= (isBeam ? 0.5 : 1);
+    const statusClass = q => !passed(q) ? "fail" : score(q) < 1 ? "partial" : "pass";
     const filtered = () => primary.filter(q => {
-      const score = attempt(q).score;
+      const value = score(q);
       if (state.category && state.category !== q.question_type) return false;
       if (state.search && !(q.question_id + " " + q.question).toLowerCase().includes(state.search)) return false;
       if (state.outcome === "fail" && passed(q)) return false;
       if (state.outcome === "pass" && !passed(q)) return false;
-      if (state.outcome === "partial" && !(score >= .5 && score < 1)) return false;
+      if (state.outcome === "partial" && !(value >= .5 && value < 1)) return false;
       if (state.outcome === "any_fail" && names.every(name => passed(maps[name].get(q.question_id)))) return false;
       return true;
     });
@@ -241,6 +242,8 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
       head.replaceChildren(node("p", label("oam") + " · " + (isBeam ? "BEAM-10M" : "LME-500"), "eyebrow"), node("h1", pct(summary.mean)));
       head.append(node("p", isBeam ? "Mean rubric score" : "Answer accuracy", "primary-caption"));
       head.append(node("span", `${summary.passes} / ${summary.count} ${isBeam ? "at least 0.5" : "correct"}`, "secondary"));
+      if (summary.carried_count) head.append(node("p", `${summary.carried_count} historical incorrect-gold No outcomes carried; ${summary.context_count} current context samples.`, "secondary"));
+      if (summary.retrieval_sample_count !== undefined) head.append(node("p", `${summary.retrieval_sample_count} saved retrieval samples.`, "secondary"));
       if (isBeam) head.append(node("p", `${pct(summary.passes / summary.count)} threshold pass rate`, "secondary"));
       if (isBeam) {
         const replay = data.arms["hindsight-saved-context-replay"].summary;
@@ -253,7 +256,7 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
         }
       }
       const metrics = node("div", null, "metrics");
-      for (const [title, value] of [["Context · mean tokens", fmt(summary.context_mean)], ["Saved recall · median", fmt(summary.retrieval_median_ms) + " ms"], ["Context · total tokens", fmt(summary.context_total)]]) {
+      for (const [title, value] of [["Context · mean tokens", fmt(summary.context_mean)], ["Saved recall · median", summary.retrieval_median_ms === null ? "Unavailable" : fmt(summary.retrieval_median_ms) + " ms"], ["Context · total tokens", fmt(summary.context_total)]]) {
         const box = node("div", null, "metric"); box.append(node("span", title), node("strong", value)); metrics.append(box);
       }
       head.append(metrics);
@@ -264,7 +267,7 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
       const grouped = new Map();
       for (const q of primary) {
         const group = grouped.get(q.question_type) || {count: 0, sum: 0};
-        group.count++; group.sum += attempt(q).score; grouped.set(q.question_type, group);
+        group.count++; group.sum += score(q); grouped.set(q.question_type, group);
       }
       for (const [name, stats] of grouped) {
         const button = node("button", null, "category-row" + (state.category === name ? " active" : ""));
@@ -307,8 +310,13 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
       const current = attempt(q);
       const card = node("div", null, "arm"); card.dataset.arm = name;
       const heading = node("div", null, "arm-title");
-      heading.append(node("h2", label(name)), node("span", pct(current.score), "arm-quality " + statusClass(q)));
+      heading.append(node("h2", label(name)), node("span", pct(score(q)), "arm-quality " + statusClass(q)));
       card.append(heading);
+      if (q.evaluation_status === "carried_incorrect_gold_no") {
+        card.append(node("p", "Historical incorrect-gold No carried unchanged in the original denominator.", "verdict fail"));
+        card.append(node("p", "No current answer, judge or retrieved context exists for this case.", "secondary"));
+        return card;
+      }
       const panel = node("section", null, "answer-panel");
       panel.append(node("p", "Selected saved answer", "eyebrow"), node("div", current.answer, "answer-text"));
       panel.append(node("p", isBeam ? (passed(q) ? "At least 0.5" : "Below 0.5") : (passed(q) ? "Correct" : "Incorrect"), "verdict " + statusClass(q)));
@@ -328,7 +336,7 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
       const pre = node("pre", q.context); pre.dataset.context = q.question_id; details.append(pre);
       details.append(node("p", "SHA-256 " + q.context_sha256, "context-stats")); context.append(details); card.append(context);
       const source = node("div", null, "source-panel");
-      const link = node("a", "Full saved requests, responses and provenance (.json.gz) ↗"); link.href = q.source_file; source.append(link);
+      const link = node("a", "Saved outputs, call metadata and provenance (.json.gz) ↗"); link.href = q.source_file; source.append(link);
       source.append(node("span", "Original result SHA-256 " + q.source.record_sha256)); card.append(source);
       return card;
     }
@@ -353,8 +361,11 @@ pre { background: var(--pre-background); padding: 0.75rem; overflow: auto; }
       for (const name of names) arms.append(armCard(maps[name].get(state.id), name));
       inner.append(arms);
       const notice = node("footer", null, "notice");
-      notice.append(node("p", isBeam ? "Recorded OAM L1 evaluation compared with Hindsight saved-context replay. Exact recorded answer settings are preserved; these measurements are not a fresh max-profile evaluation. The replay is not a matched rerun of Hindsight indexing or retrieval. Mean rubric score and threshold pass rate are separate metrics." : "OAM paired saved-context results: MiniMax native adaptive and DeepSeek max answers use identical saved contexts and the common DeepSeek high judge."));
-      notice.append(node("p", "Context and latency statistics use the full saved question cohort. Tokenizers and saved runtime conditions differ between evaluations. Missing billing and indexing measurements remain unavailable."));
+      const notes = data.manifest.display_notes || [
+        isBeam ? "Recorded OAM L1 evaluation compared with Hindsight saved-context replay. Exact recorded answer settings are preserved; these measurements are not a fresh max-profile evaluation. The replay is not a matched rerun of Hindsight indexing or retrieval. Mean rubric score and threshold pass rate are separate metrics." : "OAM paired saved-context results: MiniMax native adaptive and DeepSeek max answers use identical saved contexts and the common DeepSeek high judge.",
+        "Context and latency statistics use the full saved question cohort. Tokenizers and saved runtime conditions differ between evaluations. Missing billing and indexing measurements remain unavailable."
+      ];
+      for (const note of notes) notice.append(node("p", note));
       const metadata = node("details", null, "metadata"); metadata.append(node("summary", "Dataset, runtime and evidence provenance"), node("pre", JSON.stringify(data.manifest, null, 2))); notice.append(metadata);
       const design = node("p"); const designLink = node("a", "AMB report design reference"); designLink.href = "https://github.com/vectorize-io/agent-memory-benchmark"; design.append(designLink); notice.append(design); inner.append(notice);
     }

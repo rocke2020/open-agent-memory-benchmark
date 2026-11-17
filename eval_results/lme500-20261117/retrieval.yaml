@@ -1,0 +1,41 @@
+# Recorded evaluation override for the pinned OAM source.
+# Apply to canonical OAM configuration; request normal recall with chunks.
+# The native OAMB LME execution profile remains a separate fast protocol.
+tokenizer:
+  type: o200k_base
+  file_env: null
+  add_special_tokens: false
+search:
+  rrf_k: 60
+  fts_rank_weights:
+  - 0.1
+  - 0.2
+  - 0.4
+  - 1.0
+  query_entity_boost: 0.5
+  normal_arm_weights:
+    lexical: 1.0
+    dense: 1.0
+    graph: 0.1
+    temporal: 1.0
+  normal:
+    context_max_tokens: 18000
+    entity_semantic_graph: 'off'
+    causal_graph: false
+    lexical_ranking: whole_query
+    partial_match_gate: user_fact_exchange
+    adjacent_user_context: true
+    adjacent_user_context_max_chars: 1000
+    channel_candidates: 64
+    fused_candidates: 128
+    rerank_candidates: 48
+    source_seed_results: 36
+    max_results: 96
+models:
+  reranker: null
+index:
+  insights_enabled: false
+profile:
+  enabled: false
+recall:
+  normal_deadline_seconds: 5.0

@@ -8,13 +8,15 @@ Open Agent Memory Benchmark（OAMB）は、Open Agent Memory（OAM）の独立�
 
 ## OAM の評価結果
 
-**OAM は LME-500 で 93.2%（466/500）**：MiniMax M3.1 Flash のネイティブ adaptive 回答と DeepSeek Flash high の判定を使用しました。
+**OAM は LME-500 で 95.2%（476/500）**：MiniMax M3.1 Flash のネイティブ adaptive 回答・判定を使用し、**検索コンテキスト上限は 18,000トークン**です。
 
-LME 評価では L1 メモリと fast 検索を使い、回答コンテキストは平均 11,481.10 トークンです。[詳しい結果と出典](eval_results/lme500/README.md)を参照してください。
+最新の評価では L1 メモリと normal 検索を使い、採点した 497 問の**保存済みコンテキストは平均 11,373.58トークン**です。参照回答に疑義がある 3 問も元の 500 問の分母に不正解として残しています。Hindsight の記録は **473/500（94.6%）**で、回答・判定モデルは異なります。OAM の保存済み整形コンテキストは **73.63% 小さく**なっています。[最新結果、ソース固定と比較条件](eval_results/lme500-20261117/README.md)と、保持した[以前の 466/463同一コンテキスト比較](eval_results/lme500/README.md)を参照してください。
+
+最新の 95.2% は保存済み証拠として公開しています。現在のネイティブ LME 実行は別の fast 検索・プロンプト方式であり、モデル名だけを変更しても最新結果の再現にはなりません。MiniMax の公式価格は入力 USD 0.15/百万トークン、出力 USD 0.60/百万トークンです。今回の Tencent Cloud AI 請求額の照合結果ではありません。[公式価格](https://platform.minimax.io/docs/pricing/overview)。
 
 **BEAM-10M：OAM は 61.56%、Hindsight の保存済みコンテキスト再評価は 52.16%（差は 9.40 ポイント）です。** 200 問の保存された選択回答と DeepSeek Flash の判定を使用しました。Hindsight のエンジンは再実行せず、OAM の回答コンテキストは 17.43% 多いものでした。これらの保存済み測定は現在の max 回答プロファイルと分けて示しています。[BEAM の結果と比較条件](eval_results/beam10m/README.md#1-recorded-results)を参照してください。
 
-オフライン HTML に全文のコンテキスト、回答、判定を保存しています：[LME-500](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。セットアップや評価呼び出しなしでダウンロードして開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はしきい値未満の選択回答 58 件を保持しています。
+オフライン HTML に全文のコンテキスト、回答、判定を保存しています：[最新 LME-500](eval_results/lme500-20261117/report.html) · [以前の LME-500 比較](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。セットアップや評価呼び出しなしでダウンロードして開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はしきい値未満の選択回答 58 件を保持しています。
 
 [ネイティブ OAM ワークフロー](docs/native-oam.md)は `./precheck.sh --oam` と `./run.sh --oam` で両データセットを実行します。DeepSeek Flash の回答は **max** 推論、MiniMax M3.1 Flash の LME 回答は**ネイティブ adaptive** 推論、判定は high を使います。各実行に実際の OAM リビジョンとモデル設定を記録します。新しいデプロイだけでは記録済みスコアの一致を証明できません。
 
@@ -46,11 +48,11 @@ BEAM は、回答の差し控え、矛盾の解消、イベント順序、情報
 
 ## プロバイダーのバージョン
 
-OAMB は **OAM v0.0.1** を主な対象とし、比較対象には以下のリリースとソースコミットを使用します。
+OAMB は最新 LME 結果の **OAM 最終 main ソース**を固定します。ほかのプロバイダーの固定版は別の LME-60 ワークフロー用で、AMB の Hindsight 473/500 サーバー版を示すものではありません。
 
 | プロバイダー | リリース | ソースコミット |
 |---|---|---|
-| Open Agent Memory（OAM） | **0.0.1 開発スナップショット** | `c0f2d2e1f62decf3af188d7c5dff2a529134610e` |
+| Open Agent Memory（OAM） | **main ソース（製品メタデータ 0.0.3）** | `38bd45d82f24aa33932a7d4b7afdf6ee27585f72` |
 | Hindsight | [0.9.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.9.2) | [`ebad478240d3171bb88201ececda5e8d9883d22d`](https://github.com/vectorize-io/hindsight/commit/ebad478240d3171bb88201ececda5e8d9883d22d) |
 | Mem0 | [2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19) | [`dc82354e143c2581d505d581a00286d6ef8c3605`](https://github.com/mem0ai/mem0/commit/dc82354e143c2581d505d581a00286d6ef8c3605) |
 | OpenViking | [0.4.19](https://github.com/volcengine/OpenViking/releases/tag/v0.4.19) | [`f3afef11637f2d7c11e4b1f36ed2f90630737cdc`](https://github.com/volcengine/OpenViking/commit/f3afef11637f2d7c11e4b1f36ed2f90630737cdc) |
@@ -59,11 +61,11 @@ OAMB は **OAM v0.0.1** を主な対象とし、比較対象には以下のリ�
 
 ### OAM 開発イメージ
 
-記録されたコミットを含む OAM チェックアウトから v0.0.1 開発イメージをビルドします。
+最終 main コミットを含む OAM チェックアウトから開発イメージをビルドします。
 
 ```bash
-./provider-services/oam/build-image.sh /path/to/open-agent-memory c0f2d2e1f62decf3af188d7c5dff2a529134610e
-docker run --rm oamb/oam:0.0.1-c0f2d2e1f62d --version
+./provider-services/oam/build-image.sh /path/to/open-agent-memory 38bd45d82f24aa33932a7d4b7afdf6ee27585f72
+docker run --rm oamb/oam:source-38bd45d82f24 --version
 ```
 
 ビルドはコミット済みソースと OAM ロックファイルを使用し、ローカルの未コミットファイルを含めません。作成されるローカルイメージは開発スナップショットであり、公開リリースイメージではありません。動作する OAM デプロイには、隔離された PostgreSQL データベース、適切な認証情報、設定済みのモデルサービスも必要です。[ネイティブ OAM の設定・実行ガイド](docs/native-oam.md)で、隔離された PostgreSQL/API/worker の準備、入力とモデルのバインド確認、チェックポイント、再開手順を確認してください。
