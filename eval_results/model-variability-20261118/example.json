@@ -1,0 +1,167 @@
+{
+  "observation": "Two saved answer/judge attempts for one LongMemEval question; illustrative case selected after observing different outcomes, not a repeated-run benchmark or a variability-rate estimate.",
+  "question_id": "e66b632c",
+  "question": "What was my previous personal best time for the charity 5K run?",
+  "gold_answers": [
+    "27 minutes and 45 seconds"
+  ],
+  "context_source": {
+    "file": "../lme500-20261117/oam/questions-401-450.json.gz",
+    "question_id": "e66b632c",
+    "context_sha256": "a7d77652308b82797eefc916e4d4105a0ef41f10cdf64d0a34d8d45e19d5743d",
+    "context_tokens": 12376,
+    "context_tokenizer": "tiktoken:o200k_base"
+  },
+  "answer_requests_identical": true,
+  "answer_request_sha256": "f11be4847178986be66cd7252fce7b8d9ad83b9285c600a6e933da32d0c72ad3",
+  "request_hash_method": "SHA-256 of compact UTF-8 JSON with sorted object keys and ensure_ascii=false; array order retained.",
+  "attempts": [
+    {
+      "label": "published",
+      "context_sha256": "a7d77652308b82797eefc916e4d4105a0ef41f10cdf64d0a34d8d45e19d5743d",
+      "source_receipt_sha256": "6a6250302d4a743d9f9d547283a44d9a81b2ed1e8d06f8328e502b15e654c623",
+      "correct": true,
+      "answer_call": {
+        "request": {
+          "model": "minimax-m3.1-flash",
+          "n": 1,
+          "temperature": 0,
+          "top_p": 1,
+          "stop": null,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "reasoning_split": true
+        },
+        "request_messages_sha256": "b4550f3d7d81a764ba0a4dc94aaddeb96c5e894456de298dbe642a1c1fb43159",
+        "status_code": 200,
+        "response": {
+          "id": "74bcebda-0e55-43c2-a782-b4c423410348",
+          "model": "minimax-m3.1-flash",
+          "finish_reason": "stop",
+          "content": "Your previous charity 5K personal best was **27 minutes 45 seconds**. You later improved it to **26:30**, shaving **1 minute 15 seconds** off the old record.",
+          "usage": {
+            "prompt_tokens": 13151,
+            "completion_tokens": 444,
+            "total_tokens": 13595,
+            "prompt_tokens_details": {
+              "cached_tokens": 720
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 405
+            }
+          }
+        }
+      },
+      "judge_call": {
+        "request": {
+          "model": "minimax-m3.1-flash",
+          "n": 1,
+          "temperature": 0,
+          "top_p": 1,
+          "stop": null,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "reasoning_split": true
+        },
+        "request_messages_sha256": "a3b57d7ee6d7ba9a199b5f5f651260e32cd07163999349d8c50dd4485a102d13",
+        "status_code": 200,
+        "response": {
+          "id": "32b3afc2-056c-41bf-a9e2-4e4c03096d33",
+          "model": "minimax-m3.1-flash",
+          "finish_reason": "stop",
+          "content": "The response states the previous personal best was 27 minutes 45 seconds, matching the correct answer.\n\ncorrect=true",
+          "usage": {
+            "prompt_tokens": 366,
+            "completion_tokens": 24,
+            "total_tokens": 390,
+            "prompt_tokens_details": {
+              "cached_tokens": 128
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "repeated",
+      "context_sha256": "a7d77652308b82797eefc916e4d4105a0ef41f10cdf64d0a34d8d45e19d5743d",
+      "source_receipt_sha256": "d1860c0f6b186f8a262a40c5a320feb2cd23a4c0ab13737e7f297a7ecaa40307",
+      "correct": false,
+      "answer_call": {
+        "request": {
+          "model": "minimax-m3.1-flash",
+          "n": 1,
+          "temperature": 0,
+          "top_p": 1,
+          "stop": null,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "reasoning_split": true
+        },
+        "request_messages_sha256": "b4550f3d7d81a764ba0a4dc94aaddeb96c5e894456de298dbe642a1c1fb43159",
+        "status_code": 200,
+        "response": {
+          "id": "552ca615-66b0-4c4b-b3ca-8668ba246bfb",
+          "model": "minimax-m3.1-flash",
+          "finish_reason": "stop",
+          "content": "Your previous charity 5K personal best was **about 28 minutes**. You later recorded a **26:30** personal best, having said you shaved off roughly **1 minute 30 seconds** from your previous record:\n\n**26:30 + 1:30 = 28:00**\n\nAn earlier memory from April separately lists a **27:45** personal best, but the later run account supports **28:00** as the record preceding your 26:30 performance.",
+          "usage": {
+            "prompt_tokens": 13151,
+            "completion_tokens": 763,
+            "total_tokens": 13914,
+            "prompt_tokens_details": {
+              "cached_tokens": 200
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 662
+            }
+          }
+        }
+      },
+      "judge_call": {
+        "request": {
+          "model": "minimax-m3.1-flash",
+          "n": 1,
+          "temperature": 0,
+          "top_p": 1,
+          "stop": null,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "reasoning_split": true
+        },
+        "request_messages_sha256": "22e4a0ee4542c9ee2b3f7214e8b70f51eaa89b10d70c0b5bf14baf3da54ed459",
+        "status_code": 200,
+        "response": {
+          "id": "af450b82-9d33-44ad-b2ab-98c6a1aae971",
+          "model": "minimax-m3.1-flash",
+          "finish_reason": "stop",
+          "content": "The model ultimately identifies the previous personal best as 28:00 rather than the required 27:45, even though 27:45 is mentioned earlier.\n\ncorrect=false",
+          "usage": {
+            "prompt_tokens": 426,
+            "completion_tokens": 216,
+            "total_tokens": 642,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 179
+            }
+          }
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Complete answer requests, including context, messages and request options, are byte-equivalent under canonical serialization.",
+    "Request-message expression and separate model reasoning are omitted, following the published evidence projection.",
+    "Judges receive different generated answers; independent judge variability is not isolated.",
+    "One selected example and one paired small-cohort rerun do not establish a randomness rate, an error bar or a population error rate.",
+    "Historical benchmark results and original receipts are unchanged."
+  ]
+}

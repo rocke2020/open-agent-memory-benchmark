@@ -14,6 +14,8 @@ Open Agent Memory Benchmark（OAMB）是 Open Agent Memory（OAM）的独立评�
 
 最新 95.2% 结果以保存证据发布；当前原生 LME 执行配置仍使用另一套 fast 召回与提示词协议，仅更换模型名称不能复现该结果。MiniMax 官方定价为输入 USD 0.15/百万 tokens、输出 USD 0.60/百万 tokens，不代表已核对的腾讯云 AI 本次账单。[官方定价](https://platform.minimax.io/docs/pricing/overview)。
 
+重新运行回答与评判模型时，评分可能变化。在一个[输入相同的 MiniMax 实例](eval_results/model-variability-20261118/README.md)中，一次回答正确，另一次回答错误；这展示了已观察到的波动，而非其发生频率。
+
 **BEAM-10M：OAM 为 61.56%，Hindsight 已保存上下文回放为 52.16%（+9.40 个百分点）。** 比较使用 200 道题保存的选定回答和 DeepSeek Flash 评判。Hindsight 没有重新运行引擎，OAM 的回答上下文多 17.43%。这些已保存的测量与当前 max 回答配置分开呈现。详见[BEAM 结果与比较条件](eval_results/beam10m/README.md#1-recorded-results)。
 
 离线 HTML 展示完整上下文、回答和评判：[最新 LME-500](eval_results/lme500-20261117/report.html) · [早期 LME-500 对比](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。下载即可打开，无需设置环境或发起评测调用。[BEAM 失败分析](eval_results/beam10m/beam10m-failure-review.md)保留 58 个低于阈值的选定回答。

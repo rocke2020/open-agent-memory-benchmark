@@ -69,6 +69,10 @@ The retrieval work preserves complete original evidence, removes redundant assis
 
 The accepted 95.2% result is a fixed-reference judge-acceptance score. Indexing generation usage/time, complete campaign usage, final monetary cost and an engine-only matched comparison are unavailable. Embedding tokens are excluded from generation totals; output usage includes reasoning where reported. The saved failed-attempt receipts prevent treating failures as free.
 
+### Answer and judge variability
+
+Accuracy also depends on answer generation and model-based judging. In a [saved same-input MiniMax example](../model-variability-20261118/README.md), the identical final context and complete answer-request settings produce a correct 27:45 answer in one attempt and an incorrect 28:00 answer in another. This demonstrates observed answer variation, not its frequency. A selected example or one paired small-cohort rerun does not establish a randomness rate or an error bar. The judge inputs differ because the answers differ, so independent judge variability is not isolated. This separate diagnostic does not change the published 476/500 or hard100 83/100 results.
+
 ## 5. Validate saved evidence and source builds
 
 From an OAMB checkout, validation and HTML rebuilding make no model calls:

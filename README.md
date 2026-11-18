@@ -12,6 +12,8 @@ Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for O
 
 The latest evaluation uses L1 memory and normal recall, with **11,373.58 mean saved context tokens** across 497 scored cases. Three disputed-gold cases remain incorrect in the unchanged 500-question denominator. Hindsight records **473/500 (94.6%)** with different answer/judge models; OAM uses **73.63% fewer saved formatted context tokens**. See the [latest results, source pin and comparison limits](eval_results/lme500-20261117/README.md) and the preserved [earlier 466/463 paired comparison](eval_results/lme500/README.md).
 
+Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](eval_results/model-variability-20261118/README.md), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
+
 **BEAM-10M: OAM 61.56%, Hindsight saved-context replay 52.16% (+9.40 percentage points).** The comparison uses 200 recorded selected answers and DeepSeek Flash judging. Hindsight's engine was not rerun, and OAM's answer context was 17.43% larger. These saved measurements are separate from the current max-effort answer profile. See the [BEAM results and comparison conditions](eval_results/beam10m/README.md#1-recorded-results).
 
 Browse full contexts, answers and judgments in the offline HTML reports: [Latest LME-500](eval_results/lme500-20261117/report.html) · [Earlier paired LME-500](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html). Download and open either file without setup or evaluation calls. The [BEAM failure review](eval_results/beam10m/beam10m-failure-review.md) retains the 58 rejected selected answers.

@@ -14,6 +14,8 @@ Open Agent Memory Benchmark（OAMB）は、Open Agent Memory（OAM）の独立�
 
 最新の 95.2% は保存済み証拠として公開しています。現在のネイティブ LME 実行は別の fast 検索・プロンプト方式であり、モデル名だけを変更しても最新結果の再現にはなりません。MiniMax の公式価格は入力 USD 0.15/百万トークン、出力 USD 0.60/百万トークンです。今回の Tencent Cloud AI 請求額の照合結果ではありません。[公式価格](https://platform.minimax.io/docs/pricing/overview)。
 
+回答・判定モデルを再実行すると、スコアが変わることがあります。[同じ入力を使った MiniMax の実例](eval_results/model-variability-20261118/README.md)では、一方の回答は正解、もう一方は不正解でした。これは観測された変動の例であり、その発生頻度を示すものではありません。
+
 **BEAM-10M：OAM は 61.56%、Hindsight の保存済みコンテキスト再評価は 52.16%（差は 9.40 ポイント）です。** 200 問の保存された選択回答と DeepSeek Flash の判定を使用しました。Hindsight のエンジンは再実行せず、OAM の回答コンテキストは 17.43% 多いものでした。これらの保存済み測定は現在の max 回答プロファイルと分けて示しています。[BEAM の結果と比較条件](eval_results/beam10m/README.md#1-recorded-results)を参照してください。
 
 オフライン HTML に全文のコンテキスト、回答、判定を保存しています：[最新 LME-500](eval_results/lme500-20261117/report.html) · [以前の LME-500 比較](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。セットアップや評価呼び出しなしでダウンロードして開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はしきい値未満の選択回答 58 件を保持しています。
