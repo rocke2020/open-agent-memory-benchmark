@@ -8,9 +8,20 @@ Open Agent Memory Benchmark（OAMB）は、Open Agent Memory（OAM）の独立�
 
 ## OAM の評価結果
 
-**OAM は LME-500 で 95.2%（476/500）**：MiniMax M3.1 Flash のネイティブ adaptive 回答・判定を使用し、**検索コンテキスト上限は 18,000トークン**です。
+**LME-500：OAM の記録済みスコアは 95.2%、Hindsight は 94.6% で、OAM の保存済み整形コンテキストは 73.63% 少ないトークン数です。** OAM は MiniMax M3.1 Flash のネイティブ adaptive 回答・判定を使用します。
 
-最新の評価では L1 メモリと normal 検索を使い、採点した 497 問の**保存済みコンテキストは平均 11,373.58トークン**です。参照回答に疑義がある 3 問も元の 500 問の分母に不正解として残しています。Hindsight の記録は **473/500（94.6%）**で、回答・判定モデルは異なります。OAM の保存済み整形コンテキストは **73.63% 小さく**なっています。[最新結果、ソース固定と比較条件](eval_results/lme500-20261117/README.md)と、保持した[以前の 466/463同一コンテキスト比較](eval_results/lme500/README.md)を参照してください。
+| LongMemEval S、全 500 問 | OAM | Hindsight（AMB の記録済み結果） |
+| --- | --- | --- |
+| 正解と判定された回答 | **476/500（95.2%）** | 473/500（94.6%） |
+| 保存済み整形コンテキストの平均、`o200k_base` | **11,373.58トークン**、497 件 | 43,124.55トークン、500 件 |
+| 回答モデル | MiniMax M3.1 Flash | Gemini 3.1 Pro Preview |
+| 判定モデル | MiniMax M3.1 Flash | Gemini 2.5 Flash Lite |
+
+**LME-500：Hindsight との公平な比較のため、同じ質問・参照回答と、バイト単位で同一の回答・判定プロンプトテンプレートを使用。** OAM は [Hindsight の公開 AMB 参照リビジョン](eval_results/lme500-20261117/README.md#2-evaluated-source-and-retrieval-settings)の回答・カテゴリー別判定プロンプトテンプレートをバイト単位でそのまま再利用し、同じ 500 問と固定参照回答を使用して、回答指示と判定基準を揃えています。
+
+OAM の記録済みスコアは **0.6 ポイント高い**結果です。最新の評価では L1 メモリと normal 検索を使い、**検索コンテキスト上限は 18,000トークン**です。参照回答に疑義がある 3 問も元の 500 問の分母に不正解として残しています。
+
+回答・判定モデルとメモリ処理が異なるため、スコアは記録済みシステム全体の性能を比較しています。コンテキスト数は保存済み整形テキストの計測値であり、正確なモデル入力使用量や請求額の削減を示すものではありません。[最新結果、ソース固定と比較条件](eval_results/lme500-20261117/README.md#3-context-latency-and-recorded-hindsight-comparison)を参照してください。
 
 最新の 95.2% は保存済み証拠として公開しています。現在のネイティブ LME 実行は別の fast 検索・プロンプト方式であり、モデル名だけを変更しても最新結果の再現にはなりません。MiniMax の公式価格は入力 USD 0.15/百万トークン、出力 USD 0.60/百万トークンです。今回の Tencent Cloud AI 請求額の照合結果ではありません。[公式価格](https://platform.minimax.io/docs/pricing/overview)。
 
@@ -18,7 +29,7 @@ Open Agent Memory Benchmark（OAMB）は、Open Agent Memory（OAM）の独立�
 
 **BEAM-10M：OAM は 61.56%、Hindsight の保存済みコンテキスト再評価は 52.16%（差は 9.40 ポイント）です。** 200 問の保存された選択回答と DeepSeek Flash の判定を使用しました。Hindsight のエンジンは再実行せず、OAM の回答コンテキストは 17.43% 多いものでした。これらの保存済み測定は現在の max 回答プロファイルと分けて示しています。[BEAM の結果と比較条件](eval_results/beam10m/README.md#1-recorded-results)を参照してください。
 
-オフライン HTML に全文のコンテキスト、回答、判定を保存しています：[最新 LME-500](eval_results/lme500-20261117/report.html) · [以前の LME-500 比較](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。セットアップや評価呼び出しなしでダウンロードして開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はしきい値未満の選択回答 58 件を保持しています。
+オフライン HTML に全文のコンテキスト、回答、判定を保存しています：[LME-500](eval_results/lme500-20261117/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。セットアップや評価呼び出しなしでダウンロードして開けます。[BEAM の失敗分析](eval_results/beam10m/beam10m-failure-review.md)はしきい値未満の選択回答 58 件を保持しています。
 
 [ネイティブ OAM ワークフロー](docs/native-oam.md)は `./precheck.sh --oam` と `./run.sh --oam` で両データセットを実行します。DeepSeek Flash の回答は **max** 推論、MiniMax M3.1 Flash の LME 回答は**ネイティブ adaptive** 推論、判定は high を使います。各実行に実際の OAM リビジョンとモデル設定を記録します。新しいデプロイだけでは記録済みスコアの一致を証明できません。
 
@@ -46,7 +57,7 @@ BEAM は、回答の差し控え、矛盾の解消、イベント順序、情報
 
 比較ワークフローでは `./precheck.sh` が LongMemEval をダウンロードします。単独で `./scripts/download/longmemeval.sh` を実行することもできます。`./scripts/download/beam10m.sh` は、固定された公式 BEAM-10M Parquet シャードをダウンロードし、評価時と同じ JSON シリアライズと SHA-256 で `datasets/beam/10m.json` をエクスポートします。両ヘルパーは、既存ファイルが一致しなければ保持したまま拒否します。ダウンロードしたデータセットは Git に含めません。[データセットの出典](DATASETS.md)を参照してください。
 
-[ネイティブ OAM ガイド](docs/native-oam.md)で隔離されたデプロイを準備し、`./precheck.sh --oam`、`./run.sh --oam` の順にいずれかの全データセットを実行します。両データセット用の合成診断設定もあります。新規実行は評価した OAM のリビジョンと設定を記録し、保存済みの [LME-500](eval_results/lme500/README.md) と [BEAM-10M](eval_results/beam10m/README.md) レポートは測定対象のパイプラインを明示します。
+[ネイティブ OAM ガイド](docs/native-oam.md)で隔離されたデプロイを準備し、`./precheck.sh --oam`、`./run.sh --oam` の順にいずれかの全データセットを実行します。両データセット用の合成診断設定もあります。新規実行は評価した OAM のリビジョンと設定を記録し、保存済みの [LME-500](eval_results/lme500-20261117/README.md) と [BEAM-10M](eval_results/beam10m/README.md) レポートは測定対象のパイプラインを明示します。
 
 ## プロバイダーのバージョン
 
@@ -108,7 +119,7 @@ LME 回答には [DeepSeek Flash max](configs/oam-lme500.yml) または [MiniMax
 
 ## クイックスタート：LME-60 比較
 
-以下のコマンドは副次的なプロバイダー比較を開始します。主目的の全データセット OAM 評価には、[上記のネイティブ評価ワークフロー](#lme-500-と-beam-10m-で-oam-を評価する)を使用してください。保存済みの [LME-500](eval_results/lme500/README.md) と [BEAM-10M](eval_results/beam10m/README.md) 評価の閲覧にセットアップは不要です。
+以下のコマンドは副次的なプロバイダー比較を開始します。主目的の全データセット OAM 評価には、[上記のネイティブ評価ワークフロー](#lme-500-と-beam-10m-で-oam-を評価する)を使用してください。保存済みの [LME-500](eval_results/lme500-20261117/README.md) と [BEAM-10M](eval_results/beam10m/README.md) 評価の閲覧にセットアップは不要です。
 
 
 Git、Python 3.11 以降、`uv`、Compose 対応の Docker、`curl`、`jq`、`shasum`、および OpenAI 互換モデルエンドポイントの認証情報が必要です。準備と評価では課金対象のモデル呼び出しが発生する場合があります。処理は隔離されたプロバイダー状態を作成し、既存のプロバイダー/データベースデータを保持します。

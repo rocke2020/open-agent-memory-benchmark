@@ -8,9 +8,20 @@ Open Agent Memory Benchmark（OAMB）是 Open Agent Memory（OAM）的独立评�
 
 ## OAM 评测结果
 
-**OAM 在 LME-500 达到 95.2%（476/500）**：使用 MiniMax M3.1 Flash 原生 adaptive 回答和评判，**检索上下文上限为 18,000 tokens**。
+**LME-500：OAM 记录得分为 95.2%，Hindsight 为 94.6%，OAM 的已保存格式化上下文 tokens 少 73.63%。** OAM 使用 MiniMax M3.1 Flash 原生 adaptive 回答和评判。
 
-最新评测使用 L1 记忆和 normal 召回，497 道实际评分问题的**已保存上下文平均为 11,373.58 tokens**。3 道参考答案存在争议的问题继续按错误计入原有 500 题分母。Hindsight 的记录为 **473/500（94.6%）**，两者的回答和评判模型不同；OAM 的已保存格式化上下文小 **73.63%**。详见[最新结果、源码固定版本与比较限制](eval_results/lme500-20261117/README.md)，早期[466/463 同上下文对比](eval_results/lme500/README.md)继续保留。
+| LongMemEval S，完整 500 题 | OAM | Hindsight（AMB 已记录结果） |
+| --- | --- | --- |
+| 判定正确的回答 | **476/500（95.2%）** | 473/500（94.6%） |
+| 已保存格式化上下文均值，`o200k_base` | **11,373.58 tokens**，共 497 份上下文 | 43,124.55 tokens，共 500 份上下文 |
+| 回答模型 | MiniMax M3.1 Flash | Gemini 3.1 Pro Preview |
+| 评判模型 | MiniMax M3.1 Flash | Gemini 2.5 Flash Lite |
+
+**LME-500：为公平比较，采用与 Hindsight 相同的问题、参考答案，以及逐字节一致的回答和评判提示词模板。** OAM 逐字节复用 [Hindsight 已发布 AMB 参考版本](eval_results/lme500-20261117/README.md#2-evaluated-source-and-retrieval-settings)的回答与分类评判提示词模板，并使用相同的 500 道问题和固定参考答案，使回答指令与评判标准保持一致。
+
+OAM 的记录得分高 **0.6 个百分点**。最新评测使用 L1 记忆和 normal 召回，**检索上下文上限为 18,000 tokens**。3 道参考答案存在争议的问题继续按错误计入原有 500 题分母。
+
+两者的回答模型、评判模型和记忆流程不同，因此这些得分比较的是已记录的端到端系统表现。上下文计数来自已保存的格式化文本，不能据此推算精确的模型输入用量或账单节省。详见[最新结果、源码固定版本与比较限制](eval_results/lme500-20261117/README.md#3-context-latency-and-recorded-hindsight-comparison)。
 
 最新 95.2% 结果以保存证据发布；当前原生 LME 执行配置仍使用另一套 fast 召回与提示词协议，仅更换模型名称不能复现该结果。MiniMax 官方定价为输入 USD 0.15/百万 tokens、输出 USD 0.60/百万 tokens，不代表已核对的腾讯云 AI 本次账单。[官方定价](https://platform.minimax.io/docs/pricing/overview)。
 
@@ -18,7 +29,7 @@ Open Agent Memory Benchmark（OAMB）是 Open Agent Memory（OAM）的独立评�
 
 **BEAM-10M：OAM 为 61.56%，Hindsight 已保存上下文回放为 52.16%（+9.40 个百分点）。** 比较使用 200 道题保存的选定回答和 DeepSeek Flash 评判。Hindsight 没有重新运行引擎，OAM 的回答上下文多 17.43%。这些已保存的测量与当前 max 回答配置分开呈现。详见[BEAM 结果与比较条件](eval_results/beam10m/README.md#1-recorded-results)。
 
-离线 HTML 展示完整上下文、回答和评判：[最新 LME-500](eval_results/lme500-20261117/report.html) · [早期 LME-500 对比](eval_results/lme500/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。下载即可打开，无需设置环境或发起评测调用。[BEAM 失败分析](eval_results/beam10m/beam10m-failure-review.md)保留 58 个低于阈值的选定回答。
+离线 HTML 展示完整上下文、回答和评判：[LME-500](eval_results/lme500-20261117/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。下载即可打开，无需设置环境或发起评测调用。[BEAM 失败分析](eval_results/beam10m/beam10m-failure-review.md)保留 58 个低于阈值的选定回答。
 
 [原生 OAM 工作流](docs/native-oam.md)通过 `./precheck.sh --oam` 和 `./run.sh --oam` 运行两个数据集。DeepSeek Flash 回答配置使用 **max** 推理强度，MiniMax M3.1 Flash 的 LME 回答配置使用**原生 adaptive** 推理，评判使用 high 强度。每次运行记录实际 OAM 版本和模型绑定。这些测量属于记录的评测流程，新部署不能自行证明分数一致。
 
@@ -46,7 +57,7 @@ BEAM 覆盖拒答、矛盾消解、事件排序、信息提取、指令遵循、
 
 比较工作流通过 `./precheck.sh` 下载 LongMemEval，也可以单独运行 `./scripts/download/longmemeval.sh`。运行 `./scripts/download/beam10m.sh` 下载固定版本的官方 BEAM-10M Parquet 分片，并按评测使用的精确 JSON 序列化和 SHA-256 导出 `datasets/beam/10m.json`。两个工具都会保留并拒绝现有的不匹配文件。下载的数据集不进入 Git；参见[数据集来源](DATASETS.md)。
 
-使用[原生 OAM 指南](docs/native-oam.md)准备隔离部署，再依次执行 `./precheck.sh --oam` 和 `./run.sh --oam` 运行任一完整数据集。两个数据集均提供合成诊断配置。新运行记录被评测的 OAM 版本和设置；已保存的 [LME-500](eval_results/lme500/README.md) 和 [BEAM-10M](eval_results/beam10m/README.md) 报告标明实际测量的评测流程。
+使用[原生 OAM 指南](docs/native-oam.md)准备隔离部署，再依次执行 `./precheck.sh --oam` 和 `./run.sh --oam` 运行任一完整数据集。两个数据集均提供合成诊断配置。新运行记录被评测的 OAM 版本和设置；已保存的 [LME-500](eval_results/lme500-20261117/README.md) 和 [BEAM-10M](eval_results/beam10m/README.md) 报告标明实际测量的评测流程。
 
 ## 提供方版本
 
@@ -108,7 +119,7 @@ LME 回答可选择 [DeepSeek Flash max](configs/oam-lme500.yml) 或 [MiniMax M3
 
 ## 快速开始：LME-60 比较
 
-以下命令启动次要的提供方比较。主要的完整数据集 OAM 任务请使用[上面的原生评测工作流](#在-lme-500-和-beam-10m-上评测-oam)。阅读已保存的 [LME-500](eval_results/lme500/README.md) 和 [BEAM-10M](eval_results/beam10m/README.md) 评测无需配置环境。
+以下命令启动次要的提供方比较。主要的完整数据集 OAM 任务请使用[上面的原生评测工作流](#在-lme-500-和-beam-10m-上评测-oam)。阅读已保存的 [LME-500](eval_results/lme500-20261117/README.md) 和 [BEAM-10M](eval_results/beam10m/README.md) 评测无需配置环境。
 
 
 你需要 Git、Python 3.11+、`uv`、带 Compose 的 Docker、`curl`、`jq`、`shasum`，以及 OpenAI 兼容模型端点的凭据。准备和评测过程可能产生收费的模型调用。它们会创建隔离的提供方状态，并保留现有的提供方/数据库数据。
