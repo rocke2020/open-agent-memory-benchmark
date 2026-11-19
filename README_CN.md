@@ -8,6 +8,24 @@ Open Agent Memory Benchmark（OAMB）是 Open Agent Memory（OAM）的独立评�
 
 ## OAM 评测结果
 
+**在 AMB 已公布的 LongMemEval S 和 BEAM-10M 对比范围内达到领先水平（SOTA）。** OAM 使用低成本 MiniMax M3.1 Flash 的 adaptive 模式回答和评判，在两个完整数据集上都超过了 Hindsight 的最高已记录成绩。[AMB 成绩清单](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+
+### BEAM-10M
+
+BEAM-10M 在十段**千万 token 规模的对话**上用 200 道题考查事件排序、时间推理和矛盾消解等复杂记忆能力。OAM 平均评分高 **14.15 个百分点**，多通过 **25 道题**。[分项成绩和逐题结果](eval_results/beam10m-20261119/README.md)
+
+| BEAM-10M | OAM | Hindsight 公布结果 |
+| --- | ---: | ---: |
+| 平均评分 | **78.23%** | 64.08% |
+| 通过率（单题得分 ≥ 0.5） | **86.0%（172/200）** | 73.5%（147/200） |
+| 已保存回答上下文均值，`o200k_base` | **24,676.88 tokens（减少 9.85%）** | 27,373.25 tokens |
+| 回答模型 | MiniMax M3.1 Flash adaptive | Gemini 3.1 Pro Preview |
+| 评判模型 | MiniMax M3.1 Flash adaptive | Gemini 2.5 Flash Lite |
+
+**为公平比较，OAM 沿用归档 AMB 评测器中的相同问题、参考答案、评分量表与规则，并逐字节复用回答和评判提示词模板。** 3 次评判调用在服务商的系统提示中加入 JSON 示例，评判正文和评分规则保持一致。180 道题的当期 normal 召回使用 **24,000 tokens** 原生上下文上限，另 20 道题使用此前保存的上下文。[评分协议和上下文详情](eval_results/beam10m-20261119/README.md)
+
+### LongMemEval S
+
 **LME-500：OAM 记录得分为 95.2%，Hindsight 为 94.6%，OAM 的已保存格式化上下文 tokens 少 73.63%。** OAM 使用 MiniMax M3.1 Flash 原生 adaptive 回答和评判。
 
 | LongMemEval S，完整 500 题 | OAM | Hindsight（AMB 已记录结果） |
@@ -27,9 +45,7 @@ OAM 的记录得分高 **0.6 个百分点**。最新评测使用 L1 记忆和 no
 
 重新运行回答与评判模型时，评分可能变化。在一个[输入相同的 MiniMax 实例](eval_results/model-variability-20261118/README.md)中，一次回答正确，另一次回答错误；这展示了已观察到的波动，而非其发生频率。
 
-**BEAM-10M：OAM 为 61.56%，Hindsight 已保存上下文回放为 52.16%（+9.40 个百分点）。** 比较使用 200 道题保存的选定回答和 DeepSeek Flash 评判。Hindsight 没有重新运行引擎，OAM 的回答上下文多 17.43%。这些已保存的测量与当前 max 回答配置分开呈现。详见[BEAM 结果与比较条件](eval_results/beam10m/README.md#1-recorded-results)。
-
-离线 HTML 展示完整上下文、回答和评判：[LME-500](eval_results/lme500-20261117/report.html) · [BEAM-10M](eval_results/beam10m/report.html)。下载即可打开，无需设置环境或发起评测调用。[BEAM 失败分析](eval_results/beam10m/beam10m-failure-review.md)保留 58 个低于阈值的选定回答。
+查看[最新 BEAM-10M 逐题评分和上下文计数](eval_results/beam10m-20261119/scores.csv)、[LME-500 离线报告](eval_results/lme500-20261117/report.html)和[早期 BEAM-10M DeepSeek Flash 回放](eval_results/beam10m/report.html)。
 
 [原生 OAM 工作流](docs/native-oam.md)通过 `./precheck.sh --oam` 和 `./run.sh --oam` 运行两个数据集。DeepSeek Flash 回答配置使用 **max** 推理强度，MiniMax M3.1 Flash 的 LME 回答配置使用**原生 adaptive** 推理，评判使用 high 强度。每次运行记录实际 OAM 版本和模型绑定。这些测量属于记录的评测流程，新部署不能自行证明分数一致。
 
@@ -57,7 +73,7 @@ BEAM 覆盖拒答、矛盾消解、事件排序、信息提取、指令遵循、
 
 比较工作流通过 `./precheck.sh` 下载 LongMemEval，也可以单独运行 `./scripts/download/longmemeval.sh`。运行 `./scripts/download/beam10m.sh` 下载固定版本的官方 BEAM-10M Parquet 分片，并按评测使用的精确 JSON 序列化和 SHA-256 导出 `datasets/beam/10m.json`。两个工具都会保留并拒绝现有的不匹配文件。下载的数据集不进入 Git；参见[数据集来源](DATASETS.md)。
 
-使用[原生 OAM 指南](docs/native-oam.md)准备隔离部署，再依次执行 `./precheck.sh --oam` 和 `./run.sh --oam` 运行任一完整数据集。两个数据集均提供合成诊断配置。新运行记录被评测的 OAM 版本和设置；已保存的 [LME-500](eval_results/lme500-20261117/README.md) 和 [BEAM-10M](eval_results/beam10m/README.md) 报告标明实际测量的评测流程。
+使用[原生 OAM 指南](docs/native-oam.md)准备隔离部署，再依次执行 `./precheck.sh --oam` 和 `./run.sh --oam` 运行任一完整数据集。两个数据集均提供合成诊断配置。每次新运行都会记录被评测的 OAM 版本和设置。[LME-500](eval_results/lme500-20261117/README.md) 和 [BEAM-10M](eval_results/beam10m-20261119/README.md) 报告列出了公布成绩所用的设置。
 
 ## 提供方版本
 
@@ -119,7 +135,7 @@ LME 回答可选择 [DeepSeek Flash max](configs/oam-lme500.yml) 或 [MiniMax M3
 
 ## 快速开始：LME-60 比较
 
-以下命令启动次要的提供方比较。主要的完整数据集 OAM 任务请使用[上面的原生评测工作流](#在-lme-500-和-beam-10m-上评测-oam)。阅读已保存的 [LME-500](eval_results/lme500-20261117/README.md) 和 [BEAM-10M](eval_results/beam10m/README.md) 评测无需配置环境。
+以下命令启动次要的提供方比较。主要的完整数据集 OAM 任务请使用[上面的原生评测工作流](#在-lme-500-和-beam-10m-上评测-oam)。阅读已保存的 [LME-500](eval_results/lme500-20261117/README.md) 和 [BEAM-10M](eval_results/beam10m-20261119/README.md) 评测无需配置环境。
 
 
 你需要 Git、Python 3.11+、`uv`、带 Compose 的 Docker、`curl`、`jq`、`shasum`，以及 OpenAI 兼容模型端点的凭据。准备和评测过程可能产生收费的模型调用。它们会创建隔离的提供方状态，并保留现有的提供方/数据库数据。

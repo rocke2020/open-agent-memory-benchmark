@@ -8,6 +8,24 @@ Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for O
 
 ## OAM results
 
+**State-of-the-art against AMB's published results for LongMemEval S and BEAM-10M.** OAM exceeds the top recorded Hindsight scores on both full datasets with low-cost MiniMax M3.1 Flash adaptive answering and judging. [AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
+
+### BEAM-10M
+
+Across **200 questions in ten 10-million-token-scale conversations**, OAM gained **14.15 percentage points in mean rubric credit and 25 additional passes**. The benchmark exercises complex memory capabilities including event ordering, temporal reasoning and contradiction resolution. [Per-capability results and paired outcomes](eval_results/beam10m-20261119/README.md)
+
+| BEAM-10M | OAM | Published Hindsight |
+| --- | ---: | ---: |
+| Mean rubric credit | **78.23%** | 64.08% |
+| Pass rate (score ≥ 0.5) | **86.0% (172/200)** | 73.5% (147/200) |
+| Mean saved answer context, `o200k_base` | **24,676.88 tokens (9.85% fewer)** | 27,373.25 tokens |
+| Answer model | MiniMax M3.1 Flash adaptive | Gemini 3.1 Pro Preview |
+| Judge model | MiniMax M3.1 Flash adaptive | Gemini 2.5 Flash Lite |
+
+**For a fair comparison, OAM used the same questions, reference answers, rubrics, scoring rules and byte-identical answer and judge prompt templates from the archived AMB evaluator.** Three judge calls needed a JSON example in the provider wrapper while keeping the judge text and scoring rule fixed. OAM's 180 current normal recalls used a **24,000-token native context cap**. Another 20 questions used previously saved contexts. [Matched protocol and context details](eval_results/beam10m-20261119/README.md)
+
+### LongMemEval S
+
 **LME-500: OAM records 95.2% vs Hindsight's 94.6%, with 73.63% fewer saved formatted context tokens.** OAM uses MiniMax M3.1 Flash native-adaptive answering and judging.
 
 | LongMemEval S, full 500-question selection | OAM | Hindsight (recorded AMB result) |
@@ -25,9 +43,7 @@ Answer/judge models and memory pipelines differ, so the scores compare the recor
 
 Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](eval_results/model-variability-20261118/README.md), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
 
-**BEAM-10M: OAM 61.56%, Hindsight saved-context replay 52.16% (+9.40 percentage points).** The comparison uses 200 recorded selected answers and DeepSeek Flash judging. Hindsight's engine was not rerun, and OAM's answer context was 17.43% larger. These saved measurements are separate from the current max-effort answer profile. See the [BEAM results and comparison conditions](eval_results/beam10m/README.md#1-recorded-results).
-
-Browse full contexts, answers and judgments in the offline HTML reports: [LME-500](eval_results/lme500-20261117/report.html) · [BEAM-10M](eval_results/beam10m/report.html). Download and open either file without setup or evaluation calls. The [BEAM failure review](eval_results/beam10m/beam10m-failure-review.md) retains the 58 rejected selected answers.
+Inspect the [latest BEAM-10M scores and context counts](eval_results/beam10m-20261119/scores.csv), the [LME-500 offline report](eval_results/lme500-20261117/report.html) or the [earlier BEAM-10M DeepSeek Flash replay](eval_results/beam10m/report.html).
 
 The latest 95.2% campaign is published as saved evidence; the current native LME execution profile uses a separate fast-recall/prompt protocol and does not reproduce it by changing model names alone. MiniMax lists USD 0.15/M input and USD 0.60/M output tokens; these vendor prices are not a reconciled Tencent Cloud AI campaign bill. [Official pricing](https://platform.minimax.io/docs/pricing/overview).
 
@@ -57,7 +73,7 @@ BEAM covers abstention, contradiction resolution, event ordering, information ex
 
 LongMemEval is downloaded by `./precheck.sh` for the comparison workflow, or separately with `./scripts/download/longmemeval.sh`. Run `./scripts/download/beam10m.sh` to download the pinned official BEAM-10M Parquet shards and export `datasets/beam/10m.json` with the campaign's exact JSON serialization and SHA-256. Both helpers preserve existing mismatched files and reject them. Downloaded datasets remain outside Git; see [dataset provenance](DATASETS.md).
 
-Use the [native OAM guide](docs/native-oam.md) to prepare an isolated deployment and run either full dataset through `./precheck.sh --oam` followed by `./run.sh --oam`. Synthetic diagnostic configurations are provided for both datasets. New runs record the evaluated OAM revision and settings; the saved [LME-500](eval_results/lme500-20261117/README.md) and [BEAM-10M](eval_results/beam10m/README.md) reports identify the measured pipelines.
+Use the [native OAM guide](docs/native-oam.md) to prepare an isolated deployment and run either full dataset through `./precheck.sh --oam` followed by `./run.sh --oam`. Synthetic diagnostic configurations are provided for both datasets. New runs record the evaluated OAM revision and settings. The saved [LME-500](eval_results/lme500-20261117/README.md) and [BEAM-10M](eval_results/beam10m-20261119/README.md) reports identify the settings used for the published scores.
 
 ## Provider versions
 
@@ -119,7 +135,7 @@ Resume reuses completed answers and judgments and continues unfinished work. Com
 
 ## Quick start: LME-60 comparison
 
-The commands below start the secondary provider comparison. For the primary full-dataset OAM task, use the [native evaluation workflow above](#evaluate-oam-on-lme-500-and-beam-10m). Reading the saved [LME-500](eval_results/lme500-20261117/README.md) and [BEAM-10M](eval_results/beam10m/README.md) evaluations requires no setup.
+The commands below start the secondary provider comparison. For the primary full-dataset OAM task, use the [native evaluation workflow above](#evaluate-oam-on-lme-500-and-beam-10m). Reading the saved [LME-500](eval_results/lme500-20261117/README.md) and [BEAM-10M](eval_results/beam10m-20261119/README.md) evaluations requires no setup.
 
 You need Git, Python 3.11+, `uv`, Docker with Compose, `curl`, `jq`, `shasum`, and credentials for an OpenAI-compatible model endpoint. Preparation and evaluation can make billable model calls. They create isolated provider state and preserve existing provider/database data.
 
