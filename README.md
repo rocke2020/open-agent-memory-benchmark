@@ -8,25 +8,9 @@ Open Agent Memory Benchmark (OAMB) is the standalone evaluation repository for O
 
 ## OAM results
 
-**State-of-the-art against AMB's published results for LongMemEval S and BEAM-10M.** OAM exceeds the top recorded Hindsight scores on both full datasets with low-cost MiniMax M3.1 Flash adaptive answering and judging. [AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
-
-### BEAM-10M
-
-Across **200 questions in ten 10-million-token-scale conversations**, OAM gained **14.15 percentage points in mean rubric credit and 25 additional passes**. The benchmark exercises complex memory capabilities including event ordering, temporal reasoning and contradiction resolution. [Per-capability results and paired outcomes](eval_results/beam10m-20261119/README.md)
-
-| BEAM-10M | OAM | Published Hindsight |
-| --- | ---: | ---: |
-| Mean rubric credit | **78.23%** | 64.08% |
-| Pass rate (score ≥ 0.5) | **86.0% (172/200)** | 73.5% (147/200) |
-| Mean saved answer context, `o200k_base` | **24,676.88 tokens (9.85% fewer)** | 27,373.25 tokens |
-| Answer model | MiniMax M3.1 Flash adaptive | Gemini 3.1 Pro Preview |
-| Judge model | MiniMax M3.1 Flash adaptive | Gemini 2.5 Flash Lite |
-
-**For a fair comparison, OAM used the same questions, reference answers, rubrics, scoring rules and byte-identical answer and judge prompt templates from the archived AMB evaluator.** Three judge calls needed a JSON example in the provider wrapper while keeping the judge text and scoring rule fixed. OAM's 180 current normal recalls used a **24,000-token native context cap**. Another 20 questions used previously saved contexts. [Matched protocol and context details](eval_results/beam10m-20261119/README.md)
-
 ### LongMemEval S
 
-**LME-500: OAM records 95.2% vs Hindsight's 94.6%, with 73.63% fewer saved formatted context tokens.** OAM uses MiniMax M3.1 Flash native-adaptive answering and judging.
+**On LME-500, OAM records 95.2% accuracy with 73.63% fewer saved formatted context tokens** than Hindsight's published Agent Memory Benchmark (AMB) run. [Hindsight's pinned LME-500 result](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
 
 | LongMemEval S, full 500-question selection | OAM | Hindsight (recorded AMB result) |
 | --- | --- | --- |
@@ -39,13 +23,31 @@ Across **200 questions in ten 10-million-token-scale conversations**, OAM gained
 
 OAM's recorded score is **0.6 percentage points higher**. The latest evaluation uses L1 memory and normal recall, with an **18,000-token retrieval-context limit**. Three disputed-gold cases remain incorrect in the unchanged 500-question denominator.
 
-Answer/judge models and memory pipelines differ, so the scores compare the recorded end-to-end systems. Context counts measure saved formatted text; they do not establish exact model-input usage or billing savings. See the [latest results, source pin and comparison limits](eval_results/lme500-20261117/README.md#3-context-latency-and-recorded-hindsight-comparison).
+Answer/judge models and memory pipelines differ, so the scores compare the recorded end-to-end systems. Context counts measure saved formatted text. Hindsight's AMB answer template can use raw recall JSON, which the public artifact omits. [Token recount and comparison details](eval_results/lme500-20261117/README.md#3-context-latency-and-recorded-hindsight-comparison).
 
 Scores can vary when answer and judge models are rerun. In a [same-input MiniMax example](eval_results/model-variability-20261118/README.md), one answer was correct and another was incorrect; this illustrates observed variability, not its frequency.
 
-Inspect the [latest BEAM-10M scores and context counts](eval_results/beam10m-20261119/scores.csv), the [LME-500 offline report](eval_results/lme500-20261117/report.html) or the [earlier BEAM-10M DeepSeek Flash replay](eval_results/beam10m/report.html).
-
 The latest 95.2% campaign is published as saved evidence; the current native LME execution profile uses a separate fast-recall/prompt protocol and does not reproduce it by changing model names alone. MiniMax lists USD 0.15/M input and USD 0.60/M output tokens; these vendor prices are not a reconciled Tencent Cloud AI campaign bill. [Official pricing](https://platform.minimax.io/docs/pricing/overview).
+
+Inspect the [LME-500 offline report](eval_results/lme500-20261117/report.html).
+
+### BEAM-10M
+
+BEAM-10M tests event ordering, temporal reasoning and contradiction resolution across **200 questions in ten conversations of about 10 million tokens each**. OAM gained **14.15 percentage points in mean rubric credit and 25 additional passes**. [Per-capability results and paired outcomes](eval_results/beam10m-20261119/README.md)
+
+| BEAM-10M | OAM | Published Hindsight |
+| --- | ---: | ---: |
+| Mean rubric credit | **78.23%** | 64.08% |
+| Pass rate (score ≥ 0.5) | **86.0% (172/200)** | 73.5% (147/200) |
+| Mean saved answer context, `o200k_base` | **24,676.88 tokens (9.85% fewer)** | 27,373.25 tokens |
+| Answer model | MiniMax M3.1 Flash adaptive | Gemini 3.1 Pro Preview |
+| Judge model | MiniMax M3.1 Flash adaptive | Gemini 2.5 Flash Lite |
+
+**For a fair comparison, OAM used the same questions, reference answers, rubrics, scoring rules and byte-identical answer and judge prompt templates from the archived AMB evaluator.** Three judge calls needed a JSON example in the provider wrapper while keeping the judge text and scoring rule fixed. OAM's 180 current normal recalls used a **24,000-token native context cap**. Another 20 questions used previously saved contexts. [Matched protocol and context details](eval_results/beam10m-20261119/README.md)
+
+Inspect the [latest BEAM-10M scores and context counts](eval_results/beam10m-20261119/scores.csv) or the [earlier BEAM-10M DeepSeek Flash replay](eval_results/beam10m/report.html).
+
+Both OAM runs exceed the highest recorded Hindsight scores in AMB and use low-cost MiniMax M3.1 Flash adaptive for answering and judging. [AMB results manifest](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
 
 The [native OAM workflow](docs/native-oam.md) runs both workloads through `./precheck.sh --oam` and `./run.sh --oam`. DeepSeek Flash answer profiles use **max** effort; the MiniMax M3.1 Flash LME profile uses **native adaptive** reasoning. Judges use high effort. Each run records the actual OAM revision and model bindings. These measurements cover the recorded pipelines; a new deployment does not establish score parity.
 

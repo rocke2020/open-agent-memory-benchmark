@@ -8,25 +8,9 @@ Open Agent Memory Benchmark（OAMB）是 Open Agent Memory（OAM）的独立评�
 
 ## OAM 评测结果
 
-**在 AMB 已公布的 LongMemEval S 和 BEAM-10M 对比范围内达到领先水平（SOTA）。** OAM 使用低成本 MiniMax M3.1 Flash 的 adaptive 模式回答和评判，在两个完整数据集上都超过了 Hindsight 的最高已记录成绩。[AMB 成绩清单](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
-
-### BEAM-10M
-
-BEAM-10M 在十段**千万 token 规模的对话**上用 200 道题考查事件排序、时间推理和矛盾消解等复杂记忆能力。OAM 平均评分高 **14.15 个百分点**，多通过 **25 道题**。[分项成绩和逐题结果](eval_results/beam10m-20261119/README.md)
-
-| BEAM-10M | OAM | Hindsight 公布结果 |
-| --- | ---: | ---: |
-| 平均评分 | **78.23%** | 64.08% |
-| 通过率（单题得分 ≥ 0.5） | **86.0%（172/200）** | 73.5%（147/200） |
-| 已保存回答上下文均值，`o200k_base` | **24,676.88 tokens（减少 9.85%）** | 27,373.25 tokens |
-| 回答模型 | MiniMax M3.1 Flash adaptive | Gemini 3.1 Pro Preview |
-| 评判模型 | MiniMax M3.1 Flash adaptive | Gemini 2.5 Flash Lite |
-
-**为公平比较，OAM 沿用归档 AMB 评测器中的相同问题、参考答案、评分量表与规则，并逐字节复用回答和评判提示词模板。** 3 次评判调用在服务商的系统提示中加入 JSON 示例，评判正文和评分规则保持一致。180 道题的当期 normal 召回使用 **24,000 tokens** 原生上下文上限，另 20 道题使用此前保存的上下文。[评分协议和上下文详情](eval_results/beam10m-20261119/README.md)
-
 ### LongMemEval S
 
-**LME-500：OAM 记录得分为 95.2%，Hindsight 为 94.6%，OAM 的已保存格式化上下文 tokens 少 73.63%。** OAM 使用 MiniMax M3.1 Flash 原生 adaptive 回答和评判。
+**在 LME-500 上，OAM 记录准确率为 95.2%，比 Hindsight 公布的 Agent Memory Benchmark（AMB）运行少 73.63% 的已保存格式化上下文 tokens。** [Hindsight 固定版本的 LME-500 结果](https://github.com/vectorize-io/agent-memory-benchmark/blob/7021c59c3497d1dd08d61f12fa4629be983fcfb1/outputs/longmemeval/hindsight/rag/s.json.gz)
 
 | LongMemEval S，完整 500 题 | OAM | Hindsight（AMB 已记录结果） |
 | --- | --- | --- |
@@ -39,13 +23,31 @@ BEAM-10M 在十段**千万 token 规模的对话**上用 200 道题考查事件�
 
 OAM 的记录得分高 **0.6 个百分点**。最新评测使用 L1 记忆和 normal 召回，**检索上下文上限为 18,000 tokens**。3 道参考答案存在争议的问题继续按错误计入原有 500 题分母。
 
-两者的回答模型、评判模型和记忆流程不同，因此这些得分比较的是已记录的端到端系统表现。上下文计数来自已保存的格式化文本，不能据此推算精确的模型输入用量或账单节省。详见[最新结果、源码固定版本与比较限制](eval_results/lme500-20261117/README.md#3-context-latency-and-recorded-hindsight-comparison)。
-
-最新 95.2% 结果以保存证据发布；当前原生 LME 执行配置仍使用另一套 fast 召回与提示词协议，仅更换模型名称不能复现该结果。MiniMax 官方定价为输入 USD 0.15/百万 tokens、输出 USD 0.60/百万 tokens，不代表已核对的腾讯云 AI 本次账单。[官方定价](https://platform.minimax.io/docs/pricing/overview)。
+两者的回答模型、评判模型和记忆流程不同，因此这些得分比较的是已记录的端到端系统表现。上下文计数来自已保存的格式化文本。Hindsight 的 AMB 回答模板可以使用 raw recall JSON，而公开产物中并未包含该字段。[Token 重新统计与比较详情](eval_results/lme500-20261117/README.md#3-context-latency-and-recorded-hindsight-comparison)。
 
 重新运行回答与评判模型时，评分可能变化。在一个[输入相同的 MiniMax 实例](eval_results/model-variability-20261118/README.md)中，一次回答正确，另一次回答错误；这展示了已观察到的波动，而非其发生频率。
 
-查看[最新 BEAM-10M 逐题评分和上下文计数](eval_results/beam10m-20261119/scores.csv)、[LME-500 离线报告](eval_results/lme500-20261117/report.html)和[早期 BEAM-10M DeepSeek Flash 回放](eval_results/beam10m/report.html)。
+最新 95.2% 结果以保存证据发布；当前原生 LME 执行配置仍使用另一套 fast 召回与提示词协议，仅更换模型名称不能复现该结果。MiniMax 官方定价为输入 USD 0.15/百万 tokens、输出 USD 0.60/百万 tokens，不代表已核对的腾讯云 AI 本次账单。[官方定价](https://platform.minimax.io/docs/pricing/overview)。
+
+查看[LME-500 离线报告](eval_results/lme500-20261117/report.html)。
+
+### BEAM-10M
+
+BEAM-10M 在十段**每段约千万 token 的对话**上用 200 道题考查事件排序、时间推理和矛盾消解等复杂记忆能力。OAM 平均评分高 **14.15 个百分点**，多通过 **25 道题**。[分项成绩和逐题结果](eval_results/beam10m-20261119/README.md)
+
+| BEAM-10M | OAM | Hindsight 公布结果 |
+| --- | ---: | ---: |
+| 平均评分 | **78.23%** | 64.08% |
+| 通过率（单题得分 ≥ 0.5） | **86.0%（172/200）** | 73.5%（147/200） |
+| 已保存回答上下文均值，`o200k_base` | **24,676.88 tokens（减少 9.85%）** | 27,373.25 tokens |
+| 回答模型 | MiniMax M3.1 Flash adaptive | Gemini 3.1 Pro Preview |
+| 评判模型 | MiniMax M3.1 Flash adaptive | Gemini 2.5 Flash Lite |
+
+**为公平比较，OAM 沿用归档 AMB 评测器中的相同问题、参考答案、评分量表与规则，并逐字节复用回答和评判提示词模板。** 3 次评判调用在服务商的系统提示中加入 JSON 示例，评判正文和评分规则保持一致。180 道题的当期 normal 召回使用 **24,000 tokens** 原生上下文上限，另 20 道题使用此前保存的上下文。[评分协议和上下文详情](eval_results/beam10m-20261119/README.md)
+
+查看[最新 BEAM-10M 逐题评分和上下文计数](eval_results/beam10m-20261119/scores.csv)或[早期 BEAM-10M DeepSeek Flash 回放](eval_results/beam10m/report.html)。
+
+OAM 的两次评测均超过 AMB 中 Hindsight 的最高已记录成绩，并使用低成本 MiniMax M3.1 Flash 的 adaptive 模式回答和评判。[AMB 成绩清单](https://github.com/vectorize-io/agent-memory-benchmark/blob/c963dba91dfe6c459f64bb871c5dafb2f3de1bf1/results-manifest.json)
 
 [原生 OAM 工作流](docs/native-oam.md)通过 `./precheck.sh --oam` 和 `./run.sh --oam` 运行两个数据集。DeepSeek Flash 回答配置使用 **max** 推理强度，MiniMax M3.1 Flash 的 LME 回答配置使用**原生 adaptive** 推理，评判使用 high 强度。每次运行记录实际 OAM 版本和模型绑定。这些测量属于记录的评测流程，新部署不能自行证明分数一致。
 
